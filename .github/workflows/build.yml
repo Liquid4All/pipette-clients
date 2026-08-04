@@ -30,7 +30,7 @@ jobs:
     # Detect what changed so PRs that don't touch Rust/iOS code can skip
     # the expensive compile jobs. Push events (main) always run everything
     # so releases keep building regardless of which paths changed.
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # paths-filter reads a pull_request's files via `pulls.listFiles`, which needs
     # `pull-requests: read`. Granted only here; `contents: read` is restated
     # because a job block replaces the top-level default.
@@ -96,7 +96,7 @@ jobs:
               - '.github/**'
 
   release-metadata:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -114,7 +114,7 @@ jobs:
     # Lightweight repo-convention checks (see ci/README.md). Its own job so a
     # failure shows up as a distinct `conventions` status, not buried in
     # rust-check; needs no Rust toolchain, so it stays fast and parallel.
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Convention checks
@@ -130,17 +130,17 @@ jobs:
       matrix:
         include:
           - os: linux
-            runner: blacksmith-2vcpu-ubuntu-2404
+            runner: ubuntu-24.04
             fmt: true
             # Both cargo-deny gates read the dependency graph for every target in
             # deny.toml, so their result is identical on all three runners.
             deny: true
           - os: macos
-            runner: blacksmith-6vcpu-macos-26
+            runner: macos-26
           - os: windows
             # rust-check on Windows recompiles the whole workspace every run
             # (cache-bin: false), so it's the CPU-bound leg of the matrix.
-            runner: blacksmith-2vcpu-windows-2025
+            runner: windows-2025
     steps:
       - uses: actions/checkout@v6
         with:
@@ -239,7 +239,7 @@ jobs:
     name: python-check
     needs: [changes]
     if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -269,7 +269,7 @@ jobs:
     # The iOS app links no Rust (native-Swift llama.cpp via build-llama.sh), so
     # it keys only on iOS changes. `changes.ios` already covers ios/** + .github/**.
     if: github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true'
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-26
     env:
       # Pin the toolchain instead of taking the image default (26.2): the
       # project's deployment target is 26.4 (beyond 26.2's supported range),
@@ -449,7 +449,7 @@ jobs:
     # github-release publishes from.
     needs: [release-metadata, changes]
     if: github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true'
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-26
     env:
       # Same toolchain pin as ios-check — see the note there.
       DEVELOPER_DIR: /Applications/Xcode_26.4.app
@@ -619,7 +619,7 @@ jobs:
     name: android-app
     needs: [changes]
     if: github.event_name != 'pull_request' || needs.changes.outputs.android == 'true'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -784,7 +784,7 @@ jobs:
     name: android-lint
     needs: [changes]
     if: github.event_name != 'pull_request' || needs.changes.outputs.android == 'true'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -844,7 +844,7 @@ jobs:
           # Android: the unified pipette client, pushed to devices via adb.
           # pipette-plan is not shipped for Android, so no plan_asset_name here.
           - target: aarch64-linux-android
-            runner: blacksmith-2vcpu-ubuntu-2404
+            runner: ubuntu-24.04
             asset_name: pipette-cli-aarch64-linux-android.tar.gz
             archive: tar.gz
             android: true
@@ -860,14 +860,14 @@ jobs:
           # binary, and carries pipette-plan as its own `plan_asset_name` artifact
           # on each desktop target (the runner ships alongside the client).
           - target: x86_64-unknown-linux-gnu
-            runner: blacksmith-2vcpu-ubuntu-2404
+            runner: ubuntu-24.04
             asset_name: pipette-cli-x86_64-unknown-linux-gnu.tar.gz
             archive: tar.gz
             packages: pipette-cli pipette-plan
             binaries: pipette
             plan_asset_name: pipette-plan-x86_64-unknown-linux-gnu.tar.gz
           - target: aarch64-unknown-linux-gnu
-            runner: blacksmith-2vcpu-ubuntu-2404
+            runner: ubuntu-24.04
             asset_name: pipette-cli-aarch64-unknown-linux-gnu.tar.gz
             archive: tar.gz
             cross_packages: gcc-aarch64-linux-gnu
@@ -876,7 +876,7 @@ jobs:
             binaries: pipette
             plan_asset_name: pipette-plan-aarch64-unknown-linux-gnu.tar.gz
           - target: aarch64-apple-darwin
-            runner: blacksmith-6vcpu-macos-26
+            runner: macos-26
             asset_name: pipette-cli-aarch64-apple-darwin.tar.gz
             archive: tar.gz
             # pipette-mlx is a pipette-cli dependency (only `pipette` ships), so
@@ -887,7 +887,7 @@ jobs:
             binaries: pipette
             plan_asset_name: pipette-plan-aarch64-apple-darwin.tar.gz
           - target: x86_64-pc-windows-msvc
-            runner: blacksmith-2vcpu-windows-2025
+            runner: windows-2025
             asset_name: pipette-cli-x86_64-pc-windows-msvc.zip
             archive: zip
             packages: pipette-cli pipette-plan
@@ -925,11 +925,11 @@ jobs:
         if: matrix.cross_packages
         run: |
           # Skip `apt-get update` on the fast path: the runner image ships
-          # current indexes and Blacksmith's transparent apt cache serves these
-          # base-pool packages instantly (49 MB in ~0s). A full refresh here
-          # instead blocks ~3min on the un-mirrored security.ubuntu.com repo
-          # (78 kB/s) — the dominant cost of this whole job. Fall back to a
-          # refresh + retry only if the direct install hits a stale index.
+          # current indexes, so these base-pool packages install straight from
+          # them. A full refresh here instead blocks ~3min on the un-mirrored
+          # security.ubuntu.com repo (78 kB/s), which was the dominant cost of
+          # this whole job. Fall back to a refresh and retry only if the direct
+          # install hits a stale index.
           sudo apt-get install -y ${{ matrix.cross_packages }} || {
             sudo apt-get update
             sudo apt-get install -y ${{ matrix.cross_packages }}
@@ -1080,7 +1080,7 @@ jobs:
     # failure arrives here as a graph of skips and the gate reports success.
     needs: [changes, release-metadata, conventions, rust-check, python-check, build-artifact, ios-check, ios-archive, android-app, android-lint]
     if: always()
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - name: Verify all builds succeeded
         run: |
@@ -1103,7 +1103,7 @@ jobs:
     # but does not publish.
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: [release-metadata, build-complete]
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Serialize concurrent manual dispatches against the same ref so two
     # clicks don't race each other creating the same release tag.
     concurrency:
