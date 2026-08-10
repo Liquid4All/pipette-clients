@@ -1,0 +1,143 @@
+dist/
+__next/
+__tasks/
+
+# iOS llama.cpp build copy + CMake build dirs (ios/build-llama.sh)
+ios/.build-llama/
+
+# Local-only development logs
+devlog/
+
+# Rust and Cargo
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+.coverage
+.pytest_cache/
+
+# CLI build outputs
+*.exe
+*.pdb
+*.dll
+*.lib
+
+# Apple build artifacts
+ios/*.xcworkspace/
+ios/build/
+ios/Pipette/build/
+ios/DerivedData/
+ios/Pipette/DerivedData/
+ios/com.apple.DeveloperTools/
+*.xcuserstate
+*.xcuserdata/
+xcuserdata/
+*.xcresult/
+*.app
+*.ipa
+*.dSYM/
+*.dSYM.zip
+*.bcsymbolmap
+*.coremlc/
+*.mlmodelc/
+
+# Local iOS build setting overrides
+ios/Pipette/Config/*.local.xcconfig
+# Written per-build by ci_scripts/ci_pre_xcodebuild.sh (and ios/build.sh --debug-ui)
+# from the PIPETTE_DEBUG_UI flag; never authored by hand.
+ios/Pipette/Config/*.generated.xcconfig
+
+# Android and Gradle build artifacts
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/app/src/main/jniLibs/
+android/local.properties
+*.apk
+*.aab
+
+# Native library build artifacts
+*.dylib
+*.so
+*.so.*
+
+# Logs and local scratch files
+*.log
+adb.log
+
+# IDEs and editors
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+
+.pipette-*/
+# The default workspace name `pipette init` creates. Covered separately from
+# the suffixed ones above because it holds the client's identity keypair.
+.pipette/
+
+# UniFFI generated bindings and static library
+ios/Pipette/Pipette/Generated/*
+!ios/Pipette/Pipette/Generated/.gitkeep
+# Track the generated build-info version stamps (but not the heavy build
+# artifacts — libllama.a, headers, module maps). These record the exact
+# llama.cpp commit and mlx-swift / mlx-swift-lm / swift-transformers pins the
+# app reports as its runtime_version. Committing them means a forgotten regen
+# after a dependency or submodule bump shows up as a diff, and CI's freshness
+# check (git diff --exit-code) forces the correct version to be committed —
+# otherwise a stale runtime_version ships and the collector can't recognize it.
+!ios/Pipette/Pipette/Generated/Llama/
+ios/Pipette/Pipette/Generated/Llama/*
+!ios/Pipette/Pipette/Generated/Llama/LlamaBuildInfo.swift
+!ios/Pipette/Pipette/Generated/MLX/
+ios/Pipette/Pipette/Generated/MLX/*
+!ios/Pipette/Pipette/Generated/MLX/MLXBuildInfo.swift
+
+# Signing material and private keys. These live in GitHub secrets and are
+# materialized outside the checkout at build time; none belongs in the tree.
+#
+# The one deliberate exception is negated below: android/Pipette/debug.keystore
+# is the shared public debug key (password `android`), committed so every machine
+# and CI produce interchangeable debug builds. It is loaded by path from
+# app/build.gradle.kts, so it has to stay tracked.
+*.jks
+*.keystore
+!android/Pipette/debug.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.p8
+*.mobileprovision
+
+# Local environment files, the usual home for tokens during development.
+# `.env.example` stays tracked: it names the variables without carrying values.
+.env
+.env.*
+!.env.example
+
+# Google Cloud service-account keys. These belong in GitHub secrets (the
+# Firebase App Distribution and Play publisher credentials both live in the
+# `firebase-distribution` environment), never in the tree. `gha-creds-*.json`
+# is the file google-github-actions/auth writes into the workspace, which is
+# the easiest one to stage by accident after a local `act` run.
+*-sa.json
+*service-account*.json
+*serviceaccount*.json
+gha-creds-*.json
+
+# Firebase SDK config. Nothing reads it: App Distribution runs through the
+# `firebase-tools` CLI with an explicit `--app` and service-account auth, so
+# neither the `google-services` Gradle plugin nor this file is present. Ignored
+# so it cannot come back by accident. Re-add both deliberately if the in-app
+# App Distribution SDK is ever adopted, since that one does require them.
+google-services.json
+
+# Claude
+CLAUDE.local.md
+
+# Codex
+AGENTS.override.md

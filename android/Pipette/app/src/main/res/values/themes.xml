@@ -1,0 +1,33 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      Dark-only Material3 theme. Building a single (dark) palette avoids an
+      accidental, untested light mode; the palette lives in colors.xml.
+    -->
+    <style name="Base.Theme.Pipette" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/pipette_primary</item>
+        <item name="colorOnPrimary">@color/pipette_on_primary</item>
+        <item name="colorSurface">@color/pipette_surface</item>
+        <item name="colorOnSurface">@color/pipette_on_surface</item>
+        <item name="colorSurfaceVariant">@color/pipette_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/pipette_on_surface_muted</item>
+        <item name="colorOutline">@color/pipette_outline</item>
+        <item name="colorOutlineVariant">@color/pipette_outline</item>
+        <item name="android:colorBackground">@color/pipette_background</item>
+        <item name="android:statusBarColor">@color/pipette_background</item>
+        <item name="android:navigationBarColor">@color/pipette_surface</item>
+    </style>
+
+    <style name="Theme.Pipette" parent="Base.Theme.Pipette" />
+
+    <!--
+      Launch theme (AndroidX splash screen). Applied to the launcher activity; the
+      system shows the Pipette "P" mark centered on the app background, then hands
+      off to Theme.Pipette once the first frame is drawn (postSplashScreenTheme).
+    -->
+    <style name="Theme.Pipette.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/pipette_primary</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_pipette_logo_splash</item>
+        <item name="postSplashScreenTheme">@style/Theme.Pipette</item>
+        <item name="android:windowSplashScreenBrandingImage">@drawable/branding_liquid</item>
+    </style>
+</resources>

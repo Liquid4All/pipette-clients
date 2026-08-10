@@ -1,0 +1,12 @@
+# Code owners for pipette-clients.
+#
+# GitHub requests a review from these accounts on every pull request, and the
+# default branch requires one of them to approve before a merge is allowed.
+# Ownership is held by the maintainers accountable for the codebase, which is a
+# narrower set than the accounts holding admin through corporate team
+# membership.
+#
+# Listing several accounts on one line means any single one of them satisfies
+# the requirement.
+
+* @m3m0ryh0l3 @ykhrustalev @ovenmitt @iamstuffed

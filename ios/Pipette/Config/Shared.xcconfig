@@ -1,0 +1,11 @@
+// Shared iOS build settings.
+// Clerk publishable keys are public, but secret keys should never be stored here.
+// Prod-only for now: every iOS build configuration uses the live Clerk app.
+
+CLERK_PUBLISHABLE_KEY = pk_live_Y2xlcmsubGlxdWlkLmFpJA
+CLERK_FRONTEND_API_DOMAIN = clerk.liquid.ai
+
+// libpipette_ios.a (metal_counter.m) reads SoC die temperature via the private
+// IOHID API, resolved at runtime with dlsym(RTLD_DEFAULT). Linking IOKit pulls
+// the IOHID dylib into the process so dlsym can find IOHIDEventSystemClient*.
+OTHER_LDFLAGS = $(inherited) -framework IOKit

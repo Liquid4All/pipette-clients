@@ -1,0 +1,34 @@
+[package]
+name = "pipette-artifacts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Workspace artifact cache for models and runtimes: storage keys, manifests, atomic stage/publish, fetch and install."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flate2.workspace = true
+hex.workspace = true
+log.workspace = true
+pipette-http.workspace = true
+pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
+pipette-venv.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+uuid.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+httpmock.workspace = true
+rstest.workspace = true
+tempfile.workspace = true

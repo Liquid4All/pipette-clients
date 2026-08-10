@@ -1,0 +1,150 @@
+[versions]
+agp = "9.2.1"
+# Clerk 1.0.24 is the last release built with Kotlin 2.3.x (metadata 2.3.0). AGP
+# 9.2.1's built-in Kotlin (2.2.x) compiler reads metadata "up to 2.3.0", so 1.0.24
+# compiles with no toolchain change; 1.0.25+ (Kotlin 2.4.0 metadata) would need an
+# AGP/Kotlin bump to 2.3.x+. Revisit when the project bumps AGP.
+clerk = "1.0.24"
+composeBom = "2026.05.01"
+coreKtx = "1.17.0"
+# AndroidX splash-screen API (installSplashScreen + windowSplashScreen* theme attrs).
+coreSplashscreen = "1.2.0"
+junit = "4.13.2"
+jsonJava = "20240303"
+junitVersion = "1.3.0"
+espressoCore = "3.7.0"
+appcompat = "1.7.1"
+material = "1.14.0"
+constraintlayout = "2.2.1"
+activityKtx = "1.13.0"
+navigationFragmentKtx = "2.9.8"
+navigationUiKtx = "2.9.8"
+navigation3 = "1.1.4"
+kotlinxSerialization = "1.7.3"
+datastore = "1.2.1"
+ksp = "2.2.10-2.0.2"
+room = "2.8.4"
+kotlinxCoroutines = "1.10.2"
+lifecycle = "2.9.4"
+work = "2.10.1"
+# ktfmt Gradle plugin — formats/checks Kotlin in Google style. Matches the version
+# used by leap-android-sdk so both Android projects share one formatter baseline.
+ktfmt = "0.25.0"
+# detekt — Kotlin static analysis (the linter half of the format+lint gate). Matches
+# leap-android-sdk and apollo-android. ktfmt owns formatting; detekt's formatting
+# ruleset (the ktlint wrapper) is deliberately NOT on the classpath so the two never
+# fight over style. See the detekt {} block in app/build.gradle.kts.
+detekt = "1.23.8"
+# Sentry Android Gradle plugin — auto-installs the sentry-android SDK, uploads
+# ProGuard mappings, and (when an auth token is set) source context for stack traces.
+sentry = "6.12.0"
+# sentry-android SDK. Pinned to the version the plugin (6.12.0) would auto-install
+# (its bundled SdkVersion) so the plugin's autoInstall sees the dependency already
+# present and skips it — no version skew. Declared explicitly (not left to autoInstall)
+# so the Sentry.feedback().capture() API is a first-class compile dependency for the
+# in-app feedback flow, not just a runtime artifact resolved at build time.
+sentryAndroid = "8.44.0"
+robolectric = "4.14.1"
+androidxTestCore = "1.6.1"
+# Tink — Ed25519 for the device signing identity; the JCA can't supply an
+# exportable one below API 37 (see Secrets.kt).
+#
+# Dependency impact, since it isn't free: `tink-android` (the Android build —
+# shaded protobuf-lite, unlike the plain `tink` artifact) adds jsr305 and wins
+# conflict resolution on two existing deps, gson 2.8.9 -> 2.13.2 over Clerk's
+# jwtdecode and error_prone_annotations 2.15.0 -> 2.41.0 over material. The gson
+# bump lands on the Clerk JWT-decode path.
+tink = "1.23.0"
+# PostHog: product analytics (manual events only; see Analytics.kt / PostHogConfiguration.kt).
+#
+# Autocapture and session replay are disabled at config time because this app
+# benchmarks on-device LLMs and instrumentation overhead corrupts the measurements, the same
+# reason the Sentry plugin's tracingInstrumentation is off. Note that `sessionReplay = false`
+# alone is NOT sufficient: PostHogLogCatIntegration gates on sessionReplayConfig.captureLogcat
+# (default true) rather than on sessionReplay, so a default config spawns a `logcat` subprocess
+# plus a lifetime reader thread. Analytics.kt disables it explicitly.
+#
+# On a version bump, re-read PostHogAndroid.setup and diff which integrations it installs and on
+# which flags. That is not busywork: 3.19.0 -> 3.58.0 added two default-true push options (one of
+# which silently re-installs the activity lifecycle integration this config works to avoid) and a
+# touch interceptor with no flag at all. Defaults here are chosen for a benchmark harness, not for
+# a typical product app, so every new default is a decision.
+posthog = "3.58.0"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+json-java = { group = "org.json", name = "json", version.ref = "jsonJava" }
+androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
+androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+androidx-activity-ktx = { group = "androidx.activity", name = "activity-ktx", version.ref = "activityKtx" }
+androidx-navigation-fragment-ktx = { group = "androidx.navigation", name = "navigation-fragment-ktx", version.ref = "navigationFragmentKtx" }
+androidx-navigation-ui-ktx = { group = "androidx.navigation", name = "navigation-ui-ktx", version.ref = "navigationUiKtx" }
+# Navigation 3 (Compose): -runtime provides NavKey + rememberNavBackStack; -ui the NavDisplay.
+androidx-navigation3-runtime = { group = "androidx.navigation3", name = "navigation3-runtime", version.ref = "navigation3" }
+androidx-navigation3-ui = { group = "androidx.navigation3", name = "navigation3-ui", version.ref = "navigation3" }
+kotlinx-serialization-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-core", version.ref = "kotlinxSerialization" }
+androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
+androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel-ktx = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-ktx", version.ref = "lifecycle" }
+# Compose integration for ViewModels: viewModel() + the lifecycle-aware viewModelScope from Compose.
+androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+# Clerk auth (PIP-… / F3): SDK core. The custom email-code UI is built in Compose (AuthGateScreen).
+clerk-android-api = { group = "com.clerk", name = "clerk-android-api", version.ref = "clerk" }
+# Compose UI stack for the app; versions from the BOM.
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+# Core Material icon set (NavigationBar item icons); versions from the BOM.
+androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
+# activity-compose — Compose integration for ComponentActivity (setContent). Version from the BOM-aligned activity stack.
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityKtx" }
+# sentry-android — the SDK auto-installed by the Sentry Gradle plugin, declared
+# explicitly so the in-app feedback flow can call Sentry.feedback().capture() at compile
+# time. The DSN is wired via AndroidManifest meta-data (auto-init); no manual init.
+sentry-android = { group = "io.sentry", name = "sentry-android", version.ref = "sentryAndroid" }
+# The six integrations the Sentry Gradle plugin's autoInstall would otherwise add
+# implicitly. Declared so they are pinned to the same version as sentry-android and,
+# more importantly, so the shipped dependency set is written down here rather than
+# being a side effect of whether the plugin happened to be applied. They are applied
+# CONDITIONALLY in app/build.gradle.kts: a build with no Sentry DSN ships none of them.
+sentry-android-fragment = { group = "io.sentry", name = "sentry-android-fragment", version.ref = "sentryAndroid" }
+sentry-android-navigation = { group = "io.sentry", name = "sentry-android-navigation", version.ref = "sentryAndroid" }
+sentry-android-sqlite = { group = "io.sentry", name = "sentry-android-sqlite", version.ref = "sentryAndroid" }
+sentry-compose-android = { group = "io.sentry", name = "sentry-compose-android", version.ref = "sentryAndroid" }
+sentry-kotlin-extensions = { group = "io.sentry", name = "sentry-kotlin-extensions", version.ref = "sentryAndroid" }
+sentry-okhttp = { group = "io.sentry", name = "sentry-okhttp", version.ref = "sentryAndroid" }
+tink-android = { group = "com.google.crypto.tink", name = "tink-android", version.ref = "tink" }
+# posthog-android: product analytics. The project API key is public/write-only (like the
+# Sentry DSN) and is injected as a BuildConfig field from app/build.gradle.kts.
+posthog-android = { group = "com.posthog", name = "posthog-android", version.ref = "posthog" }
+# Compose Preview tooling; versions come from the BOM (declared version-less so they stay aligned with the rest of the Compose stack).
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+# Kotlin itself is AGP 9's built-in Kotlin (no Kotlin plugin applied). The only
+# Kotlin compiler plugin we need is Compose, applied directly in app/build.gradle.kts
+# with an explicit version matching the built-in Kotlin (2.2.10) — not via this catalog.
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+# ktfmt — Kotlin formatter (Google style, 150-col). Registers ktfmtFormat (rewrite)
+# and ktfmtCheck (CI gate); see app/build.gradle.kts for the AGP-9 source wiring.
+ktfmt = { id = "com.ncorti.ktfmt.gradle", version.ref = "ktfmt" }
+# detekt — Kotlin static analysis / linter (no formatting ruleset; ktfmt owns style).
+detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }
+# Sentry — crash/perf monitoring. Applied in app/build.gradle.kts; see the sentry {} block.
+sentry = { id = "io.sentry.android.gradle", version.ref = "sentry" }

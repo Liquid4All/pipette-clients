@@ -1,0 +1,28 @@
+# Periphery — unused-code (dead declaration) scanner for the Pipette iOS app.
+#
+# Run from ios/:  periphery scan
+# Periphery builds the app with an index store, then reports declarations nothing
+# references (unused functions, properties, types, parameters). It is wired into CI
+# as a *report-only* job (see .github/workflows/build.yml → ios-deadcode) because a
+# full index build is too heavy for every PR and the initial backlog isn't triaged;
+# flip that job to fail-on-findings once the reported set is cleaned up.
+project: Pipette/Pipette.xcodeproj
+schemes:
+  - Pipette
+targets:
+  - Pipette
+# SwiftUI previews and #Preview types look unused to static analysis but aren't.
+retain_swift_ui_previews: true
+# `@main`, Codable-synthesized members, and IB/Storyboard hooks are entry points.
+retain_public: false
+# Build for the simulator without signing — matches the ios-check build. The llama
+# static lib must be pre-built (PIPETTE_SKIP_BUILD_LLAMA=1 in the CI job) so the
+# in-Xcode build phase is skipped.
+build_arguments:
+  - -destination
+  - "platform=iOS Simulator,name=iPhone 17,OS=latest"
+  - -skipPackagePluginValidation
+  - -skipMacroValidation
+  - CODE_SIGNING_ALLOWED=NO
+  - ARCHS=arm64
+  - ONLY_ACTIVE_ARCH=YES

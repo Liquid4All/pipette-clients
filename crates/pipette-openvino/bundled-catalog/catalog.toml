@@ -1,0 +1,33 @@
+# Bundled openvino-genai runtime catalog. Each `[[openvino]]` table is a
+# complete bundled runtime entry, keyed by `version` (the openvino-genai
+# version, minus its trailing wheel component).
+#
+# Each entry carries:
+#   - `version`      — the openvino-genai version (the catalog key /
+#                      `uv-openvino://version=`)
+#   - `requirements` — the exact locked text materialized into
+#                      `requirements.txt` during install
+#
+# There is no `flavor`/`build` column: one wheel serves CPU, GPU and NPU. The
+# device is chosen per cell on the runtime (`device = "npu"`), not at install.
+#
+# `requirements` is embedded here so this TOML file is the single source of
+# truth for the bundled catalog.
+#
+# The runtime set is deliberately minimal — no transformers, optimum-intel or
+# nncf. Those are export-side; inference needs only openvino-genai and the
+# tokenizers wheel it loads the compiled tokenizer IR with. Keeping them out
+# avoids pinning the export stack's much heavier version constraints.
+#
+# Pin the version to whatever `openvino` produced the IR being benchmarked; a
+# runtime newer than the export is not guaranteed to load it.
+
+[[openvino]]
+version = "2026.2.1"
+requirements = '''
+numpy==2.4.6
+openvino==2026.2.1
+openvino-genai==2026.2.1.0
+openvino-telemetry==2025.2.0
+openvino-tokenizers==2026.2.1.0
+'''

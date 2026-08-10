@@ -1,0 +1,81 @@
+# Example plan: unified pipette client, llama.cpp runtime dispatched as SLURM jobs.
+#
+# Each matrix cell becomes its own `srun` allocation (synchronous —
+# `srun` blocks and propagates the job's exit code). `parallelism = 8`
+# below means the runner holds up to 8 blocking `srun` allocations at
+# once, i.e. up to 8 concurrent SLURM jobs spread across compute nodes.
+# State written to
+# .pipette-plan/plans/llamacpp-slurm-example/state.jsonl.
+#
+# Driver caveat: one `pipette-plan run` process owns all 8 allocations.
+# If it dies (logout, ssh drop) the jobs die with it — run it under
+# tmux/nohup. For a disconnect-resilient, detached alternative see
+# scripts/slurm/ (shard + sbatch; no long-lived driver).
+
+plan_id = "llamacpp-slurm-example"
+benchmarks = ["eval_smoke"]
+
+# pipette-plan runs ON the cluster login node and shells out to `srun`
+# directly. The command lands in a non-login shell that does NOT have
+# `srun` on PATH (the login profile, which is not sourced for non-login
+# `sh -c`, sets that up), so `pre_exec` re-establishes it. Use POSIX `.`
+# (not bash `source`) — slurm_local runs under `sh -c`, which may be dash.
+[[transports]]
+client_id       = "cluster-login"
+type            = "slurm_local"
+binary_path     = "/home/eval/pipette/pipette"
+work_dir        = "/home/eval/pipette"
+shell           = "posix"
+pre_exec        = ". /etc/profile.d/modules.sh && module load slurm"
+partition       = "defq"
+gpus            = 1
+cpus            = 8
+time_limit      = "02:00:00"
+mem             = "32G"
+# Per-job --output/--error files under <work_dir>/slurm-logs (omit to
+# stream task output to the driver). Each job is auto-named by its
+# benchmark/model, so `squeue` shows what's running instead of all `sh`.
+log_dir         = "slurm-logs"
+parallelism     = 8
+
+# Alternative: drive the same cluster from a laptop or CI box that is
+# NOT the login node. pipette-plan runs `ssh [user@]host "<srun cmd>"`
+# (same invocation style as the `ssh` transport: -o BatchMode=yes,
+# optional `port`). `pre_exec` runs on the remote side and is required
+# here because non-interactive ssh skips the login profile.
+#
+# [[transports]]
+# client_id     = "cluster-over-ssh"
+# type          = "slurm_over_ssh"
+# host          = "headnode"
+# user          = "eval"
+# port          = 22
+# binary_path   = "/home/eval/pipette/pipette"
+# work_dir      = "/home/eval/pipette"
+# shell         = "posix"
+# pre_exec      = ". /etc/profile.d/modules.sh && module load slurm"
+# partition     = "defq"
+# gpus          = 1
+# cpus          = 8
+# time_limit    = "02:00:00"
+# mem           = "32G"
+# extra_srun_args = ["--exclusive"]
+# parallelism   = 8
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["cluster-login"]
+models = [
+  { type = "gguf_text", source = "huggingface", org = "unsloth", repo_name = "Qwen3.5-0.8B-GGUF", path = "Qwen3.5-0.8B-Q4_0.gguf" },
+  { type = "gguf_text", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-350M-GGUF", path = "LFM2.5-350M-Q4_K_M.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_version = "b9050", flavor = "linux-x64-vulkan" },
+]
+# Run-driving knobs (HTTP-client timeout, doom-loop monitor, readiness gate),
+# keyed on (benchmark, runtime, model).
+benchmark_flags = [
+  { benchmark_type = "eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", http_timeout_seconds = 600 },
+]

@@ -1,0 +1,15 @@
+#include "Shared.xcconfig"
+
+// Release intentionally inherits production Clerk settings from Shared.xcconfig.
+
+// Written by `ci_scripts/ci_pre_xcodebuild.sh` when the Xcode Cloud workflow sets
+// `PIPETTE_DEBUG_UI=1`, and absent otherwise — which is why the include is optional
+// (`#include?`): a missing file is not an error, so a local Release build and the
+// App Store workflow both compile with nothing added.
+//
+// It exists because an Xcode Cloud *environment variable* cannot reach a `#if` on
+// its own. xcodebuild does not promote shell environment variables to build
+// settings (verified: `PIPETTE_DEBUG_UI` does not appear in the 631 settings
+// `-showBuildSettings` reports when it is exported), so the value has to be turned
+// into a build setting by something that runs before xcodebuild. That is this file.
+#include? "Distribution.generated.xcconfig"

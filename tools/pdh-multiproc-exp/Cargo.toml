@@ -1,0 +1,17 @@
+[package]
+name = "pdh-multiproc-exp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Multi-process Windows GPU memory attribution experiment for the peak-memory methodology"
+
+# Standalone workspace — keeps this Windows-only tool out of the main
+# pipette-clients workspace so `cargo build --workspace` on Mac/Linux
+# doesn't try to compile it.
+[workspace]
+
+[dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Performance",
+] }

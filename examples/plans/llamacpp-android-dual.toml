@@ -1,0 +1,67 @@
+# Example plan: unified pipette client, llama.cpp runtime on two Android devices.
+#
+# Two-ADB fleet running the matrix. One worker per device, both racing
+# through a shared queue. State written to
+# .pipette-plan/plans/llamacpp-android-dual-example/state.jsonl.
+
+plan_id = "llamacpp-android-dual-example"
+benchmarks = [
+  "prefill_throughput_512",
+  "decode_throughput_512_100",
+  "end_to_end_latency_512_256",
+  "max_memory_usage_512",
+]
+
+[[transports]]
+client_id   = "android-a"
+type        = "adb"
+serial      = "R5CY80M8ZZK"
+binary_path = "/data/local/tmp/pipette/pipette"
+work_dir    = "/data/local/tmp/pipette"
+shell       = "posix"
+
+[[transports]]
+client_id   = "android-b"
+type        = "adb"
+serial      = "R3CY6098BXJ"
+binary_path = "/data/local/tmp/pipette/pipette"
+work_dir    = "/data/local/tmp/pipette"
+shell       = "posix"
+
+# A phone attached to another box's adb server: the `adb` command runs there
+# over ssh, so this driver needs neither adb nor a tunnel. `port` is the ssh
+# port, `adb_port` the adb server port on `host`.
+#
+# `pre_exec` is needed when only that host's login profile — which
+# non-interactive ssh skips — puts `adb` on PATH.
+#
+# [[transports]]
+# client_id   = "android-c"
+# type        = "adb_over_ssh"
+# host        = "phone-controller"
+# user        = "liquid"
+# serial      = "R3CY6098CXK"
+# pre_exec    = "export PATH=$PATH:$HOME/Android/Sdk/platform-tools"
+# binary_path = "/data/local/tmp/pipette/pipette"
+# work_dir    = "/data/local/tmp/pipette"
+# shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["android-a", "android-b"]
+models = [
+  { type = "gguf_text", source = "huggingface", org = "unsloth", repo_name = "Qwen3.5-0.8B-GGUF", path = "Qwen3.5-0.8B-Q4_0.gguf" },
+  { type = "gguf_text", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-350M-GGUF", path = "LFM2.5-350M-Q4_K_M.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_version = "23dff81c4", flavor = "android-arm64-v8a" },
+]
+# Per-cell flags: `threads` is authored once per benchmark it applies to.
+runtime_flags = [
+  { benchmark_type = "prefill_throughput",  runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4 },
+  { benchmark_type = "decode_throughput",   runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4 },
+  { benchmark_type = "end_to_end_latency",  runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4 },
+  { benchmark_type = "max_memory_usage",    runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4 },
+]

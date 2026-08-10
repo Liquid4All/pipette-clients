@@ -1,0 +1,108 @@
+# cargo-deny configuration: the license and security-advisory gates for the
+# Rust workspace.
+#
+# Run locally with `cargo deny check licenses advisories`; CI runs both on the
+# linux leg of `rust-check` (see .github/workflows/build.yml).
+#
+# Needs cargo-deny 0.19+. Older builds abort on any advisory carrying a CVSS 4.0
+# vector ("unsupported CVSS version: 4.0") before reading this file, which looks
+# like a policy failure but is a stale tool. CI installs the current release.
+#
+# This file is the Rust license policy. The Android app's shipping dependencies
+# have their own gate in ci/android-licenses.py; the two allow-lists are meant to
+# agree, so change them together. See docs/licensing.md for the whole picture.
+
+[graph]
+# Check every target the clients actually build for, rather than just the host.
+# A host-only check would miss a dependency that only appears under
+# cfg(target_os = "android") or cfg(target_os = "ios").
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-linux-android",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+# Evaluate every feature combination's dependencies, so a license can't slip in
+# behind a feature flag that the default build happens not to enable.
+all-features = true
+
+[licenses]
+# Allow-list, not a deny-list: an unrecognized license fails the check. That is
+# the point — a new copyleft dependency should turn CI red rather than depend on
+# someone having predicted its exact SPDX id.
+allow = [
+    # --- the licenses actually present across the shipped graphs ---
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    # Weak copyleft, allowed: MPL-2.0 operates per file, so it reaches only the
+    # dependency's own sources even when statically linked. (L)GPL reaches ours,
+    # which is why nothing in that family appears here.
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # --- the permissive tail, present in the CLI / Android / Windows graphs ---
+    "0BSD",
+    "BSD-1-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0", # webpki-roots, webpki-root-certs
+    "ISC",
+]
+
+# The allow-list is a policy — which licenses are acceptable — so it may name
+# licenses no crate in today's graph carries (BSD-1-Clause, BSD-2-Clause,
+# CC0-1.0 and MPL-2.0 are all unmatched at present). This setting keeps those
+# entries quiet; otherwise each emits a `license-not-encountered` warning on every
+# run, and a gate that always prints warnings is a gate people stop reading.
+unused-allowed-license = "allow"
+
+# Deliberately NOT configured:
+#
+# - No `exceptions`. Every crate in the graph satisfies `allow` above on its own,
+#   including the one crate that offers a copyleft option: r-efi is
+#   `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and cargo-deny satisfies an OR
+#   expression from the allow-list, so it resolves to MIT with no exception
+#   needed. (It is also UEFI-only — getrandom pulls it under
+#   cfg(target_os = "uefi") — so it never compiles for any target above.)
+#
+# - No `[[clarify]]` entries. Every third-party crate in the graph declares a
+#   license in its manifest; none needs one inferred from a bundled file.
+
+# The `pipette-*` workspace members carry no `license` field, since nothing here
+# is published (hence `publish = false` in each member's manifest — which is
+# also what this setting keys off). Without it they fail the check as
+# unlicensed. Third-party dependencies are still checked.
+[licenses.private]
+ignore = true
+
+# The RUSTSEC gate. Unlike the license allow-list this policy is a moving target:
+# the database is fetched at check time, so a newly published advisory can turn a
+# green `main` red with no change here. A red advisories step is often not the
+# triggering PR's doing.
+[advisories]
+# A yank is usually the author withdrawing a broken or compromised version, so
+# treat it as an advisory rather than a warning.
+yanked = "deny"
+
+# "all" covers transitive crates, so an abandoned dependency is visible even when
+# nothing we name pulls it directly. The trade is that an unfixable transitive
+# case needs an explicit entry below, matching the licenses gate's allow-list
+# stance above.
+unmaintained = "all"
+
+# Each `reason` says why the crate is out of reach; these comments add only what
+# it takes to re-check the entry. An ignore that outlives its reason is how a
+# real advisory gets waved through.
+ignore = [
+    # Nowhere to move: tabled 0.21 is newest, every tabled_derive back to 0.9
+    # depends on this crate, and 0.8-and-earlier depend on proc-macro-error,
+    # also unmaintained (RUSTSEC-2024-0370).
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time only, via tabled_derive. No safe upgrade; needs an upstream tabled release." },
+    # Dropping it means replacing httpmock itself.
+    { id = "RUSTSEC-2025-0052", reason = "async-std discontinued; dev-dependency only, via httpmock. Never linked into a shipped client." },
+]

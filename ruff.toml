@@ -1,0 +1,18 @@
+# Ruff config for the repo's Python sources (pipette-mlx server + tests, iOS
+# license generator). Python 3.12 matches DEFAULT_PYTHON_VERSION (the venv
+# pipette-mlx provisions). Run `ruff check .` and `ruff format --check .`;
+# CI enforces both in the python-check job.
+target-version = "py312"
+
+# Vendored / generated trees are not ours to lint.
+extend-exclude = [
+    "ios/vendor",
+    "**/.venv",
+    "**/venv",
+]
+
+[lint]
+# A pragmatic default set: pyflakes (F) + pycodestyle (E) catch real errors,
+# isort (I) keeps imports ordered, and the rest are cheap correctness/upgrade
+# lints. Add rules as the Python surface grows.
+select = ["E", "F", "I", "B", "UP", "W"]

@@ -1,0 +1,20 @@
+[package]
+name = "pipette-doomloop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Optional serde-derived TOML override structs, argv forwarding helpers, and
+# plan → pipeline conversion. Plan crates and desktop run seams enable this;
+# pure consumers of the detectors pull no extra dependencies.
+plan = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true

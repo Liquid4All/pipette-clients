@@ -1,0 +1,25 @@
+[package]
+name = "pipette-device"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host identity, power, and thermal probes shared by the pipette client crates."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+
+pipette-plan-types.workspace = true
+
+# SoC die temperature via the private IOHID thermal sensors (see die_temp.rs).
+# CoreFoundation's retain/release rules are where hand-rolled FFI goes wrong,
+# so the typed wrappers earn their place over another `extern "C"` block.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+libc.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

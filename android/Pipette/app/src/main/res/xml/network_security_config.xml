@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release/default network policy: NO cleartext traffic. Production talks only to
+  the HTTPS management server (and HTTPS model hosts), so plain-HTTP is refused.
+
+  The debug build overrides this file with a permissive config
+  (src/debug/res/xml/network_security_config.xml) so a local mgmt server can be
+  reached over http://<host-ip>:<port> for end-to-end testing. That permissive
+  policy ships ONLY in debug builds, never in release.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

@@ -1,0 +1,36 @@
+# Example plan: unified pipette client, MLX runtime on a single Mac over SSH.
+#
+# State written to
+# .pipette-plan/plans/mlx-macstudio-example/state.jsonl.
+
+plan_id = "mlx-macstudio-example"
+benchmarks = [
+  "prefill_throughput_512",
+  "decode_throughput_512_100",
+  "end_to_end_latency_512_256",
+  "max_memory_usage_512",
+]
+
+[[transports]]
+client_id   = "macstudio"
+type        = "ssh"
+host        = "boston-macstudio"
+user        = "yuri"
+port        = 22
+binary_path = "/Users/yuri/pipette/pipette"
+work_dir    = "/Users/yuri/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["macstudio"]
+models = [
+  { type = "mlx", source = "huggingface", org = "mlx-community", repo_name = "Qwen3.5-0.8B-4bit" },
+  { type = "mlx", source = "huggingface", org = "mlx-community", repo_name = "Qwen3.5-0.8B-8bit" },
+  { type = "mlx", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-350M-MLX-4bit" },
+]
+runtimes = [
+  { type = "mlx_macos_pipette", version = "0.31.3", flavor = "macos-arm64", source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3\n" } },
+]

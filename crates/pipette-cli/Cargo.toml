@@ -1,0 +1,47 @@
+[package]
+name = "pipette-cli"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pipette"
+path = "src/bin/pipette.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+getrandom.workspace = true
+log.workspace = true
+pipette-artifacts.workspace = true
+pipette-device.workspace = true
+pipette-doomloop = { workspace = true, features = ["plan"] }
+pipette-llamacpp.workspace = true
+pipette-torch-oai.workspace = true
+pipette-http.workspace = true
+pipette-mgmt-client.workspace = true
+pipette-ops.workspace = true
+pipette-readiness.workspace = true
+pipette-subprocess.workspace = true
+pipette-mlx.workspace = true
+pipette-openvino.workspace = true
+pipette-plan-types.workspace = true
+pipette-workspace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shlex.workspace = true
+strum.workspace = true
+tabled.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+httpmock.workspace = true
+rstest.workspace = true
+tempfile.workspace = true

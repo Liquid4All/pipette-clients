@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Auto Backup rules for API 30 and below (android:fullBackupContent). minSdk is 31,
+   so data_extraction_rules.xml is what actually governs this app; this file mirrors
+   its exclusions only so they survive a future minSdk drop.
+
+   The rationale for each exclusion lives in data_extraction_rules.xml. Keep the two
+   element lists in sync; do not duplicate the reasoning here, because two copies of
+   an argument drift.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="pipette_secrets.xml"/>
+    <exclude domain="file" path="Pipette/metadata/registration.json"/>
+</full-backup-content>

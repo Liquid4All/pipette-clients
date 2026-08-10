@@ -1,0 +1,33 @@
+[package]
+name = "pipette-plan-types"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Adds `clap::ValueEnum` derives on the flavor enums so CLI consumers
+# (like `pipette-torch-oai`) can `#[arg(long, value_enum)]` against
+# them directly without re-modelling.
+clap = ["dep:clap"]
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, optional = true }
+hex.workspace = true
+nutype.workspace = true
+pipette-doomloop = { workspace = true, features = ["plan"] }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+shlex.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

@@ -1,0 +1,35 @@
+# Example plan: unified pipette client, vLLM Docker runtime over SSH.
+#
+# State written to
+# .pipette-plan/plans/torch-oai-vllm-linux-example/state.jsonl.
+
+plan_id = "torch-oai-vllm-linux-example"
+benchmarks = ["eval_smoke"]
+
+[[transports]]
+client_id   = "edge-ci-linux1"
+type        = "ssh"
+host        = "edge-ci-linux1"
+user        = "yuri"
+binary_path = "/home/yuri/bin/pipette"
+work_dir    = "/home/yuri/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["edge-ci-linux1"]
+models = [
+  { type = "torch", source = "huggingface", org = "Qwen", repo_name = "Qwen2.5-0.5B-Instruct" },
+]
+runtimes = [
+  { type = "docker_vllm", image_name = "vllm/vllm-openai", image_tag = "v0.21.0", flavor = "nvidia_gpu" },
+]
+runtime_flags = [
+  { benchmark_type = "eval", runtime_type = "docker_vllm", model_type = "torch", max_model_len = 4096 },
+]
+# Model-generation flags, keyed on (benchmark, model); eval-only.
+model_flags = [
+  { benchmark_type = "eval", model_type = "torch", enable_thinking = true },
+]

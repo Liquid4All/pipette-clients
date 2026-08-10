@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!--
+      Pipette palette (dark). Near-black surfaces + near-white text + a light
+      primary accent for filled controls. Heatmap cells are the primary color
+      rendered at varying alpha, so "better → lighter" reads on the dark surface
+      (see UiKit.heatmapColor). The pocket-mode screen already uses a near-black
+      background, so the rest of the app now matches it.
+    -->
+    <color name="pipette_primary">#FFE7E7EC</color>
+    <color name="pipette_on_primary">#FF111114</color>
+    <color name="pipette_background">#FF0E0E10</color>
+    <color name="pipette_surface">#FF18181B</color>
+    <color name="pipette_surface_variant">#FF222226</color>
+    <color name="pipette_on_surface">#FFF2F2F5</color>
+    <color name="pipette_on_surface_muted">#FF9A9AA2</color>
+    <color name="pipette_outline">#FF333338</color>
+
+    <!-- Thermal / status accents (green nominal → orange serious → red critical). -->
+    <color name="pipette_thermal_nominal">#FF34C77B</color>
+    <color name="pipette_thermal_serious">#FFF0A33A</color>
+    <color name="pipette_thermal_critical">#FFFF5A5E</color>
+
+    <!--
+      Background layer of the adaptive launcher icon (mipmap-anydpi/ic_launcher.xml).
+      Deliberately outside the palette above: the app's surfaces are near-black, while the
+      icon plate is light so the dark P mark reads on it. ic_pipette_logo_splash.xml
+      hardcodes this same plate value and is deliberately not repointed at this resource,
+      since naming an icon colour would not fit the splash; the two can therefore drift.
+    -->
+    <color name="ic_launcher_background">#FFF2F2F2</color>
+</resources>

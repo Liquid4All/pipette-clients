@@ -1,0 +1,16 @@
+[package]
+name = "pipette-http"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustls.workspace = true
+webpki-roots.workspace = true
+thiserror.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
+serde.workspace = true
+serde_json.workspace = true

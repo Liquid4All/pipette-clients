@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Pipette</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>ClerkFrontendApiDomain</key>
+	<string>$(CLERK_FRONTEND_API_DOMAIN)</string>
+	<key>ClerkPublishableKey</key>
+	<string>$(CLERK_PUBLISHABLE_KEY)</string>
+	<key>SentryDSN</key>
+	<string>https://7fa359c74d07dea911127f35d34569d1@o4507225641582592.ingest.us.sentry.io/4511619891331072</string>
+	<!-- PostHog project 456142 (US Cloud). A phc_ project token is public and write-only:
+	     it can ingest events but never read them, so it ships in the bundle like the
+	     SentryDSN above and the Clerk publishable key. PostHogHost is the INGEST host,
+	     not the dashboard host (us.posthog.com). -->
+	<key>PostHogProjectToken</key>
+	<string>phc_tGKa98yNH3WzFs7C2SKKisXYoKU2rLU8VkB3aYMRnyao</string>
+	<key>PostHogHost</key>
+	<string>https://us.i.posthog.com</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIUserInterfaceStyle</key>
+	<string>Light</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>ai.liquid.pipette.run</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>pipette</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

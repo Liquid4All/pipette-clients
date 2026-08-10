@@ -1,0 +1,26 @@
+[package]
+name = "pipette-readiness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Pre-benchmark readiness wait: per-platform thermal and CPU-load probes behind one entry point."
+
+[lints]
+workspace = true
+
+[dependencies]
+log.workspace = true
+thiserror.workspace = true
+
+# Mach `host_statistics(HOST_CPU_LOAD_INFO)` for the macOS CPU-load probe,
+# replacing a `top` subprocess per check. See `read_cpu_load` in macos.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+# Die temperature for the thermal criterion. The same reader that records the
+# per-rep series, so the gate and the telemetry cannot disagree about what the
+# machine's temperature was.
+pipette-device.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+rstest.workspace = true

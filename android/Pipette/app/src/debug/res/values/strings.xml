@@ -1,0 +1,8 @@
+<resources>
+    <!-- Debug builds install as a separate app (applicationIdSuffix ".debug") that
+         points at the development Clerk instance. Override the launcher label so it's
+         distinguishable from the release ("Pipette") build on the same device. Debug and
+         release now share the same themed adaptive icon, so the label is the only
+         on-device distinction — mirrors iOS's "(D)" dev-build naming. -->
+    <string name="app_name">Pipette (D)</string>
+</resources>

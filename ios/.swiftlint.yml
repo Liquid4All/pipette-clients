@@ -1,0 +1,27 @@
+# SwiftLint config for the Pipette iOS app.
+#
+# Compiler warnings are already hard-gated (SWIFT_TREAT_WARNINGS_AS_ERRORS on the
+# app target); this layer adds style/correctness lint on top. The disabled rules
+# below clash with deliberate choices in this codebase (terse local names in the
+# numeric/inference code, long cohesive files, wide signatures) and would be pure
+# noise — the remaining rules are the ones worth enforcing.
+included:
+  - Pipette/Pipette
+  - Pipette/PipetteTests
+
+disabled_rules:
+  - identifier_name          # terse math/inference locals (f, m, w, h, t) are intentional
+  - line_length              # long doc comments + descriptive strings
+  - file_length              # large cohesive files (JobRunner, LocalStorage)
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+  - function_parameter_count # runtime/config constructors take many knobs
+  - large_tuple
+  - nesting
+  - trailing_comma
+  - vertical_parameter_alignment
+  - switch_case_alignment    # the enum-dispatch switches align cases with values
+  - multiple_closures_with_trailing_closure
+  - optional_data_string_conversion  # misfires on the already-idiomatic String(decoding:as:)
+  - todo                     # `TODO: review` marks a mirrored type awaiting sign-off

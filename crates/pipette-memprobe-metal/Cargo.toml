@@ -1,0 +1,22 @@
+[package]
+name = "pipette-memprobe-metal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "macOS Metal peak-memory probe for pipette clients (DYLD shim + phys_footprint poller)."
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc.workspace = true
+hex.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+anyhow.workspace = true

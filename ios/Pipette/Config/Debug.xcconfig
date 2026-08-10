@@ -1,0 +1,3 @@
+#include "Shared.xcconfig"
+
+// Debug intentionally inherits production Clerk settings from Shared.xcconfig.

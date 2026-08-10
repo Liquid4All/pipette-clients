@@ -1,0 +1,38 @@
+# Example plan: unified pipette client, llama.cpp vision-language benchmarks.
+#
+# Vision-language GGUF models carry both the main weights and the
+# projector filename in the model entry.
+#
+# State written to
+# .pipette-plan/plans/llamacpp-android-vl-example/state.jsonl.
+
+plan_id = "llamacpp-android-vl-example"
+benchmarks = [
+  "vl_throughput_256x256_32_128",
+  "vl_throughput_512x512_32_128",
+  "vl_throughput_1056x1056_32_128",
+]
+
+[[transports]]
+client_id   = "android-a"
+type        = "adb"
+serial      = "R5CY80M8ZZK"
+binary_path = "/data/local/tmp/pipette/pipette"
+work_dir    = "/data/local/tmp/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["android-a"]
+models = [
+  { type = "gguf_vision", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-VL-450M-GGUF", model = "LFM2.5-VL-450M-Q4_0.gguf", mmproj = "mmproj-LFM2.5-VL-450m-Q8_0.gguf" },
+  { type = "gguf_vision", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-VL-450M-GGUF", model = "LFM2.5-VL-450M-Q4_K_M.gguf", mmproj = "mmproj-LFM2.5-VL-450m-Q8_0.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_version = "23dff81c4", flavor = "android-arm64-v8a" },
+]
+runtime_flags = [
+  { benchmark_type = "vl_throughput", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", threads = 4 },
+]

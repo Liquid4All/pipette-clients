@@ -1,0 +1,35 @@
+[package]
+name = "pipette-torch-oai"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+pipette-doomloop = { workspace = true, features = ["plan"] }
+pipette-http.workspace = true
+pipette-ops.workspace = true
+pipette-subprocess.workspace = true
+pipette-venv.workspace = true
+pipette-plan-types = { workspace = true, features = ["clap"] }
+log.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true
+pipette-artifacts.workspace = true
+rstest.workspace = true
+tempfile.workspace = true
+time.workspace = true
+
+[build-dependencies]
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true

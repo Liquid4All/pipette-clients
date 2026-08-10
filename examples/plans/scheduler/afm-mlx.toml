@@ -1,0 +1,42 @@
+# Example scheduler-mode plan: expanded by `pipette-plan generate` into job
+# files that `pipette-mgmt plans ingest` stages onto the job server.
+#
+#   pipette-plan generate --plan examples/plans/scheduler/afm-mlx.toml --out ./jobs
+#   pipette-mgmt plans ingest ./jobs --plan-name afm-mlx-smoke
+#
+# A distinct format from the local-dispatch plans alongside it: no `plan_id`,
+# no `[[transports]]`, no `[retry]`. A variant declares *eligibility* — which
+# registered clients may run it — instead of naming execution targets, and the
+# server leases each job to a matching device. The two formats don't parse as
+# each other, so a mis-selected mode is a loud failure.
+
+# Stamped on every generated job; after it the server stops handing them out.
+# Drop the line for jobs that never expire on their own.
+expires_at = "2026-09-01T00:00:00Z"
+
+benchmarks = [
+  "decode_throughput_512_100",
+  "end_to_end_latency_512_256",
+]
+
+# iOS Apple Foundation. `requires` is what this variant commits to; the
+# supported-iPhone family is injected by the capability rules at generation, so
+# the plan never spells out which devices can run AFM. `clients` widens
+# eligibility to that device whatever its capabilities say.
+[[variants]]
+requires   = ["os:ios"]
+clients    = ["ev1_9f2c1d3e4b5a6c7d"]
+models     = [{ type = "apple_foundation_text" }]
+runtimes   = [{ type = "apple_foundation" }]
+benchmarks = ["decode_throughput_512_100"]
+
+# macOS MLX: eligibility by capability alone — any registered, approved macOS
+# client that matches claims it. Both top-level benchmarks run here.
+[[variants]]
+requires = ["os:macos"]
+models = [
+  { type = "mlx", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-350M-MLX-4bit" },
+]
+runtimes = [
+  { type = "mlx_macos_pipette", version = "0.31.3", flavor = "macos-arm64", source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3\n" } },
+]

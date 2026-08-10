@@ -1,0 +1,41 @@
+[package]
+name = "pipette-mlx"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+# Describing an MLX runtime is portable; running one is not. The catalog and
+# the bound projections are plain plan-types work, so they compile everywhere —
+# which is what lets `pipette-cli` resolve an `mlx-macos-pipette://` ref on a
+# Linux box instead of keeping a second copy of this catalog. Only
+# `execute` is gated (see `src/lib.rs`), and its deps with it.
+[dependencies]
+anyhow.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
+pipette-venv.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+# `execute` only: mlx_lm, the server transport, and the Metal-side measurement
+# primitives, none of which exist off Apple Silicon.
+[target.'cfg(target_os = "macos")'.dependencies]
+pipette-doomloop = { workspace = true, features = ["plan"] }
+pipette-http.workspace = true
+pipette-memprobe-metal.workspace = true
+log.workspace = true
+pipette-subprocess.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+tokio.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+pipette-artifacts.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

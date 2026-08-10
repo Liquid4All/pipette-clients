@@ -1,0 +1,22 @@
+[package]
+name = "pipette-venv"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "uv-provisioned Python venvs for pipette runtimes: install, on-disk layout, and bound-path projection."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

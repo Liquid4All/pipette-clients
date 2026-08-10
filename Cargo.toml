@@ -1,0 +1,141 @@
+[workspace]
+members = [
+    "crates/pipette-device",
+    "crates/pipette-doomloop",
+    "crates/pipette-http",
+    "crates/pipette-memprobe-metal",
+    "crates/pipette-mgmt-client",
+    "crates/pipette-plan-types",
+    "crates/pipette-readiness",
+    "crates/pipette-subprocess",
+    "crates/pipette-venv",
+    "crates/pipette-workspace",
+    "crates/pipette-artifacts",
+    "crates/pipette-ops",
+    "crates/pipette-plan",
+    "crates/pipette-llamacpp",
+    "crates/pipette-mlx",
+    "crates/pipette-openvino",
+    "crates/pipette-android",
+    "crates/pipette-torch-oai",
+    "crates/pipette-cli",
+]
+# pipette-android is a mobile-only cdylib: on the host it compiles to stubs and
+# is never shipped from CI (the Android app builds it via `cargo build -p
+# pipette-android --target aarch64-linux-android` from Gradle). Keep it a member
+# so `-p` resolves, but leave it out of default builds so plain
+# `cargo build`/`clippy`/`test` — and CI, which also passes
+# `--exclude pipette-android` — don't compile it on the host.
+default-members = [
+    "crates/pipette-device",
+    "crates/pipette-doomloop",
+    "crates/pipette-http",
+    "crates/pipette-memprobe-metal",
+    "crates/pipette-mgmt-client",
+    "crates/pipette-plan-types",
+    "crates/pipette-readiness",
+    "crates/pipette-subprocess",
+    "crates/pipette-venv",
+    "crates/pipette-workspace",
+    "crates/pipette-artifacts",
+    "crates/pipette-ops",
+    "crates/pipette-plan",
+    "crates/pipette-llamacpp",
+    "crates/pipette-mlx",
+    "crates/pipette-openvino",
+    "crates/pipette-torch-oai",
+    "crates/pipette-cli",
+]
+resolver = "2"
+
+# Single source of truth for lint policy. Each member opts in with
+# `[lints] workspace = true`, so local `cargo clippy` enforces the same
+# gate as CI — which is why the CI clippy steps no longer pass `-D warnings`.
+[workspace.lints.rust]
+warnings = "deny"
+
+# `warnings = "deny"` covers rustdoc too, so `cargo doc` is a gate (ci/lint.sh
+# runs it). One lint is opted out of deliberately: nothing here is published to
+# crates.io, so a doc comment pointing at a crate-internal item is a working
+# cross-reference for the only readers there are, not a dead link in a
+# published page. Broken and ambiguous links stay denied — those are rot.
+[workspace.lints.rustdoc]
+private_intra_doc_links = "allow"
+
+# Panicking constructs are banned. A reachable failure must return a typed
+# `Result` — tests included: they should be `-> anyhow::Result<()>` and use `?`
+# to propagate. An unreachable case should be made unrepresentable in the types,
+# not asserted at runtime.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unreachable = "deny"
+
+[workspace.dependencies]
+# First-party crates, kept in their own block for the reason `ci/lint.sh` keeps
+# `pipette_*` its own `use` group: the internal graph is worth reading apart from
+# the third-party one. Declaring the paths here means a member states only *that*
+# it depends on a crate, never where that crate lives, so moving one is a single
+# edit. No `version` on any of them — nothing here is published.
+#
+# Only crates something depends on are listed. `pipette-cli` (binary),
+# `pipette-android` (cdylib) and `pipette-plan` have no dependents, so an entry
+# would declare an edge that does not exist.
+pipette-artifacts = { path = "crates/pipette-artifacts" }
+pipette-device = { path = "crates/pipette-device" }
+pipette-doomloop = { path = "crates/pipette-doomloop" }
+pipette-http = { path = "crates/pipette-http" }
+pipette-llamacpp = { path = "crates/pipette-llamacpp" }
+pipette-memprobe-metal = { path = "crates/pipette-memprobe-metal" }
+pipette-mgmt-client = { path = "crates/pipette-mgmt-client" }
+pipette-mlx = { path = "crates/pipette-mlx" }
+pipette-openvino = { path = "crates/pipette-openvino" }
+pipette-ops = { path = "crates/pipette-ops" }
+pipette-plan-types = { path = "crates/pipette-plan-types" }
+pipette-readiness = { path = "crates/pipette-readiness" }
+pipette-subprocess = { path = "crates/pipette-subprocess" }
+pipette-torch-oai = { path = "crates/pipette-torch-oai" }
+pipette-venv = { path = "crates/pipette-venv" }
+pipette-workspace = { path = "crates/pipette-workspace" }
+
+android_logger = "0.15"
+anyhow = "1"
+base64 = "0.23"
+cc = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+ctrlc = { version = "3", features = ["termination"] }
+ed25519-dalek = { version = "3" }
+env_logger = "0.11"
+flate2 = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.4"
+hex = "0.4"
+httpmock = "0.7"
+jni = "0.22"
+libc = "0.2"
+log = "0.4"
+nutype = { version = "0.7", features = ["serde", "regex"] }
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rstest = { version = "0.26.1", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+strum = { version = "0.28", features = ["derive"] }
+serde_json = "1"
+shlex = "2"
+tabled = "0.21"
+tar = "0.4"
+tempfile = "3"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known"] }
+tokio = { version = "1", features = ["rt"] }
+toml = "1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }

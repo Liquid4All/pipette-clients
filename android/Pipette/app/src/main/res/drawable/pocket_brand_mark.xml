@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pocket Mode brand mark: the Pipette "P" traced from the drawable-nodpi copy of
+     pipette_logo_mark.png, filled with the Pocket Mode vertical #FAFAFA → #737373
+     gradient. Drawn at 30x40dp; see MainActivity.pocketBrandMark(), the only
+     consumer. The same P outline is stored twice more, as
+     ic_pipette_logo_splash.xml and ic_launcher_foreground.xml. Comparing the
+     outline bounds rather than the viewports, the three sit at 0.749 here, 0.760
+     for the splash and 0.737 for the launcher. Nothing keeps them in step, so an
+     artwork change means editing all three by hand. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="30dp"
+    android:height="40dp"
+    android:viewportWidth="300"
+    android:viewportHeight="400">
+    <path android:pathData="M131.5,0.5 C131,0.6 127.1,1.3 123,2 C61.2,12.2 11.8,62.4 1.9,125.3 C-0.2,138.7 -1.2,400 0.9,400 C1.4,400 8.7,396.1 17.1,391.3 C25.6,386.5 38.8,379.1 46.5,374.9 C54.2,370.6 61.7,366.2 63.2,365 C66,362.8 66,362.8 66,250.7 C66,122.6 65.7,128.2 74.4,110.5 C102.8,53 184.3,48.3 220.7,102 C231.3,117.7 236.2,141.9 232.5,160 C231.6,164.7 230.7,169.2 230.5,170.1 C226.5,189.8 202.9,214.8 179.9,223.4 C166.2,228.5 161.2,229 118.9,229 L79.8,229 L80.1,292 C80.3,326.6 80.7,355 80.9,355 C81.2,355 89,350.7 98.4,345.3 C107.8,340 123.8,331 134,325.2 C144.2,319.5 155.4,313.1 159,311 C162.6,308.9 172.7,303.1 181.5,298.2 C242.6,264.1 253.1,256.5 269.6,234.5 C335.8,146.7 286,22 176.9,2.1 C166.8,0.2 135.8,-0.9 131.5,0.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="0"
+                android:endY="400"
+                android:type="linear">
+                <item android:color="#FFFAFAFA" android:offset="0.0" />
+                <item android:color="#FF737373" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

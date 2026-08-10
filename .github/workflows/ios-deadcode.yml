@@ -1,0 +1,79 @@
+name: iOS Dead Code
+
+# Unused-code (Periphery) report for the Pipette iOS app. A full index build is too
+# heavy to run on every PR, so this lives in its own workflow on a weekly schedule
+# plus manual dispatch, and only *reports* — it never blocks a merge. Findings are
+# written to the run summary. Once the backlog is triaged, tighten this to fail on
+# findings (drop `continue-on-error` and add `--strict` to the scan).
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 06:00 UTC.
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ios-deadcode-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default for GITHUB_TOKEN. See build.yml.
+permissions:
+  contents: read
+
+jobs:
+  ios-deadcode:
+    name: ios-deadcode
+    runs-on: blacksmith-6vcpu-macos-26
+    continue-on-error: true
+    env:
+      # Match ios-check's pinned toolchain (see build.yml for the rationale).
+      DEVELOPER_DIR: /Applications/Xcode_26.4.app
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up sccache (C/C++ compiler launcher)
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # Periphery drives its own xcodebuild; pre-build the llama static lib (as
+      # ios-check does) so the in-Xcode "Build llama.cpp" phase is skipped
+      # (PIPETTE_SKIP_BUILD_LLAMA below) rather than recompiled uncached.
+      - name: Build llama.cpp (static lib + bindings)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+        run: ./ios/build-llama.sh sim
+
+      - name: Generate MLX build info
+        run: ./ios/gen-mlx-build-info.sh
+
+      - name: Install Periphery (pinned)
+        # The version was pinned; the digest is what makes it one. Bump both vars
+        # together; the digest is the release asset's, from
+        # `gh api repos/peripheryapp/periphery/releases/tags/<v>`. The release also
+        # ships an `.artifactbundle.zip` whose digest differs from this plain zip.
+        # macOS runner, so `shasum -a 256`; coreutils sha256sum is absent.
+        env:
+          PERIPHERY_VERSION: "3.7.4"
+          PERIPHERY_SHA256: "f8283239a82c638a4d5cfb91c42519980462b7853299562f663eb33ce54c8dc6"
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/periphery.zip" \
+            "https://github.com/peripheryapp/periphery/releases/download/${PERIPHERY_VERSION}/periphery-${PERIPHERY_VERSION}.zip"
+          # cd so a temp path with spaces cannot misparse the checksum line.
+          (cd "$RUNNER_TEMP" && echo "${PERIPHERY_SHA256}  periphery.zip" | shasum -a 256 -c -)
+          unzip -oq "$RUNNER_TEMP/periphery.zip" -d "$RUNNER_TEMP/periphery"
+
+      # Scan reads ios/.periphery.yml (project/schemes/targets + sim build args).
+      - name: Periphery scan (report only)
+        working-directory: ios
+        env:
+          PIPETTE_SKIP_BUILD_LLAMA: "1"
+        run: |
+          {
+            echo "## iOS unused-code report (Periphery)"
+            echo ""
+            echo '```'
+            "$RUNNER_TEMP/periphery/periphery" scan --disable-update-check \
+              || echo "(periphery scan did not complete — see step logs)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

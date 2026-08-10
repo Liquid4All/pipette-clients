@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Submit pipette invocation commands to SLURM, one job per line.
+#
+# Reads commands from stdin (the output of `pipette-plan commands`) and
+# wraps each in an `sbatch` submission. Blank lines and lines starting
+# with `#` are skipped.
+#
+# Usage:
+#   cat jobs | ./scripts/slurm/schedule
+#   ./scripts/slurm/schedule < jobs
+#   pipette-plan commands --plan plan.toml | ./scripts/slurm/schedule
+#   ./scripts/slurm/run-plans.sh ... | ./scripts/slurm/schedule
+#
+# Tunables (env vars; unset resource knobs fall back to cluster defaults):
+#   PARTITION          --partition
+#   ACCOUNT            --account
+#   TIME               --time            (default 02:00:00)
+#   GPUS               --gres=gpu:N      (default 1; set 0 to omit)
+#   CPUS               --cpus-per-task   (default 8)
+#   MEM                --mem             (e.g. 32G)
+#   EXTRA_SBATCH_ARGS  extra flags appended verbatim (word-split)
+#   JOB_PREFIX         job-name prefix   (default pipette)
+#   LOG_DIR            stdout/stderr dir  (default slurm-logs)
+#   SERIAL=1           chain jobs so each starts after the previous ends
+#                      (afterany) — use when they share one GPU/box
+#   DRY_RUN=1          print the sbatch commands instead of submitting
+
+JOB_PREFIX=${JOB_PREFIX:-pipette}
+LOG_DIR=${LOG_DIR:-slurm-logs}
+TIME=${TIME:-02:00:00}
+GPUS=${GPUS:-1}
+CPUS=${CPUS:-8}
+SERIAL=${SERIAL:-0}
+DRY_RUN=${DRY_RUN:-0}
+
+if [[ -t 0 ]]; then
+    echo "usage: <commands> | $0   (reads pipette commands from stdin)" >&2
+    echo "see the header of this script for the env-var knobs" >&2
+    exit 2
+fi
+
+if [[ "$DRY_RUN" != "1" ]] && ! command -v sbatch >/dev/null 2>&1; then
+    echo "error: sbatch not found on PATH (run this on a SLURM login node, or use DRY_RUN=1)" >&2
+    exit 1
+fi
+
+mkdir -p "$LOG_DIR"
+
+# sbatch flags shared by every job. Optional knobs are only added when set
+# so an unset value defers to the cluster default rather than forcing one.
+common_args=(--time="$TIME" --cpus-per-task="$CPUS")
+[[ -n "${PARTITION:-}" ]] && common_args+=(--partition="$PARTITION")
+[[ -n "${ACCOUNT:-}" ]] && common_args+=(--account="$ACCOUNT")
+[[ -n "${MEM:-}" ]] && common_args+=(--mem="$MEM")
+[[ "$GPUS" != "0" ]] && common_args+=(--gres=gpu:"$GPUS")
+# shellcheck disable=SC2206  # intentional word-split so callers can pass multiple flags
+[[ -n "${EXTRA_SBATCH_ARGS:-}" ]] && common_args+=(${EXTRA_SBATCH_ARGS})
+
+# Reduce a benchmark/model token to a job-name-safe slug.
+sanitize() {
+    local s=${1//\//_}
+    s=${s//:/_}
+    printf '%s' "${s//[^A-Za-z0-9._-]/_}"
+}
+
+count=0
+submitted=0
+prev_jobid=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    count=$((count + 1))
+    bench=$(sed -nE 's/.*--benchmark[[:space:]]+([^[:space:]]+).*/\1/p' <<<"$line")
+    name=$(printf '%s-%03d-%s' "$JOB_PREFIX" "$count" "$(sanitize "${bench:-job}")")
+
+    job_args=("${common_args[@]}" --job-name="$name" --output="$LOG_DIR/$name-%j.out")
+    if [[ "$SERIAL" == "1" && -n "$prev_jobid" ]]; then
+        job_args+=(--dependency=afterany:"$prev_jobid")
+    fi
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        printf 'sbatch %s --wrap %q\n' "${job_args[*]}" "$line"
+        continue
+    fi
+
+    # Keep going if one submission fails — a single bad job shouldn't
+    # strand the rest of the batch.
+    if ! jobid=$(sbatch --parsable "${job_args[@]}" --wrap "$line"); then
+        echo "[$name] submit FAILED" >&2
+        continue
+    fi
+    jobid=${jobid%%;*} # strip ";cluster" suffix on federated setups
+    printf '[%s] submitted job %s (%s)\n' "$name" "$jobid" "${bench:-?}"
+    submitted=$((submitted + 1))
+    prev_jobid="$jobid"
+done
+
+if [[ "$DRY_RUN" == "1" ]]; then
+    echo "dry run: would schedule $count job(s)"
+else
+    echo "submitted $submitted of $count job(s)"
+fi

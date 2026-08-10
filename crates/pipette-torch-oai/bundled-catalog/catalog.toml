@@ -1,0 +1,132 @@
+# Bundled uv runtime catalog. Each table is a complete bundled runtime
+# entry. The slug is computed at load time as:
+#
+#   <server>@<server_version>+<build>.py<python_version>
+#
+# The installer derives:
+#   - the canonical runtime version from these three component fields
+#   - the hardware flavor from `build` (`cu*` / `rocm*` / `cpu`)
+#   - uv's `--python` value from `python_version`
+#
+# `requirements` is embedded here so this TOML file is the single
+# source of truth for the bundled catalog.
+#
+# `install_flags` → `uv pip install`/`compile`. `--index-strategy
+# unsafe-best-match` is required so PyTorch's `--extra-index-url` can
+# combine with PyPI transitive deps (uv's default first-index refuses).
+
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "cu121"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - NVIDIA CUDA 12.1.
+--extra-index-url https://download.pytorch.org/whl/cu121
+vllm==0.21.0
+'''
+
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "cu124"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - NVIDIA CUDA 12.4.
+--extra-index-url https://download.pytorch.org/whl/cu124
+vllm==0.21.0
+'''
+
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "rocm6"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - AMD ROCm 6.x.
+# ROCm wheels typically lag mainline; if no matching wheel is
+# published yet, roll back the server_version in this catalog entry.
+--extra-index-url https://download.pytorch.org/whl/rocm6.0
+vllm==0.21.0
+'''
+
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "cpu"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - CPU-only (smoke / dev). Not performance-tested.
+--extra-index-url https://download.pytorch.org/whl/cpu
+vllm==0.21.0
+'''
+
+# vLLM 0.22.0 — current upstream (released 2026-05-29).
+#
+# IMPORTANT: the default PyPI `vllm==0.22.0` wheel is the CUDA 13 build
+# (it pins `nvidia-cutlass-dsl[cu13]`; `vllm._C` links libcudart.so.13),
+# and `--extra-index-url` only redirects torch, NOT the vLLM wheel. So a
+# bare `vllm==0.22.0` always pulls CUDA 13 regardless of the index. To get
+# a sub-13 CUDA build you must pin vLLM's `+cuNNN` release wheel by URL.
+# vLLM publishes only `+cu129` (and `+cpu`) for 0.22.0 — there is no
+# `+cu128` wheel. cu129 runs on any 12.x driver >= 550.54.14 via CUDA
+# minor-version compatibility (so it works on the A10 box, driver 570.x /
+# CUDA 12.8). CUDA 13 needs a 580+ driver, so the cu130 entry below only
+# runs on 13-capable hosts.
+[[uv_vllm]]
+server_version = "0.22.0"
+build = "cu129"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.22.0 - NVIDIA CUDA 12.9, pinned by release-wheel URL (a bare
+# `vllm==0.22.0` would resolve to the CUDA 13 PyPI default). Runs on
+# 12.8 drivers via CUDA 12.x minor-version compatibility.
+--extra-index-url https://download.pytorch.org/whl/cu129
+https://github.com/vllm-project/vllm/releases/download/v0.22.0/vllm-0.22.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl
+'''
+
+[[uv_vllm]]
+server_version = "0.22.0"
+build = "cu130"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.22.0 - NVIDIA CUDA 13.0 (the default PyPI wheel). Needs a 580+
+# driver; will not load on a 12.x-only driver.
+--extra-index-url https://download.pytorch.org/whl/cu130
+vllm==0.22.0
+'''
+
+[[uv_sglang]]
+server_version = "0.5.12.post1"
+build = "cu121"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.12.post1 - NVIDIA CUDA 12.1.
+--extra-index-url https://download.pytorch.org/whl/cu121
+sglang[all]==0.5.12.post1
+'''
+
+[[uv_sglang]]
+server_version = "0.5.12.post1"
+build = "rocm6"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.12.post1 - AMD ROCm 6.x. Some `[all]` deps are NVIDIA-only.
+--extra-index-url https://download.pytorch.org/whl/rocm6.0
+sglang[all]==0.5.12.post1
+'''
+
+[[uv_sglang]]
+server_version = "0.5.12.post1"
+build = "cpu"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.12.post1 - CPU-only (smoke / dev). `[all]` skipped.
+--extra-index-url https://download.pytorch.org/whl/cpu
+sglang==0.5.12.post1
+'''

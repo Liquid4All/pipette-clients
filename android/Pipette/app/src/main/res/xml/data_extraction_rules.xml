@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Backup / transfer rules for API 31+ (android:dataExtractionRules). This is the
+   operative file for this app, since minSdk is 31; backup_rules.xml mirrors it.
+
+   pipette_secrets holds the Ed25519 device signing identity and the Hugging Face
+   token, and is excluded from BOTH channels for two independent reasons:
+
+   1. They are encrypted under an Android Keystore key, and Keystore material never
+      leaves the device. Restoring the ciphertext elsewhere would produce an install
+      that reports itself registered while every signed request fails, because
+      nothing there can decrypt it.
+   2. The signing key IS the device's identity to the management server. Restoring it
+      onto a second device would give two physical devices one client_id and corrupt
+      the per-device attribution the benchmark results exist to provide.
+
+   registration.json goes with it, and must: it is the other half of the same
+   identity. Excluding only the secrets would restore an install that reports itself
+   registered (LocalStorage.isRegistered reads that file) while holding no key to
+   sign with, so every submission would fail with "No private signing key" and no
+   visible cause. Dropping both together makes a restored install present as
+   unregistered, which is recoverable in one step from Settings.
+
+   device-transfer is excluded as well as cloud-backup: a direct device-to-device
+   transfer moves the same files, so leaving them in would reintroduce every problem
+   above on the path users are most likely to take when replacing a phone.
+
+   Job manifests and results are deliberately NOT excluded: they are ordinary app
+   data, carry no credential, and are worth keeping across a restore.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="pipette_secrets.xml"/>
+        <exclude domain="file" path="Pipette/metadata/registration.json"/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="pipette_secrets.xml"/>
+        <exclude domain="file" path="Pipette/metadata/registration.json"/>
+    </device-transfer>
+</data-extraction-rules>

@@ -1,0 +1,111 @@
+<resources>
+    <string name="app_name">Pipette</string>
+    <string name="action_settings">Settings</string>
+
+    <!-- Job creator (wizard) -->
+    <string name="job_wizard_title">Create a job</string>
+    <string name="job_wizard_back">Back</string>
+    <string name="job_wizard_next">Next</string>
+    <string name="job_wizard_run">Run job</string>
+
+    <string name="job_wizard_models_title">Model selection</string>
+    <string name="job_wizard_models_subtitle">Select the models to run benchmarks on.</string>
+    <string name="job_wizard_search_models">Search models</string>
+    <string name="job_wizard_no_models_title">No models downloaded</string>
+    <string name="job_wizard_no_models_subtitle">No models downloaded. Download models to\nselect for a benchmarking job.</string>
+    <string name="job_wizard_go_to_models">Go to Models</string>
+    <string name="job_wizard_no_models_match">No models match \"%1$s\".</string>
+    <string name="job_wizard_quants_title">Quantizations</string>
+    <string name="job_wizard_quants_subtitle">Select the level of compression to use</string>
+
+    <string name="job_wizard_benchmarks_title">Benchmark selection</string>
+    <string name="job_wizard_benchmarks_subtitle">Select benchmarks to track model performance on.\nExpand to select context size.</string>
+    <string name="job_wizard_search_benchmarks">Search benchmarks</string>
+    <string name="job_wizard_no_benchmarks_match">No benchmarks match \"%1$s\".</string>
+    <string name="job_wizard_benchmark_requires_mmproj">Requires a selected model with a matching MMProjector.</string>
+    <string name="job_wizard_mmproj_title">MMProjectors</string>
+    <string name="job_wizard_mmproj_subtitle">Required for VL benchmarks. Each selected MMProjector is paired with each selected compatible model.</string>
+    <string name="job_wizard_mmproj_empty">No MMProjector files. Download one from the Models tab.</string>
+
+    <string name="job_wizard_review_title">Review &amp; run</string>
+    <string name="job_wizard_section_models">Models</string>
+    <string name="job_wizard_section_benchmarks">Benchmarks</string>
+    <string name="job_wizard_section_quants">Quants</string>
+
+    <string name="job_contribute_text">Contribute benchmark results to the public dataset. Only performance metrics are shared, never personal or device data.</string>
+
+    <!-- Job list -->
+    <string name="job_list_title">Your jobs</string>
+    <string name="job_list_search">Search jobs</string>
+    <string name="job_list_no_models_title">No models downloaded</string>
+    <string name="job_list_no_models_subtitle">To create jobs, you need to first download\nmodels to select for benchmarking</string>
+    <string name="job_list_go_to_models">Go to Models</string>
+    <string name="job_list_empty_title">No jobs yet</string>
+    <string name="job_list_empty_subtitle">Tap below to add your first benchmarking job</string>
+    <string name="job_list_create">Create a job</string>
+    <string name="job_list_no_match_title">No matching jobs</string>
+    <string name="job_list_no_match_subtitle">Try a different job name.</string>
+
+    <!-- Job detail -->
+    <string name="job_detail_property_gpu">GPU</string>
+    <string name="job_detail_gpu_on">On</string>
+    <string name="job_detail_gpu_off">Off</string>
+    <string name="job_detail_property_context">Context size</string>
+    <string name="job_detail_show_less">Show less</string>
+    <plurals name="job_detail_show_more">
+        <item quantity="one">Show %d more property</item>
+        <item quantity="other">Show %d more properties</item>
+    </plurals>
+
+    <string name="job_detail_in_progress">In progress</string>
+    <string name="job_detail_paused">Paused</string>
+    <string name="job_detail_results">Results</string>
+    <string name="job_detail_results_hint">Tap a cell to view its details.</string>
+    <string name="job_detail_no_results">No results yet.</string>
+    <string name="job_detail_open_pocket">Open in Pocket mode</string>
+    <string name="job_detail_pause">Pause job</string>
+    <string name="job_detail_pausing">Pausing…</string>
+    <string name="job_detail_resume">Resume paused cells</string>
+    <string name="job_detail_retry">Retry failed cells</string>
+    <string name="job_detail_table_model">Model</string>
+    <string name="job_detail_rename">Rename</string>
+    <string name="job_detail_delete">Delete job</string>
+    <string name="job_detail_delete_confirm_title">Delete Job?</string>
+    <string name="job_detail_delete_confirm_message">This will delete the job and all its results from the device. This cannot be undone.</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="job_detail_rename_title">Rename job</string>
+    <string name="job_detail_rename_hint">Leave empty to reset to the default name.</string>
+    <string name="job_detail_rename_name">Name</string>
+    <string name="action_save">Save</string>
+    <string name="action_reset">Reset</string>
+    <plurals name="job_detail_submit_confirm">
+        <item quantity="one">Submit %d completed result?</item>
+        <item quantity="other">Submit %d completed results?</item>
+    </plurals>
+    <plurals name="job_detail_submit">
+        <item quantity="one">Submit %d Result</item>
+        <item quantity="other">Submit %d Results</item>
+    </plurals>
+    <string name="job_detail_submit_action">Submit</string>
+
+    <!-- Cell detail -->
+    <string name="cell_detail_title">Cell details</string>
+    <string name="cell_detail_no_payload">No saved result payload was found for this cell.</string>
+
+    <!-- Settings: sign-out -->
+    <string name="settings_sign_out_confirm">Sign out of your account? This deletes this device\'s registration and private key, along with every local job, benchmark result, downloaded model, and your saved Hugging Face token. You will need to register again when you sign back in.</string>
+    <!-- Appended to the message above when results are still waiting to be uploaded, since the reset destroys them. -->
+    <plurals name="settings_sign_out_unsubmitted">
+        <item quantity="one">%d result has not been submitted yet and will be permanently deleted.</item>
+        <item quantity="other">%d results have not been submitted yet and will be permanently deleted.</item>
+    </plurals>
+
+    <!-- Shared property labels -->
+    <string name="property_models">Models</string>
+    <string name="property_benchmarks">Benchmarks</string>
+    <string name="property_quants">Quants</string>
+    <string name="property_quant">Quant</string>
+    <string name="property_benchmark">Benchmark</string>
+    <string name="property_status">Status</string>
+</resources>

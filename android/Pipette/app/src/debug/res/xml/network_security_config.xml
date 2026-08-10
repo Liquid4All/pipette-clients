@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG BUILDS ONLY — this file overrides the release policy in
+  src/main/res/xml/network_security_config.xml and is never shipped in release.
+
+  Permits cleartext HTTP so a local development mgmt server can be reached
+  during end-to-end testing:
+    - emulator:        http://10.0.2.2:<port>   (host loopback)
+    - physical device: http://<host-lan-ip>:<port>
+  Release builds keep cleartext disabled (HTTPS only).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

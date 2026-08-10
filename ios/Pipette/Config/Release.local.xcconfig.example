@@ -1,0 +1,5 @@
+// Local Clerk overrides are disabled while iOS builds are prod-only.
+// Do not copy this file unless the environment split is restored.
+
+CLERK_PUBLISHABLE_KEY = pk_live_Y2xlcmsubGlxdWlkLmFpJA
+CLERK_FRONTEND_API_DOMAIN = clerk.liquid.ai

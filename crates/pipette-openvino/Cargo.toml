@@ -1,0 +1,27 @@
+[package]
+name = "pipette-openvino"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+# Not platform-gated. OpenVINO ships wheels for Linux and Windows x86_64, and
+# Windows is where Intel NPU hardware lives — so unlike `pipette-mlx` this crate
+# compiles everywhere and refuses at run time on a host without the devices.
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
+pipette-venv.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,48 @@
+[package]
+name = "pipette-android"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "pipette_android"
+
+[features]
+# Backends registered in the runtime loader (see src/loader.rs). Only the
+# kernels a build ships are enabled; llama.cpp is the default.
+default = ["llamacpp-backend"]
+llamacpp-backend = []
+
+[dependencies]
+anyhow.workspace = true
+jni.workspace = true
+pipette-device.workspace = true
+pipette-doomloop.workspace = true
+pipette-ops.workspace = true
+# Thermal wire enums (`AndroidThermalStatus`, `AndroidTemperatureSensor`) named
+# by the `ThermalSampler` trait's per-rep status/sensor methods.
+pipette-plan-types.workspace = true
+pipette-readiness.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+# Bridges the crate's `log::*` records (e.g. the per-rep
+# `end_to_end_latency: measurement run i/5` lines and decode timings) to
+# logcat. Android-only: on the host `cargo check` build there's no logcat and
+# the logger is never initialized, so the `log` macros stay no-ops.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger.workspace = true
+
+# The build script translates the CMake link-config marker into cargo:rustc-link
+# directives; anyhow lets it propagate failures as typed errors (no panics).
+[build-dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

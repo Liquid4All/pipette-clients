@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Code of Conduct report
+    url: mailto:support@liquid.ai
+    about: Please report unacceptable behavior by email instead of opening a public issue.

@@ -1,0 +1,784 @@
+name: Android Release Distribution
+
+# Builds the Pipette Android release artifacts. Runs either:
+#   - manually via the Actions "Run workflow" button (workflow_dispatch), or
+#   - automatically when the `build-deploy-firebase` label is added to a PR.
+#
+# Both paths run ONLY in Liquid4All/pipette-clients. Every path needs the release
+# upload keystore and a distribution credential, none of which a fork has, so a
+# fork's run could only fail partway through. The job `if:` skips it instead; see
+# the comment there for why the protected environment doesn't cover this.
+#
+# The `distribution` input selects what is produced:
+#   - firebase (default): release APK, uploaded to Firebase App Distribution
+#     so it can be handed to testers. This is the label-trigger behaviour.
+#   - play: release AAB (Android App Bundle), attached to the run as a
+#     downloadable artifact. No Firebase release is created.
+#   - both: both of the above.
+#
+# The `publish_to_play` input additionally pushes that bundle to the Play
+# Console's **internal testing** track. It defaults to false, so `play` keeps
+# meaning "build the bundle and attach it" unless a run explicitly opts in, and
+# the artifact is attached either way, so a failed publish still leaves
+# something to upload by hand.
+#
+# The Play bundle exists because the release signing material lives only in repo
+# secrets: a local `./gradlew :app:bundleRelease` silently falls back to the
+# shared debug keystore (see app/build.gradle.kts), and the key that signs the
+# FIRST Play upload becomes the account's permanent upload certificate. Building
+# here is the only way to guarantee the real upload key signs it.
+#
+# The file name and the `concurrency:` prefix now match the display name, since
+# this workflow stopped being Firebase-only. `environment:` deliberately does NOT:
+# it keeps the `firebase-distribution` value so the protected-environment config
+# and its required reviewers do not have to be re-created.
+#
+# RENAMING THIS FILE AGAIN requires raising PIPETTE_VERSION_CODE_BASE in the
+# "Resolve build identity" step. GitHub keys the run number to a workflow's file
+# path, so a rename restarts it at 1, and Play permanently rejects any versionCode
+# at or below the highest it has accepted. The base is what makes that recoverable
+# instead of fatal.
+#
+# WHERE THE SECRETS LIVE. This job declares `environment: firebase-distribution`,
+# so every secret below resolves from either the repository or that environment,
+# and the header does not distinguish them. As set up today, RELEASE_* and CLERK_*
+# are repository secrets; FIREBASE_SERVICE_ACCOUNT and
+# GOOGLE_PLAY_SERVICE_ACCOUNT_JSON are scoped to the environment, which is tighter
+# (only a job that declares it can read them). Prefer the environment for a new
+# credential: `gh secret set NAME --env firebase-distribution`.
+#
+# Required by EVERY path (every path signs a release build, and all are gated on
+# the `firebase-distribution` environment's approval, which covers the upload
+# keystore as well as the Firebase credential):
+#   - secrets RELEASE_KEYSTORE_BASE64 / RELEASE_KEYSTORE_PASSWORD /
+#     RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD: the production upload keystore.
+#     Missing BASE64/PASSWORD/ALIAS fails the "Decode release keystore" step; a
+#     missing KEY_PASSWORD instead makes gradle fall back to the shared debug
+#     keystore, which the signature check then catches before anything ships.
+#
+# Also required by every path:
+#   - secret CLERK_PUBLISHABLE_KEY: the Clerk instance this build signs in against.
+#     No key is baked into the repo any more, so an unset secret would produce a
+#     build with the sign-in gate wide open. That is the right outcome for a fork
+#     and never for a distributed build, so the "Verify the Clerk key is present"
+#     step below fails the run rather than shipping it.
+#   - secret SENTRY_DSN: the Sentry project this build reports to. Supplying it is
+#     what turns crash reporting on at all (it compiles sentry-native into the
+#     :benchmark engine, applies the Sentry Gradle plugin, and populates
+#     io.sentry.dsn). Because this workflow injects PIPETTE_VERSION_CODE, the build
+#     identifies as an official release and `verifyReleaseSentryDsn` will FAIL the
+#     release if the secret is missing, rather than quietly shipping without crash
+#     capture. For a deliberately telemetry-free release set
+#     PIPETTE_ENABLE_CRASH_REPORTING=0 instead of removing the secret.
+#
+# Optional everywhere:
+#   - secret POSTHOG_API_KEY / variable POSTHOG_HOST: the PostHog project events
+#     are sent to. Unset means the build falls back to whatever default
+#     app/build.gradle.kts carries.
+#
+# Required by the `firebase` and `both` paths only (otherwise the "Upload to
+# Firebase App Distribution" step fails with a clear error):
+#   - secret FIREBASE_SERVICE_ACCOUNT: a Google service-account JSON key with the
+#     "Firebase App Distribution Admin" role (roles/firebaseappdistro.admin) on
+#     project liquid-leap. NOTE: the service-account address appears to testers as
+#     the App Distribution "Contact:", and it is not a deliverable mailbox, so a
+#     reachable human contact (david.berrios@liquid.ai) is appended to the release
+#     notes instead (see the release-notes step).
+# Required by `publish_to_play` only:
+#   - secret GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: a Google Cloud service-account JSON
+#     key, invited into Play Console (Users and permissions) with the "Release
+#     manager" role, or at least "Release to testing tracks" on ai.liquid.pipette.
+#     That invite is what grants Play authority; no Cloud IAM role is involved.
+#     The key may come from any Cloud project with the Android Publisher API
+#     (androidpublisher.googleapis.com) enabled. Linking the developer account to a
+#     Cloud project is no longer required, so ignore the Play Console "API access"
+#     page: it is visible only to the account owner and grants nothing by itself.
+#     Ours is pipette-play-publisher@liquid-leap.iam.gserviceaccount.com.
+#
+#     BOOTSTRAP: the Play Developer API cannot create an app listing, and it
+#     rejects an edit for a package that has never had a release ("Package not
+#     found"). So the FIRST bundle has to go up through the Console by hand; every
+#     run after that can publish here. That first upload is also what permanently
+#     registers the signing certificate as the account's upload key, which is why
+#     the AAB signature is verified above before anything leaves this job.
+#
+# Optional (firebase / both only):
+#   - variable FIREBASE_TESTER_GROUPS: comma-separated tester-group alias(es) to
+#     notify (e.g. "qa,internal"). May also be passed per-run via the `groups`
+#     input. If empty, the build is uploaded but no group is notified (assign
+#     testers in the Firebase console). Groups must already exist in
+#     App Distribution → Testers & groups.
+
+on:
+  workflow_dispatch:
+    inputs:
+      distribution:
+        description: "What to build: firebase = APK to App Distribution; play = signed AAB attached to this run; both."
+        required: false
+        type: choice
+        options: [firebase, play, both]
+        default: firebase
+      publish_to_play:
+        description: "Also push the signed bundle to the Play internal testing track. Requires distribution = play or both."
+        required: false
+        type: boolean
+        default: false
+      groups:
+        description: "Tester group alias(es), comma-separated. Overrides the FIREBASE_TESTER_GROUPS variable."
+        required: false
+        default: ""
+      notes:
+        description: "Release-notes override. If empty, notes are the commits on this ref since main."
+        required: false
+        default: ""
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  # One in-flight run per PR / ref, bucketed by whether the run performs a
+  # Firebase rollout, NOT by the raw input. `firebase` and `both` share a bucket
+  # so two tester rollouts of the same ref still supersede each other (the
+  # original invariant); `play` gets its own so a `play` dispatch can't cancel an
+  # in-flight tester rollout a maintainer already approved. Note `both` sits in
+  # the firebase bucket, so a later `firebase` dispatch can still cancel it and
+  # discard its bundle; dispatch `play` when the bundle is what you care about.
+  group: >-
+    android-release-distribution-${{ github.event.pull_request.number || github.ref }}-${{
+    (github.event.inputs.distribution || 'firebase') == 'play' && 'play' || 'firebase' }}
+  cancel-in-progress: true
+
+# Least-privilege default for GITHUB_TOKEN, so a job added here later starts
+# read-only. `distribute` already declares the same scope. See build.yml.
+permissions:
+  contents: read
+
+jobs:
+  distribute:
+    name: build & release (Android)
+    # Manual dispatch runs only in the canonical repo. A fork's dispatch receives no
+    # secrets and would die at "Decode release keystore" with an error about a
+    # missing repository secret, which reads as a broken workflow to someone who
+    # forked this to read the code; skipping is the clearer signal. The protected
+    # environment below does NOT cover this, because environment protection rules
+    # are not copied to forks, so a fork's dispatch faces no reviewer gate at all.
+    # The label path additionally requires the exact `build-deploy-firebase` label
+    # AND a same-repo PR (fork PRs don't receive secrets, so the distribute step
+    # couldn't authenticate anyway).
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.repository == 'Liquid4All/pipette-clients') ||
+      (github.event.label.name == 'build-deploy-firebase' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Gate the job behind a protected environment with required reviewers. Every
+    # run (whether started by the `build-deploy-firebase` label or a manual
+    # dispatch, and whichever `distribution` mode) pauses for maintainer approval
+    # before the job starts, so the release upload keystore and (on the firebase
+    # paths) the FIREBASE_SERVICE_ACCOUNT credential are only ever exposed to an
+    # explicitly approved run. This blocks the label-trigger exfiltration vector: a
+    # labeled PR can't run its (potentially modified) build code against those
+    # secrets until a reviewer approves the deployment.
+    environment: firebase-distribution
+    permissions:
+      contents: read
+    env:
+      # Resolved once so every step branches on the same value. The
+      # `pull_request: labeled` trigger carries no inputs, so it falls back to
+      # `firebase`, so the label path keeps its original behaviour exactly.
+      DISTRIBUTION: ${{ github.event.inputs.distribution || 'firebase' }}
+      # Same reasoning: the label path carries no inputs, so it resolves to
+      # 'false' and can never publish. A `workflow_dispatch` boolean arrives as
+      # the string "true"/"false", which is what every `if:` below compares to.
+      PUBLISH_TO_PLAY: ${{ github.event.inputs.publish_to_play || 'false' }}
+    steps:
+      # Actions here are pinned to commit SHAs, tag in a trailing comment: this job
+      # decodes the release keystore and the Play/Firebase credentials, so a
+      # retagged action would run with signing material in reach. Resolve a tag with
+      #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha
+      # (deref again via git/tags/<sha> when that returns type "tag").
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # For a labeled PR, check out the PR head (not the merge ref) so the
+          # changelog reflects the branch's own commits. Falls back to the
+          # dispatched ref for workflow_dispatch.
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          submodules: recursive
+          lfs: true
+          # Full history so `git merge-base origin/main HEAD` can resolve the
+          # divergence point for the changelog.
+          fetch-depth: 0
+
+      - name: Validate publish inputs
+        # Fails in seconds rather than after a ~10 minute native build: both of
+        # these are knowable before anything is compiled, and a run that can't
+        # publish should say so before it burns a runner (and before it decodes
+        # the signing keystore).
+        if: env.PUBLISH_TO_PLAY == 'true'
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          if [ "${DISTRIBUTION}" = "firebase" ]; then
+            echo "::error::publish_to_play needs a bundle to publish; set distribution to 'play' or 'both'." >&2
+            exit 1
+          fi
+          if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then
+            echo "::error::GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not set. Add the Play Console service-account JSON key with 'gh secret set GOOGLE_PLAY_SERVICE_ACCOUNT_JSON --env firebase-distribution' (see this file's header for the required role and the one-time manual bootstrap)." >&2
+            exit 1
+          fi
+          echo "Publishing to the Play internal testing track is enabled for this run."
+
+      - name: Resolve build identity
+        # versionCode = BASE + this workflow's run number.
+        #
+        # versionCode must increase forever: Play's floor is the highest code it
+        # has ever accepted, and anything at or below that is rejected. The run
+        # number supplies the increment; BASE exists because the run number is
+        # NOT permanent. GitHub keys it to a workflow's file *path*, not its
+        # `name:`, so renaming or re-creating this file restarts it at 1.
+        #
+        # ==> IF THE RUN NUMBER EVER RESTARTS, RAISE PIPETTE_VERSION_CODE_BASE BY
+        #     PIPETTE_VERSION_CODE_GENERATION BEFORE THE NEXT RELEASE BUILD. <==
+        #
+        # That is the whole maintenance contract. A generation is 10,000 runs,
+        # sized off the real rate: this workflow saw 11 runs in its first three
+        # weeks, so ~500/year is a generous read and 10,000 is decades. Play's
+        # 2,100,000,000 ceiling (the effective limit, 47M below int32's
+        # 2,147,483,647) then leaves ~210,000 generations. Deliberately not
+        # larger: the codes stay short enough to read a run number straight off
+        # one (10042 is run 42), and nothing is gained by reserving more.
+        # Raising BASE is always safe; lowering it is never safe, because Play
+        # would reject every build after it.
+        #
+        # Known limitation, deliberate: RE-RUNNING a run reuses its run number,
+        # so the rebuilt bundle carries a versionCode Play has already accepted
+        # and the publish is rejected. Re-dispatch the workflow instead of
+        # re-running it. This is the accepted cost of a legible counter over a
+        # wall-clock value.
+        env:
+          # Generation 1. Raise by PIPETTE_VERSION_CODE_GENERATION whenever the
+          # run number resets. Nothing has been published to Play, so the only
+          # floor is what App Distribution has already seen (bare run numbers, max
+          # 11), which this clears comfortably. Renaming this file to
+          # android-release-distribution.yml is itself a reset, so the first build
+          # after that lands at 10001 rather than continuing from 11.
+          PIPETTE_VERSION_CODE_BASE: "10000"
+          PIPETTE_VERSION_CODE_GENERATION: "10000"
+        run: |
+          set -euo pipefail
+          code=$(( PIPETTE_VERSION_CODE_BASE + GITHUB_RUN_NUMBER ))
+          # A run number that has outgrown its generation means BASE is now too
+          # close to the next one to stay distinguishable; bump both together.
+          if [ "${GITHUB_RUN_NUMBER}" -ge "${PIPETTE_VERSION_CODE_GENERATION}" ]; then
+            echo "::error::Run number ${GITHUB_RUN_NUMBER} has reached the generation size ${PIPETTE_VERSION_CODE_GENERATION}; raise PIPETTE_VERSION_CODE_BASE and the generation size together." >&2
+            exit 1
+          fi
+          if [ "${code}" -le 0 ] || [ "${code}" -gt 2100000000 ]; then
+            echo "::error::Computed versionCode ${code} is outside Play's accepted range (1..2100000000)." >&2
+            exit 1
+          fi
+          # The commit, not the counter, is what identifies a harness build: two
+          # builds of the same commit are the same harness and should group
+          # together in the warehouse, where this rides along as `client_version`.
+          # Keeping it off the counter also means a run-number reset cannot make
+          # `client_version` ambiguous the way it would make versionCode collide.
+          tag="g$(git rev-parse --short=7 HEAD)"
+          echo "PIPETTE_VERSION_CODE=${code}" >> "${GITHUB_ENV}"
+          echo "PIPETTE_BUILD_TAG=${tag}" >> "${GITHUB_ENV}"
+          echo "versionCode ${code} (base ${PIPETTE_VERSION_CODE_BASE} + run ${GITHUB_RUN_NUMBER}), build tag ${tag}"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+
+      - name: Install Android NDK + native build tools
+        run: |
+          # build-rust-android.sh auto-detects the NDK under $ANDROID_HOME/ndk and
+          # needs cmake + ninja on PATH to cross-build llama.cpp/ggml for arm64.
+          yes | sdkmanager --install "ndk;27.2.12479018" >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build cmake
+
+      - name: Install Rust (Android target)
+        # `@stable` is a branch whose action.yml defaults `toolchain: stable`, so
+        # pinning its commit still installs current stable; only the action is
+        # frozen.
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-05
+        with:
+          targets: aarch64-linux-android
+
+      # v2 sits one changelog-only commit past v2.9.1, so this is what the tag
+      # resolves to today, not a version change.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1 + changelog)
+        with:
+          # Share the CI android-app cache so this job restores its warm native
+          # build instead of compiling llama.cpp/ggml from cold.
+          key: android-app-v1
+          cache-bin: false
+
+      - name: Licenses (shipping dependencies)
+        # The same gate the CI android-app job runs, repeated here because this is
+        # the workflow that actually distributes to users (Firebase App
+        # Distribution / Play). CI being green is not sufficient: a release can be
+        # dispatched from a ref whose android-app job never ran, since that job is
+        # behind a path filter.
+        #
+        # Deliberately before the keystore decode and the Sentry CLI install, so a
+        # license regression aborts the run before it touches signing material or
+        # publishes anything. See docs/licensing.md.
+        run: |
+          ./ci/android-licenses.py --selftest
+          ./ci/android-licenses.py
+
+      - name: Attribution file up to date
+        # A distributed build must not ship an attribution screen that credits
+        # dependencies it does not have, or omits ones it does. Same check as CI;
+        # regenerate with `./ci/android-attribution.py --write` and commit.
+        run: ./ci/android-attribution.py --check
+
+      - name: Install Sentry CLI
+        # Needed by :app:uploadBenchmarkNativeSymbols, which runs as a finalizer of
+        # assembleRelease AND bundleRelease (so it covers the Play-only path too),
+        # to upload the unstripped native debug symbols so :benchmark crash
+        # backtraces symbolicate. Mirrors the iOS dSYM-upload build phase.
+        #
+        # Pinned to an explicit release + SHA-256 rather than piping the installer
+        # (`curl https://sentry.io/get-cli/ | bash`): that runs a remote script at
+        # build time (a supply-chain vector in a job that also holds
+        # SENTRY_AUTH_TOKEN) and installs whatever "latest" resolves to that day
+        # (not reproducible). To bump, change both vars together; the digest is the
+        # release asset's, from `gh api repos/getsentry/sentry-cli/releases/tags/<v>`.
+        env:
+          SENTRY_CLI_VERSION: "3.6.0"
+          SENTRY_CLI_SHA256: "e2bff5d8b546f3fb72c616da656ecb347c7c144f36a5294b0749dcc2001f68d5"
+        run: |
+          set -euo pipefail
+          url="https://github.com/getsentry/sentry-cli/releases/download/${SENTRY_CLI_VERSION}/sentry-cli-Linux-x86_64"
+          curl -fsSL "$url" -o /tmp/sentry-cli
+          echo "${SENTRY_CLI_SHA256}  /tmp/sentry-cli" | sha256sum -c -
+          sudo install -m 0755 /tmp/sentry-cli /usr/local/bin/sentry-cli
+          sentry-cli --version
+
+      - name: Decode release keystore
+        # Materialize the production upload keystore from the base64 repo secret so
+        # the release build is signed with the real key (Play upload key) instead of
+        # the shared debug keystore. Written outside the checkout ($RUNNER_TEMP) so it
+        # can't be picked up by any glob or committed; a later step shreds it.
+        env:
+          # Both secrets via env: (never inlined into the run script) so they can't
+          # land in the logged command line or be interpreted by the shell.
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_KEYSTORE_BASE64}" ]; then
+            echo "::error::RELEASE_KEYSTORE_BASE64 secret is empty, so the release build cannot be signed." >&2
+            exit 1
+          fi
+          keystore="${RUNNER_TEMP}/pipette-release.jks"
+          # tr strips any stray whitespace/newlines a paste may have introduced;
+          # base64's alphabet contains none, so this only removes noise.
+          printf '%s' "${RELEASE_KEYSTORE_BASE64}" | tr -d '[:space:]' | base64 --decode > "${keystore}"
+          # Validate the store+password AND capture the signing-cert SHA-256 in one pass
+          # (keytool exits non-zero, failing the step, on a corrupt store or wrong
+          # password). Scoped to the signing alias so the fingerprint is the exact key
+          # gradle signs with, not merely the first entry. The fingerprint is handed to
+          # the post-build signature check via $GITHUB_ENV, so there is no hand-maintained
+          # constant to drift on key rotation.
+          details="$(keytool -list -v -keystore "${keystore}" -alias "${RELEASE_KEY_ALIAS}" -storepass "${RELEASE_KEYSTORE_PASSWORD}")"
+          fingerprint="$(printf '%s\n' "${details}" | awk -F'SHA256: ' '/SHA256:/{print $2; exit}' | tr -d ': ' | tr 'A-F' 'a-f')"
+          if [ -z "${fingerprint}" ]; then
+            echo "::error::Could not read the signing-certificate SHA-256 from the keystore." >&2
+            exit 1
+          fi
+          echo "UPLOAD_CERT_SHA256=${fingerprint}" >> "${GITHUB_ENV}"
+          echo "Release keystore decoded and verified (upload cert SHA-256 ${fingerprint})."
+
+      - name: Verify the Clerk key is present
+        # The build treats a missing Clerk key as "this build has no auth" and only warns, because
+        # that is correct for a fork with no Clerk instance. It is never correct for a distributed
+        # Liquid build, which would ship with the sign-in gate open. This job runs only in the
+        # canonical repo (see the job-level `if:`), so the distinction Gradle cannot make is made
+        # here. The key is public by design, hence the length echo rather than a masked compare.
+        #
+        # The accepted shape mirrors ClerkConfiguration.isCompleteKey and verifyReleaseClerkKey:
+        # non-empty, `pk_` prefix, and no unexpanded placeholder. A prefix check alone would pass
+        # `pk_$(CLERK_PUBLISHABLE_KEY)`, which the runtime rejects, so the run would go green and
+        # distribute a build with sign-in silently off.
+        env:
+          CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLERK_PUBLISHABLE_KEY}" ]; then
+            echo "::error::CLERK_PUBLISHABLE_KEY is empty, so this build would ship with sign-in disabled. Set the repository secret."
+            exit 1
+          fi
+          # Single-quoted patterns: these are literal '$(' and '${' to match, not expansions.
+          case "${CLERK_PUBLISHABLE_KEY}" in
+            *'$('*|*'${'*)
+              echo "::error::CLERK_PUBLISHABLE_KEY still contains an unexpanded placeholder, so the runtime would treat it as no key at all and ship with sign-in disabled."
+              exit 1
+              ;;
+          esac
+          case "${CLERK_PUBLISHABLE_KEY}" in
+            pk_*) echo "Clerk key present (${#CLERK_PUBLISHABLE_KEY} chars)." ;;
+            *) echo "::error::CLERK_PUBLISHABLE_KEY does not start with 'pk_'; the secret looks mangled."; exit 1 ;;
+          esac
+
+      - name: Build release artifacts
+        # One gradle invocation for whichever artifacts this run needs (see the
+        # header for the mode → artifact mapping). Building both in a single
+        # invocation shares the configuration phase and the native (llama.cpp)
+        # build, and runs the `uploadBenchmarkNativeSymbols` finalizer once
+        # instead of once per task.
+        working-directory: android/Pipette
+        env:
+          # The Clerk instance this build authenticates against (public by design,
+          # kept out of VCS: see app/build.gradle.kts). Asserted non-empty above.
+          CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY }}
+          # Sentry DSN. REQUIRED on this path: a supplied DSN is what
+          # turns crash reporting on, and because this workflow injects
+          # PIPETTE_VERSION_CODE the build identifies as an official release, so
+          # `verifyReleaseSentryDsn` (app/build.gradle.kts) will FAIL
+          # assembleRelease/bundleRelease when it is missing. That is deliberate: a
+          # distributed build must not silently ship without crash capture. To ship a
+          # deliberately telemetry-free release, set PIPETTE_ENABLE_CRASH_REPORTING=0
+          # rather than dropping the secret.
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # PostHog product analytics for the distributed build. POSTHOG_HOST is a
+          # repo variable (plain ingest hostname), defaulted in the build script.
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
+          # Real release signing (see app/build.gradle.kts): all four must be present
+          # or gradle silently falls back to the debug keystore. STORE_FILE is the
+          # file decoded above; note the secret is named RELEASE_KEYSTORE_PASSWORD but
+          # gradle expects RELEASE_STORE_PASSWORD, so the names are bridged here.
+          RELEASE_STORE_FILE: ${{ runner.temp }}/pipette-release.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          # Enables Sentry build-time uploads on this (distributed) release build:
+          # native debug symbols (uploadBenchmarkNativeSymbols, a finalizer of both
+          # assembleRelease and bundleRelease) + the plugin's source context. No
+          # ProGuard mappings: `optimization { enable = false }` on buildTypes.release
+          # means minification never runs, so no mapping file is produced.
+          # All are token-gated, so the PR-CI build (build.yml, no token) still
+          # uploads nothing. See app/build.gradle.kts.
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          # Monotonic build identity, resolved by the step above. This workflow
+          # isn't tag-triggered, so the base version stays "1.0"; a tag-driven
+          # build would also pass PIPETTE_VERSION_NAME=<tag version>. versionCode
+          # advances every run, which changes the APK hash too, so each
+          # distribution is a distinct App Distribution release (no dedup).
+          PIPETTE_VERSION_CODE: ${{ env.PIPETTE_VERSION_CODE }}
+          PIPETTE_BUILD_TAG: ${{ env.PIPETTE_BUILD_TAG }}
+        run: |
+          set -euo pipefail
+          # `play` and `firebase` are mutually exclusive tests, so at least one
+          # task is always selected and gradle is never invoked with an empty list.
+          tasks=()
+          if [ "${DISTRIBUTION}" != "play" ]; then tasks+=(:app:assembleRelease); fi
+          if [ "${DISTRIBUTION}" != "firebase" ]; then tasks+=(:app:bundleRelease); fi
+          echo "distribution=${DISTRIBUTION} -> gradle tasks: ${tasks[*]}"
+          ./gradlew "${tasks[@]}" --no-daemon --stacktrace
+
+      - name: Verify computed native libs 16 KB page-size compatibility
+        working-directory: android/Pipette
+        run: ../../ci/android-16kb-page-size.sh app/build/generated/rustJniLibs
+
+      - name: Verify APK 16 KB page-size compatibility
+        if: env.DISTRIBUTION != 'play'
+        working-directory: android/Pipette
+        run: ../../ci/android-16kb-page-size.sh app/build/outputs/apk/release/app-release.apk
+
+      - name: Verify AAB 16 KB page-size compatibility
+        if: env.DISTRIBUTION != 'firebase'
+        working-directory: android/Pipette
+        run: ../../ci/android-16kb-page-size.sh app/build/outputs/bundle/release/app-release.aab
+
+      - name: Verify release signature
+        # Guard against gradle's documented silent fallback to the debug keystore
+        # (it happens if any RELEASE_* value is missing/blank). Assert the built APK
+        # carries the very cert we decoded ($UPLOAD_CERT_SHA256) before distributing.
+        if: env.DISTRIBUTION != 'play'
+        working-directory: android/Pipette
+        run: |
+          set -euo pipefail
+          expected="${UPLOAD_CERT_SHA256:-}"
+          if [ -z "${expected}" ]; then
+            echo "::error::UPLOAD_CERT_SHA256 was not set by the decode step." >&2
+            exit 1
+          fi
+          # `| tail -1` drains the whole pipe (no SIGPIPE, unlike `head`), picking the
+          # newest build-tools revision. Fail clearly if none resolved.
+          apksigner="$(find "${ANDROID_HOME}/build-tools" -name apksigner | sort -V | tail -1)"
+          if [ ! -x "${apksigner}" ]; then
+            echo "::error::apksigner not found under ${ANDROID_HOME}/build-tools." >&2
+            exit 1
+          fi
+          # Resolve the APK unambiguously: verifying a different file than the upload
+          # step ships would be worthless, so fail unless there is exactly one.
+          # `|| true` so a missing output directory reaches the explicit check
+          # below as "none" instead of killing the step on find's own exit status.
+          apks="$(find app/build/outputs/apk/release -name '*.apk' 2>/dev/null || true)"
+          if [ "$(printf '%s\n' "${apks}" | grep -c .)" -ne 1 ]; then
+            echo "::error::Expected exactly one release APK under app/build/outputs/apk/release; found: ${apks:-none}" >&2
+            exit 1
+          fi
+          echo "Verifying ${apks} with ${apksigner}"
+          certs="$("${apksigner}" verify --print-certs "${apks}")"
+          echo "${certs}"
+          apk_cert="$(printf '%s\n' "${certs}" | awk -F'digest: ' '/SHA-256 digest:/{print $2; exit}' | tr -d ' ' | tr 'A-F' 'a-f')"
+          if [ "${apk_cert}" != "${expected}" ]; then
+            echo "::error::Release APK cert (${apk_cert:-none}) != production upload key (${expected}). Gradle likely fell back to the debug keystore." >&2
+            exit 1
+          fi
+          echo "Signature matches the production upload key (${expected})."
+
+      - name: Verify AAB signature
+        # Same guard as the APK check above, and it matters more here: the key
+        # that signs the FIRST Play upload becomes the account's permanent upload
+        # certificate, so a debug-signed bundle would need a Google key reset.
+        #
+        # apksigner can't be reused here: a bundle is JAR-signed (v1). Two checks
+        # are needed because neither is sufficient alone:
+        #   * `jarsigner -verify` proves the entry digests still match the
+        #     signature, but it exits 0 for a jar carrying NO signature at all;
+        #   * `keytool -printcert -jarfile` identifies the signer but checks no
+        #     digests; it yields the SHA-256 in the same format the decode step
+        #     parsed from the keystore, and prints
+        #     "Not a signed jar file" for an unsigned bundle, leaving the parsed
+        #     value empty, which the comparison below then rejects.
+        # `-strict` is deliberately NOT passed to jarsigner: Android upload keys
+        # are self-signed, so it would always fail PKIX chain validation.
+        if: env.DISTRIBUTION != 'firebase'
+        working-directory: android/Pipette
+        run: |
+          set -euo pipefail
+          expected="${UPLOAD_CERT_SHA256:-}"
+          if [ -z "${expected}" ]; then
+            echo "::error::UPLOAD_CERT_SHA256 was not set by the decode step." >&2
+            exit 1
+          fi
+          # Resolve the bundle unambiguously: verifying a different file than the
+          # one attached to the run would be worthless.
+          # `|| true` so a missing output directory reaches the explicit check
+          # below as "none" instead of killing the step on find's own exit status.
+          aabs="$(find app/build/outputs/bundle/release -name '*.aab' 2>/dev/null || true)"
+          if [ "$(printf '%s\n' "${aabs}" | grep -c .)" -ne 1 ]; then
+            echo "::error::Expected exactly one release AAB under app/build/outputs/bundle/release; found: ${aabs:-none}" >&2
+            exit 1
+          fi
+          echo "Verifying ${aabs}"
+          # Capture the status explicitly: inside `if ! cmd; then`, `$?` is the
+          # negation's result (always 0), not jarsigner's.
+          jarsigner_status=0
+          jarsigner -verify "${aabs}" || jarsigner_status=$?
+          if [ "${jarsigner_status}" -ne 0 ]; then
+            echo "::error::jarsigner -verify failed for ${aabs} (exit ${jarsigner_status}): a signed entry no longer matches its recorded digest, or jarsigner is unavailable." >&2
+            exit 1
+          fi
+          # `|| true` covers an unreadable or corrupt bundle, on which keytool
+          # exits non-zero; it prints "Not a signed jar file" and exits 0 for a
+          # merely unsigned one. Either way the fingerprint parses empty and the
+          # comparison below rejects it.
+          certs="$(keytool -printcert -jarfile "${aabs}" 2>&1 || true)"
+          aab_cert="$(printf '%s\n' "${certs}" | awk -F'SHA256: ' '/SHA256:/{print $2; exit}' | tr -d ': ' | tr 'A-F' 'a-f')"
+          if [ "${aab_cert}" != "${expected}" ]; then
+            echo "::error::Release AAB cert (${aab_cert:-none, bundle unsigned?}) != production upload key (${expected}); gradle likely fell back to the debug keystore." >&2
+            exit 1
+          fi
+          echo "AAB signature matches the production upload key (${expected})."
+          # Path is relative to this step's working-directory; upload-artifact
+          # below runs from the repo root, so record it repo-relative.
+          echo "PLAY_AAB_PATH=android/Pipette/${aabs}" >> "${GITHUB_ENV}"
+
+      - name: Shred signing material
+        # Defense-in-depth: don't rely solely on runner ephemerality (this job uses a
+        # custom runner label), so remove the decoded keystore whatever the outcome.
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/pipette-release.jks"
+
+      - name: Attach Play bundle to this run
+        # Needs no signing material, so it deliberately sits after the shred step.
+        if: env.DISTRIBUTION != 'firebase'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          # run_attempt is in the name because upload-artifact rejects a duplicate
+          # name within a run: without it, re-running a failed run (a plausible
+          # recovery from a transient network failure) would fail at this step.
+          name: pipette-play-bundle-${{ github.run_number }}-${{ github.run_attempt }}
+          path: ${{ env.PLAY_AAB_PATH }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write Play release notes
+        # The action reads one file per locale from a directory, so the name
+        # matters: `whatsnew-<locale>`, matching a locale the listing actually
+        # has. Google truncates at 500 characters, so build up to a 450-character
+        # budget and stop on the commit that would cross it rather than slicing
+        # mid-line.
+        if: env.PUBLISH_TO_PLAY == 'true'
+        run: |
+          set -euo pipefail
+          notes=""
+          # Same base as the Firebase notes: the commits this ref adds on top of
+          # main. `|| true` keeps a shallow/absent base from failing the step,
+          # since empty notes fall back to the generic line below.
+          git fetch --no-tags --quiet origin main || true
+          base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+          if [ -n "${base}" ]; then
+            subjects="$(git log --no-merges --pretty=%s "${base}..HEAD" || true)"
+            while IFS= read -r line; do
+              [ -z "${line}" ] && continue
+              next="${notes}- ${line}"$'\n'
+              [ "${#next}" -gt 450 ] && break
+              notes="${next}"
+            done <<< "${subjects}"
+          fi
+          [ -z "${notes}" ] && notes="- Internal build ${GITHUB_RUN_NUMBER}."$'\n'
+          mkdir -p .whatsnew
+          printf '%s' "${notes}" > .whatsnew/whatsnew-en-US
+          echo "Release notes ($(wc -c < .whatsnew/whatsnew-en-US) bytes):"
+          cat .whatsnew/whatsnew-en-US
+
+      - name: Publish to Play internal testing track
+        # Deliberately after the shred step: this needs the bundle, not the
+        # signing material. Pinned like every other action in this job (see the
+        # note at the first step); it matters most here, since this one holds a
+        # credential that can ship code to testers.
+        if: env.PUBLISH_TO_PLAY == 'true'
+        uses: r0adkll/upload-google-play@935ef9c68bb393a8e6116b1575626a7f5be3a7fb # v1.1.3
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ai.liquid.pipette
+          # The path the AAB signature check resolved and verified, so this
+          # publishes the exact file that was checked against the upload key
+          # rather than re-globbing the output directory.
+          releaseFiles: ${{ env.PLAY_AAB_PATH }}
+          track: internal
+          # The Console row shows versionCode; pairing it with the versionName
+          # this bundle carries makes a release traceable to its commit without
+          # opening the run. Note a RE-RUN reuses its run number and therefore its
+          # versionCode, which Play rejects once it has accepted that code:
+          # re-dispatch the workflow rather than re-running a failed publish.
+          releaseName: "1.0+${{ env.PIPETTE_BUILD_TAG }} (${{ env.PIPETTE_VERSION_CODE }})"
+          whatsNewDirectory: .whatsnew
+          # Internal-track releases go live to the tester list immediately; there
+          # is no staged rollout to hold back.
+          status: completed
+
+      - name: Summarize Play bundle
+        if: env.DISTRIBUTION != 'firebase'
+        run: |
+          set -euo pipefail
+          {
+            echo "## Pipette Android: Play release bundle"
+            echo ""
+            echo "- **Artifact:** \`pipette-play-bundle-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}\`, downloadable from this run's Artifacts section (GitHub wraps it in a .zip)"
+            echo "- **File:** \`$(basename "${PLAY_AAB_PATH}")\` ($(du -h "${PLAY_AAB_PATH}" | cut -f1))"
+            echo "- **versionCode:** ${PIPETTE_VERSION_CODE} (base + run ${GITHUB_RUN_NUMBER})"
+            echo "- **versionName:** 1.0+${PIPETTE_BUILD_TAG}"
+            echo "- **Upload cert SHA-256:** \`${UPLOAD_CERT_SHA256}\`"
+            echo ""
+            if [ "${PUBLISH_TO_PLAY}" = "true" ]; then
+              echo "Published to the **internal testing** track. Review at Play Console → Testing → Internal testing."
+              echo ""
+              echo "The artifact above is still attached, so a rejected or half-finished publish can be uploaded by hand without rebuilding."
+            else
+              echo "Upload at Play Console → Testing → Internal testing → Create new release, or re-dispatch with \`publish_to_play\` to push it from CI."
+            fi
+            echo ""
+            echo "The first upload permanently claims the \`ai.liquid.pipette\` package name and registers the certificate above as the account's UPLOAD key:"
+            echo "the key every future upload must be signed with. Play generates a separate app signing key for what end-user devices verify."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Generate release notes (commits since main)
+        if: env.DISTRIBUTION != 'play'
+        run: |
+          set -euo pipefail
+          SHORT="$(git rev-parse --short HEAD)"
+          {
+            echo "Pipette Android (${SHORT})"
+            echo ""
+            if [ -n "${NOTES_OVERRIDE}" ]; then
+              echo "${NOTES_OVERRIDE}"
+            else
+              git fetch --no-tags --quiet origin main || true
+              if BASE="$(git merge-base origin/main HEAD 2>/dev/null)" && [ -n "${BASE}" ]; then
+                CHANGES="$(git log --no-merges --pretty='- %s' "${BASE}..HEAD")"
+                if [ -n "${CHANGES}" ]; then
+                  echo "${CHANGES}"
+                else
+                  echo "- No commits since main (HEAD is up to date with main)."
+                fi
+              else
+                # Can't resolve a base (e.g. main itself), so fall back to the tip.
+                git log -1 --pretty='- %s'
+              fi
+            fi
+            # Reachable human contact for testers. The App Distribution "Contact:"
+            # field shows the service-account uploader, which is not a deliverable
+            # mailbox, so surface a real address here in the notes instead.
+            echo ""
+            echo "Questions or feedback? Contact david.berrios@liquid.ai"
+          } | tee release-notes.txt
+        env:
+          NOTES_OVERRIDE: ${{ github.event.inputs.notes }}
+
+      - name: Upload to Firebase App Distribution
+        if: env.DISTRIBUTION != 'play'
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # Release Firebase Android app (ai.liquid.pipette) in project liquid-leap.
+          FIREBASE_APP_ID: "1:32876689405:android:43166060d1d78a45a00b94"
+          GROUPS: ${{ github.event.inputs.groups || vars.FIREBASE_TESTER_GROUPS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FIREBASE_SERVICE_ACCOUNT:-}" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT secret is not set. Add a service-account JSON key with the 'Firebase App Distribution Admin' role with 'gh secret set FIREBASE_SERVICE_ACCOUNT --env firebase-distribution'."
+            exit 1
+          fi
+          # Authenticate the Firebase CLI via Application Default Credentials.
+          printf '%s' "${FIREBASE_SERVICE_ACCOUNT}" > "${RUNNER_TEMP}/firebase-sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="${RUNNER_TEMP}/firebase-sa.json"
+
+          APK="$(ls android/Pipette/app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)"
+          if [ -z "${APK}" ] || [ ! -f "${APK}" ]; then
+            echo "::error::No release APK under android/Pipette/app/build/outputs/apk/release/. Did ':app:assembleRelease' produce one?"
+            exit 1
+          fi
+          echo "Distributing: ${APK}"
+          echo "Groups: ${GROUPS:-<none: uploaded without notifying a group>}"
+
+          GROUP_ARGS=()
+          if [ -n "${GROUPS:-}" ]; then
+            GROUP_ARGS=(--groups "${GROUPS}")
+          fi
+
+          # Pin firebase-tools to a known-good version for reproducible uploads;
+          # bump deliberately rather than tracking @latest (which can ship
+          # breaking changes mid-pipeline).
+          npx -y firebase-tools@15.21.0 appdistribution:distribute "${APK}" \
+            --app "${FIREBASE_APP_ID}" \
+            --release-notes-file release-notes.txt \
+            "${GROUP_ARGS[@]}"
+
+          {
+            echo "## Pipette Android: distributed to Firebase App Distribution"
+            echo ""
+            echo "- **APK:** \`$(basename "${APK}")\` ($(du -h "${APK}" | cut -f1))"
+            echo "- **App ID:** \`${FIREBASE_APP_ID}\`"
+            echo "- **Groups:** ${GROUPS:-_none (assign testers in the console)_}"
+            echo ""
+            echo "### Release notes"
+            echo '```'
+            cat release-notes.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

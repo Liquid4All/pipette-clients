@@ -1,0 +1,15 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Base.Theme.Pipette" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Customize your dark theme here. -->
+        <!-- <item name="colorPrimary">@color/my_dark_primary</item> -->
+    </style>
+
+    <style name="Theme.Pipette.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/pipette_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_pipette_logo_splash</item>
+        window
+        <item name="postSplashScreenTheme">@style/Theme.Pipette</item>
+        <item name="android:windowSplashScreenBrandingImage">@drawable/branding_liquid_dark</item>
+    </style>
+</resources>
