@@ -28,6 +28,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # 365 needs a private repo; public caps at 90 and clamps silently.
+  ARTIFACT_RETENTION_DAYS: ${{ github.event_name == 'pull_request' && 14 || 365 }}
 
 jobs:
   changes:
@@ -636,6 +638,7 @@ jobs:
           name: pipette-ios-archive
           path: ${{ env.archive_zip }}
           if-no-files-found: error
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   android-app:
     name: android-app
@@ -763,6 +766,8 @@ jobs:
           name: pipette-debug-apk
           path: android/Pipette/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: warn
+          # Never released (github-release stages app-release.apk only).
+          retention-days: 14
 
       - name: Upload release APK
         if: always()
@@ -771,6 +776,7 @@ jobs:
           name: pipette-release-apk
           path: android/Pipette/app/build/outputs/apk/release/*.apk
           if-no-files-found: warn
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       - name: APK summary
         if: always()
@@ -1066,6 +1072,7 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}
           path: dist/${{ matrix.asset_name }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       # pipette-plan is compiled in the same build as the main binary (so it
       # shares the dependency compile), but shipped as its own artifact rather
@@ -1089,6 +1096,7 @@ jobs:
         with:
           name: ${{ matrix.plan_asset_name }}
           path: dist/${{ matrix.plan_asset_name }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   build-complete:
     # Single aggregate gate so branch protection can require just one check
