@@ -107,20 +107,28 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+          # `git describe` below needs the tags and the history behind them.
+          # The default checkout is shallow (depth 1, no tags) and would make
+          # describe fail outright.
+          fetch-depth: 0
 
       - name: Compute release metadata
         id: version
         run: |
           set -euo pipefail
-          # A release branch names the train it publishes:
-          # release/2026.08.1 -> 2026.08.1, so the tag, the release title and
-          # every asset filename carry that number. Everywhere else keeps the
-          # date+sha snapshot version, which is what the manual
-          # workflow_dispatch path on main has always produced.
-          case "${GITHUB_REF}" in
-            refs/heads/release/*) VERSION="${GITHUB_REF#refs/heads/release/}" ;;
-            *) VERSION="$(date -u +'%Y.%m.%d')-$(git rev-parse --short HEAD)" ;;
-          esac
+          # `git describe` off the release train's tag, so every push to a
+          # release branch bumps the version on its own:
+          #   2026.08.1 -> 2026.08.1-1-g<sha> -> 2026.08.1-2-g<sha> -> ...
+          # That keeps each published release distinct without moving a tag.
+          #
+          # The fallback covers a ref with no tag reachable behind it, which
+          # is every ref in this repository today (the squashed snapshot
+          # carries no tags at all) — there it stays on the date+sha scheme
+          # this repo has always used.
+          if ! VERSION="$(git describe --tags --match '[0-9]*' 2>/dev/null)"; then
+            VERSION="$(date -u +'%Y.%m.%d')-$(git rev-parse --short HEAD)"
+            echo "::notice::no reachable release tag — falling back to date+sha"
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "release version: ${VERSION}"
 
@@ -1130,11 +1138,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      # A release-branch version is a fixed string, so every later push to
-      # that branch would otherwise republish and drag the tag onto a new
-      # commit — exactly the moved tag the note below warns about. Respins
-      # get a new train instead (2026.08.1 -> 2026.08.2), matching how the
-      # upstream release branches are already numbered.
+      # `git describe` gives each commit its own version, so this only fires
+      # when the *same* commit is published twice — a re-run, or a branch
+      # pushed again with no new commits. It stops that from moving an
+      # existing tag onto a fresh build, which is the moved tag the note
+      # below warns about. It never blocks a real push: new commit, new
+      # version, new release.
       - name: Skip if this release already exists
         id: guard
         env:
