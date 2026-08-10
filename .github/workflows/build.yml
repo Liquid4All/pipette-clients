@@ -766,8 +766,9 @@ jobs:
           name: pipette-debug-apk
           path: android/Pipette/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: warn
-          # Never released (github-release stages app-release.apk only).
-          retention-days: 14
+          # Same lifespan as the release APK: not published, but it is the
+          # debuggable counterpart of whatever shipped.
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       - name: Upload release APK
         if: always()
