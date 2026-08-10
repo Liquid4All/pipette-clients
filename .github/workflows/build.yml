@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `release/**` runs the full pipeline and publishes (see github-release).
+    # Inert until such a branch exists: a push event runs the workflow file as
+    # it stands on the pushed branch, so the branch must be cut from a commit
+    # that already carries this trigger.
+    branches: [main, 'release/**']
   # No base-branch filter: stacked PRs target intermediate heads, not only main.
   pull_request:
   workflow_dispatch:
@@ -107,8 +111,18 @@ jobs:
       - name: Compute release metadata
         id: version
         run: |
-          VERSION="$(date -u +'%Y.%m.%d')-$(git rev-parse --short HEAD)"
+          set -euo pipefail
+          # A release branch names the train it publishes:
+          # release/2026.08.1 -> 2026.08.1, so the tag, the release title and
+          # every asset filename carry that number. Everywhere else keeps the
+          # date+sha snapshot version, which is what the manual
+          # workflow_dispatch path on main has always produced.
+          case "${GITHUB_REF}" in
+            refs/heads/release/*) VERSION="${GITHUB_REF#refs/heads/release/}" ;;
+            *) VERSION="$(date -u +'%Y.%m.%d')-$(git rev-parse --short HEAD)" ;;
+          esac
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release version: ${VERSION}"
 
   conventions:
     # Lightweight repo-convention checks (see ci/README.md). Its own job so a
@@ -1097,11 +1111,15 @@ jobs:
           esac
 
   github-release:
-    # Manual-only: trigger from Actions UI ("Run workflow") on the ref you
-    # want to release. The whole build pipeline runs against that ref and
-    # publishes the artifacts. Push to main still runs CI (build-complete)
-    # but does not publish.
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    # Two ways in:
+    #   * push to `release/**` — the release train publishes itself. The
+    #     branch name is the version (release/2026.08.1 -> 2026.08.1).
+    #   * workflow_dispatch on main — the pre-existing manual path, kept so
+    #     an ad-hoc date+sha release is still one click away.
+    # Push to main still runs CI (build-complete) but does not publish.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/'))
     needs: [release-metadata, build-complete]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     # Serialize concurrent manual dispatches against the same ref so two
@@ -1112,15 +1130,37 @@ jobs:
     permissions:
       contents: write
     steps:
+      # A release-branch version is a fixed string, so every later push to
+      # that branch would otherwise republish and drag the tag onto a new
+      # commit — exactly the moved tag the note below warns about. Respins
+      # get a new train instead (2026.08.1 -> 2026.08.2), matching how the
+      # upstream release branches are already numbered.
+      - name: Skip if this release already exists
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "${VER}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::notice::release ${VER} already exists — not republishing"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publishing ${VER}"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Pinned: this is the only job with a repo-write token, so a moved tag here
       # could publish a release. Read-only jobs above still ride tags.
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        if: steps.guard.outputs.skip != 'true'
         with:
           pattern: "pipette-*"
           merge-multiple: true
           path: dist
 
       - name: Stage Android release APK (versioned)
+        if: steps.guard.outputs.skip != 'true'
         # The android-app job uploads the production APK as `pipette-release-apk`
         # (file: app-release.apk), which the download above flattens into dist/.
         # Rename it to a versioned asset so the release carries `pipette-<ver>.apk`
@@ -1137,6 +1177,7 @@ jobs:
           fi
 
       - name: Create GitHub release
+        if: steps.guard.outputs.skip != 'true'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.release-metadata.outputs.version }}
