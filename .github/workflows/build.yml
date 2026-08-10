@@ -2,17 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Inert until a release branch exists: a push runs the workflow file as
+    # it stands on the pushed branch.
+    branches: [main, 'release/**']
   # No base-branch filter: stacked PRs target intermediate heads, not only main.
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  # Separate groups per event type so a push to main doesn't cancel an
-  # in-flight manual release. workflow_dispatch keys on run_id (unique
-  # per click) and disables cancel-in-progress; dispatches are further
-  # serialized at the publish step via the per-job concurrency on
-  # github-release.
+  # Only pull requests supersede each other. Everything else keys on run_id,
+  # so a second push to a release branch cannot cancel an in-flight publish.
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
@@ -102,13 +101,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          submodules: recursive
+          fetch-depth: 0 # ci/version.sh needs the history behind the branch point
 
       - name: Compute release metadata
         id: version
         run: |
-          VERSION="$(date -u +'%Y.%m.%d')-$(git rev-parse --short HEAD)"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # Assign first: `echo "v=$(cmd)"` succeeds even when cmd fails, and
+          # the default shell is `bash -e` with no pipefail, so piping the echo
+          # straight into tee would swallow the failure and emit an empty
+          # version.
+          set -euo pipefail
+          version="$(ci/version.sh)"
+          echo "version=${version}" | tee -a "$GITHUB_OUTPUT"
 
   conventions:
     # Lightweight repo-convention checks (see ci/README.md). Its own job so a
@@ -1097,38 +1101,55 @@ jobs:
           esac
 
   github-release:
-    # Manual-only: trigger from Actions UI ("Run workflow") on the ref you
-    # want to release. The whole build pipeline runs against that ref and
-    # publishes the artifacts. Push to main still runs CI (build-complete)
-    # but does not publish.
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
     needs: [release-metadata, build-complete]
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    # Serialize concurrent manual dispatches against the same ref so two
-    # clicks don't race each other creating the same release tag.
+    # Serialize publishes against one release branch so two pushes can't race
+    # to create the same tag.
     concurrency:
       group: release-${{ github.ref }}
       cancel-in-progress: false
     permissions:
       contents: write
     steps:
+      # The version carries the commit, so this only fires when the same
+      # commit is published twice — a re-run. It never blocks a real push.
+      - name: Skip if this release already exists
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "${VER}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::notice::release ${VER} already exists — not republishing"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publishing ${VER}"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Pinned: this is the only job with a repo-write token, so a moved tag here
       # could publish a release. Read-only jobs above still ride tags.
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        if: steps.guard.outputs.skip != 'true'
         with:
           pattern: "pipette-*"
           merge-multiple: true
           path: dist
 
       - name: Stage Android release APK (versioned)
+        if: steps.guard.outputs.skip != 'true'
         # The android-app job uploads the production APK as `pipette-release-apk`
         # (file: app-release.apk), which the download above flattens into dist/.
         # Rename it to a versioned asset so the release carries `pipette-<ver>.apk`
-        # rather than a generic name. Target app-release.apk explicitly so the
-        # co-downloaded debug APK (app-debug.apk) is never published.
+        # rather than a generic name. The debug APK rides along in the same
+        # download; drop it so it is neither published nor checksummed.
         run: |
+          set -euo pipefail
           ver='${{ needs.release-metadata.outputs.version }}'
-          if [ -f dist/app-release.apk ]; then
+          rm -f dist/app-debug.apk
+          if [[ -f dist/app-release.apk ]]; then
             mv dist/app-release.apk "dist/pipette-${ver}.apk"
             echo "staged dist/pipette-${ver}.apk"
           else
@@ -1136,12 +1157,30 @@ jobs:
             ls -la dist || true
           fi
 
+      - name: Checksum release assets
+        if: steps.guard.outputs.skip != 'true'
+        # One `<asset>.sha256` beside each file, matching pipette-mgmt's layout.
+        # This proves a download arrived intact; it is not a signature, since
+        # anyone able to replace an asset can replace its checksum too.
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in *; do
+            [[ -f "$f" ]] || continue
+            sha256sum "$f" > "${f}.sha256"
+          done
+          ls -1
+
       - name: Create GitHub release
+        if: steps.guard.outputs.skip != 'true'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.release-metadata.outputs.version }}
           name: ${{ needs.release-metadata.outputs.version }}
           generate_release_notes: true
+          # Archives are listed explicitly so nothing unexpected in dist/ can
+          # ship. The `*.sha256` glob is safe because the staging step removed
+          # the only file that must not be published.
           files: |
             dist/pipette-${{ needs.release-metadata.outputs.version }}.apk
             dist/pipette-ios-${{ needs.release-metadata.outputs.version }}-internal.xcarchive.zip
@@ -1156,3 +1195,4 @@ jobs:
             dist/pipette-cli-x86_64-pc-windows-msvc.zip
             dist/pipette-cli-aarch64-pc-windows-msvc.zip
             dist/pipette-cli-aarch64-linux-android.tar.gz
+            dist/*.sha256
