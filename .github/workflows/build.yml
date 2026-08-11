@@ -377,15 +377,21 @@ jobs:
       # pattern returns. Note this variable also implies SCCACHE_GHA_ENABLED,
       # which is why it is set per-step beside it rather than workflow-wide.
       #
-      # SCCACHE_GHA_RW_MODE keeps writes on main, matching every other cache
-      # here. Objects written from a PR ref are visible to nothing else and are
-      # dropped with the PR: two runs of this branch alone left 958 of them.
-      # main seeds, every other ref reads.
+      # Deliberately NOT paired with SCCACHE_GHA_RW_MODE: READ_ONLY off main.
+      # Every other cache here is main-writes-only, and sccache was tried the
+      # same way and measured worse. It is the opposite shape: many small
+      # objects rather than one blob, so a PR's copy holds only what that PR
+      # compiled instead of duplicating main's, and it is what lets a second run
+      # on the same PR reuse the first (android-app's native build went 8m10s
+      # cold to 2m37s warm that way). Restricting it cost roughly ten minutes
+      # per PR run across the iOS and Android jobs to reclaim 239 MB, 2.4% of
+      # the ceiling, in entries GitHub deletes when the PR closes. It also
+      # pinned cache_write_errors at one-per-object on every non-main run, which
+      # is the counter used to detect the poisoning described above.
       - name: Build llama.cpp (static lib + bindings)
         env:
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_GHA_VERSION: "2"
-          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
         run: ./ios/build-llama.sh sim
 
       # Regenerate Generated/MLX/MLXBuildInfo.swift from Package.resolved (the
@@ -525,7 +531,6 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           # See the note on ios-check's build-llama step.
           SCCACHE_GHA_VERSION: "2"
-          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
         run: ./ios/build-llama.sh device
 
       - name: Generate MLX build info
@@ -809,7 +814,6 @@ jobs:
           # See the note on ios-check's build-llama step. This is the job whose
           # v1 namespace was poisoned, so it is the one v2 is meant to rescue.
           SCCACHE_GHA_VERSION: "2"
-          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
           # Diagnostic, temporary. sccache reports a write failure only as a
           # counter in `--show-stats`; the reason goes to its server log, which
           # is off by default. This job needs that reason: it has been recording
@@ -986,7 +990,6 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       # See the note on ios-check's build-llama step.
       SCCACHE_GHA_VERSION: "2"
-      SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
       RUSTC_WRAPPER: sccache
     strategy:
       fail-fast: false
