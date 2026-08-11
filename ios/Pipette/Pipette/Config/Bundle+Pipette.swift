@@ -15,20 +15,6 @@ extension Bundle {
         return value
     }
 
-    /// "<short version>[-internal] (<build>[, <commit>])" — e.g. "0.1.0 (1, a1b2c3d)", or
-    /// "0.1.0-internal (1)" for an internal build with no git metadata. Shared by the
-    /// Settings debug row, the Sentry `app_version` tag, and the `client_version` on every
-    /// submitted result, so the displayed version and the reported version can never drift.
-    ///
-    /// The commit is what makes the string identifying: `CFBundleVersion` is `1` on every
-    /// local build, so without it two results from different source trees are
-    /// indistinguishable in the warehouse.
-    ///
-    /// The `-internal` marker is here rather than in a separate field because this string is
-    /// already the one thing that reaches all of them: a result gated by a real die
-    /// temperature is not comparable to one gated by `thermalState`, and without the
-    /// marker two such rows are indistinguishable. `client_version` is free-form
-    /// upstream (`Option<String>`), so the suffix breaks no parser.
     /// The commit this build was made from, stamped into the built Info.plist by
     /// `ios/stamp-git-commit.sh` — `"a1b2c3d"`, or `"a1b2c3d-dirty"` when the tree carried
     /// uncommitted changes. Nil when the build had no git metadata to read, which
@@ -37,7 +23,36 @@ extension Bundle {
         normalizedInfoString("PipetteGitCommit")
     }
 
+    /// The version this build publishes as — `ci/version.sh`'s output, stamped into the built
+    /// Info.plist by `ios/stamp-git-commit.sh` when CI passes `PIPETTE_BUILD_VERSION`
+    /// (e.g. `"2026.08.1-3-ga1b2c3d4ab"`). Also the GitHub release's tag and name, which is the
+    /// point: a submitted row names a downloadable artifact.
+    ///
+    /// Nil on a local build and on the TestFlight path, neither of which has a release to name.
+    ///
+    /// Not `CFBundleVersion`: that key is the build *number*, hardcoded to `1` in the project,
+    /// stamped by `agvtool` only on the TestFlight path, and validated by App Store Connect —
+    /// so it can neither carry this value nor be replaced by it.
+    var buildVersion: String? {
+        normalizedInfoString("PipetteBuildVersion")
+    }
+
+    /// A released build reports the release, verbatim: `"2026.08.1-3-ga1b2c3d4ab-internal"`.
+    /// Anything else falls back to the composed local form, `"0.1.0 (1, a1b2c3d)"`.
+    ///
+    /// The release string is not wrapped in the marketing version and build number. Those add
+    /// nothing a release has to say — `MARKETING_VERSION` has never moved off `0.1.0` and
+    /// `CFBundleVersion` is `1` — and wrapping them around it would stop the value matching the
+    /// release page it came from. It already ends in the commit, so nothing identifying is lost.
+    ///
+    /// The `-internal` suffix survives because it is not version metadata: a result gated by a
+    /// real die temperature is not comparable to one gated by `thermalState`, and without the
+    /// marker two such rows are indistinguishable. `client_version` is free-form upstream
+    /// (`Option<String>`), so the suffix breaks no parser.
     var appVersionDisplayString: String {
+        if let buildVersion {
+            return "\(buildVersion)\(BuildFlavor.versionSuffix)"
+        }
         let version = object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
         let build = object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
         return Self.appVersionDisplayString(version: version, build: build, commit: gitCommit)

@@ -338,13 +338,19 @@ mod tests {
         assert_eq!(wire["client_version"], crate::CLIENT_VERSION);
 
         // Comparing against the const alone would be the code checking itself,
-        // so pin the shape too: a value that lost its build component (or was
-        // empty) would still satisfy the equality above.
+        // so pin the shape too: an empty value would still satisfy the equality
+        // above. The value is the release's own version string (`ci/version.sh`,
+        // e.g. "2026.08.1-0-g58c2adbf16") or "dev" for a local build — nothing
+        // is wrapped around it, since the point is that it equals the GitHub
+        // release name rather than merely containing it.
         let reported = wire["client_version"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("client_version must be a string"))?;
-        assert!(reported.starts_with(env!("CARGO_PKG_VERSION")));
-        assert!(reported.contains("(build "));
+        assert!(!reported.is_empty());
+        assert!(
+            !reported.contains(char::is_whitespace),
+            "client_version must be the bare release version, got {reported:?}"
+        );
         Ok(())
     }
 
