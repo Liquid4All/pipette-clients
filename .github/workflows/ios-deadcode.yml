@@ -22,7 +22,7 @@ permissions:
 jobs:
   ios-deadcode:
     name: ios-deadcode
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-26
     continue-on-error: true
     env:
       # Match ios-check's pinned toolchain (see build.yml for the rationale).

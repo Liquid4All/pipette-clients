@@ -169,7 +169,7 @@ jobs:
        github.repository == 'Liquid4All/pipette-clients') ||
       (github.event.label.name == 'build-deploy-firebase' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Gate the job behind a protected environment with required reviewers. Every
     # run (whether started by the `build-deploy-firebase` label or a manual
     # dispatch, and whichever `distribution` mode) pauses for maintainer approval
