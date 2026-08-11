@@ -169,6 +169,16 @@ jobs:
           # rust-cache drops by default; cargo fingerprinting still recompiles
           # any crate whose sources changed, so no stale artifacts.
           cache-workspace-crates: true
+          # Only main writes. Restore is unchanged, every branch still reads
+          # main's entry; this just stops a branch that missed from saving its
+          # own copy under its own ref. That is how the repo ended up holding
+          # rust-check-linux-v3 twice at 782 MB, and three more entries twice
+          # over, against a 10 GB ceiling. Cost: the first PR after a Cargo.lock
+          # bump compiles cold, because the refreshed entry only lands once the
+          # bump reaches main. Worth it while eviction is the binding
+          # constraint, since a warm cache that gets evicted is worth less than
+          # a slightly staler one that survives.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         if: matrix.fmt
@@ -742,6 +752,8 @@ jobs:
         with:
           key: android-app-v1
           cache-bin: false
+          # Only main writes; see the note on rust-check's rust-cache above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # sccache caches the llama.cpp/ggml C/C++ cross-compile (the bulk of the
       # gradle build), routed in via build-rust-android.sh's compiler launchers.
@@ -1073,6 +1085,8 @@ jobs:
           key: build-artifact-${{ matrix.asset_name }}-v3
           cache-bin: false
           cache-workspace-crates: true
+          # Only main writes; see the note on rust-check's rust-cache above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Per-target clippy, only where it covers a rust-check blind spot
       # (target_clippy entries): the android target lints target_os="android"
