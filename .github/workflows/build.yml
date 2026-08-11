@@ -783,6 +783,20 @@ jobs:
           # Enables sccache's GHA backend for the native compiles (see the
           # compiler launchers in build-rust-android.sh).
           SCCACHE_GHA_ENABLED: "true"
+          # Diagnostic, temporary. sccache reports a write failure only as a
+          # counter in `--show-stats`; the reason goes to its server log, which
+          # is off by default. This job needs that reason: it has been recording
+          # 0% cache hits with writes failing, 336 of 336 on the main push in run
+          # 31493653710, and because GitHub scopes cache reads to your own ref
+          # plus the default branch, main failing to write is what leaves every
+          # other ref with no Android objects to restore. `warn` is enough to
+          # capture the backend error without logging a line per cache key.
+          #
+          # These must sit on this step rather than at job level: the sccache
+          # server is started lazily by the first client call, which happens
+          # here, and it captures the environment it was started with.
+          SCCACHE_ERROR_LOG: ${{ runner.temp }}/sccache-error.log
+          SCCACHE_LOG: warn
         # assemble first so the APKs exist even if a later unit test fails (the job
         # still goes red, but the artifacts are uploaded for inspection). Release is
         # signed with the real release keystore when configured (RELEASE_* secrets),
@@ -790,6 +804,18 @@ jobs:
         # assembleRelease runs the PIP-391 guard (verifyReleaseClerkKey, see build.gradle.kts):
         # the release APK must ship a usable Clerk publishable key or the build fails fast.
         run: ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --no-daemon --stacktrace
+
+      # Companion to SCCACHE_ERROR_LOG above, and temporary with it. `always()`
+      # because a red build is exactly when the log is worth reading, and
+      # if-no-files-found: ignore because sccache only creates the file when it
+      # has something to say.
+      - name: Upload sccache server log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sccache-error-log-android-app
+          path: ${{ runner.temp }}/sccache-error.log
+          if-no-files-found: ignore
 
       - name: Verify computed native libs 16 KB page-size compatibility
         working-directory: android/Pipette
