@@ -293,8 +293,22 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # The Gradle cache the CI android-app job uses, for the same reason: this
+      # job otherwise resolved every plugin and dependency from cold Maven.
+      # cache-provider is pinned to 'basic' so the cache stays on the GitHub
+      # Actions cache rather than the commercial service the action defaults to.
+      # See build.yml's android-app for the full note.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-provider: basic
+
       - name: Set up Android SDK
+        # platform-tools alone: the action's default `tools platform-tools`
+        # drags in the Android Emulator, which this job never boots.
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: platform-tools
 
       - name: Install Android NDK + native build tools
         run: |

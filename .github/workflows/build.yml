@@ -661,19 +661,57 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-          # Persists ~/.gradle (dependency cache + the local build cache enabled
-          # in gradle.properties) across runs, keyed on the gradle lockfiles.
-          cache: gradle
+
+      # Persists ~/.gradle (dependency cache, artifact transforms, and the local
+      # build cache enabled in gradle.properties) across runs. Gradle's own
+      # action rather than setup-java's `cache: gradle`, which its docs say not
+      # to combine with. Two reasons beyond it being the official action:
+      #
+      #   - cache-read-only defaults to true off the default branch, so PR runs
+      #     restore main's entry and write nothing. setup-java's actions/cache
+      #     wrote a fresh branch-scoped copy on every run, which is why this repo
+      #     was holding three byte-identical ~1 GB copies of this cache (main,
+      #     release/2026.08.1, refs/pull/4/merge) against a 10 GB ceiling, and
+      #     paying 16-18s per run in the post step to upload each one.
+      #   - It prunes to what the build actually used rather than re-uploading a
+      #     monolithic tarball.
+      #
+      # cache-provider is pinned because the default ('enhanced') routes the
+      # cache through a commercial third-party service; 'basic' keeps it on the
+      # GitHub Actions cache, matching what setup-java did.
+      #
+      # Not wired yet: cache-encryption-key, which is what would let the Gradle
+      # configuration cache survive across runs (this job stores an entry every
+      # run and then reports none available on the next). It needs a repo secret.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
 
       - name: Set up Android SDK
         # Installs cmdline-tools and accepts licenses; AGP auto-downloads the
         # compileSdk platform + build-tools on first build.
+        #
+        # packages: the action's default is `tools platform-tools`, and the
+        # legacy `tools` package pulls the Android Emulator in as a dependency
+        # (~14s of this step). Nothing in CI boots an emulator, so ask for
+        # platform-tools alone.
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       # Cache the pinned NDK so sdkmanager restores it instead of re-downloading
       # (~1 GB) each run; on a hit the install below is a no-op verify.
-      - name: Cache Android NDK
-        uses: actions/cache@v4
+      #
+      # Restore everywhere, save only on main. The key is content-invariant (it
+      # names an exact NDK version), so a branch can never hold anything main
+      # does not already have. On a miss, though, actions/cache would save a
+      # branch-scoped copy anyway, and this repo accumulated three identical
+      # 589 MB copies that way. Splitting restore from save means PR and release
+      # branches read main's entry and never write one.
+      - name: Restore Android NDK
+        id: ndk-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           key: android-ndk-27.2.12479018-${{ runner.os }}
@@ -685,6 +723,15 @@ jobs:
           yes | sdkmanager --install "ndk;27.2.12479018" >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build cmake
+
+      # Seed the entry every other branch restores from. Only on main, and only
+      # when the restore above missed; see the restore step for why.
+      - name: Save Android NDK
+        if: github.ref == 'refs/heads/main' && steps.ndk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          key: android-ndk-27.2.12479018-${{ runner.os }}
 
       - name: Install Rust (Android target)
         uses: dtolnay/rust-toolchain@stable
@@ -824,10 +871,25 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # This job had no Gradle cache at all, so every run resolved the whole
+      # plugin and dependency graph from cold Maven: ~53s of "Calculating task
+      # graph as no cached configuration is available" inside a ~2min step that
+      # ends up executing two tasks. Same action and same reasoning as
+      # android-app above, and the same ~/.gradle key, so the two jobs share one
+      # entry rather than each holding its own.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
       - name: Set up Android SDK
         # AGP needs the SDK to configure the :app project (compileSdk resolution),
-        # even though ktfmtCheck/detekt only read source files.
+        # even though ktfmtCheck/detekt only read source files. platform-tools
+        # alone, to skip the emulator the default `tools` package drags in (see
+        # android-app).
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Check Kotlin format (ktfmt) + lint (detekt)
         working-directory: android/Pipette
