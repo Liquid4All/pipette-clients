@@ -174,14 +174,26 @@ val posthogHost = localOrEnv("posthog.host", "POSTHOG_HOST").orEmpty().ifBlank {
 //              GitHub triggers by renaming the workflow file; see that
 //              workflow's "Resolve build identity" step for the bump rule.
 //   env (CI):  PIPETTE_BUILD_TAG. Short commit tag (e.g. "g7d2a7f6") appended
-//              to the base version as "1.0+g7d2a7f6". The commit, not a build
-//              counter, is the harness identity: this string is submitted as
-//              `client_version`, where two builds of one commit are the same
-//              harness and should group together.
-// Uninjected/local builds fall back to versionCode 1 / versionName "1.0".
+//              to the base version as "1.0+g7d2a7f6", so the user-visible
+//              version names the commit it was cut from.
+//   env (CI):  PIPETTE_BUILD_VERSION. The version this build is PUBLISHED as —
+//              ci/version.sh's output, which is also the GitHub release's tag
+//              and name (e.g. "2026.08.1-3-ga1b2c3d4ab"). Surfaces as
+//              BuildConfig.BUILD_VERSION and is submitted verbatim as
+//              `client_version`, so a warehouse row maps to a downloadable
+//              release by equality rather than by anyone's parsing rule.
+// Uninjected/local builds fall back to versionCode 1 / versionName "1.0" /
+// BUILD_VERSION "dev".
 val baseVersionName = localOrEnv("pipette.versionName", "PIPETTE_VERSION_NAME") ?: "1.0"
 val ciVersionCode = localOrEnv("pipette.versionCode", "PIPETTE_VERSION_CODE")?.toIntOrNull()
 val ciBuildTag = localOrEnv("pipette.buildTag", "PIPETTE_BUILD_TAG")?.takeIf { it.isNotBlank() }
+
+// Kept off versionName deliberately. versionName is user-visible and, on the
+// Play path, constrained by what the store will accept; `client_version` wants
+// the release string untouched. Two fields, so neither has to compromise.
+// "dev" matches what the Rust client's build.rs defaults to, so a local build of
+// either reads the same way in the warehouse.
+val buildVersion = localOrEnv("pipette.buildVersion", "PIPETTE_BUILD_VERSION")?.takeIf { it.isNotBlank() } ?: "dev"
 
 // Real release keystore, if configured (local.properties / env); otherwise null and
 // the release build falls back to the shared debug keystore (see buildTypes.release).
@@ -266,11 +278,16 @@ android {
         targetSdk = 36
         // Monotonic when CI injects PIPETTE_VERSION_CODE (base + run number);
         // otherwise 1 for local/uninjected builds. versionName is deliberately
-        // NOT derived from it: it ships as `client_version`, which wants the
-        // commit, and a run-number reset would otherwise make that key ambiguous
-        // as well as colliding the code. Local builds keep the bare base version.
+        // NOT derived from it: a run-number reset would make it ambiguous as
+        // well as colliding the code. Local builds keep the bare base version.
         versionCode = ciVersionCode ?: 1
         versionName = ciBuildTag?.let { "$baseVersionName+$it" } ?: baseVersionName
+
+        // The published release this APK is, submitted verbatim as
+        // `client_version` (see LocalStorage.kt). The release build type takes
+        // it as-is; debug appends "-debug" below, mirroring versionNameSuffix,
+        // so a developer's submissions stay distinguishable from a release's.
+        buildConfigField("String", "BUILD_VERSION", "\"$buildVersion\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -337,6 +354,11 @@ android {
             // guard compares getProcessName() to the runtime packageName, so it still holds.
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            // The `client_version` counterpart of versionNameSuffix above: that
+            // suffix no longer reaches the wire, since client_version is
+            // BUILD_VERSION rather than VERSION_NAME. Without this a debug
+            // build of a release commit would submit as that release.
+            buildConfigField("String", "BUILD_VERSION", "\"$buildVersion-debug\"")
             signingConfig = signingConfigs.getByName("debug")
             // Sentry environment (read by io.sentry.environment in the manifest): keep
             // dev/test crashes + feedback out of the production environment. Mirrors the

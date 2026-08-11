@@ -520,6 +520,16 @@ jobs:
       - name: Archive iOS app (Release, unsigned, private-thermal)
         env:
           PIPETTE_SKIP_BUILD_LLAMA: "1"
+          # Read by the `Stamp git commit` build phase (ios/stamp-git-commit.sh),
+          # which writes it into the BUILT Info.plist as `PipetteBuildVersion`.
+          # Without it the archive carried only the project's hardcoded
+          # CFBundleVersion `1`, so `client_version` named the release nowhere —
+          # the version below reached the asset's filename and stopped there.
+          #
+          # Unconditional, unlike the Rust/Android equivalents: xcodebuild
+          # recompiles this archive from scratch every run regardless (see the
+          # DerivedData cache note above), so there is no cache to protect.
+          PIPETTE_BUILD_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
           xcodebuild archive \
             -project ios/Pipette/Pipette.xcodeproj \
@@ -621,9 +631,25 @@ jobs:
 
   android-app:
     name: android-app
-    needs: [changes]
+    needs: [changes, release-metadata]
     if: github.event_name != 'pull_request' || needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
+    env:
+      # The APK this job uploads is the one github-release publishes, and
+      # `BuildConfig.BUILD_VERSION` is what it submits as `client_version`. With
+      # nothing injected, build.gradle.kts falls back to "dev" — every release
+      # reporting the same thing as every local build.
+      #
+      # Same release-path-only gating as PIPETTE_CLI_BUILD_VERSION below: the
+      # version changes every commit and lands in BuildConfig, so injecting it
+      # on ordinary CI runs would defeat the gradle build cache for no gain.
+      #
+      # PIPETTE_VERSION_CODE is deliberately NOT set here. It is the
+      # Play/Firebase monotonic counter owned by android-release-distribution
+      # .yml, and setting it is what makes build.gradle.kts treat the build as
+      # an official distribution (verifyReleaseSentryDsn would then fail this
+      # job on a fork with no SENTRY_DSN secret).
+      PIPETTE_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/heads/release/') && needs.release-metadata.outputs.version || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -816,12 +842,17 @@ jobs:
     if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.runner }}
     env:
-      # The real date+sha version changes every commit, so on CI (push/PR) runs
-      # it would invalidate the crate that bakes it in via `env!` on each
-      # build. Use it only on the release path (workflow_dispatch — see
-      # github-release) and fall back to build.rs's own "dev" default otherwise,
-      # keeping the crate cacheable.
-      PIPETTE_CLI_BUILD_VERSION: ${{ github.event_name == 'workflow_dispatch' && needs.release-metadata.outputs.version || 'dev' }}
+      # The real date+sha version changes every commit, so on ordinary CI (PR /
+      # main push) runs it would invalidate the crate that bakes it in via
+      # `env!` on each build. Use it only on the release path and fall back to
+      # build.rs's own "dev" default otherwise, keeping the crate cacheable.
+      #
+      # The release path is a PUSH to `release/**` — that is what github-release
+      # gates on, so gating this on workflow_dispatch alone shipped every
+      # released binary reporting `0.1.0 (build dev)` as its `--version` and its
+      # `client_version`. The two conditions must name the same event or the
+      # published artifact does not know what it is.
+      PIPETTE_CLI_BUILD_VERSION: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/release/')) && needs.release-metadata.outputs.version || 'dev' }}
       # Compiler-level cache: reuse unchanged compilation units (including
       # workspace crates, which the target-dir cache drops) across runs. Biggest
       # effect on the CPU-bound Windows targets.

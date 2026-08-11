@@ -76,8 +76,10 @@ class LocalStoragePayloadTest {
     assertEquals("""{"readiness":{"max_wait_secs":180,"skip_thermal":false}}""", payload.getString("benchmark_flags"))
 
     // The app build that produced the run — distinct from runtime_version
-    // above, which names the engine it drove.
-    assertEquals(BuildConfig.VERSION_NAME, payload.getString("client_version"))
+    // above, which names the engine it drove. BUILD_VERSION is the release this
+    // APK was published as (ci/version.sh, matching the GitHub release tag), NOT
+    // the user-visible VERSION_NAME; the two are deliberately separate fields.
+    assertEquals(BuildConfig.BUILD_VERSION, payload.getString("client_version"))
 
     // Retired server-side.
     assertFalse("mmproj_quant must not be emitted", payload.has("mmproj_quant"))

@@ -216,11 +216,15 @@ class LocalStorage(private val context: Context) : JobStore {
     json.put("submitted_at", DateFormats.isoNow())
     // This app build — the harness, not the engine it drove (runtime_version).
     // The server stores it opaquely as a grouping key, so a shift in the numbers
-    // can be attributed to an app change rather than to the device. VERSION_NAME
-    // alone is the whole identity here: CI folds the version code into it and
-    // debug builds carry a `-debug` suffix, so unlike iOS there is no separate
-    // build number worth appending.
-    json.put("client_version", BuildConfig.VERSION_NAME)
+    // can be attributed to an app change rather than to the device.
+    //
+    // BUILD_VERSION, not VERSION_NAME: this is the version the APK was PUBLISHED
+    // as (ci/version.sh, e.g. "2026.08.1-3-ga1b2c3d4ab"), which is also the
+    // GitHub release's tag — so a row maps to a downloadable artifact by
+    // equality. VERSION_NAME is the user-visible app version and is constrained
+    // by what Play accepts; it cannot also be this. "dev" on a local build,
+    // "<version>-debug" on a debug build. See app/build.gradle.kts.
+    json.put("client_version", BuildConfig.BUILD_VERSION)
     json.put("runtime_name", "llamacpp_apk_pipette")
     json.put("runtime_version", runtimeVersion)
     json.put("runtime_descriptor", SubmissionRef.runtime(runtimeVersion))
