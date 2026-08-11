@@ -363,9 +363,29 @@ jobs:
       # backed by the GHA cache via SCCACHE_GHA_ENABLED. Swift sources compiled
       # later by xcodebuild can't use sccache, but the app target has no
       # C/C++/ObjC sources of its own.
+      # The two SCCACHE_GHA_* settings below are repeated at every sccache step
+      # in this repo; this is the copy that carries the reasoning.
+      #
+      # SCCACHE_GHA_VERSION selects the namespace every object is keyed into,
+      # and bumping it abandons the previous one. v2 exists because v1's
+      # android-app objects became unwritable: the main push in run 31493653710
+      # recorded 336 write errors against 336 objects, every one an HTTP 409
+      # `already_exists` from CreateCacheEntry, while that same run read-missed
+      # all 336. An entry a write collides with but a read cannot find is one
+      # that was reserved and never finalized, so those keys were poisoned for
+      # good and no later run on main could reseed them. Bump again if that
+      # pattern returns. Note this variable also implies SCCACHE_GHA_ENABLED,
+      # which is why it is set per-step beside it rather than workflow-wide.
+      #
+      # SCCACHE_GHA_RW_MODE keeps writes on main, matching every other cache
+      # here. Objects written from a PR ref are visible to nothing else and are
+      # dropped with the PR: two runs of this branch alone left 958 of them.
+      # main seeds, every other ref reads.
       - name: Build llama.cpp (static lib + bindings)
         env:
           SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_GHA_VERSION: "2"
+          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
         run: ./ios/build-llama.sh sim
 
       # Regenerate Generated/MLX/MLXBuildInfo.swift from Package.resolved (the
@@ -503,6 +523,9 @@ jobs:
       - name: Build llama.cpp (static lib + bindings, device slice)
         env:
           SCCACHE_GHA_ENABLED: "true"
+          # See the note on ios-check's build-llama step.
+          SCCACHE_GHA_VERSION: "2"
+          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
         run: ./ios/build-llama.sh device
 
       - name: Generate MLX build info
@@ -783,6 +806,10 @@ jobs:
           # Enables sccache's GHA backend for the native compiles (see the
           # compiler launchers in build-rust-android.sh).
           SCCACHE_GHA_ENABLED: "true"
+          # See the note on ios-check's build-llama step. This is the job whose
+          # v1 namespace was poisoned, so it is the one v2 is meant to rescue.
+          SCCACHE_GHA_VERSION: "2"
+          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
           # Diagnostic, temporary. sccache reports a write failure only as a
           # counter in `--show-stats`; the reason goes to its server log, which
           # is off by default. This job needs that reason: it has been recording
@@ -957,6 +984,9 @@ jobs:
       # workspace crates, which the target-dir cache drops) across runs. Biggest
       # effect on the CPU-bound Windows targets.
       SCCACHE_GHA_ENABLED: "true"
+      # See the note on ios-check's build-llama step.
+      SCCACHE_GHA_VERSION: "2"
+      SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
       RUSTC_WRAPPER: sccache
     strategy:
       fail-fast: false

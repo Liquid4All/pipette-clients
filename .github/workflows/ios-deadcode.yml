@@ -41,6 +41,11 @@ jobs:
       - name: Build llama.cpp (static lib + bindings)
         env:
           SCCACHE_GHA_ENABLED: "true"
+          # Must match build.yml's value or this workflow keys into a namespace
+          # of its own and shares nothing with ios-check, which builds the same
+          # sim slice. See the note on ios-check's build-llama step in build.yml.
+          SCCACHE_GHA_VERSION: "2"
+          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
         run: ./ios/build-llama.sh sim
 
       - name: Generate MLX build info
