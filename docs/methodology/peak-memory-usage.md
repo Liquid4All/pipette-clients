@@ -20,8 +20,8 @@ they ran, as **observations**:
 
 | Column | Meaning |
 |--------|---------|
-| `observation_max_host_bytes` | peak memory the run held, counting compressed or paged-out pages where the platform sees them |
-| `observation_max_swap_bytes` | most of the run the kernel held in swap at once |
+| `observation_max_host_bytes` | peak **resident** memory the run held (`VmHWM`, `PeakWorkingSetSize`; on macOS `phys_footprint`, which also counts compressed pages) |
+| `observation_max_swap_bytes` | most the kernel held of the run in swap at once |
 
 These are measured workload facts rather than results, in the same sense as
 `observation_vl_throughput_prefill_tokens`. They exist because a timing number
@@ -39,13 +39,30 @@ observed", which is true, where a partial one would read as complete.
 
 Two properties matter when reading them:
 
-- **The swap term is contained in the host term, not additional to it.** Adding
-  them together double-counts.
-- **`observation_max_host_bytes` need not equal `max_host_bytes` on the same
-  row.** The observation is free to report the swap-aware peak wherever the
-  sampler supplies one; the metric keeps its per-platform definition, and the
-  Linux metric is still resident-only. A Linux row whose observation exceeds its
-  metric is showing exactly that gap.
+- **The two terms are independent, and must not be added.** The host term is a
+  resident watermark; the swap term is the largest swap reading sampled. They
+  need not fall at the same instant, so their sum describes no moment that
+  actually happened. What a non-zero swap term tells you is that the resident
+  peak beside it was suppressed by reclaim, and roughly by how much.
+- **`observation_max_host_bytes` is resident-only, so it is not always the same
+  quantity as `max_host_bytes` on the same row.** The Linux metric is also
+  resident-only and the two agree there. The Android metric is the swap-aware
+  peak (`max(VmHWM, max(VmRSS + VmSwap))`), so on a row that swapped it will
+  read *higher* than the observation beside it. That difference is the metric's
+  swap uplift, made legible rather than hidden.
+
+A worked example, measured on a Galaxy S26 Ultra loading a 5417 MiB model with
+`--mmap 0`:
+
+| | |
+|---|---|
+| `observation_max_host_bytes` | 5004 MiB (what stayed resident) |
+| `observation_max_swap_bytes` | 4105 MiB (what zram held at its worst) |
+| Android `max_host_bytes` (metric) | 6138 MiB (the swap-aware peak) |
+
+The resident figure alone is *below the model file*, which a completed no-mmap
+load cannot be; the swap term beside it is what says why, and the metric is what
+scores the real requirement.
 
 ### The observation must not move the number it rides along with
 

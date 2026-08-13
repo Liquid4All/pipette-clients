@@ -130,12 +130,12 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
-        // The observation is swap-aware even though the metric above is not:
-        // that is the whole point of the split. A Linux row whose observed peak
-        // exceeds its `max_host_bytes` is showing exactly the under-reporting the
-        // metric still carries, and names the hosts where adopting the
-        // swap-aware peak would change anything. Through the same rule the
-        // timing benchmarks use, so one sampler cannot mean two things.
+        // Both resident-only, so the observation restates this arm's metric and
+        // adds the swap term beside it. That term is the point here: it names
+        // the hosts where this metric is being suppressed by reclaim, which is
+        // what adopting the swap-aware peak on Linux would have to be argued
+        // from. Through the same rule the timing benchmarks use, so one sampler
+        // cannot mean two things.
         memory: crate::run_memory::observation_from(&footprint),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {

@@ -126,25 +126,36 @@ pub struct BenchmarkEvalCompletion {
 /// populates nothing. Absence means "not observed", never zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryObservation {
-    /// Peak memory the run held, counting pages the kernel had compressed or
-    /// paged out where the platform can see them.
+    /// Peak *resident* memory the run held: the kernel's high-water mark for
+    /// the pages actually in RAM.
     ///
-    /// Deliberately *not* the same quantity as the memory benchmark's
-    /// `max_host_bytes` on every arm: this is free to report the swap-aware peak
-    /// wherever the sampler supplies one, because an observation qualifies a row
-    /// rather than being scored. The Linux memory metric stays resident-only.
+    /// Resident-only on every arm that can be, so the name means one thing
+    /// across platforms — `VmHWM` on Android and Linux, `PeakWorkingSetSize` on
+    /// Windows. macOS is the exception it cannot avoid: `phys_footprint` bills
+    /// compressed pages to the process and the kernel publishes no resident-only
+    /// counter beside it.
+    ///
+    /// Pages the kernel swapped out are deliberately **not** counted here. What
+    /// tells a reader this figure was suppressed by reclaim is
+    /// [`Self::max_swap_bytes`] standing beside it.
     #[serde(
         rename = "observation_max_host_bytes",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub max_host_bytes: Option<u64>,
-    /// Most of the run the kernel held in swap at once.
+    /// Most the kernel held of this run in swap at once.
     ///
-    /// Contained in [`Self::max_host_bytes`] rather than additional to it, so
-    /// the two are never summed. `Some(0)` is a real reading meaning the
-    /// platform sampled swap and the run stayed resident, which is what makes
-    /// the peak beside it trustworthy; `None` means nothing sampled it.
+    /// A term in its own right, **not** a component of [`Self::max_host_bytes`]
+    /// and not additive with it: the resident watermark and the largest swap
+    /// reading need not fall at the same instant, so their sum describes no
+    /// moment that happened. Read it as the qualifier on the peak beside it —
+    /// a non-zero swap term means the resident figure under-states what the run
+    /// required, and by roughly how much.
+    ///
+    /// `Some(0)` is a real reading, meaning the platform sampled swap and the
+    /// run stayed resident, which is what makes the peak beside it trustworthy;
+    /// `None` means nothing sampled it.
     #[serde(
         rename = "observation_max_swap_bytes",
         default,

@@ -111,9 +111,11 @@ impl Footprint {
 
     /// The swap term in bytes, for the run's `observation_max_swap_bytes`.
     ///
-    /// Contained in [`Self::peak_ram_kib`] rather than additional to it, so a
-    /// consumer must never sum the two. Zero is a real reading: the sampler
-    /// looked and the run stayed resident.
+    /// Contained in [`Self::peak_ram_kib`], the swap-aware sum, rather than
+    /// additional to it. It is *not* contained in [`Self::peak_rss_kib`], which
+    /// is what the observation reports as its host term: those two are
+    /// independent readings and summing them describes no instant that happened.
+    /// Zero is a real reading: the sampler looked and the run stayed resident.
     pub(crate) fn max_swap_bytes(&self) -> u64 {
         self.max_swap_kib.saturating_mul(1024)
     }

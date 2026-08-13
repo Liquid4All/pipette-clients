@@ -8,11 +8,13 @@
 //! of the model is a different fact from one measured resident, and without this
 //! nothing in the row distinguishes them.
 //!
-//! Because it never feeds a scored figure, this is free to report the
-//! swap-aware peak wherever the sampler supplies one. The `max_memory_usage`
-//! metric keeps its own per-arm definition (Linux still reports resident-only
-//! there); the two are allowed to disagree, and that disagreement is exactly
-//! what the swap term explains.
+//! The host term is the **resident** watermark, so the field means one thing
+//! wherever it appears, and the swap term rides beside it rather than inside it.
+//! A run that swapped is recognised by a non-zero swap term, not by an inflated
+//! peak. That keeps the two terms independently checkable and leaves the
+//! swap-aware *sum* where it is already scored: the `max_memory_usage` metric,
+//! whose Android arm reports it. An Android row where the metric exceeds this
+//! observation is showing exactly that difference.
 //!
 //! Attaching is per OS and by design incomplete: an arm with no sampler
 //! observes nothing and contributes no keys, which is why every field is
@@ -169,8 +171,12 @@ pub(crate) fn observation_from(footprint: &proc_footprint::Footprint) -> MemoryO
     if footprint.samples < 2 {
         return MemoryObservation::default();
     }
+    // `peak_rss_kib` (VmHWM), deliberately not `peak_ram_kib()`: the host term is
+    // the resident watermark, so the field means the same thing on every arm that
+    // can report it. The swap-aware sum stays out of it and rides beside it as
+    // the swap term, which is what says the resident figure was suppressed.
     MemoryObservation::with_swap(
-        footprint.peak_ram_kib().saturating_mul(1024),
+        footprint.peak_rss_kib.saturating_mul(1024),
         footprint.max_swap_bytes(),
     )
 }
@@ -206,6 +212,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(observation_from(&footprint), expected);
+    }
+
+    /// The host term is the resident watermark, never the swap-aware sum. Figures
+    /// are a real S26 Ultra reading: `VmHWM` 5004 MiB while zram held 4105 MiB of
+    /// the run, summing to the 6138 MiB the `max_memory_usage` metric reports on
+    /// Android. Only the resident term may appear here, or the field means two
+    /// things depending on the arm that filled it.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn the_host_term_stays_resident_when_the_run_swapped() {
+        let footprint = proc_footprint::Footprint {
+            peak_rss_kib: 5_124_688,
+            peak_committed_kib: 6_285_312,
+            max_swap_kib: 4_203_520,
+            samples: 64,
+            ..Default::default()
+        };
+        assert_eq!(
+            observation_from(&footprint),
+            MemoryObservation::with_swap(5_124_688 * 1024, 4_203_520 * 1024)
+        );
+        assert_eq!(
+            footprint.peak_ram_kib(),
+            6_285_312,
+            "the swap-aware sum still exists for the metric that scores it"
+        );
     }
 
     /// The macOS arm needs the same rule as the `/proc` one: the read taken as

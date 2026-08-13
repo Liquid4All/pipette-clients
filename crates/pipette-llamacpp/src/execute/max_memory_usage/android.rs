@@ -137,9 +137,12 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
-        // Same sampler the metric came from, so this arm's observation and its
-        // metric agree. Reported anyway: a consumer reading observations across
-        // benchmarks should not have to special-case the memory one.
+        // Same sampler as the metric, read differently on purpose: the metric
+        // above is the swap-aware peak (`peak_ram_kib`), this is the resident
+        // watermark with the swap term beside it. On a row that swapped the two
+        // will differ, and that difference is the metric's swap uplift made
+        // legible. Reported at all because a consumer reading observations
+        // across benchmarks should not have to special-case the memory one.
         memory: crate::run_memory::observation_from(&footprint),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
