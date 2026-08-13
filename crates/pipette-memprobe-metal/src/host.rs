@@ -72,7 +72,29 @@ impl PhysFootprintPoller {
 /// if a future workload allocates and frees within a frame. See
 /// `pipette-mgmt/docs/methodology/peak-memory.md` §3.1 for the
 /// failure-detection signal.
+///
+/// A caller riding along on a benchmark that reports *time* should use
+/// [`spawn_phys_footprint_poller_for_observation`] instead, which polls rarely
+/// enough not to move the number it observes.
 pub fn spawn_phys_footprint_poller(pid: i32) -> PhysFootprintPoller {
+    spawn_phys_footprint_poller_every(pid, Duration::from_millis(20))
+}
+
+/// As [`spawn_phys_footprint_poller`], but for a caller whose benchmark reports
+/// time rather than bytes, where the poller must not be able to move the number
+/// it rides along with.
+///
+/// `ri_lifetime_max_phys_footprint` is a kernel-maintained high-water mark, so a
+/// rarer poll still reads the same peak rather than needing to catch its instant.
+/// It does **not** make the cadence free: `proc_pid_rusage` returns ESRCH once
+/// the child is reaped, so the last useful read precedes exit and a peak reached
+/// in the final interval is missed. 100 ms bounds that window while costing
+/// ~0.1% of a core.
+pub fn spawn_phys_footprint_poller_for_observation(pid: i32) -> PhysFootprintPoller {
+    spawn_phys_footprint_poller_every(pid, Duration::from_millis(100))
+}
+
+fn spawn_phys_footprint_poller_every(pid: i32, interval: Duration) -> PhysFootprintPoller {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let handle = thread::spawn(move || -> u64 {
         let mut peak: u64 = 0;
@@ -98,8 +120,8 @@ pub fn spawn_phys_footprint_poller(pid: i32) -> PhysFootprintPoller {
             // child. Fine — peak is captured; loop until stop.
             //
             // Combined sleep + stop-check: recv_timeout sleeps up to
-            // 20 ms, returns early on stop signal or sender drop.
-            match stop_rx.recv_timeout(Duration::from_millis(20)) {
+            // `interval`, returns early on stop signal or sender drop.
+            match stop_rx.recv_timeout(interval) {
                 Ok(_) | Err(RecvTimeoutError::Disconnected) => break peak,
                 Err(RecvTimeoutError::Timeout) => continue,
             }

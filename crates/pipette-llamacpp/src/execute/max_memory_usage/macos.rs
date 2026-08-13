@@ -25,7 +25,7 @@ use std::{
 use anyhow::Context;
 
 use pipette_memprobe_metal::{host, metal};
-use pipette_plan_types::result::BenchmarkResultData;
+use pipette_plan_types::result::{BenchmarkResultData, MemoryObservation};
 use pipette_plan_types::RuntimeFlags;
 use pipette_subprocess::{argv, echo_info};
 
@@ -136,6 +136,12 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
+        // `phys_footprint` bills compressed pages to the process, so the peak
+        // already counts them and there is no separate swap term to observe.
+        memory: MemoryObservation {
+            max_host_bytes: Some(phys_peak),
+            max_swap_bytes: None,
+        },
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

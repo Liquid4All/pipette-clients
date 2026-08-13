@@ -72,7 +72,7 @@ Reading `/proc` avoids wrapping `wait4` around the child, which would race
 `std`'s own reaping in `wait_with_output`.
 
 The sampler is shared with the Android arm
-([`max_memory_usage::proc_footprint`](../../crates/pipette-llamacpp/src/execute/max_memory_usage/proc_footprint.rs)),
+([`run_memory::proc_footprint`](../../crates/pipette-llamacpp/src/run_memory/proc_footprint.rs)),
 which also collects `VmSwap`. This arm reports resident peak only, so it carries
 the swap under-reporting described in
 [peak memory: Android](peak-memory-android.md); adopting the swap-aware figure

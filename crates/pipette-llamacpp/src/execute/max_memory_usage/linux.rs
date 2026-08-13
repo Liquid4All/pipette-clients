@@ -27,7 +27,7 @@ use std::{
 // in scope. `bail!` and `Result` are written `anyhow::`-qualified at use sites.
 use anyhow::Context;
 
-use pipette_plan_types::result::BenchmarkResultData;
+use pipette_plan_types::result::{BenchmarkResultData, MemoryObservation};
 use pipette_plan_types::RuntimeFlags;
 use pipette_subprocess::{argv, echo_info};
 
@@ -86,7 +86,7 @@ pub(super) fn run(
         libc::kill(-pgid, libc::SIGKILL);
     });
 
-    let poller = super::proc_footprint::spawn_footprint_poller(pid);
+    let poller = crate::run_memory::proc_footprint::spawn_footprint_poller(pid);
 
     let output = child
         .wait_with_output()
@@ -95,7 +95,8 @@ pub(super) fn run(
     // footprint the Android arm reports; adopting it here needs the same
     // model-file floor, so it is left to a follow-up rather than changing what
     // Linux rows mean as a side effect.
-    let max_kib = poller.stop_and_join().peak_rss_kib;
+    let footprint = poller.stop_and_join();
+    let max_kib = footprint.peak_rss_kib;
     let killer_fired = killer.fired();
     drop(killer);
 
@@ -129,6 +130,15 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
+        // The observation is swap-aware even though the metric above is not:
+        // that is the whole point of the split. A Linux row whose observed peak
+        // exceeds its `max_host_bytes` is showing exactly the under-reporting the
+        // metric still carries, and names the hosts where adopting the
+        // swap-aware peak would change anything.
+        memory: MemoryObservation {
+            max_host_bytes: Some(footprint.peak_ram_kib().saturating_mul(1024)),
+            max_swap_bytes: Some(footprint.max_swap_bytes()),
+        },
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

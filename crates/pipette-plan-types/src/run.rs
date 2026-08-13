@@ -20,7 +20,7 @@
 use serde::Serialize;
 
 use crate::benchmark::BenchmarkDefinition;
-use crate::result::BenchmarkResultData;
+use crate::result::{BenchmarkResultData, MemoryObservation};
 use crate::thermal::RunThermal;
 use crate::{
     BenchmarkFlagRef, BenchmarkFlags, Model, ModelFlags, ModelType, Runtime, RuntimeFlagRef,
@@ -160,6 +160,15 @@ pub struct RunResponse {
     /// (see [`RuntimeFlags::submission_value`](crate::RuntimeFlags::submission_value))
     /// — an engine that shells out keeps those in `command`.
     pub runtime_flags: Option<RuntimeFlags>,
+    /// What memory the run held while it ran
+    /// ([`MemoryObservation`](crate::result::MemoryObservation)), collected on
+    /// every benchmark kind rather than only the memory one.
+    ///
+    /// Filled by the **engine**, unlike `thermal` and `benchmark_flags`:
+    /// sampling the child's memory needs the pid, which only the engine that
+    /// spawned it has. Default is "observed nothing", which a platform without a
+    /// sampler leaves in place.
+    pub memory: MemoryObservation,
 }
 
 impl RunResponse {
@@ -176,6 +185,7 @@ impl RunResponse {
             command: Vec::new(),
             executable: None,
             runtime_flags: None,
+            memory: MemoryObservation::default(),
         }
     }
 }

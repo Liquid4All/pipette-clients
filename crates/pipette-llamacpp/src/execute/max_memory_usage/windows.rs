@@ -77,7 +77,7 @@ use windows_sys::Win32::{
     },
 };
 
-use pipette_plan_types::result::BenchmarkResultData;
+use pipette_plan_types::result::{BenchmarkResultData, MemoryObservation};
 use pipette_plan_types::{LlamaCppFlavor, RuntimeFlags};
 use pipette_subprocess::{argv, echo_info};
 
@@ -246,6 +246,12 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
+        // `PeakWorkingSetSize` is resident-only and PSAPI exposes no paged-out
+        // watermark, so there is no swap term to observe here yet.
+        memory: MemoryObservation {
+            max_host_bytes: Some(max_host_bytes),
+            max_swap_bytes: None,
+        },
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

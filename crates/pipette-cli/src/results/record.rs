@@ -154,6 +154,9 @@ pub fn build_submission_payload_from_run(
         device_power_state: power.power_state,
         device_power_save_mode: power.power_save_mode,
         thermal: ThermalTelemetry::from_series(&outcome.thermal.before, &outcome.thermal.after),
+        // Passed straight through: the engine observed it, and unlike thermal
+        // there is no per-rep series for the caller to fold.
+        memory: outcome.memory,
         model_descriptor,
         runtime_descriptor,
         model_flags: req

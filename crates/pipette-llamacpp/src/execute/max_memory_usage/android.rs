@@ -21,16 +21,16 @@ use std::{
 
 use anyhow::Context;
 
-use pipette_plan_types::result::BenchmarkResultData;
+use pipette_plan_types::result::{BenchmarkResultData, MemoryObservation};
 use pipette_plan_types::RuntimeFlags;
 use pipette_subprocess::{argv, echo_info};
 
 use super::super::RunResponse;
-use super::proc_footprint::{peak_ram_bytes, spawn_footprint_poller};
 use super::Params;
 use crate::common::{
     apply_dylib_search_env, deadline_error_message, spawn_timeout_killer, MAX_MEMORY_USAGE_TIMEOUT,
 };
+use crate::run_memory::proc_footprint::{peak_ram_bytes, spawn_footprint_poller};
 
 pub(super) fn run(
     llama_bench: &Path,
@@ -137,6 +137,13 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
+        // Same sampler the metric came from, so this arm's observation and its
+        // metric agree. Reported anyway: a consumer reading observations across
+        // benchmarks should not have to special-case the memory one.
+        memory: MemoryObservation {
+            max_host_bytes: Some(max_host_bytes),
+            max_swap_bytes: Some(footprint.max_swap_bytes()),
+        },
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

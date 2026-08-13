@@ -171,7 +171,7 @@ under-read. These figures were taken at the earlier 25 ms interval.
 ## Code References
 
 - [`pipette-llamacpp max_memory_usage::android`](../../crates/pipette-llamacpp/src/execute/max_memory_usage/android.rs)
-- [`pipette-llamacpp max_memory_usage::proc_footprint`](../../crates/pipette-llamacpp/src/execute/max_memory_usage/proc_footprint.rs)
+- [`pipette-llamacpp run_memory::proc_footprint`](../../crates/pipette-llamacpp/src/run_memory/proc_footprint.rs)
 
 ## The VL runner samples resident only
 

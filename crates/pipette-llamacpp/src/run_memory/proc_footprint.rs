@@ -74,20 +74,27 @@ fn parse_stat_fields(stat: &str) -> Option<(u64, u64)> {
 /// What a run required at peak, kept decomposed so a peak suppressed by reclaim
 /// is visible rather than silently low.
 #[derive(Clone, Copy, Default)]
-pub(super) struct Footprint {
+pub(crate) struct Footprint {
     /// Kernel peak-RSS watermark — exact, but blind to anything in swap.
-    pub(super) peak_rss_kib: u64,
+    pub(crate) peak_rss_kib: u64,
     /// Largest `VmRSS + VmSwap` sampled. The kernel keeps no watermark for
     /// swap, so a sampled maximum is the only way to count what zram holds.
-    pub(super) peak_committed_kib: u64,
+    pub(crate) peak_committed_kib: u64,
     /// How much of the process zram held, and how hard it thrashed to get it
     /// back. Diagnostics: they explain a low `peak_rss_kib`, never replace it.
-    pub(super) max_swap_kib: u64,
-    pub(super) major_faults: u64,
+    pub(crate) max_swap_kib: u64,
+    pub(crate) major_faults: u64,
+    /// How many reads landed. `1` means only the synchronous seed did, taken
+    /// before the child had loaded anything, so the figures describe process
+    /// startup rather than the run: a few MB, non-zero, and indistinguishable
+    /// from a real measurement once submitted. Consumers that would rather report
+    /// nothing than that check this.
+    pub(crate) samples: u32,
 }
 
 impl Footprint {
     fn observe(&mut self, sample: StatusSample) {
+        self.samples = self.samples.saturating_add(1);
         self.peak_rss_kib = self.peak_rss_kib.max(sample.hwm_kib);
         self.peak_committed_kib = self
             .peak_committed_kib
@@ -98,9 +105,17 @@ impl Footprint {
 
     /// Peak RAM the run required, wherever those pages sat when the peak was
     /// struck.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    pub(super) fn peak_ram_kib(&self) -> u64 {
+    pub(crate) fn peak_ram_kib(&self) -> u64 {
         self.peak_rss_kib.max(self.peak_committed_kib)
+    }
+
+    /// The swap term in bytes, for the run's `observation_max_swap_bytes`.
+    ///
+    /// Contained in [`Self::peak_ram_kib`] rather than additional to it, so a
+    /// consumer must never sum the two. Zero is a real reading: the sampler
+    /// looked and the run stayed resident.
+    pub(crate) fn max_swap_bytes(&self) -> u64 {
+        self.max_swap_kib.saturating_mul(1024)
     }
 }
 
@@ -114,7 +129,7 @@ impl Footprint {
 /// rather than in `max_memory_usage::android` so its tests run on a target CI
 /// actually executes tests for.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(super) fn peak_ram_bytes(
+pub(crate) fn peak_ram_bytes(
     footprint: &Footprint,
     model_path: &std::path::Path,
     flags: &pipette_plan_types::RuntimeFlags,
@@ -177,24 +192,80 @@ fn same_process(identity: Option<u64>, sample_start_time: u64) -> bool {
     }
 }
 
-pub(super) struct FootprintPoller {
+pub(crate) struct FootprintPoller {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    handle: std::thread::JoinHandle<Footprint>,
+    /// `Option` only so [`Drop`] can coexist with a `stop_and_join` that moves
+    /// the handle out to join it.
+    handle: Option<std::thread::JoinHandle<Footprint>>,
 }
 
-/// How often the sampler reads `/proc/<pid>`.
+impl Drop for FootprintPoller {
+    /// Setting the flag is the only thing that ends the sampling thread, and
+    /// `stop_and_join` consumes `self`, so this runs exactly on the paths that
+    /// discard the observation: a run that failed before reporting, or a
+    /// `llama-server` replaced mid-eval after a crash. Without it each of those
+    /// leaves a thread waking forever to read the `/proc` entry of a dead pid.
+    ///
+    /// Deliberately does not join. This runs on error paths, and blocking one
+    /// for up to a full sample interval to collect a footprint nobody will read
+    /// is not worth it; the thread observes the flag and exits on its own.
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// How often the sampler reads `/proc/<pid>` when the figure it produces is the
+/// benchmark's own result.
 ///
 /// This bounds the only lossy term. `VmHWM` is exact, but when swap suppresses it
 /// the reported figure falls back to the sampled `VmRSS + VmSwap` sum, which can
 /// only under-read: the miss is roughly the footprint's growth rate times this
 /// interval. A no-mmap load faults in ~900 MB/s, so 10 ms costs about 9 MB of
 /// resolution where 25 ms cost ~22 MB. Two small reads per tick at 100 Hz is
-/// ~1% of one core, which stays clear of perturbing a benchmark that already has
-/// four threads running.
+/// ~1% of one core, which the memory benchmark can afford because it reports
+/// bytes, not time. A benchmark that reports time must not pay it: see
+/// [`OBSERVATION_INTERVAL`].
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// Sample `pid`'s footprint until stopped.
-pub(super) fn spawn_footprint_poller(pid: u32) -> FootprintPoller {
+/// How often to read `/proc/<pid>` when the figure is only an observation
+/// riding along on a benchmark that measures something else.
+///
+/// A timing benchmark's number must not move because we watched it, so this
+/// trades resolution the observation does not need for a duty cycle that cannot
+/// register: two small reads every 100 ms is ~0.1% of one core, a tenth of
+/// [`SAMPLE_INTERVAL`]'s.
+///
+/// **A watermark still has to be read while the process is alive.** `VmHWM` is
+/// maintained by the kernel, so we never have to catch the peak's instant — but
+/// a process that has exited publishes no `Vm*` fields at all, so the last
+/// useful read precedes exit and anything the run grows in the final interval is
+/// missed. That is the real cost of polling less often, and it is why this is
+/// 100 ms rather than the 500 ms that perturbs even less: past ~100 ms the
+/// saving is immaterial (0.1% vs 0.02% of a core, both far under a benchmark's
+/// noise) while the miss window grows in proportion.
+///
+/// Within that bound the terms still degrade unevenly. `VmHWM` is exact as of
+/// the last read, so cadence costs nothing for a workload whose peak is at model
+/// load, which is every benchmark here. Only the swap-aware uplift and the swap
+/// term itself are additionally sampled between reads, and an observation asks
+/// "did this run swap, and roughly how much",
+/// which a coarse maximum answers. Precision there belongs to the memory
+/// benchmark, which keeps [`SAMPLE_INTERVAL`].
+const OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Sample `pid`'s footprint until stopped, at the resolution the memory
+/// benchmark's own metric needs.
+pub(crate) fn spawn_footprint_poller(pid: u32) -> FootprintPoller {
+    spawn_footprint_poller_every(pid, SAMPLE_INTERVAL)
+}
+
+/// Sample `pid`'s footprint until stopped, at the cadence for an observation on
+/// a benchmark measuring something else. See [`OBSERVATION_INTERVAL`].
+pub(crate) fn spawn_observation_poller(pid: u32) -> FootprintPoller {
+    spawn_footprint_poller_every(pid, OBSERVATION_INTERVAL)
+}
+
+fn spawn_footprint_poller_every(pid: u32, interval: std::time::Duration) -> FootprintPoller {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -223,32 +294,73 @@ pub(super) fn spawn_footprint_poller(pid: u32) -> FootprintPoller {
             // stop the poller BEFORE reaping (the VL runner does); for the
             // wait_with_output-style callers the window is accepted as not
             // worth guarding.
+            // Sleeps before reading, not after. The seed already covers t=0, so a
+            // read-first loop only duplicated it, and sleeping first makes
+            // `samples > 1` mean "something was read after a full interval
+            // elapsed" — the distinction `Footprint::samples` exists to carry.
             while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(interval);
                 if let Some(sample) = read_status_sample(pid) {
                     if same_process(identity, sample.start_time) {
                         footprint.observe(sample);
                     }
                 }
-                std::thread::sleep(SAMPLE_INTERVAL);
             }
             footprint
         })
     };
-    FootprintPoller { stop, handle }
+    FootprintPoller {
+        stop,
+        handle: Some(handle),
+    }
 }
 
 impl FootprintPoller {
     /// Stop the poller and return what it saw. A sampler that panicked yields
     /// the default, whose zero peak the callers reject rather than submit.
-    pub(super) fn stop_and_join(self) -> Footprint {
+    pub(crate) fn stop_and_join(mut self) -> Footprint {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.handle.join().unwrap_or_default()
+        self.handle
+            .take()
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A poller dropped without `stop_and_join` must still end its thread.
+    /// Nothing but the flag stops it, and the observer is dropped un-finished on
+    /// every failed run and every `llama-server` replaced mid-eval, so a missing
+    /// `Drop` leaks one thread per occurrence, each waking forever to read a dead
+    /// pid. Asserts the thread actually observes the flag, not merely that it was
+    /// set: the thread's own `Arc` clone is released only as it exits.
+    #[test]
+    fn dropping_a_poller_ends_its_thread() -> anyhow::Result<()> {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn()?;
+        let poller = spawn_footprint_poller_every(child.id(), std::time::Duration::from_millis(5));
+        let stop = std::sync::Arc::clone(&poller.stop);
+        drop(poller);
+
+        let exited = (0..200).any(|_| {
+            if std::sync::Arc::strong_count(&stop) == 1 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            false
+        });
+        child.kill()?;
+        child.wait()?;
+
+        assert!(
+            stop.load(std::sync::atomic::Ordering::Relaxed),
+            "drop must signal the sampler to stop"
+        );
+        assert!(exited, "the sampling thread outlived the dropped poller");
+        Ok(())
+    }
 
     /// `comm` is attacker-shaped: it can hold spaces and parens, so both fields
     /// have to be located from the last ')' rather than by absolute token index.
