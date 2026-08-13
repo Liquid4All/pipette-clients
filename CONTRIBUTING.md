@@ -28,15 +28,9 @@ gives:
 git submodule update --init --recursive
 ```
 
-**Git LFS.** One tracked file is stored in LFS: the statically linked
-`crates/pipette-llamacpp/vendor/toybox/toybox-aarch64` binary, which the Android
-memory-measurement path embeds with `include_bytes!`. Have Git LFS installed
-*before* you clone or the working tree gets a 131-byte pointer file instead of
-the binary, the artifact bakes that pointer in, and the wrapped
-`toybox time -v llama-bench` exits 127 at run time. This is why CI checks out
-with `lfs: true` on the main-workflow jobs that build Android artifacts
-(`android-app`, `build-artifact`) and not on the rest; the Android Firebase
-Distribution workflow does the same for APK distribution builds.
+**Git LFS.** Nothing in the tree needs it at the moment: the one LFS-tracked
+file, a vendored toybox binary, is gone now that the Android measurement path
+samples `/proc` directly. `.gitattributes` remains the list to check.
 
 A host build of the CLI needs neither the mobile toolchains nor LFS:
 

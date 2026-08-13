@@ -939,12 +939,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-          # LFS objects are required for the Android target: the
-          # toybox-aarch64 binary the android measurement path
-          # embeds via `include_bytes!` is stored in Git LFS. Without
-          # this, CI bakes the 131-byte LFS pointer into the artifact
-          # and the wrapped `toybox time -v llama-bench` exits 127
-          # because the extracted "toybox" isn't a real ELF.
+          # Nothing needs it at the moment: the toybox binary whose `include_bytes!`
+          # required LFS is gone, and the Android measurement path now samples
+          # `/proc` directly. `.gitattributes` stays the list to check if an
+          # LFS-tracked asset is added back.
           lfs: true
 
       - name: Set up sccache

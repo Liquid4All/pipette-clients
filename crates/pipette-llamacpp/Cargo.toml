@@ -38,12 +38,6 @@ serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
 
-# `tempfile` is used by the Android measurement path
-# (`execute/max_memory_usage/android.rs`) for race-safe extraction of
-# the vendored toybox binary.
-[target.'cfg(target_os = "android")'.dependencies]
-tempfile.workspace = true
-
 # Windows measurement path (`execute/max_memory_usage/windows.rs`):
 # PSAPI for `max_host_bytes` and PDH `\GPU Process Memory(...)\Dedicated
 # Usage` for `max_gpu_bytes`. PDH covers every GPU API (Vulkan, HIP,

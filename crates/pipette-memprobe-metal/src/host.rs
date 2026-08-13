@@ -8,7 +8,7 @@
 //! of `max_gpu_bytes` on Mac — each is its own dimension's peak,
 //! reported independently with no cross-subtraction.
 //!
-//! The Android/Windows host counters (toybox `time -v`'s `Max RSS`,
+//! The Android/Windows host counters (`/proc/<pid>/status` sampling,
 //! `GetProcessMemoryInfo.PeakWorkingSetSize`) are inlined directly
 //! in `pipette-llamacpp`'s per-OS `max_memory_usage::{android,
 //! windows}` modules — they share no abstraction with this poller
