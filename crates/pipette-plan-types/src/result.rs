@@ -264,10 +264,11 @@ impl BenchmarkResultData {
 
 /// Payload sent to the management server via `POST /benchmarks`.
 ///
-/// **Serde note**: this struct uses three `#[serde(flatten)]` fields —
-/// [`DeviceInfo`], [`ThermalTelemetry`], and [`BenchmarkResultData`].  All
-/// field names across the flattened types and the struct itself must remain
-/// unique; a collision silently breaks deserialization.  The round-trip test
+/// **Serde note**: this struct uses four `#[serde(flatten)]` fields —
+/// [`DeviceInfo`], [`ThermalTelemetry`], [`MemoryObservation`], and
+/// [`BenchmarkResultData`].  All field names across the flattened types and the
+/// struct itself must remain unique; a collision silently breaks
+/// deserialization.  The round-trip test
 /// `submission_payload_round_trip_with_device_info` guards this.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchmarkSubmissionPayload {

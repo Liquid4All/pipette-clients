@@ -247,9 +247,11 @@ pub(super) fn run(
         command: preview,
         runtime_flags: Some(flags.clone()),
         // `PeakWorkingSetSize` is resident-only and PSAPI exposes no paged-out
-        // watermark, so there is no swap term to observe here yet.
+        // watermark, so there is no swap term to observe here yet. A zero
+        // watermark is withheld for the same reason as the macOS arm: absence
+        // means "not observed", and a zero would read as a measurement.
         memory: MemoryObservation {
-            max_host_bytes: Some(max_host_bytes),
+            max_host_bytes: (max_host_bytes > 0).then_some(max_host_bytes),
             max_swap_bytes: None,
         },
         ..RunResponse::new(

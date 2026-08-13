@@ -161,8 +161,8 @@ pub struct RunResponse {
     /// — an engine that shells out keeps those in `command`.
     pub runtime_flags: Option<RuntimeFlags>,
     /// What memory the run held while it ran
-    /// ([`MemoryObservation`](crate::result::MemoryObservation)), collected on
-    /// every benchmark kind rather than only the memory one.
+    /// ([`MemoryObservation`]), collected on every benchmark kind rather than
+    /// only the memory one.
     ///
     /// Filled by the **engine**, unlike `thermal` and `benchmark_flags`:
     /// sampling the child's memory needs the pid, which only the engine that

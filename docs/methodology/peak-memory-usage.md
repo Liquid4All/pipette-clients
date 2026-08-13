@@ -75,8 +75,11 @@ What that costs is bounded rather than nil, and the terms are affected unevenly:
 Coverage is per platform and deliberately incomplete. Android and Linux sample
 `/proc/<pid>/status` and report both terms. macOS reports the host term from
 `phys_footprint`, which already bills compressed pages, so it has no separate
-swap term. Windows reports neither yet: PSAPI is read once after exit through a
-duplicated handle rather than polled, so there is no sampler to attach. A
+swap term. Windows has no sampler to attach: PSAPI is read once after exit
+through a duplicated handle rather than polled, so a Windows run of any *other*
+benchmark reports neither term. The memory benchmark is the exception: it makes
+that single post-exit read anyway, so its rows carry the host term (never the
+swap one) on Windows too. A
 platform that samples nothing contributes no keys, and absence therefore means
 "not observed" rather than zero, while a `0` means the sampler looked and found
 the run resident.

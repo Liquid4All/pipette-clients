@@ -23,6 +23,11 @@
 //! | Android, Linux | yes | yes | [`proc_footprint`] sampling `/proc/<pid>/status` |
 //! | macOS | yes | no | `phys_footprint`, which already bills compressed pages |
 //! | Windows | no | no | PSAPI reads once after exit through a duplicated handle, so it is not a poller yet |
+//!
+//! The table is this observer's coverage. The `max_memory_usage` benchmark does
+//! not attach one — it already measures memory itself and fills the observation
+//! from that — so its Windows rows do carry a host term, the one place a Windows
+//! row has `observation_max_host_bytes` at all.
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) mod proc_footprint;
@@ -149,6 +154,11 @@ mod tests {
 
     /// The observer must work without the caller knowing which platform it is
     /// on, and must never invent a figure on one that samples nothing.
+    ///
+    /// Unix-gated because it needs a live child to observe and `sleep` is not on
+    /// the PATH of a stock Windows runner — the sampler-less arm this would cover
+    /// there is pinned by `an_arm_with_no_sampler_observes_nothing` instead.
+    #[cfg(unix)]
     #[test]
     fn an_observation_is_either_populated_or_absent_but_never_zero() -> anyhow::Result<()> {
         let mut child = std::process::Command::new("sleep").arg("2").spawn()?;
@@ -174,5 +184,17 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// Windows today: attaching still has to succeed so callers need no `cfg`,
+    /// and finishing has to contribute no keys rather than a zero that reads as
+    /// a measurement. Needs no child, since nothing is sampled.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    #[test]
+    fn an_arm_with_no_sampler_observes_nothing() {
+        assert_eq!(
+            RunMemoryObserver::attach(std::process::id()).finish(),
+            MemoryObservation::default()
+        );
     }
 }
