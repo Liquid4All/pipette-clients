@@ -84,9 +84,13 @@ pub(super) fn run(
         .context("failed to wait for llama-bench")?;
     let killer_fired = killer.fired();
     drop(killer);
+    // The metric takes the peak alone: it polls at 20 ms across a whole load, so
+    // the seed-only case the `samples` count exists to catch cannot arise here.
+    // The observation channel applies that rule (`observation_from_phys`).
     let phys_peak = phys_poller
         .stop_and_join()
-        .context("phys_footprint poller failed; max_host_bytes is unreliable")?;
+        .context("phys_footprint poller failed; max_host_bytes is unreliable")?
+        .peak_bytes;
 
     if killer_fired {
         anyhow::bail!(

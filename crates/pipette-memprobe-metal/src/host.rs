@@ -37,7 +37,23 @@ use std::{
               dropping the handle silently discards the measurement"]
 pub struct PhysFootprintPoller {
     stop: mpsc::Sender<()>,
-    handle: JoinHandle<u64>,
+    handle: JoinHandle<PhysFootprint>,
+}
+
+/// What a poller saw: the peak, and how many reads produced it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhysFootprint {
+    /// Largest `phys_footprint` observed, in bytes. Zero means no read
+    /// succeeded.
+    pub peak_bytes: u64,
+    /// How many `proc_pid_rusage` calls returned a reading.
+    ///
+    /// `1` means only the read taken as the thread started did, before the
+    /// child had loaded anything: a few plausible-looking MB of process startup
+    /// that a consumer cannot tell apart from a measurement. A caller that would
+    /// rather report nothing than that checks this — the `/proc` sampler carries
+    /// the same count for the same reason.
+    pub samples: u32,
 }
 
 impl PhysFootprintPoller {
@@ -51,7 +67,7 @@ impl PhysFootprintPoller {
     /// must fail the bench loudly rather than silently report a
     /// partial peak — the caller can't tell the difference between
     /// "zero peak observed" and "panic before any observation."
-    pub fn stop_and_join(self) -> anyhow::Result<u64> {
+    pub fn stop_and_join(self) -> anyhow::Result<PhysFootprint> {
         // Send is non-blocking; the poller's recv_timeout returns Ok
         // on the next tick. Send may fail (Disconnected) if the
         // poller already exited — ignore here; join below surfaces
@@ -106,8 +122,8 @@ const OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 
 fn spawn_phys_footprint_poller_every(pid: i32, interval: Duration) -> PhysFootprintPoller {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let handle = thread::spawn(move || -> u64 {
-        let mut peak: u64 = 0;
+    let handle = thread::spawn(move || -> PhysFootprint {
+        let mut footprint = PhysFootprint::default();
         loop {
             let mut info = MaybeUninit::<libc::rusage_info_v4>::zeroed();
             let rc = unsafe {
@@ -122,9 +138,8 @@ fn spawn_phys_footprint_poller_every(pid: i32, interval: Duration) -> PhysFootpr
                 let observed = info
                     .ri_phys_footprint
                     .max(info.ri_lifetime_max_phys_footprint);
-                if observed > peak {
-                    peak = observed;
-                }
+                footprint.samples = footprint.samples.saturating_add(1);
+                footprint.peak_bytes = footprint.peak_bytes.max(observed);
             }
             // proc_pid_rusage returns ESRCH after wait4 reaps the
             // child. Fine — peak is captured; loop until stop.
@@ -132,7 +147,7 @@ fn spawn_phys_footprint_poller_every(pid: i32, interval: Duration) -> PhysFootpr
             // Combined sleep + stop-check: recv_timeout sleeps up to
             // `interval`, returns early on stop signal or sender drop.
             match stop_rx.recv_timeout(interval) {
-                Ok(_) | Err(RecvTimeoutError::Disconnected) => break peak,
+                Ok(_) | Err(RecvTimeoutError::Disconnected) => break footprint,
                 Err(RecvTimeoutError::Timeout) => continue,
             }
         }

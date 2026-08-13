@@ -55,9 +55,12 @@ pub(super) fn run(req: &RunRequest) -> anyhow::Result<RunResponse> {
             decode_tokens: DECODE_TOKENS,
         },
     );
+    // Peak only: this arm polls across the whole load, so the seed-only case the
+    // `samples` count guards against cannot arise here.
     let max_host_bytes = phys_poller
         .stop_and_join()
-        .context("phys_footprint poller failed; max_host_bytes is unreliable")?;
+        .context("phys_footprint poller failed; max_host_bytes is unreliable")?
+        .peak_bytes;
 
     let shutdown_result: anyhow::Result<serde_json::Value> =
         throughput_http::post_json(&server.base_url, SHUTDOWN_ENDPOINT, &serde_json::json!({}));

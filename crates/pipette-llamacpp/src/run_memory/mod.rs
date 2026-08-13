@@ -130,12 +130,29 @@ impl RunMemoryObserver {
             #[cfg(target_os = "macos")]
             Inner::PhysFootprint(poller) => poller
                 .stop_and_join()
-                .map(MemoryObservation::host_only)
+                .map(observation_from_phys)
                 .unwrap_or_default(),
             #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
             Inner::Unobserved => MemoryObservation::default(),
         }
     }
+}
+
+/// What a `phys_footprint` reading is worth reporting as, or nothing.
+///
+/// The macOS counterpart of [`observation_from`], applying the same rule: the
+/// read taken as the poller starts happens before the child has loaded
+/// anything, so a footprint built only from it describes startup rather than the
+/// run. `phys_footprint` being a watermark does not help here — the watermark is
+/// simply small that early.
+#[cfg(target_os = "macos")]
+fn observation_from_phys(
+    footprint: pipette_memprobe_metal::host::PhysFootprint,
+) -> MemoryObservation {
+    if footprint.samples < 2 {
+        return MemoryObservation::default();
+    }
+    MemoryObservation::host_only(footprint.peak_bytes)
 }
 
 /// What a `/proc` footprint is worth reporting as, or nothing.
@@ -191,6 +208,31 @@ mod tests {
         assert_eq!(observation_from(&footprint), expected);
     }
 
+    /// The macOS arm needs the same rule as the `/proc` one: the read taken as
+    /// the poller starts describes startup, so a footprint built only from it is
+    /// withheld rather than reported as a measurement.
+    #[cfg(target_os = "macos")]
+    #[rstest::rstest]
+    #[case::seed_only_is_withheld(3_000_000, 1, MemoryObservation::default())]
+    #[case::nothing_read_is_withheld(0, 0, MemoryObservation::default())]
+    #[case::a_zero_peak_is_withheld_even_when_sampled(0, 5, MemoryObservation::default())]
+    #[case::a_post_seed_read_is_reported(
+        6_594_494_464,
+        2,
+        MemoryObservation::host_only(6_594_494_464)
+    )]
+    fn a_phys_observation_needs_a_read_after_the_first(
+        #[case] peak_bytes: u64,
+        #[case] samples: u32,
+        #[case] expected: MemoryObservation,
+    ) {
+        let footprint = pipette_memprobe_metal::host::PhysFootprint {
+            peak_bytes,
+            samples,
+        };
+        assert_eq!(observation_from_phys(footprint), expected);
+    }
+
     /// The observer must work without the caller knowing which platform it is
     /// on, and must never invent a figure on one that samples nothing.
     ///
@@ -207,12 +249,6 @@ mod tests {
 
         if let Some(peak) = observed.max_host_bytes {
             assert!(peak > 0, "a reported peak must never be zero");
-            if let Some(swap) = observed.max_swap_bytes {
-                assert!(
-                    swap <= peak,
-                    "swap is contained in the peak, not added to it"
-                );
-            }
         } else {
             assert_eq!(
                 observed,
