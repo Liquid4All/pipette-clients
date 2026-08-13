@@ -246,14 +246,9 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
-        // `PeakWorkingSetSize` is resident-only and PSAPI exposes no paged-out
-        // watermark, so there is no swap term to observe here yet. A zero
-        // watermark is withheld for the same reason as the macOS arm: absence
-        // means "not observed", and a zero would read as a measurement.
-        memory: MemoryObservation {
-            max_host_bytes: (max_host_bytes > 0).then_some(max_host_bytes),
-            max_swap_bytes: None,
-        },
+        // No swap term: `PeakWorkingSetSize` is resident-only and PSAPI exposes
+        // no paged-out watermark yet.
+        memory: MemoryObservation::host_only(max_host_bytes),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

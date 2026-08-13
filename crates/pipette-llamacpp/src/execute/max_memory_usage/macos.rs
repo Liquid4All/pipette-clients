@@ -136,17 +136,10 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
-        // `phys_footprint` bills compressed pages to the process, so the peak
-        // already counts them and there is no separate swap term to observe.
-        //
-        // A zero means no `proc_pid_rusage` call landed — the poller tolerates a
-        // failing read rather than erroring — so it is withheld, matching
-        // `RunMemoryObserver::finish`. Absence means "not observed" here, and a
-        // zero would read as a measurement instead.
-        memory: MemoryObservation {
-            max_host_bytes: (phys_peak > 0).then_some(phys_peak),
-            max_swap_bytes: None,
-        },
+        // No swap term: `phys_footprint` bills compressed pages to the process,
+        // so the peak already counts them. `host_only` withholds a zero, which
+        // here means no `proc_pid_rusage` read landed.
+        memory: MemoryObservation::host_only(phys_peak),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

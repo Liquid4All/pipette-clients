@@ -27,7 +27,7 @@ use std::{
 // in scope. `bail!` and `Result` are written `anyhow::`-qualified at use sites.
 use anyhow::Context;
 
-use pipette_plan_types::result::{BenchmarkResultData, MemoryObservation};
+use pipette_plan_types::result::BenchmarkResultData;
 use pipette_plan_types::RuntimeFlags;
 use pipette_subprocess::{argv, echo_info};
 
@@ -134,11 +134,9 @@ pub(super) fn run(
         // that is the whole point of the split. A Linux row whose observed peak
         // exceeds its `max_host_bytes` is showing exactly the under-reporting the
         // metric still carries, and names the hosts where adopting the
-        // swap-aware peak would change anything.
-        memory: MemoryObservation {
-            max_host_bytes: Some(footprint.peak_ram_kib().saturating_mul(1024)),
-            max_swap_bytes: Some(footprint.max_swap_bytes()),
-        },
+        // swap-aware peak would change anything. Through the same rule the
+        // timing benchmarks use, so one sampler cannot mean two things.
+        memory: crate::run_memory::observation_from(&footprint),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

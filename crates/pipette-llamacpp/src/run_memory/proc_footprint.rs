@@ -231,26 +231,11 @@ const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10
 /// riding along on a benchmark that measures something else.
 ///
 /// A timing benchmark's number must not move because we watched it, so this
-/// trades resolution the observation does not need for a duty cycle that cannot
-/// register: two small reads every 100 ms is ~0.1% of one core, a tenth of
-/// [`SAMPLE_INTERVAL`]'s.
-///
-/// **A watermark still has to be read while the process is alive.** `VmHWM` is
-/// maintained by the kernel, so we never have to catch the peak's instant — but
-/// a process that has exited publishes no `Vm*` fields at all, so the last
-/// useful read precedes exit and anything the run grows in the final interval is
-/// missed. That is the real cost of polling less often, and it is why this is
-/// 100 ms rather than the 500 ms that perturbs even less: past ~100 ms the
-/// saving is immaterial (0.1% vs 0.02% of a core, both far under a benchmark's
-/// noise) while the miss window grows in proportion.
-///
-/// Within that bound the terms still degrade unevenly. `VmHWM` is exact as of
-/// the last read, so cadence costs nothing for a workload whose peak is at model
-/// load, which is every benchmark here. Only the swap-aware uplift and the swap
-/// term itself are additionally sampled between reads, and an observation asks
-/// "did this run swap, and roughly how much",
-/// which a coarse maximum answers. Precision there belongs to the memory
-/// benchmark, which keeps [`SAMPLE_INTERVAL`].
+/// costs a tenth of [`SAMPLE_INTERVAL`]'s duty cycle (~0.1% of one core). Not
+/// rarer, because `VmHWM` has to be read while the process is alive: the last
+/// useful read precedes exit, and that miss window grows in proportion while the
+/// saving past ~100 ms does not. What each term gives up is worked through in
+/// docs/methodology/peak-memory-usage.md.
 const OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Sample `pid`'s footprint until stopped, at the resolution the memory
@@ -294,6 +279,7 @@ fn spawn_footprint_poller_every(pid: u32, interval: std::time::Duration) -> Foot
             // stop the poller BEFORE reaping (the VL runner does); for the
             // wait_with_output-style callers the window is accepted as not
             // worth guarding.
+            //
             // Sleeps before reading, not after. The seed already covers t=0, so a
             // read-first loop only duplicated it, and sleeping first makes
             // `samples > 1` mean "something was read after a full interval
@@ -339,7 +325,7 @@ mod tests {
     /// set: the thread's own `Arc` clone is released only as it exits.
     #[test]
     fn dropping_a_poller_ends_its_thread() -> anyhow::Result<()> {
-        let mut child = std::process::Command::new("sleep").arg("30").spawn()?;
+        let child = crate::run_memory::SleepChild::spawn("30")?;
         let poller = spawn_footprint_poller_every(child.id(), std::time::Duration::from_millis(5));
         let stop = std::sync::Arc::clone(&poller.stop);
         drop(poller);
@@ -351,8 +337,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
             false
         });
-        child.kill()?;
-        child.wait()?;
 
         assert!(
             stop.load(std::sync::atomic::Ordering::Relaxed),
@@ -451,12 +435,10 @@ mod tests {
     /// the sampler must report a live process rather than the default.
     #[test]
     fn the_poller_reports_the_process_it_was_pointed_at() -> anyhow::Result<()> {
-        let mut child = std::process::Command::new("sleep").arg("2").spawn()?;
+        let child = crate::run_memory::SleepChild::spawn("2")?;
         let poller = spawn_footprint_poller(child.id());
         std::thread::sleep(std::time::Duration::from_millis(120));
         let footprint = poller.stop_and_join();
-        child.kill()?;
-        child.wait()?;
 
         assert!(
             footprint.peak_rss_kib > 0,

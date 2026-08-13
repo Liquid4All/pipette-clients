@@ -154,6 +154,38 @@ pub struct MemoryObservation {
 }
 
 impl MemoryObservation {
+    /// A peak from a sampler that sees no swap term, or nothing if it read
+    /// nothing.
+    ///
+    /// Zero is how every sampler here spells "no read landed", so it is withheld
+    /// rather than reported: absence is filterable, and a zero on the row reads
+    /// as a measurement. Constructing through this instead of the literal is what
+    /// keeps that rule in one place — the arms that built their own once shipped
+    /// a `Some(0)`.
+    pub fn host_only(host_bytes: u64) -> Self {
+        Self {
+            max_host_bytes: (host_bytes > 0).then_some(host_bytes),
+            max_swap_bytes: None,
+        }
+    }
+
+    /// A peak with the swap term beside it, from a sampler that reads both.
+    ///
+    /// Same rule for the peak, and the swap term rides with it: a withheld peak
+    /// withholds the swap reading too, since half an observation says the
+    /// platform sampled swap while refusing to say what it held. A `Some(0)`
+    /// swap beside a real peak is the opposite — a reading, and the one that
+    /// makes the peak trustworthy.
+    pub fn with_swap(host_bytes: u64, swap_bytes: u64) -> Self {
+        match (host_bytes > 0).then_some(host_bytes) {
+            Some(host_bytes) => Self {
+                max_host_bytes: Some(host_bytes),
+                max_swap_bytes: Some(swap_bytes),
+            },
+            None => Self::default(),
+        }
+    }
+
     /// The larger of two observations, term by term.
     ///
     /// A benchmark that runs several repetitions observes each one, and the run's
@@ -410,6 +442,35 @@ mod tests {
         #[case] expected: MemoryObservation,
     ) {
         assert_eq!(a.merge_max(b), expected);
+    }
+
+    /// The constructors are where the "zero is not a measurement" rule lives, so
+    /// every arm that builds an observation inherits it.
+    #[rstest]
+    #[case::host_only_keeps_a_real_peak(
+        observed(Some(600), None),
+        MemoryObservation::host_only(600)
+    )]
+    #[case::host_only_withholds_a_zero(observed(None, None), MemoryObservation::host_only(0))]
+    // A sampled zero swap is a reading and survives beside a real peak.
+    #[case::swap_zero_is_a_reading(
+        observed(Some(600), Some(0)),
+        MemoryObservation::with_swap(600, 0)
+    )]
+    #[case::swap_rides_with_the_peak(
+        observed(Some(600), Some(50)),
+        MemoryObservation::with_swap(600, 50)
+    )]
+    // Never half an observation: no peak means the swap term goes too.
+    #[case::a_withheld_peak_withholds_swap(
+        observed(None, None),
+        MemoryObservation::with_swap(0, 50)
+    )]
+    fn a_zero_peak_is_withheld_rather_than_reported(
+        #[case] expected: MemoryObservation,
+        #[case] built: MemoryObservation,
+    ) {
+        assert_eq!(built, expected);
     }
 
     /// An observation with nothing in it must contribute no keys, so a client on

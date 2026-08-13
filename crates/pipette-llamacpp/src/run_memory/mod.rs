@@ -34,6 +34,36 @@ pub(crate) mod proc_footprint;
 
 use pipette_plan_types::result::MemoryObservation;
 
+/// A `sleep` child, killed and reaped on drop.
+///
+/// Several tests here and in [`proc_footprint`] need a live process to point a
+/// sampler at. Cleanup belongs on `Drop` rather than at the end of each test: an
+/// assertion that fires early would otherwise leave the child running for the
+/// rest of its duration.
+#[cfg(all(test, unix))]
+pub(crate) struct SleepChild(std::process::Child);
+
+#[cfg(all(test, unix))]
+impl SleepChild {
+    pub(crate) fn spawn(seconds: &str) -> anyhow::Result<Self> {
+        Ok(Self(
+            std::process::Command::new("sleep").arg(seconds).spawn()?,
+        ))
+    }
+
+    pub(crate) fn id(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for SleepChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Observes a spawned child until [`Self::finish`]. Attach right after spawn;
 /// finish after the child is waited for.
 ///
@@ -66,6 +96,12 @@ impl RunMemoryObserver {
         // something rarer.
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let inner = Inner::Proc(proc_footprint::spawn_observation_poller(pid));
+        // Unlike the `/proc` arm this one has no identity guard: a caller that
+        // reaps before finishing leaves a window of at most one interval in which
+        // a read could land on a recycled pid and be folded into the peak. Known
+        // and accepted — `proc_pid_rusage` carries no start time to compare, the
+        // metric path has always had the same window, and macOS would have to
+        // recycle a pid within ~100 ms of the reap to hit it.
         #[cfg(target_os = "macos")]
         let inner = Inner::PhysFootprint(
             pipette_memprobe_metal::host::spawn_phys_footprint_poller_for_observation(pid as i32),
@@ -89,16 +125,13 @@ impl RunMemoryObserver {
         match self.inner {
             #[cfg(any(target_os = "linux", target_os = "android"))]
             Inner::Proc(poller) => observation_from(&poller.stop_and_join()),
+            // `host_only` because `phys_footprint` bills compressed pages to the
+            // process: the peak already counts them and no separate term exists.
             #[cfg(target_os = "macos")]
-            Inner::PhysFootprint(poller) => match poller.stop_and_join() {
-                Ok(0) | Err(_) => MemoryObservation::default(),
-                Ok(bytes) => MemoryObservation {
-                    max_host_bytes: Some(bytes),
-                    // `phys_footprint` bills compressed pages to the process, so
-                    // the peak already counts them and no separate term exists.
-                    max_swap_bytes: None,
-                },
-            },
+            Inner::PhysFootprint(poller) => poller
+                .stop_and_join()
+                .map(MemoryObservation::host_only)
+                .unwrap_or_default(),
             #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
             Inner::Unobserved => MemoryObservation::default(),
         }
@@ -107,21 +140,22 @@ impl RunMemoryObserver {
 
 /// What a `/proc` footprint is worth reporting as, or nothing.
 ///
-/// Separate from [`RunMemoryObserver::finish`] so the rule is decidable from a
-/// hand-built footprint instead of only from a live process.
+/// The single rule for this sampler, used by [`RunMemoryObserver::finish`] and
+/// by the `max_memory_usage` arms that hold a footprint of their own. Separate
+/// from `finish` so it is decidable from a hand-built footprint instead of only
+/// from a live process.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn observation_from(footprint: &proc_footprint::Footprint) -> MemoryObservation {
-    // A zero peak means nobody looked. A seed-only footprint is worse: it
-    // describes process startup in a few plausible-looking MB that a consumer
-    // cannot tell apart from a real measurement. Absence is filterable, a wrong
-    // number is not.
-    if footprint.peak_ram_kib() == 0 || footprint.samples < 2 {
+pub(crate) fn observation_from(footprint: &proc_footprint::Footprint) -> MemoryObservation {
+    // A seed-only footprint describes process startup in a few plausible-looking
+    // MB that a consumer cannot tell apart from a real measurement, so it is
+    // withheld on top of the zero rule the constructor applies.
+    if footprint.samples < 2 {
         return MemoryObservation::default();
     }
-    MemoryObservation {
-        max_host_bytes: Some(footprint.peak_ram_kib().saturating_mul(1024)),
-        max_swap_bytes: Some(footprint.max_swap_bytes()),
-    }
+    MemoryObservation::with_swap(
+        footprint.peak_ram_kib().saturating_mul(1024),
+        footprint.max_swap_bytes(),
+    )
 }
 
 #[cfg(test)]
@@ -131,25 +165,30 @@ mod tests {
     /// The seed is taken before the child has loaded anything, so a footprint
     /// built only from it describes startup, not the run. Reporting it would put
     /// a few MB on a row as though measured; these cases pin that it is withheld.
+    ///
+    /// Asserts the whole observation, not just the peak: a withheld peak has to
+    /// take the swap term with it, or the row claims swap was sampled while
+    /// refusing to say what it held.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[rstest::rstest]
-    #[case::seed_only_is_withheld(3_000, 1, None)]
-    #[case::nothing_read_is_withheld(0, 0, None)]
-    #[case::a_post_seed_read_is_reported(6_440_000, 2, Some(6_440_000 * 1024))]
+    #[case::seed_only_is_withheld(3_000, 1, MemoryObservation::default())]
+    #[case::nothing_read_is_withheld(0, 0, MemoryObservation::default())]
+    #[case::a_post_seed_read_is_reported(
+        6_440_000,
+        2,
+        MemoryObservation::with_swap(6_440_000 * 1024, 0)
+    )]
     fn an_observation_needs_a_read_after_the_seed(
         #[case] peak_rss_kib: u64,
         #[case] samples: u32,
-        #[case] expected_host_bytes: Option<u64>,
+        #[case] expected: MemoryObservation,
     ) {
         let footprint = proc_footprint::Footprint {
             peak_rss_kib,
             samples,
             ..Default::default()
         };
-        assert_eq!(
-            observation_from(&footprint).max_host_bytes,
-            expected_host_bytes
-        );
+        assert_eq!(observation_from(&footprint), expected);
     }
 
     /// The observer must work without the caller knowing which platform it is
@@ -161,12 +200,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_observation_is_either_populated_or_absent_but_never_zero() -> anyhow::Result<()> {
-        let mut child = std::process::Command::new("sleep").arg("2").spawn()?;
+        let child = SleepChild::spawn("2")?;
         let observer = RunMemoryObserver::attach(child.id());
         std::thread::sleep(std::time::Duration::from_millis(350));
         let observed = observer.finish();
-        child.kill()?;
-        child.wait()?;
 
         if let Some(peak) = observed.max_host_bytes {
             assert!(peak > 0, "a reported peak must never be zero");

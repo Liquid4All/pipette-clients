@@ -21,7 +21,7 @@ use std::{
 
 use anyhow::Context;
 
-use pipette_plan_types::result::{BenchmarkResultData, MemoryObservation};
+use pipette_plan_types::result::BenchmarkResultData;
 use pipette_plan_types::RuntimeFlags;
 use pipette_subprocess::{argv, echo_info};
 
@@ -140,10 +140,7 @@ pub(super) fn run(
         // Same sampler the metric came from, so this arm's observation and its
         // metric agree. Reported anyway: a consumer reading observations across
         // benchmarks should not have to special-case the memory one.
-        memory: MemoryObservation {
-            max_host_bytes: Some(max_host_bytes),
-            max_swap_bytes: Some(footprint.max_swap_bytes()),
-        },
+        memory: crate::run_memory::observation_from(&footprint),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

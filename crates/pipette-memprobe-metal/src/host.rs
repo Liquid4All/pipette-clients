@@ -77,7 +77,7 @@ impl PhysFootprintPoller {
 /// [`spawn_phys_footprint_poller_for_observation`] instead, which polls rarely
 /// enough not to move the number it observes.
 pub fn spawn_phys_footprint_poller(pid: i32) -> PhysFootprintPoller {
-    spawn_phys_footprint_poller_every(pid, Duration::from_millis(20))
+    spawn_phys_footprint_poller_every(pid, SAMPLE_INTERVAL)
 }
 
 /// As [`spawn_phys_footprint_poller`], but for a caller whose benchmark reports
@@ -91,8 +91,18 @@ pub fn spawn_phys_footprint_poller(pid: i32) -> PhysFootprintPoller {
 /// in the final interval is missed. 100 ms bounds that window while costing
 /// ~0.1% of a core.
 pub fn spawn_phys_footprint_poller_for_observation(pid: i32) -> PhysFootprintPoller {
-    spawn_phys_footprint_poller_every(pid, Duration::from_millis(100))
+    spawn_phys_footprint_poller_every(pid, OBSERVATION_INTERVAL)
 }
+
+/// Cadence when the peak *is* the benchmark's result. Sufficient for
+/// steady-state peaks; tighten only if a future workload allocates and frees
+/// within a frame.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Cadence when the peak only rides along on a benchmark reporting time, chosen
+/// so the poller cannot move that number. Mirrors the `/proc` sampler's split in
+/// `pipette-llamacpp`'s `run_memory::proc_footprint`.
+const OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 
 fn spawn_phys_footprint_poller_every(pid: i32, interval: Duration) -> PhysFootprintPoller {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
