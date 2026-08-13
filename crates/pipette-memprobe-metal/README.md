@@ -24,8 +24,8 @@ The wire-protocol side of this (what `max_host_bytes` /
 - **Sidecar OS-attribution counters** (PDH, DRM fdinfo, nvidia-smi):
   live in `pipette-llamacpp/src/execute/max_memory_usage/sidecar/`.
   Diagnostic data, not the wire-schema source.
-- **Android measurement**: uses a vendored `toybox time -v` wrapper;
-  lives in `pipette-llamacpp/src/execute/max_memory_usage/android.rs`.
+- **Android measurement**: samples `/proc/<pid>/status` for
+  `max(VmHWM, VmRSS + VmSwap)`; lives in `pipette-llamacpp/src/execute/max_memory_usage/android.rs`.
 - **Process-timeout helpers** (`spawn_timeout_killer`,
   `run_command_with_timeout`): moved to where they're used
   (`pipette-mlx/src/execute/python.rs`).

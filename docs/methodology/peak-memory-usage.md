@@ -237,7 +237,7 @@ different counters and process-lifetime rules.
 | --- | --- | --- | --- | --- |
 | macOS llama.cpp | Metal probe attached before `llama-bench` launch; host poller runs during child lifetime. | `phys_footprint` plus kernel lifetime maximum. | `null`: Apple Silicon unified memory, no host/GPU split. | Unified memory: reported entirely as host. The Metal `currentAllocatedSize` peak is captured as a diagnostic, not a field. |
 | macOS MLX | Metal probe attached before Python sidecar launch; host poller starts after sidecar readiness. | `phys_footprint` plus kernel lifetime maximum, so earlier model-load peaks remain visible while the process lives. | `null`: Apple Silicon unified memory, no host/GPU split. | Unified memory: reported entirely as host. Metal `currentAllocatedSize` peak captured as a diagnostic. |
-| Android llama.cpp CPU | `toybox time -v` wraps `llama-bench` from launch. | Child `Max RSS (KiB)` high-water mark. | Unset. | Current Android arm64-v8a runtime is host-only. |
+| Android llama.cpp CPU | `llama-bench` launched directly; `/proc/<pid>/status` sampler runs during child lifetime, seeded by one synchronous read at spawn. | `max(VmHWM, max(VmRSS + VmSwap))`, so pages zram compressed out of the resident set still count. | Unset. | Current Android arm64-v8a runtime is host-only. Devices carry more zram than RAM, so a resident-only figure under-reports by as much as 966 MB; a peak below the model file size is refused. |
 | Linux llama.cpp CPU | `llama-bench` launched directly; `/proc/<pid>/status` `VmHWM` poller runs during child lifetime, seeded by one synchronous read at spawn. | `VmHWM` peak resident-set high-water mark. | Unset. | CPU flavors only; GPU/accelerator flavors are rejected pending a DRM-fdinfo probe. |
 | Windows llama.cpp | PSAPI handle kept across child exit; PDH poller starts after spawn for GPU flavors. | `PeakWorkingSetSize` lifetime peak. | PDH `Total Committed` sampled every 20 ms for GPU flavors. | CPU flavors report `null`; PDH setup or read failure currently reports `0` and requires log audit. |
 | Linux torch-oai Docker | Server starts and reaches readiness before the benchmark memory probe starts. | cgroup v2 `memory.peak`, which covers the container lifetime. | Host `nvidia-smi` samples matching container PIDs every 500 ms during the benchmark request. | GPU sampling sees persistent allocations during the request; transient GPU-only startup spikes can fall outside the sampled window. |
@@ -261,8 +261,8 @@ separately:
   `currentAllocatedSize` probe is kept as a diagnostic.
 - [Windows](peak-memory-windows.md): PSAPI `PeakWorkingSetSize` host counter and
   a PDH `Total Committed` GPU poller (a separate pool from the host working set).
-- [Android](peak-memory-android.md): `toybox time -v` `Max RSS` host counter;
-  CPU-only, no GPU counter.
+- [Android](peak-memory-android.md): `max(VmHWM, VmRSS + VmSwap)` host counter,
+  because zram can hold part of the run; CPU-only, no GPU counter.
 - [Linux](peak-memory-linux.md): torch-oai Docker uses cgroup v2 `memory.peak`
   and `nvidia-smi`; llama.cpp CPU flavors use `/proc` `VmHWM` (GPU/accelerator
   flavors not implemented).

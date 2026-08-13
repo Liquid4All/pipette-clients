@@ -1,16 +1,18 @@
 //! Peak memory benchmark — per-OS execution paths.
 //!
 //! Currently implemented for **macOS** (Metal probe), **Android**
-//! (toybox `time -v` wrapper), **Windows** (PSAPI host counter, no GPU
+//! (`/proc` footprint sampler), **Windows** (PSAPI host counter, no GPU
 //! probe yet), and **Linux** (`/proc` `VmHWM`, CPU flavors only).
 //! Other flavors bail at the dispatcher.
 //!
 //! - [`macos`]   — `pipette-memprobe-metal` Metal probe (DYLD shim)
 //!   gives in-process `[MTLDevice currentAllocatedSize]`. Host
 //!   counter is `phys_footprint`.
-//! - [`android`] — wraps `llama-bench` with a vendored `toybox time -v`
-//!   binary; parses `Max RSS (KiB)` from its stderr summary. No GPU
-//!   probe (CPU-only Android build).
+//! - [`android`] — runs `llama-bench` under a `/proc` footprint sampler
+//!   ([`proc_footprint`]) and reports `max(VmHWM, max(VmRSS + VmSwap))`,
+//!   because zram can compress the model out of the resident set mid-run
+//!   and a peak-RSS figure alone then under-reports what the run required.
+//!   No GPU probe (CPU-only Android build).
 //! - [`windows`] — reads `PROCESS_MEMORY_COUNTERS.PeakWorkingSetSize`
 //!   via PSAPI for `max_host_bytes` and polls
 //!   `\GPU Process Memory(pid_<PID>_*)\Total Committed` via PDH for
@@ -68,6 +70,8 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod pdh_poller;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod proc_footprint;
 #[cfg(target_os = "windows")]
 mod windows;
 

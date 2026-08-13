@@ -63,13 +63,20 @@ dispatcher.
 
 The runner launches `llama-bench` directly and polls `/proc/<pid>/status`
 `VmHWM` (the kernel's peak resident-set high-water mark, the same figure
-`wait4`'s `ru_maxrss` reports) in a background thread every 25 ms for the
+`wait4`'s `ru_maxrss` reports) in a background thread every 10 ms for the
 child's lifetime, tracking the running maximum as `max_host_bytes`. `VmHWM`
 only grows, so any sample taken after the peak (model load plus the first
 decode step) captures it; the poll is seeded with one synchronous read at spawn
 so a child that exits before the thread is scheduled still yields a value.
 Reading `/proc` avoids wrapping `wait4` around the child, which would race
 `std`'s own reaping in `wait_with_output`.
+
+The sampler is shared with the Android arm
+([`max_memory_usage::proc_footprint`](../../crates/pipette-llamacpp/src/execute/max_memory_usage/proc_footprint.rs)),
+which also collects `VmSwap`. This arm reports resident peak only, so it carries
+the swap under-reporting described in
+[peak memory: Android](peak-memory-android.md); adopting the swap-aware figure
+here needs the same model-file floor and is left as a follow-up.
 
 ### GPU Counter
 
