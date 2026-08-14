@@ -584,11 +584,16 @@ mod tests {
 
     #[test]
     fn build_launch_uv_binds_venv_and_tags_declared_runtime_ref() -> anyhow::Result<()> {
-        // `require_uv_venv` stats `bin/python`, so the venv has to exist.
+        // `require_uv_venv` stats the in-venv interpreter, so the venv has to
+        // exist. Built through `pipette_venv::venv_python` rather than a literal
+        // `bin/python`: that spelling is `Scripts\python.exe` on Windows, and the
+        // layout module owns the choice precisely so fixtures cannot drift from
+        // what the installer writes and the check reads.
         let tmp = tempfile::tempdir()?;
         let venv = tmp.path().join("venv");
-        std::fs::create_dir_all(venv.join("bin"))?;
-        std::fs::write(venv.join("bin").join("python"), "")?;
+        let python = pipette_venv::venv_python(&venv);
+        std::fs::create_dir_all(pipette_venv::venv_bin(&venv))?;
+        std::fs::write(&python, "")?;
         let model_dir = tmp.path().join("model");
         std::fs::create_dir_all(&model_dir)?;
 

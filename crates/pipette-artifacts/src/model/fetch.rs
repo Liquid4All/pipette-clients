@@ -563,10 +563,24 @@ pub(crate) fn declared_size_bytes(http: &HttpClient, declared: &Model) -> Option
 }
 
 /// Total `Content-Length` over every file a single-file source would download.
+/// Absolute base for the size probe's throwaway dest.
+///
+/// Never written to: it exists only so [`to_stored`] resolves to its `Absolute*`
+/// arms, which `plan_downloads` requires and refuses a relative dest for. What
+/// decides that is `Path::is_absolute`, and its answer is per-platform — a bare
+/// `/quota-probe` has a root but no drive prefix, so Windows reads it as
+/// relative. Spelled per platform rather than Unix-shaped for that reason: the
+/// Unix form made every remote size probe on Windows return `None`, silently
+/// dropping the pre-fetch quota check to the post-publish sweep.
+#[cfg(windows)]
+const QUOTA_PROBE_BASE: &str = r"C:\quota-probe";
+#[cfg(not(windows))]
+const QUOTA_PROBE_BASE: &str = "/quota-probe";
+
 fn remote_files_size_bytes(http: &HttpClient, declared: &Model) -> Option<u64> {
     // Only the URLs matter here — the probe dest is never written. Going
     // through `plan_downloads` keeps URL and auth derivation single-sourced.
-    let into = to_stored(declared, Path::new("/quota-probe")).ok()?;
+    let into = to_stored(declared, Path::new(QUOTA_PROBE_BASE)).ok()?;
     plan_downloads(declared, &into)
         .ok()?
         .iter()
@@ -727,8 +741,34 @@ mod tests {
 
     const SHA_A: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
+    /// Store base the planning tests re-home into. Platform-shaped for the same
+    /// reason [`QUOTA_PROBE_BASE`] is: `to_stored` picks its `Absolute*` arms off
+    /// `Path::is_absolute`, whose answer is per-platform, so a bare
+    /// `/store/entry/blobs` is read as relative on Windows and every re-home
+    /// through it fails `RelativePath` validation instead of testing anything.
+    ///
+    /// Note the asymmetry that makes this easy to miss: `AbsolutePath`'s own
+    /// validator is a platform-independent string check that accepts the Unix
+    /// spelling everywhere, so tests handing a literal straight to
+    /// `AbsolutePath::try_new` pass on Windows — only the ones routed through
+    /// `to_stored` break.
+    ///
+    /// Spelled with forward slashes on both platforms because `to_stored`
+    /// normalizes separators to `/`; only the drive prefix differs, which is what
+    /// lets [`dest`] compose expectations from one string.
+    #[cfg(windows)]
+    const BASE: &str = "C:/store/entry/blobs";
+    #[cfg(not(windows))]
+    const BASE: &str = "/store/entry/blobs";
+
     fn base() -> &'static Path {
-        Path::new("/store/entry/blobs")
+        Path::new(BASE)
+    }
+
+    /// The dest a planned download carries for `relative` under [`BASE`], spelled
+    /// the way the planner spells it — separators normalized to `/`.
+    fn dest(relative: &str) -> String {
+        format!("{BASE}/{relative}")
     }
 
     fn hf_repo(revision: Option<&str>, auth: Option<&str>) -> anyhow::Result<HfRepo> {
@@ -772,7 +812,7 @@ mod tests {
             download.sha256.as_ref().map(ToString::to_string).as_deref(),
             Some(SHA_A)
         );
-        assert_eq!(download.dest.as_ref(), "/store/entry/blobs/Q4.gguf");
+        assert_eq!(download.dest.as_ref(), dest("Q4.gguf").as_str());
         Ok(())
     }
 
@@ -829,13 +869,7 @@ mod tests {
             ]
         );
         let dests: Vec<&str> = downloads.iter().map(|d| d.dest.as_ref()).collect();
-        assert_eq!(
-            dests,
-            [
-                "/store/entry/blobs/model.gguf",
-                "/store/entry/blobs/mmproj.gguf",
-            ]
-        );
+        assert_eq!(dests, [dest("model.gguf"), dest("mmproj.gguf")]);
         Ok(())
     }
 
@@ -861,13 +895,7 @@ mod tests {
             "URL sources carry no token"
         );
         let dests: Vec<&str> = downloads.iter().map(|d| d.dest.as_ref()).collect();
-        assert_eq!(
-            dests,
-            [
-                "/store/entry/blobs/model.gguf",
-                "/store/entry/blobs/mmproj.gguf",
-            ]
-        );
+        assert_eq!(dests, [dest("model.gguf"), dest("mmproj.gguf")]);
         Ok(())
     }
 
@@ -1332,6 +1360,19 @@ mod tests {
             }
         });
         Ok(format!("http://{addr}"))
+    }
+
+    /// The probe base has to be absolute by the running platform's rule, not by
+    /// looking Unix-shaped. `plan_downloads` refuses a relative dest, so a base
+    /// the platform reads as relative turns every remote size probe into `None`
+    /// — which is a quota check quietly not happening, not a visible failure.
+    /// Cheap to assert here, and it fails on the platform that would break.
+    #[test]
+    fn the_quota_probe_base_is_absolute_on_this_platform() {
+        assert!(
+            Path::new(QUOTA_PROBE_BASE).is_absolute(),
+            "{QUOTA_PROBE_BASE} is not absolute here"
+        );
     }
 
     #[test]

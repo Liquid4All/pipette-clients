@@ -190,13 +190,22 @@ mod tests {
                 },
             })
         );
+        // Platform-shaped: `bind_under` picks its `Absolute*` arm off
+        // `Path::is_absolute`, and a bare `/ws/models` is relative on Windows —
+        // which sends this through the `Relative*` arm and fails on the leading
+        // `/` instead of asserting the join. Forward slashes on both platforms,
+        // since the join normalizes separators to `/`.
+        #[cfg(windows)]
+        const MODELS_ROOT: &str = "C:/ws/models";
+        #[cfg(not(windows))]
+        const MODELS_ROOT: &str = "/ws/models";
         assert_eq!(
-            manifest.bind_under(Path::new("/ws/models"))?,
+            manifest.bind_under(Path::new(MODELS_ROOT))?,
             Model::GgufText(GgufText {
                 source: GgufTextSource::AbsoluteFile {
-                    path: AbsolutePath::try_new(
-                        "/ws/models/meta__llama__Q4.gguf/blobs/Q4.gguf".to_owned()
-                    )?,
+                    path: AbsolutePath::try_new(format!(
+                        "{MODELS_ROOT}/meta__llama__Q4.gguf/blobs/Q4.gguf"
+                    ))?,
                 },
             })
         );
