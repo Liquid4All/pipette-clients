@@ -63,6 +63,7 @@ pub fn run(
     let http_timeout = http_timeout_from_req(req);
 
     let mut server = server::start(&llama_server, &model_path, Some(&mmproj_path), &extra_flags)?;
+    server.observe_memory();
 
     let result = (|| -> anyhow::Result<RunResponse> {
         if let Err(e) = server::wait_until_ready(&server.base_url, &mut server.child, http_timeout)
@@ -132,6 +133,7 @@ pub fn run(
             executable: Some(llama_server.display().to_string()),
             command: server.command_preview.clone(),
             runtime_flags: Some(flags.clone()),
+            memory: server.memory_observation(),
             ..RunResponse::new(
                 BenchmarkResultData::VlThroughput {
                     prompt_tokens,

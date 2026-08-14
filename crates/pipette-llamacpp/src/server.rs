@@ -27,6 +27,40 @@ pub struct RunningLlamaServer {
     /// registry. Drop on the field auto-deregisters; the test-only
     /// construction site below leaves it `None`.
     _cleanup_guard: Option<pipette_subprocess::cleanup::Guard>,
+    /// Observes the server's memory for the run's `observation_max_*` fields.
+    /// `None` until a caller opts in via [`Self::observe_memory`], and taken by
+    /// [`Self::memory_observation`] so an observation is reported once.
+    memory_observer: Option<crate::run_memory::RunMemoryObserver>,
+}
+
+impl RunningLlamaServer {
+    /// Start observing this server's memory for the run's `observation_max_*`
+    /// fields. Opt-in rather than done by [`start`]: `eval` reports no
+    /// observation (it can restart the server mid-run, so no single figure
+    /// describes the whole run) and would otherwise pay for a sampler whose
+    /// result is discarded, across a run that can last hours.
+    ///
+    /// Call right after `start`. The peak counters are watermarks, so attaching a
+    /// moment late still sees a peak already reached.
+    pub fn observe_memory(&mut self) {
+        self.memory_observer = Some(crate::run_memory::RunMemoryObserver::attach(
+            self.child.id(),
+        ));
+    }
+
+    /// The memory this server held, for the run's observation fields. Empty
+    /// unless [`Self::observe_memory`] was called. Taking it finishes the
+    /// sampler, so a second call reports nothing observed rather than a second
+    /// reading.
+    ///
+    /// Safe to call after the child is reaped: the sampler has already
+    /// accumulated its peak and later reads simply find no `/proc` entry.
+    pub fn memory_observation(&mut self) -> pipette_plan_types::result::MemoryObservation {
+        self.memory_observer
+            .take()
+            .map(|observer| observer.finish())
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for RunningLlamaServer {
@@ -186,6 +220,7 @@ pub fn start(
         stderr_buf,
         stderr_thread: Some(stderr_thread),
         _cleanup_guard: Some(cleanup_guard),
+        memory_observer: None,
     })
 }
 
@@ -385,6 +420,7 @@ mod tests {
             stderr_buf,
             stderr_thread: Some(stderr_thread),
             _cleanup_guard: None,
+            memory_observer: None,
         };
         let stderr = shutdown_and_collect_stderr(&mut server);
 

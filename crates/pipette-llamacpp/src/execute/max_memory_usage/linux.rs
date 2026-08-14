@@ -86,7 +86,7 @@ pub(super) fn run(
         libc::kill(-pgid, libc::SIGKILL);
     });
 
-    let poller = super::proc_footprint::spawn_footprint_poller(pid);
+    let poller = crate::run_memory::proc_footprint::spawn_footprint_poller(pid);
 
     let output = child
         .wait_with_output()
@@ -95,7 +95,8 @@ pub(super) fn run(
     // footprint the Android arm reports; adopting it here needs the same
     // model-file floor, so it is left to a follow-up rather than changing what
     // Linux rows mean as a side effect.
-    let max_kib = poller.stop_and_join().peak_rss_kib;
+    let footprint = poller.stop_and_join();
+    let max_kib = footprint.peak_rss_kib;
     let killer_fired = killer.fired();
     drop(killer);
 
@@ -129,6 +130,13 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
+        // Both resident-only, so the observation restates this arm's metric and
+        // adds the swap term beside it. That term is the point here: it names
+        // the hosts where this metric is being suppressed by reclaim, which is
+        // what adopting the swap-aware peak on Linux would have to be argued
+        // from. Through the same rule the timing benchmarks use, so one sampler
+        // cannot mean two things.
+        memory: crate::run_memory::observation_from(&footprint),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

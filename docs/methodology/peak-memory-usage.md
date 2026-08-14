@@ -10,6 +10,99 @@ accelerator memory at the peak, or the workload failed to fit.
 
 In pipette, this metric is reported by the `max_memory_usage` benchmark family.
 
+## Observations vs metrics
+
+Everything in this document describes the `max_memory_usage` **metric**: a
+scored figure produced by a benchmark whose whole job is to measure memory.
+
+Separately, the llama.cpp benchmarks also record what memory they held while
+they ran, as **observations**:
+
+| Column | Meaning |
+|--------|---------|
+| `observation_max_host_bytes` | peak **resident** memory the run held (`VmHWM`, `PeakWorkingSetSize`; on macOS `phys_footprint`, which also counts compressed pages) |
+| `observation_max_swap_bytes` | most the kernel held of the run in swap at once |
+
+These are measured workload facts rather than results, in the same sense as
+`observation_vl_throughput_prefill_tokens`. They exist because a timing number
+means something different depending on the memory conditions it was measured
+under: a decode-throughput row that hit its figure while zram held part of the
+model is not comparable to one measured resident, and nothing else in the row
+says which happened. They carry no benchmark prefix because they are not
+specific to one benchmark type.
+
+`eval` is the deliberate exception and reports neither. It can restart
+`llama-server` mid-run after a crash, so the handle that survives to the end has
+only watched the replacement: any single figure would describe part of the run
+while looking like it described all of it. An absent observation says "not
+observed", which is true, where a partial one would read as complete.
+
+Two properties matter when reading them:
+
+- **The two terms are independent, and must not be added.** The host term is a
+  resident watermark; the swap term is the largest swap reading sampled. They
+  need not fall at the same instant, so their sum describes no moment that
+  actually happened. What a non-zero swap term tells you is that the resident
+  peak beside it was suppressed by reclaim, and roughly by how much.
+- **`observation_max_host_bytes` is resident-only, so it is not always the same
+  quantity as `max_host_bytes` on the same row.** The Linux metric is also
+  resident-only and the two agree there. The Android metric is the swap-aware
+  peak (`max(VmHWM, max(VmRSS + VmSwap))`), so on a row that swapped it will
+  read *higher* than the observation beside it. That difference is the metric's
+  swap uplift, made legible rather than hidden.
+
+A worked example, measured on a Galaxy S26 Ultra loading a 5417 MiB model with
+`--mmap 0`:
+
+| | |
+|---|---|
+| `observation_max_host_bytes` | 5004 MiB (what stayed resident) |
+| `observation_max_swap_bytes` | 4105 MiB (what zram held at its worst) |
+| Android `max_host_bytes` (metric) | 6138 MiB (the swap-aware peak) |
+
+The resident figure alone is *below the model file*, which a completed no-mmap
+load cannot be; the swap term beside it is what says why, and the metric is what
+scores the real requirement.
+
+### The observation must not move the number it rides along with
+
+A benchmark that reports time cannot pay for being watched, so the observer polls
+every 100 ms rather than at the memory benchmark's 10 ms (Android/Linux) or 20 ms
+(macOS). That is two small reads per tenth of a second, roughly 0.1% of one core.
+
+What that costs is bounded rather than nil, and the terms are affected unevenly:
+
+- **The peak counters are watermarks, so we never have to catch the peak's
+  instant.** `VmHWM` on Android/Linux and `ri_lifetime_max_phys_footprint` on
+  macOS are maintained by the kernel, and a later read still returns the highest
+  value reached.
+- **But a watermark has to be read while the process is alive.** An exited
+  process publishes no `Vm*` fields at all, and `proc_pid_rusage` returns ESRCH
+  once the child is reaped, so on both platforms the last useful read precedes
+  exit and any growth in the final interval is missed. In practice these
+  workloads peak at model load, well before the end, which is why the trade is
+  acceptable; 100 ms rather than something rarer keeps the window small, since
+  past that point the saving is immaterial while the window grows in proportion.
+- **The swap term loses resolution on top of that**, since the kernel keeps no
+  watermark for swap and a sampled maximum is the only way to see it. An
+  observation asks "did this run swap, and roughly how much", which a coarse
+  maximum answers. Precision there belongs to the memory benchmark, which keeps
+  its 10 ms cadence because it reports bytes rather than time.
+
+Coverage is per platform and deliberately incomplete. Android and Linux sample
+`/proc/<pid>/status` and report both terms. macOS reports the host term from
+`phys_footprint`, which already bills compressed pages, so it has no separate
+swap term. Windows has no sampler to attach: PSAPI is read once after exit
+through a duplicated handle rather than polled, so a Windows run of any *other*
+benchmark reports neither term. The memory benchmark is the exception: it makes
+that single post-exit read anyway, so its rows carry the host term (never the
+swap one) on Windows too. A
+platform that samples nothing contributes no keys, and absence therefore means
+"not observed" rather than zero, while a `0` means the sampler looked and found
+the run resident.
+
+## The metric
+
 The methodology uses three conceptual result fields:
 
 - `max_host_bytes`: peak host/process memory attributed to the workload.

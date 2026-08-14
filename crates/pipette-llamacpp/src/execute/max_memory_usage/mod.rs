@@ -9,7 +9,7 @@
 //!   gives in-process `[MTLDevice currentAllocatedSize]`. Host
 //!   counter is `phys_footprint`.
 //! - [`android`] — runs `llama-bench` under a `/proc` footprint sampler
-//!   ([`proc_footprint`]) and reports `max(VmHWM, max(VmRSS + VmSwap))`,
+//!   ([`crate::run_memory::proc_footprint`]) and reports `max(VmHWM, max(VmRSS + VmSwap))`,
 //!   because zram can compress the model out of the resident set mid-run
 //!   and a peak-RSS figure alone then under-reports what the run required.
 //!   No GPU probe (CPU-only Android build).
@@ -70,8 +70,6 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod pdh_poller;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-mod proc_footprint;
 #[cfg(target_os = "windows")]
 mod windows;
 

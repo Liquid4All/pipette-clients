@@ -26,11 +26,11 @@ use pipette_plan_types::RuntimeFlags;
 use pipette_subprocess::{argv, echo_info};
 
 use super::super::RunResponse;
-use super::proc_footprint::{peak_ram_bytes, spawn_footprint_poller};
 use super::Params;
 use crate::common::{
     apply_dylib_search_env, deadline_error_message, spawn_timeout_killer, MAX_MEMORY_USAGE_TIMEOUT,
 };
+use crate::run_memory::proc_footprint::{peak_ram_bytes, spawn_footprint_poller};
 
 pub(super) fn run(
     llama_bench: &Path,
@@ -137,6 +137,13 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
+        // Same sampler as the metric, read differently on purpose: the metric
+        // above is the swap-aware peak (`peak_ram_kib`), this is the resident
+        // watermark with the swap term beside it. On a row that swapped the two
+        // will differ, and that difference is the metric's swap uplift made
+        // legible. Reported at all because a consumer reading observations
+        // across benchmarks should not have to special-case the memory one.
+        memory: crate::run_memory::observation_from(&footprint),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

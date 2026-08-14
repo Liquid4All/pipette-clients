@@ -25,7 +25,7 @@ use std::{
 use anyhow::Context;
 
 use pipette_memprobe_metal::{host, metal};
-use pipette_plan_types::result::BenchmarkResultData;
+use pipette_plan_types::result::{BenchmarkResultData, MemoryObservation};
 use pipette_plan_types::RuntimeFlags;
 use pipette_subprocess::{argv, echo_info};
 
@@ -84,9 +84,13 @@ pub(super) fn run(
         .context("failed to wait for llama-bench")?;
     let killer_fired = killer.fired();
     drop(killer);
+    // The metric takes the peak alone: it polls at 20 ms across a whole load, so
+    // the seed-only case the `samples` count exists to catch cannot arise here.
+    // The observation channel applies that rule (`observation_from_phys`).
     let phys_peak = phys_poller
         .stop_and_join()
-        .context("phys_footprint poller failed; max_host_bytes is unreliable")?;
+        .context("phys_footprint poller failed; max_host_bytes is unreliable")?
+        .peak_bytes;
 
     if killer_fired {
         anyhow::bail!(
@@ -136,6 +140,10 @@ pub(super) fn run(
         executable: Some(llama_bench.display().to_string()),
         command: preview,
         runtime_flags: Some(flags.clone()),
+        // No swap term: `phys_footprint` bills compressed pages to the process,
+        // so the peak already counts them. `host_only` withholds a zero, which
+        // here means no `proc_pid_rusage` read landed.
+        memory: MemoryObservation::host_only(phys_peak),
         ..RunResponse::new(
             BenchmarkResultData::MaxMemoryUsage {
                 max_host_bytes,

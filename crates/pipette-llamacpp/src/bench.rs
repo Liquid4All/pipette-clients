@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use pipette_ops::measurement;
 use pipette_ops::readiness::{ReadinessGate, RepObserver};
+use pipette_plan_types::result::MemoryObservation;
 use pipette_plan_types::{LlamacppFlashAttention, RuntimeFlagRef, RuntimeFlags};
 use pipette_subprocess::{argv, echo_info};
 
@@ -112,6 +113,9 @@ struct LlamaBenchExecution {
     stdout: String,
     stderr: String,
     rows: Vec<LlamaBenchRow>,
+    /// What memory this one invocation held. Folded across reps by
+    /// [`execute_reps`] into the run's observation.
+    memory: MemoryObservation,
 }
 
 fn execute(mut command: Command) -> anyhow::Result<LlamaBenchExecution> {
@@ -151,9 +155,11 @@ fn execute(mut command: Command) -> anyhow::Result<LlamaBenchExecution> {
     // timeout-killer firing) leaves the registry empty for this pid.
     let _cleanup_guard = pipette_subprocess::cleanup::Guard::for_process_group(pid);
     let killer = spawn_timeout_killer(LLAMA_BENCH_TIMING_TIMEOUT, move || kill_pid(pid));
+    let memory_observer = crate::run_memory::RunMemoryObserver::attach(pid);
     let output = child
         .wait_with_output()
         .with_context(|| format!("failed to wait for {program}"))?;
+    let memory = memory_observer.finish();
     let killer_fired = killer.fired();
     drop(killer);
 
@@ -179,6 +185,7 @@ fn execute(mut command: Command) -> anyhow::Result<LlamaBenchExecution> {
         stdout,
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         rows,
+        memory,
     })
 }
 
@@ -204,6 +211,8 @@ pub struct BenchRepSummary {
     pub stderr: String,
     pub mean_ms: f64,
     pub stddev_ms: f64,
+    /// The worst memory any rep held. Not a metric — see [`MemoryObservation`].
+    pub memory: MemoryObservation,
 }
 
 pub fn execute_reps(
@@ -233,6 +242,13 @@ pub fn execute_reps(
         .first()
         .map(|execution| execution.preview.clone())
         .unwrap_or_default();
+    // Folded before `measured` is consumed below, and across every rep rather
+    // than the last one: the run's observation is the worst any rep reached.
+    let memory = measured
+        .iter()
+        .fold(MemoryObservation::default(), |worst, rep| {
+            worst.merge_max(rep.value.memory)
+        });
     let (stdout, stderr) = measured
         .into_iter()
         .next_back()
@@ -245,6 +261,7 @@ pub fn execute_reps(
         stderr,
         mean_ms: stats.mean_ms,
         stddev_ms: stats.stddev_ms,
+        memory,
     })
 }
 

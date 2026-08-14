@@ -109,6 +109,120 @@ pub struct BenchmarkEvalCompletion {
     pub completion_tokens: Option<u64>,
 }
 
+/// What a run's memory looked like while it ran, on every benchmark kind rather
+/// than only the memory one.
+///
+/// These are **observations, not metrics**, in the same sense as
+/// `observation_vl_throughput_prefill_tokens`: measured workload facts that
+/// qualify a result instead of scoring it. A decode-throughput row that hit its
+/// number while zram held part of the model is a different fact from one that
+/// stayed resident, and without this nothing in the row says which happened.
+///
+/// Unlike the `observation_vl_throughput_*` columns these carry no benchmark
+/// prefix, because they are not specific to one benchmark type.
+///
+/// Every field is optional and per platform: a platform with no sampler
+/// contributes no keys, so the wire shape is unchanged for a client that
+/// populates nothing. Absence means "not observed", never zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryObservation {
+    /// Peak *resident* memory the run held: the kernel's high-water mark for
+    /// the pages actually in RAM.
+    ///
+    /// Resident-only on every arm that can be, so the name means one thing
+    /// across platforms — `VmHWM` on Android and Linux, `PeakWorkingSetSize` on
+    /// Windows. macOS is the exception it cannot avoid: `phys_footprint` bills
+    /// compressed pages to the process and the kernel publishes no resident-only
+    /// counter beside it.
+    ///
+    /// Pages the kernel swapped out are deliberately **not** counted here. What
+    /// tells a reader this figure was suppressed by reclaim is
+    /// [`Self::max_swap_bytes`] standing beside it.
+    #[serde(
+        rename = "observation_max_host_bytes",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_host_bytes: Option<u64>,
+    /// Most the kernel held of this run in swap at once.
+    ///
+    /// A term in its own right, **not** a component of [`Self::max_host_bytes`]
+    /// and not additive with it: the resident watermark and the largest swap
+    /// reading need not fall at the same instant, so their sum describes no
+    /// moment that happened. Read it as the qualifier on the peak beside it —
+    /// a non-zero swap term means the resident figure under-states what the run
+    /// required, and by roughly how much.
+    ///
+    /// `Some(0)` is a real reading, meaning the platform sampled swap and the
+    /// run stayed resident, which is what makes the peak beside it trustworthy;
+    /// `None` means nothing sampled it.
+    #[serde(
+        rename = "observation_max_swap_bytes",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_swap_bytes: Option<u64>,
+}
+
+impl MemoryObservation {
+    /// A peak from a sampler that sees no swap term, or nothing if it read
+    /// nothing.
+    ///
+    /// Zero is how every sampler here spells "no read landed", so it is withheld
+    /// rather than reported: absence is filterable, and a zero on the row reads
+    /// as a measurement. Constructing through this instead of the literal is what
+    /// keeps that rule in one place — the arms that built their own once shipped
+    /// a `Some(0)`.
+    pub fn host_only(host_bytes: u64) -> Self {
+        Self {
+            max_host_bytes: (host_bytes > 0).then_some(host_bytes),
+            max_swap_bytes: None,
+        }
+    }
+
+    /// A peak with the swap term beside it, from a sampler that reads both.
+    ///
+    /// Same rule for the peak, and the swap term rides with it: a withheld peak
+    /// withholds the swap reading too, since half an observation says the
+    /// platform sampled swap while refusing to say what it held. A `Some(0)`
+    /// swap beside a real peak is the opposite — a reading, and the one that
+    /// makes the peak trustworthy.
+    pub fn with_swap(host_bytes: u64, swap_bytes: u64) -> Self {
+        match (host_bytes > 0).then_some(host_bytes) {
+            Some(host_bytes) => Self {
+                max_host_bytes: Some(host_bytes),
+                max_swap_bytes: Some(swap_bytes),
+            },
+            None => Self::default(),
+        }
+    }
+
+    /// The larger of two observations, term by term.
+    ///
+    /// A benchmark that runs several repetitions observes each one, and the run's
+    /// figure is the worst any rep reached: reporting the last rep would hide a
+    /// peak an earlier one hit, and averaging would describe no rep that
+    /// happened. Taken per term rather than by picking a winning observation,
+    /// because the largest peak and the largest swap need not come from the same
+    /// rep.
+    ///
+    /// `None` is "not observed" rather than zero, so it never wins a maximum: an
+    /// arm that sampled one rep and missed another still reports the reading it
+    /// has.
+    pub fn merge_max(self, other: Self) -> Self {
+        fn larger(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+            match (a, b) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (found, None) | (None, found) => found,
+            }
+        }
+        Self {
+            max_host_bytes: larger(self.max_host_bytes, other.max_host_bytes),
+            max_swap_bytes: larger(self.max_swap_bytes, other.max_swap_bytes),
+        }
+    }
+}
+
 /// Result data for a benchmark run.
 ///
 /// **Serde note**: this enum uses `#[serde(untagged)]`, so deserialization tries
@@ -193,10 +307,11 @@ impl BenchmarkResultData {
 
 /// Payload sent to the management server via `POST /benchmarks`.
 ///
-/// **Serde note**: this struct uses three `#[serde(flatten)]` fields —
-/// [`DeviceInfo`], [`ThermalTelemetry`], and [`BenchmarkResultData`].  All
-/// field names across the flattened types and the struct itself must remain
-/// unique; a collision silently breaks deserialization.  The round-trip test
+/// **Serde note**: this struct uses four `#[serde(flatten)]` fields —
+/// [`DeviceInfo`], [`ThermalTelemetry`], [`MemoryObservation`], and
+/// [`BenchmarkResultData`].  All field names across the flattened types and the
+/// struct itself must remain unique; a collision silently breaks
+/// deserialization.  The round-trip test
 /// `submission_payload_round_trip_with_device_info` guards this.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchmarkSubmissionPayload {
@@ -219,6 +334,12 @@ pub struct BenchmarkSubmissionPayload {
     // shape is unchanged for clients that don't populate it.
     #[serde(flatten)]
     pub thermal: ThermalTelemetry,
+    // What memory the run held while it ran, on every benchmark kind. Flattened
+    // beside the thermal and power observations for the same reason: these are
+    // conditions the result was measured under, not the result. See
+    // [`MemoryObservation`].
+    #[serde(flatten)]
+    pub memory: MemoryObservation,
     /// Canonical JSON of the run's `pipette_plan_types::Model` — the lossless
     /// model coordinate (`type`/`source`/`org`/`repo_name`/…). Supersedes the
     /// old `model_name`/`model_quant`/`mmproj_quant` grouping fields; the server
@@ -279,6 +400,99 @@ mod tests {
     use crate::device::DeviceFormFactor;
     use crate::thermal::{LinuxThermalZone, ThermalReading};
     use crate::ModelFlags;
+
+    fn observed(host: Option<u64>, swap: Option<u64>) -> MemoryObservation {
+        MemoryObservation {
+            max_host_bytes: host,
+            max_swap_bytes: swap,
+        }
+    }
+
+    /// Folding across repetitions must keep the worst of each term and must never
+    /// let "not observed" beat a real reading.
+    #[rstest]
+    // The worst rep wins, not the last one.
+    #[case::worst_rep_wins(
+        observed(Some(600), Some(50)),
+        observed(Some(400), Some(10)),
+        observed(Some(600), Some(50))
+    )]
+    // Terms are taken independently: the biggest peak and the biggest swap can
+    // come from different reps, and picking one rep wholesale would lose one.
+    #[case::terms_are_independent(
+        observed(Some(600), Some(10)),
+        observed(Some(400), Some(90)),
+        observed(Some(600), Some(90))
+    )]
+    // `None` is "nobody looked", so a rep that observed nothing must not erase a
+    // rep that did.
+    #[case::absence_never_wins(
+        observed(Some(600), Some(50)),
+        observed(None, None),
+        observed(Some(600), Some(50))
+    )]
+    #[case::absence_never_wins_either_order(
+        observed(None, None),
+        observed(Some(600), Some(50)),
+        observed(Some(600), Some(50))
+    )]
+    // A sampled zero is a real reading and survives, unlike absence.
+    #[case::a_sampled_zero_is_kept(
+        observed(Some(600), Some(0)),
+        observed(None, None),
+        observed(Some(600), Some(0))
+    )]
+    #[case::nothing_observed_stays_empty(
+        observed(None, None),
+        observed(None, None),
+        observed(None, None)
+    )]
+    fn merging_reps_keeps_the_worst_of_each_term(
+        #[case] a: MemoryObservation,
+        #[case] b: MemoryObservation,
+        #[case] expected: MemoryObservation,
+    ) {
+        assert_eq!(a.merge_max(b), expected);
+    }
+
+    /// The constructors are where the "zero is not a measurement" rule lives, so
+    /// every arm that builds an observation inherits it.
+    #[rstest]
+    #[case::host_only_keeps_a_real_peak(
+        observed(Some(600), None),
+        MemoryObservation::host_only(600)
+    )]
+    #[case::host_only_withholds_a_zero(observed(None, None), MemoryObservation::host_only(0))]
+    // A sampled zero swap is a reading and survives beside a real peak.
+    #[case::swap_zero_is_a_reading(
+        observed(Some(600), Some(0)),
+        MemoryObservation::with_swap(600, 0)
+    )]
+    #[case::swap_rides_with_the_peak(
+        observed(Some(600), Some(50)),
+        MemoryObservation::with_swap(600, 50)
+    )]
+    // Never half an observation: no peak means the swap term goes too.
+    #[case::a_withheld_peak_withholds_swap(
+        observed(None, None),
+        MemoryObservation::with_swap(0, 50)
+    )]
+    fn a_zero_peak_is_withheld_rather_than_reported(
+        #[case] expected: MemoryObservation,
+        #[case] built: MemoryObservation,
+    ) {
+        assert_eq!(built, expected);
+    }
+
+    /// An observation with nothing in it must contribute no keys, so a client on
+    /// a platform without a sampler leaves the wire shape untouched.
+    #[test]
+    fn an_empty_observation_serializes_to_nothing() -> anyhow::Result<()> {
+        let json = serde_json::to_value(MemoryObservation::default())?;
+        assert_eq!(json, serde_json::json!({}), "got {json}");
+        assert_eq!(MemoryObservation::default(), MemoryObservation::default());
+        Ok(())
+    }
 
     /// Every untagged variant survives a round trip, with and without its
     /// optional stddev.
@@ -525,6 +739,7 @@ mod tests {
             device_power_state: None,
             device_power_save_mode: None,
             thermal: ThermalTelemetry::default(),
+            memory: MemoryObservation::default(),
             model_descriptor: MODEL_DESC.to_string(),
             runtime_descriptor: RT_DESC.to_string(),
             model_flags: None,
@@ -562,6 +777,7 @@ mod tests {
             device_power_state: None,
             device_power_save_mode: None,
             thermal: ThermalTelemetry::default(),
+            memory: MemoryObservation::default(),
             model_descriptor: MODEL_DESC.to_string(),
             runtime_descriptor: RT_DESC.to_string(),
             model_flags: None,
@@ -682,6 +898,10 @@ mod tests {
                     ..Default::default()
                 }],
             ),
+            memory: MemoryObservation {
+                max_host_bytes: Some(6_594_494_464),
+                max_swap_bytes: Some(356_515_840),
+            },
             model_descriptor: MODEL_DESC.to_string(),
             runtime_descriptor: RT_DESC.to_string(),
             model_flags: None,
@@ -707,6 +927,16 @@ mod tests {
         assert_eq!(json["device_linux_thermal_zones_before"][2]["iteration"], 1);
         assert_eq!(json["device_linux_thermal_zones_before"][2]["celsius"], 55);
         assert!(json.get("thermal").is_none());
+        // The memory observation flattens the same way, under the
+        // `observation_*` names the warehouse uses for measured workload facts.
+        // Note this is a decode-throughput row: the observation rides on every
+        // benchmark, not just the memory one.
+        assert_eq!(json["observation_max_host_bytes"], 6_594_494_464u64);
+        assert_eq!(json["observation_max_swap_bytes"], 356_515_840u64);
+        assert!(
+            json.get("memory").is_none(),
+            "must flatten, not nest: {json}"
+        );
         let round_tripped: BenchmarkSubmissionPayload = serde_json::from_value(json)?;
         assert_eq!(round_tripped, payload);
         Ok(())

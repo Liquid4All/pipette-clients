@@ -80,8 +80,10 @@ that path) still surface the peak.
 
 ```rust
 pub fn spawn_phys_footprint_poller(pid: i32) -> PhysFootprintPoller;
+pub fn spawn_phys_footprint_poller_for_observation(pid: i32) -> PhysFootprintPoller;
 pub struct PhysFootprintPoller { /* opaque */ }
-impl PhysFootprintPoller { pub fn stop_and_join(self) -> u64; }
+pub struct PhysFootprint { pub peak_bytes: u64, pub samples: u32 }
+impl PhysFootprintPoller { pub fn stop_and_join(self) -> anyhow::Result<PhysFootprint>; }
 ```
 
 Polls `proc_pid_rusage(pid, RUSAGE_INFO_V4)` every 20 ms while the
@@ -92,6 +94,14 @@ high-water mark** maintained inside the kernel: even if the
 20 ms poll misses a sub-poll spike, the next poll observes the
 elevated lifetime max. The 20 ms cadence is therefore latency for
 detection, not for accuracy.
+
+That is why `spawn_phys_footprint_poller_for_observation` exists: a caller
+that only wants an observation alongside a benchmark reporting time
+polls every 100 ms and still reads the same watermark rather than
+having to catch the peak's instant. It is not free, though --
+`proc_pid_rusage` returns ESRCH once the child is reaped, so the last
+useful read precedes exit and a peak reached in the final interval is
+missed.
 
 The poller's value is reported **directly** as `max_host_bytes`.
 On Apple UMA, Metal allocations are billed to `phys_footprint`, so
@@ -122,7 +132,7 @@ cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 let child = cmd.spawn()?;
 let phys_poller = host::spawn_phys_footprint_poller(child.id() as i32);
 let output = child.wait_with_output()?;
-let phys_peak = phys_poller.stop_and_join();
+let phys_peak = phys_poller.stop_and_join()?.peak_bytes;
 
 // Read shim snapshot. Each peak is reported independently — no
 // cross-subtraction. On UMA the two values overlap (Metal lives

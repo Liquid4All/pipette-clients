@@ -226,6 +226,9 @@ pub fn run_eval(
         // only in `--port`.
         command: server.command_preview.clone(),
         runtime_flags: Some(flags.clone()),
+        // No memory observation, deliberately: eval can restart `llama-server`
+        // mid-run, so no single figure describes the whole run. See
+        // `RunningLlamaServer::observe_memory`; `RunResponse::new` defaults it.
         ..RunResponse::new(
             BenchmarkResultData::Eval { completions },
             String::new(),

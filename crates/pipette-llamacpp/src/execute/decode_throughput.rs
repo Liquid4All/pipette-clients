@@ -60,6 +60,7 @@ pub fn run(
         executable: Some(llama_bench.display().to_string()),
         command: summary.preview,
         runtime_flags: Some(flags),
+        memory: summary.memory,
         ..RunResponse::new(
             BenchmarkResultData::DecodeThroughput {
                 decode_time_ms: summary.mean_ms,
