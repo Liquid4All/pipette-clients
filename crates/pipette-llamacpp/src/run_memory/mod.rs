@@ -142,11 +142,12 @@ impl RunMemoryObserver {
 
 /// What a `phys_footprint` reading is worth reporting as, or nothing.
 ///
-/// The macOS counterpart of [`observation_from`], applying the same rule: the
-/// read taken as the poller starts happens before the child has loaded
-/// anything, so a footprint built only from it describes startup rather than the
-/// run. `phys_footprint` being a watermark does not help here — the watermark is
-/// simply small that early.
+/// The macOS counterpart of [`observation_from`], applying the same rule for the
+/// same reason (`PhysFootprint::samples`). Weaker here than on `/proc`: that
+/// sampler seeds synchronously, so one sample provably means startup, while this
+/// poller's first read lands whenever its thread is scheduled. The guard only
+/// ever withholds, so the difference costs a short run its observation rather
+/// than putting a wrong figure on a row.
 #[cfg(target_os = "macos")]
 fn observation_from_phys(
     footprint: pipette_memprobe_metal::host::PhysFootprint,
@@ -165,16 +166,17 @@ fn observation_from_phys(
 /// from a live process.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn observation_from(footprint: &proc_footprint::Footprint) -> MemoryObservation {
-    // A seed-only footprint describes process startup in a few plausible-looking
-    // MB that a consumer cannot tell apart from a real measurement, so it is
-    // withheld on top of the zero rule the constructor applies.
+    // Withheld on top of the zero rule the constructor applies: see
+    // `Footprint::samples`.
     if footprint.samples < 2 {
         return MemoryObservation::default();
     }
     // `peak_rss_kib` (VmHWM), deliberately not `peak_ram_kib()`: the host term is
     // the resident watermark, so the field means the same thing on every arm that
     // can report it. The swap-aware sum stays out of it and rides beside it as
-    // the swap term, which is what says the resident figure was suppressed.
+    // the swap term, which is what says the resident figure was suppressed. An
+    // unreadable VmHWM therefore withholds the swap reading too, rather than
+    // reporting a term whose peak is missing.
     MemoryObservation::with_swap(
         footprint.peak_rss_kib.saturating_mul(1024),
         footprint.max_swap_bytes(),
@@ -185,64 +187,46 @@ pub(crate) fn observation_from(footprint: &proc_footprint::Footprint) -> MemoryO
 mod tests {
     use super::*;
 
-    /// The seed is taken before the child has loaded anything, so a footprint
-    /// built only from it describes startup, not the run. Reporting it would put
-    /// a few MB on a row as though measured; these cases pin that it is withheld.
+    /// What reaches a row from a `/proc` footprint: the resident peak, only once
+    /// a read has landed after the seed, and never half an observation.
     ///
-    /// Asserts the whole observation, not just the peak: a withheld peak has to
-    /// take the swap term with it, or the row claims swap was sampled while
-    /// refusing to say what it held.
+    /// Asserts the whole observation rather than the peak alone, since a
+    /// withheld peak has to take the swap term with it.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[rstest::rstest]
-    #[case::seed_only_is_withheld(3_000, 1, MemoryObservation::default())]
-    #[case::nothing_read_is_withheld(0, 0, MemoryObservation::default())]
+    #[case::seed_only_is_withheld(3_000, 0, 0, 1, MemoryObservation::default())]
+    #[case::nothing_read_is_withheld(0, 0, 0, 0, MemoryObservation::default())]
     #[case::a_post_seed_read_is_reported(
-        6_440_000,
-        2,
+        6_440_000, 0, 0, 2,
         MemoryObservation::with_swap(6_440_000 * 1024, 0)
     )]
-    fn an_observation_needs_a_read_after_the_seed(
+    // A measured S26 Ultra footprint: `VmHWM` 5004 MiB while zram held 4105 MiB,
+    // the two summing to the 6138 MiB the Android metric scores. Only the
+    // resident term may appear here, or the field means one thing on an arm that
+    // swapped and another on one that did not.
+    #[case::swapping_reports_the_resident_term(
+        5_124_688, 6_285_312, 4_203_520, 64,
+        MemoryObservation::with_swap(5_124_688 * 1024, 4_203_520 * 1024)
+    )]
+    fn an_observation_reports_the_resident_peak_after_the_seed(
         #[case] peak_rss_kib: u64,
+        #[case] peak_committed_kib: u64,
+        #[case] max_swap_kib: u64,
         #[case] samples: u32,
         #[case] expected: MemoryObservation,
     ) {
         let footprint = proc_footprint::Footprint {
             peak_rss_kib,
+            peak_committed_kib,
+            max_swap_kib,
             samples,
             ..Default::default()
         };
         assert_eq!(observation_from(&footprint), expected);
     }
 
-    /// The host term is the resident watermark, never the swap-aware sum. Figures
-    /// are a real S26 Ultra reading: `VmHWM` 5004 MiB while zram held 4105 MiB of
-    /// the run, summing to the 6138 MiB the `max_memory_usage` metric reports on
-    /// Android. Only the resident term may appear here, or the field means two
-    /// things depending on the arm that filled it.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    #[test]
-    fn the_host_term_stays_resident_when_the_run_swapped() {
-        let footprint = proc_footprint::Footprint {
-            peak_rss_kib: 5_124_688,
-            peak_committed_kib: 6_285_312,
-            max_swap_kib: 4_203_520,
-            samples: 64,
-            ..Default::default()
-        };
-        assert_eq!(
-            observation_from(&footprint),
-            MemoryObservation::with_swap(5_124_688 * 1024, 4_203_520 * 1024)
-        );
-        assert_eq!(
-            footprint.peak_ram_kib(),
-            6_285_312,
-            "the swap-aware sum still exists for the metric that scores it"
-        );
-    }
-
-    /// The macOS arm needs the same rule as the `/proc` one: the read taken as
-    /// the poller starts describes startup, so a footprint built only from it is
-    /// withheld rather than reported as a measurement.
+    /// The macOS arm needs the same rule as the `/proc` one, and withholds a
+    /// zero on top of it.
     #[cfg(target_os = "macos")]
     #[rstest::rstest]
     #[case::seed_only_is_withheld(3_000_000, 1, MemoryObservation::default())]

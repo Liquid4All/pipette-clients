@@ -48,11 +48,12 @@ pub struct PhysFootprint {
     pub peak_bytes: u64,
     /// How many `proc_pid_rusage` calls returned a reading.
     ///
-    /// `1` means only the read taken as the thread started did, before the
-    /// child had loaded anything: a few plausible-looking MB of process startup
-    /// that a consumer cannot tell apart from a measurement. A caller that would
-    /// rather report nothing than that checks this — the `/proc` sampler carries
-    /// the same count for the same reason.
+    /// `1` usually means only the read taken as the thread started did, before
+    /// the child had loaded anything: a few plausible-looking MB of process
+    /// startup that a consumer cannot tell apart from a measurement. A caller
+    /// that would rather report nothing than that checks this. Only "usually"
+    /// because that first read happens when the thread is scheduled rather than
+    /// synchronously at spawn, so a short run can land its one sample later.
     pub samples: u32,
 }
 
