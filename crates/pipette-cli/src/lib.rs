@@ -30,8 +30,11 @@
 /// printed. A second, tidier spelling for the wire would break that match for
 /// nothing — the server stores the value opaquely and never parses it.
 ///
-/// Local builds report `dev` (see `build.rs`), so a developer's submissions are
-/// distinguishable from a released build's.
+/// A CI build off the release path carries the `-dev` marker its train never
+/// has, e.g. `2026.08.1-dev-3-g323eeda3ab` — it names the release it descends
+/// from and the commit it is, without being equal to any release. A local build
+/// reports a bare `dev` (see `build.rs`). Either way a developer's submissions
+/// stay distinguishable from a released build's.
 pub const CLIENT_VERSION: &str = env!("PIPETTE_CLI_BUILD_VERSION");
 
 pub mod artifact_ref;

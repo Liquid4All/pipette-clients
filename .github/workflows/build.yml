@@ -105,6 +105,13 @@ jobs:
 
       - name: Compute release metadata
         id: version
+        env:
+          # On `pull_request` the checkout is the merge commit GitHub built for
+          # the run, and its sha is in neither branch — a version naming it
+          # would point at nothing. Name the PR's head commit, the one the
+          # commit list and `git log` show. Empty on every other event, where
+          # ci/version.sh falls back to HEAD.
+          PIPETTE_VERSION_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # Assign first: `echo "v=$(cmd)"` succeeds even when cmd fails, and
           # the default shell is `bash -e` with no pipefail, so piping the echo
@@ -973,17 +980,19 @@ jobs:
     if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.runner }}
     env:
-      # The real date+sha version changes every commit, so on ordinary CI (PR /
-      # main push) runs it would invalidate the crate that bakes it in via
-      # `env!` on each build. Use it only on the release path and fall back to
-      # build.rs's own "dev" default otherwise, keeping the crate cacheable.
+      # Every build stamps its own version — `2026.08.1-3-ga1b2c3d4ab` on the
+      # release path, `2026.08.1-dev-3-g323eeda3ab` elsewhere (ci/version.sh). A
+      # binary taken off a PR run therefore names the release it descends from
+      # and the commit it is, which is the whole reason someone pastes
+      # `--version` into a bug report; the bare `dev` this used to pass on
+      # non-release runs named nothing.
       #
-      # The release path is a PUSH to `release/**` — that is what github-release
-      # gates on, so gating this on workflow_dispatch alone shipped every
-      # released binary reporting `0.1.0 (build dev)` as its `--version` and its
-      # `client_version`. The two conditions must name the same event or the
-      # published artifact does not know what it is.
-      PIPETTE_CLI_BUILD_VERSION: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/release/')) && needs.release-metadata.outputs.version || 'dev' }}
+      # It does change every commit, so the two crates that bake it in via
+      # `env!` recompile and the binaries relink on each run. That cost is
+      # confined to this job: `rust-check` never sets the variable, so the
+      # clippy/test caches — the ones a PR loop actually waits on — are
+      # untouched.
+      PIPETTE_CLI_BUILD_VERSION: ${{ needs.release-metadata.outputs.version }}
       # Compiler-level cache: reuse unchanged compilation units (including
       # workspace crates, which the target-dir cache drops) across runs. Biggest
       # effect on the CPU-bound Windows targets.
