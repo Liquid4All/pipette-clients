@@ -277,6 +277,12 @@ the runtime reports token counts that differ from the benchmark shape. A missing
 GPU field is valid only for paths where no GPU probe exists or no matching GPU
 sample was observed.
 
+A run that made the device swap is still collected and stored, but it is held back
+from the published results, together with every other run of that model and
+quantization on that device. That policy covers all benchmarks, not only peak
+memory, so it is stated with the selection rules: see
+[Selection policies → Swap exclusion](selection-policies.md#swap-exclusion).
+
 To compare `max_memory_usage` results:
 
 - Use the same benchmark ID, model, quantization, runtime, and relevant runtime

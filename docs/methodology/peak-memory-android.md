@@ -54,6 +54,12 @@ is the only thing in that field the tool did not print. A suppressed peak is
 therefore diagnosable after the fact: near-zero major faults indicate a run that
 met no pressure, while six figures indicate one that thrashed.
 
+Counting the swapped-out pages makes the figure honest, but a run that needed zram
+is still a run the device could not hold in RAM. Such a run is collected and
+stored, and held back from the published results along with the rest of that model
+and quantization on that device; see
+[Selection policies → Swap exclusion](selection-policies.md#swap-exclusion).
+
 `llama-bench` runs in its own process group so the deadline killer can signal the
 whole group. The sampler pins the process start time from `/proc/<pid>/stat` and
 discards any sample whose start time differs, so a pid recycled after the child is

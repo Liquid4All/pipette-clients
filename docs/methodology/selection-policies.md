@@ -81,6 +81,43 @@ a comparison between two models is only fair at the same quantization.
 The selected weight repository and quantization are part of the recorded
 selection and must match for two results to be compared.
 
+## Swap Exclusion
+
+A result describes a model on a device only when the device holds the whole run
+in physical memory. When the operating system moves part of a run to swap, the
+measurement describes a memory-starved device instead of the model. We hold that
+configuration back from the published results.
+
+The exclusion is a display rule, not a collection rule. We still run the
+benchmark, and we still store the result with its full recorded selection and run
+environment. The result stays available for investigation and comparison against a
+later rerun. What the exclusion removes is the public presentation of that number,
+because a swapping run does not answer the question a reader asks of it.
+
+The unit of exclusion is one quantization of one model on one device. A single
+swapping run excludes that quantization on that device in every configuration and
+for every benchmark, not only for peak memory. The context length, benchmark, and
+runtime flags of the run that swapped do not limit the exclusion.
+
+The moment of the swap does not matter. Weights that the kernel compresses during
+model load and pages that it evicts during inference mean the same thing: the
+device lacks the memory for that quantization. Both cases are excluded on the
+same terms.
+
+"Swap" means whatever the platform provides: zram on Android, the Windows page
+file, macOS memory compression and swap files, or a Linux swap partition or file.
+Detection is per platform, and we refine the mechanism as necessary for any
+operating system we support. The exclusion follows from the observation rather than
+from the signal that produced it.
+
+An exclusion is provisional, and it is not a verdict on the model. A swapping run
+raises a question about the cause: the device's memory ceiling, a background
+process that consumed memory, a runtime flag that loads the weights into
+anonymous memory, or a defect in the runtime. We investigate the cause. If the
+same quantization then runs on the same device with no swap, it appears again in a
+later update of the published results. The rerun carries the published number on
+its own; we do not publish the swapping run with a caveat attached.
+
 ## Provider Recommendations
 
 Model and runtime providers are welcome to tell us the best way to run their
