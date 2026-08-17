@@ -24,7 +24,7 @@ use pipette_plan_types::{
     Model, ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
 };
 
-use super::stored::to_stored;
+use super::stored::{to_stored, ModelStoredError};
 use crate::progress::{copy_reporting, Reporter};
 
 /// Why [`fetch_model`] couldn't materialize a model.
@@ -42,6 +42,11 @@ pub enum ModelFetchError {
     /// A resolved on-disk destination wasn't a valid [`AbsolutePath`].
     #[error("invalid destination path: {0}")]
     InvalidDestination(String),
+    /// The store-relative destinations for a model couldn't be derived at all,
+    /// so there is no plan to run — a `Url` source naming no file, colliding
+    /// vision leaves, a base that doesn't join into a valid path.
+    #[error(transparent)]
+    UnresolvedDestination(#[from] ModelStoredError),
     /// A directory model's repo (or `prefix` subtree) held no files to fetch —
     /// an empty repo or, more often, a mistyped `prefix`.
     #[error("{0}")]
@@ -276,7 +281,7 @@ fn plan_dir_downloads(
                 dest: local_join(dest_dir, &relative)?,
             })
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, ModelFetchError>>()?;
     // An empty plan means an empty repo or — far more likely — a `prefix` that
     // matches nothing (a typo). Fetching it would publish an empty model dir that
     // every later `ensure` resolves as valid, so reject it loudly here.
@@ -507,6 +512,11 @@ fn list_repo_files(
 
 /// `Content-Length` for `url`, from a HEAD. `None` whenever the server declines
 /// to say — the caller then has no size to enforce against.
+///
+/// A failed HEAD is not fatal: servers exist that refuse HEAD and serve the GET
+/// the fetch will make anyway, so a probe failure must not decide the resolve.
+/// It is logged, though — it is the one `None` here that isn't the server
+/// answering, and it is why the quota pre-flight has nothing to check.
 pub(crate) fn content_length(
     http: &HttpClient,
     url: &str,
@@ -521,6 +531,12 @@ pub(crate) fn content_length(
     request
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
+        .inspect_err(|source| {
+            log::warn!(
+                "sizing {url} failed ({source}); the storage quota cannot be checked before the \
+                 fetch"
+            );
+        })
         .ok()?
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)?
@@ -532,12 +548,23 @@ pub(crate) fn content_length(
 
 /// Bytes `declared` will occupy once fetched, when that is knowable before the
 /// fetch: an exact walk for a local import, `Content-Length` for single-file
-/// downloads, the HuggingFace blob listing for a directory snapshot. `None`
-/// whenever no size can be established, in which case the post-publish sweep is
-/// the only enforcement.
-pub(crate) fn declared_size_bytes(http: &HttpClient, declared: &Model) -> Option<u64> {
+/// downloads, the HuggingFace blob listing for a directory snapshot.
+///
+/// `Ok(None)` is "nobody could say how big this is" — the server declined, the
+/// listing omitted sizes, the source has no installer to size — and leaves the
+/// post-publish sweep as the only enforcement. `Err` is the narrower case where
+/// the fetch could not even be *planned*, and it is an error rather than another
+/// `None` because the two are not interchangeable to the caller: a `None` skips
+/// the quota pre-flight silently, letting the fetch run unchecked into a sweep
+/// that cannot evict the entry it just pinned. Planning here goes through the
+/// same [`to_stored`] and [`plan_downloads`] the fetch will, so an `Err` is the
+/// fetch's own failure surfacing one step early.
+pub(crate) fn declared_size_bytes(
+    http: &HttpClient,
+    declared: &Model,
+) -> Result<Option<u64>, ModelFetchError> {
     let walk = |path: &AbsolutePath| crate::entry::entry_size_bytes(Path::new(path.as_ref()));
-    match declared {
+    Ok(match declared {
         // OS-bundled: nothing lands in the store.
         Model::AppleFoundationText => Some(0),
         Model::GgufText(GgufText {
@@ -558,11 +585,10 @@ pub(crate) fn declared_size_bytes(http: &HttpClient, declared: &Model) -> Option
         Model::Mlx(Mlx { source })
         | Model::Torch(Torch { source })
         | Model::Openvino(Openvino { source }) => hf_dir_size_bytes(http, HF_ENDPOINT, source),
-        Model::GgufText(_) | Model::GgufVision(_) => remote_files_size_bytes(http, declared),
-    }
+        Model::GgufText(_) | Model::GgufVision(_) => remote_files_size_bytes(http, declared)?,
+    })
 }
 
-/// Total `Content-Length` over every file a single-file source would download.
 /// Absolute base for the size probe's throwaway dest.
 ///
 /// Never written to: it exists only so [`to_stored`] resolves to its `Absolute*`
@@ -570,24 +596,31 @@ pub(crate) fn declared_size_bytes(http: &HttpClient, declared: &Model) -> Option
 /// decides that is `Path::is_absolute`, and its answer is per-platform — a bare
 /// `/quota-probe` has a root but no drive prefix, so Windows reads it as
 /// relative. Spelled per platform rather than Unix-shaped for that reason: the
-/// Unix form made every remote size probe on Windows return `None`, silently
-/// dropping the pre-fetch quota check to the post-publish sweep.
+/// Unix form made every remote size probe on Windows fail to plan, dropping the
+/// pre-fetch quota check to the post-publish sweep.
 #[cfg(windows)]
 const QUOTA_PROBE_BASE: &str = r"C:\quota-probe";
 #[cfg(not(windows))]
 const QUOTA_PROBE_BASE: &str = "/quota-probe";
 
-fn remote_files_size_bytes(http: &HttpClient, declared: &Model) -> Option<u64> {
+/// Total `Content-Length` over every file a single-file source would download.
+fn remote_files_size_bytes(
+    http: &HttpClient,
+    declared: &Model,
+) -> Result<Option<u64>, ModelFetchError> {
     // Only the URLs matter here — the probe dest is never written. Going
-    // through `plan_downloads` keeps URL and auth derivation single-sourced.
-    let into = to_stored(declared, Path::new(QUOTA_PROBE_BASE)).ok()?;
-    plan_downloads(declared, &into)
-        .ok()?
+    // through `plan_downloads` keeps URL and auth derivation single-sourced,
+    // and it is why both failures propagate: the fetch plans the same way
+    // against the staging base, so anything that stops a plan forming here
+    // stops one forming there. Swallowing it would trade a real error for a
+    // skipped quota check.
+    let into = to_stored(declared, Path::new(QUOTA_PROBE_BASE))?;
+    Ok(plan_downloads(declared, &into)?
         .iter()
         .try_fold(0u64, |total, download| {
             content_length(http, download.url.as_ref(), download.auth.as_ref())
                 .map(|bytes| total.saturating_add(bytes))
-        })
+        }))
 }
 
 /// Total blob size of the repo subtree a directory model would snapshot.
@@ -597,7 +630,16 @@ fn hf_dir_size_bytes(http: &HttpClient, hf_endpoint: &str, source: &ModelSource)
         return None;
     };
     let prefix_slash = prefix.as_ref().map(|p| format!("{}/", p.as_ref()));
-    let info = repo_info(http, hf_endpoint, repo, true).ok()?;
+    // Not fatal, for the same reason a failed HEAD isn't: the fetch makes its
+    // own listing request and will report the failure itself if it persists.
+    let info = repo_info(http, hf_endpoint, repo, true)
+        .inspect_err(|source| {
+            log::warn!(
+                "sizing {repo} failed ({source}); the storage quota cannot be checked before the \
+                 fetch"
+            );
+        })
+        .ok()?;
     let under_prefix: Vec<_> = info
         .siblings
         .into_iter()
@@ -1327,7 +1369,7 @@ mod tests {
             },
         });
 
-        let size = declared_size_bytes(&test_http()?, &declared);
+        let size = declared_size_bytes(&test_http()?, &declared)?;
 
         assert!(size.is_some_and(|bytes| bytes >= 9000), "{size:?}");
         Ok(())
@@ -1364,9 +1406,10 @@ mod tests {
 
     /// The probe base has to be absolute by the running platform's rule, not by
     /// looking Unix-shaped. `plan_downloads` refuses a relative dest, so a base
-    /// the platform reads as relative turns every remote size probe into `None`
-    /// — which is a quota check quietly not happening, not a visible failure.
-    /// Cheap to assert here, and it fails on the platform that would break.
+    /// the platform reads as relative fails every remote size probe — now a
+    /// reported error rather than a silent `None`, but still a quota check that
+    /// never ran. Cheap to assert here, and it fails on the platform that would
+    /// break.
     #[test]
     fn the_quota_probe_base_is_absolute_on_this_platform() {
         assert!(
@@ -1389,7 +1432,7 @@ mod tests {
             },
         });
 
-        assert_eq!(declared_size_bytes(&test_http()?, &declared), Some(1400));
+        assert_eq!(declared_size_bytes(&test_http()?, &declared)?, Some(1400));
         Ok(())
     }
 
@@ -1403,9 +1446,36 @@ mod tests {
         let (declared, _into) =
             url_text_model(&server.url("/w.gguf"), None, Path::new("/tmp/w.gguf"))?;
 
-        // Nothing to refuse against, so the post-publish sweep becomes the only
-        // enforcement — the fetch itself will surface the 404.
-        assert_eq!(declared_size_bytes(&test_http()?, &declared), None);
+        // A server that won't answer a HEAD is not a planning failure: the plan
+        // formed, the size just isn't in it. Nothing to refuse against, so the
+        // post-publish sweep becomes the only enforcement — and the fetch itself
+        // will surface the 404.
+        assert_eq!(declared_size_bytes(&test_http()?, &declared)?, None);
+        Ok(())
+    }
+
+    /// The counterpart: when no plan can be formed, the size probe must not
+    /// answer `None`. `None` skips the quota pre-flight silently and hands the
+    /// job to a post-publish sweep that cannot evict the entry it just pinned,
+    /// so the failure has to reach the caller. This URL names no file, which is
+    /// the same wall the fetch would hit against the staging base.
+    #[test]
+    fn declared_size_bytes_fails_when_no_plan_can_be_formed() -> anyhow::Result<()> {
+        let declared = Model::GgufText(GgufText {
+            source: GgufTextSource::Url {
+                url: ResourceUrl::try_new("https://example.com/models/".to_owned())?,
+                sha256: None,
+            },
+        });
+
+        let err = declared_size_bytes(&test_http()?, &declared)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("an unplannable fetch must not size as unknown"))?;
+
+        assert!(
+            matches!(err, ModelFetchError::UnresolvedDestination(_)),
+            "{err:?}"
+        );
         Ok(())
     }
 
