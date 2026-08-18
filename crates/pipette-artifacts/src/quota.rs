@@ -1022,17 +1022,32 @@ mod tests {
         Ok(())
     }
 
+    /// Unix-only because the *fixture* is, not the behaviour: an un-removable
+    /// path is not constructible on Windows with std alone.
+    ///
+    /// Every lever that looks like it should work there is one Rust deliberately
+    /// neutralizes to make Windows behave like Unix:
+    ///
+    /// - Nesting the target under a *file* fails `ENOTDIR` here, but Windows
+    ///   reports that shape as plain `NotFound`, which [`remove_entry`] treats as
+    ///   success — already gone is the outcome it wanted.
+    /// - An open handle does not block it: std opens with `FILE_SHARE_DELETE`.
+    /// - Nor does the read-only attribute: std removes with
+    ///   `FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE`.
+    ///
+    /// What is left is a DENY-DELETE ACL, which means a native dependency for one
+    /// fixture. `apply_sweep`'s failure branch is plain platform-independent
+    /// arithmetic over `remove_entry`'s `Err`, and the linux and macos legs cover
+    /// it, so the coverage lost here is the fixture's reach, not the branch.
+    #[cfg(unix)]
     #[test]
     fn apply_sweep_reports_a_removal_it_could_not_perform() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
-        let missing = tmp.path().join("nested/entry");
+        // A path whose parent is a file: the unlink cannot succeed.
+        fs::write(tmp.path().join("nested"), b"blocker")?;
         let plan = SweepPlan {
             evictions: vec![StorageEntry {
-                // A path whose parent is a file: the unlink cannot succeed.
-                path: {
-                    fs::write(tmp.path().join("nested"), b"blocker")?;
-                    missing.join("child")
-                },
+                path: tmp.path().join("nested").join("entry").join("child"),
                 label: "blocked".to_owned(),
                 size_bytes: 10,
                 kind: EntryKind::Garbage {

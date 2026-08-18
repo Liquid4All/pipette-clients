@@ -310,10 +310,41 @@ mod tests {
         })
     }
 
-    /// Absolute base — staging / loader shape.
+    /// Absolute base — staging / loader shape. Platform-shaped because
+    /// [`to_stored`] picks its `Absolute*` arms off `Path::is_absolute`, whose
+    /// answer is per-platform: a bare `/store/entry` has a root but no drive
+    /// prefix, so Windows reads it as relative, every re-home takes the
+    /// `Relative*` branch, and `RelativePath` then rejects the leading `/` —
+    /// the test fails on path spelling without reaching what it meant to assert.
+    ///
+    /// Note the asymmetry that makes this easy to miss: `AbsolutePath`'s own
+    /// validator is a platform-independent string check that accepts the Unix
+    /// spelling everywhere, so the `/elsewhere/w.gguf`-style *inputs* below need
+    /// no such treatment — only bases, and the expectations derived from them.
+    ///
+    /// Forward slashes on both platforms because the joins normalize separators
+    /// to `/`; only the prefix differs, which is what lets [`under`] compose
+    /// every expectation from the one string.
+    #[cfg(windows)]
+    const BASE: &str = "C:/store/entry";
+    #[cfg(not(windows))]
+    const BASE: &str = "/store/entry";
+
     fn base() -> &'static Path {
-        Path::new("/store/entry")
+        Path::new(BASE)
     }
+
+    /// `relative` re-homed under [`BASE`], spelled the way the joins spell it.
+    fn under(relative: &str) -> String {
+        format!("{BASE}/{relative}")
+    }
+
+    /// Models root for the [`under_root`] tests, platform-shaped for the same
+    /// reason as [`BASE`].
+    #[cfg(windows)]
+    const MODELS_ROOT: &str = "C:/ws/models";
+    #[cfg(not(windows))]
+    const MODELS_ROOT: &str = "/ws/models";
 
     /// Models-root-relative base — the store's `stored` shape (`<key>/blobs`).
     fn relative_base() -> &'static Path {
@@ -520,7 +551,7 @@ mod tests {
             local,
             Model::GgufText(GgufText {
                 source: GgufTextSource::AbsoluteFile {
-                    path: AbsolutePath::try_new("/store/entry/Q4.gguf".to_owned())?,
+                    path: AbsolutePath::try_new(under("Q4.gguf"))?,
                 },
             })
         );
@@ -549,10 +580,7 @@ mod tests {
         else {
             return Err(anyhow::anyhow!("expected Absolute gguf-text source"));
         };
-        assert_eq!(
-            path,
-            AbsolutePath::try_new("/store/entry/w.gguf".to_owned())?
-        );
+        assert_eq!(path, AbsolutePath::try_new(under("w.gguf"))?);
         Ok(())
     }
 
@@ -592,8 +620,8 @@ mod tests {
                 _ => Err(anyhow::anyhow!("expected a local dir source")),
             }
         };
-        assert_eq!(dir_of(to_stored(&bare, base())?)?, "/store/entry");
-        assert_eq!(dir_of(to_stored(&sub, base())?)?, "/store/entry/4bit");
+        assert_eq!(dir_of(to_stored(&bare, base())?)?, BASE);
+        assert_eq!(dir_of(to_stored(&sub, base())?)?, under("4bit"));
         Ok(())
     }
 
@@ -608,7 +636,7 @@ mod tests {
             to_stored(&local, base())?,
             Model::GgufText(GgufText {
                 source: GgufTextSource::AbsoluteFile {
-                    path: AbsolutePath::try_new("/store/entry/w.gguf".to_owned())?,
+                    path: AbsolutePath::try_new(under("w.gguf"))?,
                 },
             })
         );
@@ -634,7 +662,7 @@ mod tests {
             }) => dir,
             other => anyhow::bail!("expected absolute dir model, got {other:?}"),
         };
-        assert_eq!(dir.as_ref(), "/store/entry");
+        assert_eq!(dir.as_ref(), BASE);
         Ok(())
     }
 
@@ -672,8 +700,8 @@ mod tests {
             to_stored(&declared, base())?,
             Model::GgufVision(GgufVision {
                 source: GgufVisionSource::AbsoluteFiles {
-                    model: AbsolutePath::try_new("/store/entry/model.gguf".to_owned())?,
-                    mmproj: AbsolutePath::try_new("/store/entry/mmproj.gguf".to_owned())?,
+                    model: AbsolutePath::try_new(under("model.gguf"))?,
+                    mmproj: AbsolutePath::try_new(under("mmproj.gguf"))?,
                 },
             })
         );
@@ -691,9 +719,7 @@ mod tests {
         });
         assert_eq!(
             to_stored(&local, base()),
-            Err(ModelStoredError::CollidingPaths(
-                "/store/entry/weights.gguf".to_owned()
-            ))
+            Err(ModelStoredError::CollidingPaths(under("weights.gguf")))
         );
         Ok(())
     }
@@ -715,10 +741,10 @@ mod tests {
             },
         });
         assert_eq!(
-            under_root(&local, Path::new("/ws/models"))?,
+            under_root(&local, Path::new(MODELS_ROOT))?,
             Model::GgufText(GgufText {
                 source: GgufTextSource::AbsoluteFile {
-                    path: AbsolutePath::try_new("/ws/models/key/blobs/w.gguf".to_owned())?,
+                    path: AbsolutePath::try_new(format!("{MODELS_ROOT}/key/blobs/w.gguf"))?,
                 },
             })
         );
@@ -734,7 +760,7 @@ mod tests {
             },
         });
         assert!(matches!(
-            under_root(&local, Path::new("/ws/models")),
+            under_root(&local, Path::new(MODELS_ROOT)),
             Err(ModelStoredError::NotRelative(_))
         ));
         Ok(())
@@ -750,7 +776,7 @@ mod tests {
             },
         });
         assert!(matches!(
-            under_root(&remote, Path::new("/ws/models")),
+            under_root(&remote, Path::new(MODELS_ROOT)),
             Err(ModelStoredError::NotRelative(_))
         ));
         Ok(())

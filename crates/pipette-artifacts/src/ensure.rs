@@ -36,9 +36,11 @@ pub fn ensure_model(
     // and a progress bar needs the same number for a denominator. Skipped when
     // nothing will be fetched — a cache hit costs no bytes, and asking a repo how
     // big they would have been is a network round trip for a number nobody reads.
-    let size = (!stored && (policy.is_some() || ctx.progress.is_some()))
-        .then(|| declared_size_bytes(http, declared))
-        .flatten();
+    let size = if !stored && (policy.is_some() || ctx.progress.is_some()) {
+        pre_fetch_size(ctx, declared)?
+    } else {
+        None
+    };
     if let Some(policy) = policy {
         quota::refuse_if_oversize(&declared.to_string(), size, policy.quota_bytes)?;
     }
@@ -115,6 +117,23 @@ fn sweep(policy: &StoragePolicy, pins: SweepPins) {
     });
 }
 
+/// Bytes `declared` will occupy once fetched, `None` when unknowable.
+///
+/// The failure is kept as a failure. [`declared_size_bytes`] errors only when the
+/// fetch cannot be planned, and answering `None` there would skip the quota
+/// pre-flight and let a fetch that is going to fail anyway run first.
+fn pre_fetch_size(
+    ctx: &ArtifactsContext,
+    declared: &Model,
+) -> Result<Option<u64>, ModelStoreError> {
+    declared_size_bytes(&ctx.download_http_client, declared).map_err(|source| {
+        ModelStoreError::Fetch {
+            model: declared.to_string(),
+            source: source.into(),
+        }
+    })
+}
+
 /// Bytes `declared` will occupy once installed, when knowable before the install.
 ///
 /// `None` means unknowable, and the post-publish sweep is then the only
@@ -146,7 +165,7 @@ pub fn model_download_size(
     if store.find(declared)?.is_some() {
         return Ok(Some(0));
     }
-    Ok(declared_size_bytes(&ctx.download_http_client, declared))
+    pre_fetch_size(ctx, declared)
 }
 
 /// [`model_download_size`] for a runtime. Only the kinds this process downloads
@@ -310,7 +329,10 @@ mod tests {
     /// leaves the store exactly full, so a test that needs an *overage* has to
     /// put bytes somewhere else.
     fn declared_bytes(ctx: &ArtifactsContext, model: &Model) -> u64 {
-        crate::model::fetch::declared_size_bytes(&ctx.download_http_client, model).unwrap_or(0)
+        crate::model::fetch::declared_size_bytes(&ctx.download_http_client, model)
+            .ok()
+            .flatten()
+            .unwrap_or(0)
     }
 
     #[test]

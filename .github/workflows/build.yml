@@ -242,6 +242,19 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Test
+        # `shell: bash` is load-bearing, not style. Windows defaults `run:` to
+        # pwsh, which does not abort on a failing native command and exits with
+        # the *last* one's status — so `cargo nextest` could fail and the step
+        # still went green on the strength of `cargo test --doc` behind it. A
+        # Windows-only failure in `pipette-artifacts` rode that gap. bash gets
+        # `-e -o pipefail`, which is what the other two legs were already using.
+        shell: bash
+        # `--no-fail-fast` so one run reports every failure. nextest's default
+        # cancels on the first, which costs a push per failing test to enumerate
+        # a break that only reproduces on one platform — the leg a contributor
+        # cannot run locally is the one where the full list is worth most. The
+        # extra runtime is only spent on an already-red run.
+        #
         # nextest runs the test binaries in parallel but does not execute
         # doctests, so keep a `--doc` pass to preserve that coverage.
         # Nothing is excluded, matching Clippy above.
@@ -253,7 +266,7 @@ jobs:
         # `native/benchmarks.rs` prompt-seed kernel, memory-peak arithmetic)
         # is pure logic that stubs tokenization.
         run: |
-          cargo nextest run --workspace
+          cargo nextest run --workspace --no-fail-fast
           cargo test --doc --workspace
 
   python-check:
