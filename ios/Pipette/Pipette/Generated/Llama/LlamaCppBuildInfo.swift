@@ -27,7 +27,7 @@ nonisolated enum LlamaCppBuildInfo {
         }
     }
 
-    static let build = Build.tagged(tag: "b10216", commit: "876a43211")
+    static let build = Build.tagged(tag: "b10516", commit: "b95502ba9")
 
     static var commit: String { build.commit }
 
