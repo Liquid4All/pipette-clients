@@ -45,6 +45,17 @@ pub fn positive_finite(metric: &str, value: f64) -> anyhow::Result<f64> {
     Ok(value)
 }
 
+/// Reject a non-positive or non-finite tokens/sec reading.
+pub fn validate_tps(metric: &str, tps: f64) -> anyhow::Result<()> {
+    positive_finite(metric, tps).map(|_| ())
+}
+
+/// Convert a tokens/sec reading into the milliseconds the result schema stores.
+pub fn time_ms_from_tps(tokens: u32, tps: f64) -> anyhow::Result<f64> {
+    let tps = positive_finite("throughput", tps)?;
+    Ok((tokens as f64 / tps) * 1000.0)
+}
+
 /// Reject a rep whose token count is not what the cell asked for.
 ///
 /// A prompt or a generation that came out the wrong size means the number

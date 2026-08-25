@@ -36,7 +36,7 @@ pub(super) fn run(
     let decode_tokens = benchmark.parameter_decode_tokens;
 
     readiness_gate()?;
-    let server = server::start_server(req, None)?;
+    let server = server::start_server(req)?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
     let warmup: DecodeThroughputResponse = throughput_http::post_json(

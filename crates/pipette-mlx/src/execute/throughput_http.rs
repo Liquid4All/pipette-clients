@@ -26,12 +26,11 @@ where
 }
 
 pub(super) fn validate_tps(metric: &str, tps: f64) -> anyhow::Result<()> {
-    pipette_ops::measurement::positive_finite(metric, tps).map(|_| ())
+    pipette_ops::measurement::validate_tps(metric, tps)
 }
 
 pub(super) fn time_ms_from_tps(tokens: u32, tps: f64) -> anyhow::Result<f64> {
-    validate_tps("throughput", tps)?;
-    Ok((tokens as f64 / tps) * 1000.0)
+    pipette_ops::measurement::time_ms_from_tps(tokens, tps)
 }
 
 #[cfg(test)]

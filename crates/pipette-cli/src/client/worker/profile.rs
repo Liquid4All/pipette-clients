@@ -62,7 +62,16 @@ fn runtime_capability_flags(runtime: &Runtime) -> Vec<String> {
         Runtime::UvVllm(rt) => ("uv_vllm", Some(rt.runtime_version())),
         Runtime::UvSglang(rt) => ("uv_sglang", Some(rt.runtime_version())),
         Runtime::AppleFoundation(_) => ("apple_foundation", None),
-        Runtime::CoreAiMacosPipette(_) => ("core_ai", None),
+        Runtime::CoreAiMacosPipette(rt) => (
+            "core_ai",
+            Some(
+                rt.packages
+                    .coreai_models
+                    .repository_version
+                    .as_ref()
+                    .to_string(),
+            ),
+        ),
     };
     let general = format!("runtime:{name}");
     match version {
@@ -90,6 +99,19 @@ pub fn installed_runtime_capabilities(
     let flags: std::collections::BTreeSet<_> = manifests
         .iter()
         .flat_map(|m| runtime_capability_flags(&m.declared))
+        .chain({
+            // Core AI is OS-bundled: it never publishes a store manifest, but
+            // a macOS host can still run it. Advertise the bundled pin so a
+            // plan that requires `runtime:core_ai` matches this client.
+            #[cfg(target_os = "macos")]
+            {
+                runtime_capability_flags(&Runtime::CoreAiMacosPipette(Default::default()))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Vec::new()
+            }
+        })
         .collect();
     Ok(flags.into_iter().collect())
 }

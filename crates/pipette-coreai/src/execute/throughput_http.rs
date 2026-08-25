@@ -17,19 +17,19 @@ where
     let http = HttpClient::with_request_timeout("pipette", HTTP_TIMEOUT)
         .context("failed to build Core AI server HTTP client")?;
     let url = format!("{base_url}{endpoint}");
-    let body = serde_json::to_value(request)
-        .with_context(|| format!("failed to serialize pipette-coreai-sidecar {endpoint} request"))?;
+    let body = serde_json::to_value(request).with_context(|| {
+        format!("failed to serialize pipette-coreai-sidecar {endpoint} request")
+    })?;
     http.json_request(Method::POST, &url, None, Some(body))
         .with_context(|| format!("POST {endpoint} to pipette-coreai-sidecar failed"))
 }
 
 pub(super) fn validate_tps(metric: &str, tps: f64) -> anyhow::Result<()> {
-    pipette_ops::measurement::positive_finite(metric, tps).map(|_| ())
+    pipette_ops::measurement::validate_tps(metric, tps)
 }
 
 pub(super) fn time_ms_from_tps(tokens: u32, tps: f64) -> anyhow::Result<f64> {
-    validate_tps("throughput", tps)?;
-    Ok((tokens as f64 / tps) * 1000.0)
+    pipette_ops::measurement::time_ms_from_tps(tokens, tps)
 }
 
 #[cfg(test)]

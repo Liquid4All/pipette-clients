@@ -141,20 +141,20 @@ final class CoreAIEngine: @unchecked Sendable {
 
         let options = InferenceOptions(maxTokens: maxTokens, includeLogits: false)
         let sampling = SamplingConfiguration(temperature: 0)
-        let start = SuspendingClock.now
+        let start = ContinuousClock.now
         let stream = try await engine.generate(
             with: prompt, samplingConfiguration: sampling, inferenceOptions: options
         )
 
         var promptSeconds: Double = 0
-        var genStart = SuspendingClock.now
+        var genStart = ContinuousClock.now
         var count = 0
-        var firstTokenAt: SuspendingClock.Instant?
+        var firstTokenAt: ContinuousClock.Instant?
 
         for try await _ in stream {
             if firstTokenAt == nil {
-                firstTokenAt = SuspendingClock.now
-                let now = SuspendingClock.now
+                firstTokenAt = ContinuousClock.now
+                let now = ContinuousClock.now
                 promptSeconds = seconds(from: start, to: now)
                 genStart = now
             }
@@ -173,8 +173,9 @@ final class CoreAIEngine: @unchecked Sendable {
         )
     }
 
-    private func seconds(from start: SuspendingClock.Instant, to end: SuspendingClock.Instant) -> Double {
-        (end - start).inSeconds
+    private func seconds(from start: ContinuousClock.Instant, to end: ContinuousClock.Instant) -> Double {
+        let d = start.duration(to: end)
+        return Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
     }
 }
 
@@ -216,6 +217,22 @@ final class SidecarServer: @unchecked Sendable {
     }
 
     func start() {
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                FileHandle.standardError.write(
+                    Data("PIPETTE_COREAI_READY port=\(self.port) model=\(self.engine.name)\n".utf8)
+                )
+            case .failed(let error):
+                FileHandle.standardError.write(
+                    Data("PIPETTE_COREAI_ERROR bind failed: \(error)\n".utf8)
+                )
+                exit(1)
+            default:
+                break
+            }
+        }
         listener.newConnectionHandler = { [weak self] conn in
             guard let self else { conn.cancel(); return }
             conn.start(queue: .global())
@@ -356,7 +373,6 @@ struct SidecarMain {
             FileHandle.standardError.write(Data("PIPETTE_COREAI_LOADING \(args.modelDir)\n".utf8))
             let engine = try await CoreAIEngine(bundleDir: dir, seed: args.seed)
             let server = try SidecarServer(port: args.port, engine: engine)
-            FileHandle.standardError.write(Data("PIPETTE_COREAI_READY port=\(args.port) model=\(engine.name)\n".utf8))
             server.start()
             // Suspend forever so the process stays alive; the NWListener's global
             // queue keeps serving. Never call dispatchMain()/RunLoop.run() from an

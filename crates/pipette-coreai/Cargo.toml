@@ -7,33 +7,24 @@ publish = false
 [lints]
 workspace = true
 
-# Describing an Apple Core AI runtime is portable; running one is not. The
-# catalog and bound projections are plain plan-types work, so they compile
-# everywhere — which is what lets `pipette-cli` resolve a `core-ai-macos://`
-# ref on a Linux box instead of keeping a second copy of this catalog. Only
-# `execute` is gated (see `src/lib.rs`), and its deps with it.
-[dependencies]
-anyhow.workspace = true
-pipette-ops.workspace = true
-pipette-plan-types.workspace = true
-serde = { workspace = true, features = ["derive"] }
+# This crate only *runs* a Core AI cell. URI parse, plan-types identity, and
+# catalog work live in pipette-cli / pipette-plan-types, so Linux and Windows
+# builds of pipette-cli do not need anything from here. The whole crate is
+# therefore macOS-gated: off-macOS it compiles as an empty lib.
 
-# `execute` only: the Swift sidecar transport, the HTTP client, and the
-# Metal-side measurement primitives — none of which exist off Apple Silicon.
 [target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+log.workspace = true
 pipette-http.workspace = true
 pipette-memprobe-metal.workspace = true
-log.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
 pipette-subprocess.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
-tokio.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-time.workspace = true
-toml.workspace = true
-uuid.workspace = true
 
-[dev-dependencies]
-pipette-artifacts.workspace = true
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+rstest.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true

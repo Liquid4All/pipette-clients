@@ -409,11 +409,50 @@ pub struct MlxMacosPipette {
     pub source: UvRuntimeSource,
 }
 
-/// Apple Core AI desktop CLI runtime. Carries no build of ours — the engine
-/// (Core AI / FoundationModels) ships with macOS 27 — so it is an empty marker
-/// like [`AppleFoundation`]; the model bundle carries the only authored identity.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
-pub struct CoreAiMacosPipette {}
+/// Apple Core AI desktop CLI runtime.
+///
+/// The inference *engine* ships with macOS 27, but the thing pipette actually
+/// runs is `pipette-coreai-sidecar`, compiled against the pinned Swift
+/// packages in [`CoreAiSwiftStack`]. Change that pin and the decode number
+/// changes under an otherwise identical cell — so the stack is part of the
+/// runtime identity, the same reason [`MlxIosPipette`] carries its
+/// `Package.resolved` pins. The `.aimodel` bundle (the model) *and* this
+/// stack together carry a published number; unlike [`AppleFoundation`], the
+/// weights do not ship with the OS.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct CoreAiMacosPipette {
+    pub packages: CoreAiSwiftStack,
+}
+
+/// The pinned Swift-package stack the desktop Core AI sidecar is compiled
+/// against (from the crate's `swift/Package.resolved`). Today that is Apple's
+/// `coreai-models` (`CoreAILM` product).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct CoreAiSwiftStack {
+    pub coreai_models: SourceRepository,
+}
+
+impl CoreAiMacosPipette {
+    /// The pin this client was built to compile. An empty
+    /// `core-ai-macos-pipette://` URI resolves to this.
+    pub fn bundled() -> Self {
+        Self {
+            packages: CoreAiSwiftStack {
+                coreai_models: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/john-rocky/coreai-models"),
+                    repository_version: NonEmptyString::try_new("0.2.2-zoo".to_owned())
+                        .expect("static pin"),
+                },
+            },
+        }
+    }
+}
+
+impl Default for CoreAiMacosPipette {
+    fn default() -> Self {
+        Self::bundled()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct DockerVllm {
@@ -718,6 +757,12 @@ impl std::fmt::Display for MlxIosPipette {
     }
 }
 
+impl std::fmt::Display for CoreAiMacosPipette {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.packages.fmt(f)
+    }
+}
+
 /// The pinned Swift packages joined space-separated, each as its
 /// `SourceRepository` coordinate (`repo@version`), in field order.
 impl std::fmt::Display for MlxSwiftStack {
@@ -727,6 +772,12 @@ impl std::fmt::Display for MlxSwiftStack {
             "mlx-swift={} mlx-swift-lm={} swift-transformers={}",
             self.mlx_swift, self.mlx_swift_lm, self.swift_transformers
         )
+    }
+}
+
+impl std::fmt::Display for CoreAiSwiftStack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "coreai-models={}", self.coreai_models)
     }
 }
 
@@ -779,7 +830,7 @@ impl std::fmt::Display for Runtime {
             Runtime::LlamacppApkPipette(rt) => rt.fmt(f),
             Runtime::LlamacppIosPipette(rt) => rt.fmt(f),
             Runtime::MlxMacosPipette(rt) => rt.fmt(f),
-            Runtime::CoreAiMacosPipette(_) => write!(f, "core_ai_macos_pipette"),
+            Runtime::CoreAiMacosPipette(rt) => rt.fmt(f),
             Runtime::MlxIosPipette(rt) => rt.fmt(f),
             Runtime::DockerVllm(rt) => rt.fmt(f),
             Runtime::DockerSglang(rt) => rt.fmt(f),

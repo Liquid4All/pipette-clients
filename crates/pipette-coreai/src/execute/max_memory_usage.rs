@@ -34,7 +34,11 @@ pub(super) fn run(req: &RunRequest) -> anyhow::Result<RunResponse> {
         .map_err(anyhow::Error::from)?;
     let prefill_tokens = benchmark.parameter_prefill_tokens;
 
-    let mut server = server::start_server(req, None)?;
+    // Specialization (first load of this `.aimodel` on this OS) happens inside
+    // sidecar construction, *before* READY. The poller starts after READY, so
+    // a cold-cache compile peak is excluded by policy. See
+    // docs/methodology/coreai-specialization.md.
+    let mut server = server::start_server(req)?;
     let phys_poller = host::spawn_phys_footprint_poller(server.pid() as i32);
 
     let response_result: anyhow::Result<MaxMemoryUsageResponse> = throughput_http::post_json(
@@ -81,21 +85,16 @@ fn validate_response(
     expected_prompt_tokens: u32,
     expected_completion_tokens: u32,
 ) -> anyhow::Result<()> {
-    if response.prompt_tokens != expected_prompt_tokens {
-        anyhow::bail!(
-            "{ENDPOINT} returned prompt_tokens {}, expected {}",
-            response.prompt_tokens,
-            expected_prompt_tokens
-        );
-    }
-    if response.completion_tokens != expected_completion_tokens {
-        anyhow::bail!(
-            "{ENDPOINT} returned completion_tokens {}, expected {}",
-            response.completion_tokens,
-            expected_completion_tokens
-        );
-    }
-    Ok(())
+    pipette_ops::measurement::expect_tokens(
+        "prompt_tokens",
+        response.prompt_tokens,
+        expected_prompt_tokens,
+    )?;
+    pipette_ops::measurement::expect_tokens(
+        "completion_tokens",
+        response.completion_tokens,
+        expected_completion_tokens,
+    )
 }
 
 #[cfg(test)]

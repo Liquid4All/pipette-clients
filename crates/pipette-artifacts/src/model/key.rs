@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use pipette_plan_types::{
-    GgufTextSource, GgufVisionSource, HfRepo, Mlx, Model, ModelSource, Openvino, Torch, CoreAi,
+    CoreAi, GgufTextSource, GgufVisionSource, HfRepo, Mlx, Model, ModelSource, Openvino, Torch,
 };
 
 use crate::entry::BLOBS_DIR_NAME;

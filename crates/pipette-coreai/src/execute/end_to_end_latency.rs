@@ -37,7 +37,7 @@ pub(super) fn run(
     let decode_tokens = benchmark.parameter_decode_tokens;
 
     readiness_gate()?;
-    let server = server::start_server(req, None)?;
+    let server = server::start_server(req)?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
     validate_response(
@@ -95,35 +95,23 @@ fn validate_response(
     expected_prompt_tokens: u32,
     expected_completion_tokens: u32,
 ) -> anyhow::Result<()> {
-    validate_ms("total_ms", response.total_ms)?;
-    validate_token_count(
+    measurement::positive_finite("total_ms", response.total_ms)?;
+    measurement::expect_tokens(
         "prompt_tokens",
         response.prompt_tokens,
         expected_prompt_tokens,
     )?;
-    validate_token_count(
+    measurement::expect_tokens(
         "completion_tokens",
         response.completion_tokens,
         expected_completion_tokens,
     )
 }
 
-fn validate_ms(metric: &str, value: f64) -> anyhow::Result<()> {
-    if !value.is_finite() || value <= 0.0 {
-        anyhow::bail!("invalid {metric}: {value}");
-    }
-    Ok(())
-}
-
-fn validate_token_count(metric: &str, actual: u32, expected: u32) -> anyhow::Result<()> {
-    if actual != expected {
-        anyhow::bail!("{ENDPOINT} returned {metric} {actual}, expected {expected}");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn valid_response() -> EndToEndLatencyResponse {
@@ -134,43 +122,41 @@ mod tests {
         }
     }
 
-    #[test]
-    fn accepts_valid_response() {
-        assert!(validate_response(&valid_response(), 100, 256).is_ok());
-    }
-
-    #[test]
-    fn rejects_token_mismatches() {
-        assert!(validate_response(
-            &EndToEndLatencyResponse {
-                prompt_tokens: 99,
-                ..valid_response()
-            },
-            100,
-            256
-        )
-        .is_err());
-        assert!(validate_response(
-            &EndToEndLatencyResponse {
-                completion_tokens: 255,
-                ..valid_response()
-            },
-            100,
-            256
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn rejects_invalid_ms() {
-        assert!(validate_response(
-            &EndToEndLatencyResponse {
-                total_ms: 0.0,
-                ..valid_response()
-            },
-            100,
-            256
-        )
-        .is_err());
+    #[rstest]
+    #[case::ok(valid_response(), 100, 256, true)]
+    #[case::prompt_mismatch(
+        EndToEndLatencyResponse {
+            prompt_tokens: 99,
+            ..valid_response()
+        },
+        100,
+        256,
+        false
+    )]
+    #[case::completion_mismatch(
+        EndToEndLatencyResponse {
+            completion_tokens: 255,
+            ..valid_response()
+        },
+        100,
+        256,
+        false
+    )]
+    #[case::zero_ms(
+        EndToEndLatencyResponse {
+            total_ms: 0.0,
+            ..valid_response()
+        },
+        100,
+        256,
+        false
+    )]
+    fn validates_response(
+        #[case] response: EndToEndLatencyResponse,
+        #[case] prompt: u32,
+        #[case] completion: u32,
+        #[case] ok: bool,
+    ) {
+        assert_eq!(validate_response(&response, prompt, completion).is_ok(), ok);
     }
 }

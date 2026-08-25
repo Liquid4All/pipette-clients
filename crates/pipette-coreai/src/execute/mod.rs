@@ -8,17 +8,15 @@ pub(crate) mod server;
 mod throughput_http;
 
 use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_ops::EvalCompletionsStore;
 use pipette_plan_types::run::RunRequest;
 use pipette_plan_types::run::RunResponse;
 
 /// Top-level Core AI dispatch: route a prepared [`RunRequest`] by kind.
 ///
 /// CLI owns prepare/record; this crate only runs the cell and returns
-/// [`RunResponse`]. Mirrors `pipette-mlx`'s dispatch.
+/// [`RunResponse`].
 pub fn run(
     req: &RunRequest,
-    _eval_completions: &EvalCompletionsStore,
     readiness_gate: ReadinessGate,
     observer: &RepObserver,
 ) -> anyhow::Result<RunResponse> {

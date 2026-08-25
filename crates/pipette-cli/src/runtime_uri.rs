@@ -11,6 +11,7 @@
 //! ```text
 //! uri    ::= scheme "://" body            ; split on the FIRST "://"
 //! scheme ::= "llamacpp-cli-stock-tools" | "mlx-macos-pipette"
+//!          | "core-ai-macos-pipette"
 //!          | "docker-vllm" | "docker-sglang"
 //!          | "uv-vllm" | "uv-sglang" | "uv-openvino"
 //! body   ::= "" | pair ("&" pair)*        ; keys unordered, each at most once
@@ -25,6 +26,7 @@
 //! |-------------------------------|------------------------------------------------------------|
 //! | `llamacpp-cli-stock-tools`    | `version`(+*`repo`*) **xor** `url`; `flavor`               |
 //! | `mlx-macos-pipette`           | `version`; *`flavor`* (default `macos-arm64`)               |
+//! | `core-ai-macos-pipette`       | *`version`* (default: bundled `coreai-models` pin)          |
 //! | `docker-vllm` / `docker-sglang` | `image`, `tag`; *`flavor`* (default `nvidia_gpu`)        |
 //! | `uv-vllm` / `uv-sglang`       | `server`, `build`, `python`                                |
 //! | `uv-openvino`                 | `version` (the device is a per-cell runtime flag)          |
@@ -134,8 +136,8 @@ pub enum RuntimeUriError {
 
     #[error(
         "unknown runtime URI scheme `{0}` (expected `llamacpp-cli-stock-tools`, \
-         `mlx-macos-pipette`, `docker-vllm`, `docker-sglang`, `uv-vllm`, `uv-sglang`, \
-         or `uv-openvino`; a scheme is the runtime type with `-` for `_`)"
+         `mlx-macos-pipette`, `core-ai-macos-pipette`, `docker-vllm`, `docker-sglang`, \
+         `uv-vllm`, `uv-sglang`, or `uv-openvino`; a scheme is the runtime type with `-` for `_`)"
     )]
     UnknownScheme(String),
 
@@ -464,6 +466,15 @@ fn parse_mlx(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     }))
 }
 
+fn parse_coreai(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
+    let mut rt = CoreAiMacosPipette::bundled();
+    if let Some(version) = p.take(KEY_VERSION) {
+        rt.packages.coreai_models.repository_version = non_empty(KEY_VERSION, version)?;
+    }
+    p.finish()?;
+    Ok(Runtime::CoreAiMacosPipette(rt))
+}
+
 fn parse_docker_vllm(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     let image_name = non_empty(KEY_IMAGE, p.require(KEY_IMAGE)?)?;
     let image_tag = non_empty(KEY_TAG, p.require(KEY_TAG)?)?;
@@ -560,9 +571,7 @@ pub fn parse_runtime_uri(input: &str) -> Result<Runtime, RuntimeUriError> {
     match scheme {
         Scheme::LlamacppCliStockTools => parse_llama_cpp(pairs),
         Scheme::MlxMacosPipette => parse_mlx(pairs),
-        Scheme::CoreAiMacosPipette => Ok(Runtime::CoreAiMacosPipette(
-            CoreAiMacosPipette::default(),
-        )),
+        Scheme::CoreAiMacosPipette => parse_coreai(pairs),
         Scheme::DockerVllm => parse_docker_vllm(pairs),
         Scheme::DockerSglang => parse_docker_sglang(pairs),
         Scheme::UvVllm => parse_uv_vllm(pairs),
@@ -760,9 +769,14 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
             Ok(body.finish())
         }
         // Core AI is a desktop runtime (macOS 27+): the engine ships with the OS,
-        // so the URI carries no keys — an empty body.
-        Runtime::CoreAiMacosPipette(_) => {
-            Ok(Body::new(Scheme::CoreAiMacosPipette).finish())
+        // the URI carries the bundled `coreai-models` pin as `version`.
+        Runtime::CoreAiMacosPipette(rt) => {
+            let mut body = Body::new(Scheme::CoreAiMacosPipette);
+            body.push(
+                KEY_VERSION,
+                rt.packages.coreai_models.repository_version.as_ref(),
+            )?;
+            Ok(body.finish())
         }
         // On-device app runtimes + Apple Foundation aren't addressable via the
         // desktop CLI — the same reject-list `refs.rs` enforces.
@@ -1170,7 +1184,7 @@ mod tests {
     #[case("llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=macos-x64")]
     #[case("llamacpp-cli-stock-tools://url=ex.com/llama-b1.tar.gz&flavor=macos-arm64")]
     #[case("mlx-macos-pipette://version=0.31.3&flavor=macos-arm64")]
-    #[case("core-ai-macos-pipette://")]
+    #[case("core-ai-macos-pipette://version=0.2.2-zoo")]
     #[case("docker-vllm://image=vllm/vllm-openai&tag=v0.10.0&flavor=nvidia_gpu")]
     #[case("docker-sglang://image=lmsysorg/sglang&tag=v0.4.0&flavor=amd_gpu")]
     #[case("uv-vllm://server=0.21.0&build=cu121&python=3.12")]

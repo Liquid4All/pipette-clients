@@ -34,7 +34,7 @@ pub(super) fn run(
     let prefill_tokens = benchmark.parameter_prefill_tokens;
 
     readiness_gate()?;
-    let server = server::start_server(req, None)?;
+    let server = server::start_server(req)?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p)");
     let warmup: PrefillThroughputResponse = throughput_http::post_json(

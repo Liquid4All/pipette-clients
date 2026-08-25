@@ -98,7 +98,7 @@ pub enum ModelUriError {
 
     #[error(
         "unknown model URI scheme `{0}` (expected `gguf-text`, `gguf-vision`, `mlx`, \
-         `torch`, or `openvino`)"
+         `core-ai`, `torch`, or `openvino`)"
     )]
     UnknownScheme(String),
 

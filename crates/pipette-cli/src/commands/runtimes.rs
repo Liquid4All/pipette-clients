@@ -135,7 +135,7 @@ PULLABLE SCHEMES (runtimes pull) -- a scheme is the runtime type with `-` for `_
   docker-vllm                image, tag; [flavor] (default nvidia_gpu)   -- pulled into the docker daemon
   docker-sglang              image, tag; [flavor] (default nvidia_gpu)   -- pulled into the docker daemon
   mlx-macos-pipette          version; [flavor] (default macos-arm64)     -- catalog: mlx_macos_pipette (macOS)
-  core-ai-macos-pipette      (no keys)                                     -- OS-bundled engine; sidecar built from source (macOS 27+)
+  core-ai-macos-pipette      version (default: bundled coreai-models pin)  -- OS-bundled engine; sidecar built from source (macOS 27+)
   uv-vllm                    server, build, python                       -- catalog: uv_vllm (Linux)
   uv-sglang                  server, build, python                       -- catalog: uv_sglang (Linux)
   uv-openvino                version                                     -- catalog: uv_openvino (Linux/Windows)
@@ -159,9 +159,9 @@ EXAMPLES:
   pipette runtimes pull --runtime 'uv-vllm://server=0.22.0&build=cu129&python=3.12'
   pipette runtimes pull --runtime 'uv-sglang://server=0.5.12.post1&build=cu121&python=3.12'
 
-  # Core AI (macOS 27+): engine ships with the OS; the URI is a marker
-  # (no keys) and the Swift sidecar is built from source at run time.
-  pipette runtimes pull --runtime 'core-ai-macos-pipette://'
+  # Core AI (macOS 27+): engine ships with the OS; the URI names the
+  # bundled coreai-models pin and the Swift sidecar is built from source.
+  pipette runtimes pull --runtime 'core-ai-macos-pipette://version=0.2.2-zoo'
 
   # OpenVINO (Linux/Windows) -- one venv per version; `device` is per cell, not per install
   pipette runtimes pull --runtime 'uv-openvino://version=2026.2.1'
@@ -208,6 +208,12 @@ impl PullArgs {
         // finished bar.
         drop(progress);
 
+        // Core AI is OS-bundled: `ensure_runtime` returns the declared pin
+        // without writing a store entry, so there is no manifest to locate.
+        if matches!(declared, Runtime::CoreAiMacosPipette(_)) {
+            println!("Ready: `{declared}` (engine ships with macOS; sidecar built on first run)");
+            return Ok(());
+        }
         let entry = store
             .find(&declared)?
             .ok_or_else(|| anyhow::anyhow!("runtime missing after ensure"))?;

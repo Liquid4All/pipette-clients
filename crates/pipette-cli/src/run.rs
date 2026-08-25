@@ -317,9 +317,7 @@ fn dispatch_run(
         (Runtime::MlxMacosPipette(_), _) => anyhow::bail!("the MLX runtime runs on macOS only"),
 
         #[cfg(target_os = "macos")]
-        (Runtime::CoreAiMacosPipette(_), _) => {
-            pipette_coreai::run(req, &ws.eval_completions(), &readiness_gate, &observer)
-        }
+        (Runtime::CoreAiMacosPipette(_), _) => pipette_coreai::run(req, &readiness_gate, &observer),
         #[cfg(not(target_os = "macos"))]
         (Runtime::CoreAiMacosPipette(_), _) => {
             anyhow::bail!("the Core AI runtime runs on macOS 27+ only")
