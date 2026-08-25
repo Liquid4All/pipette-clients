@@ -13,7 +13,7 @@ cache: [coreai-specialization.md](../methodology/coreai-specialization.md).
 | | Core AI | MLX | llama.cpp |
 |---|---------|-----|-----------|
 | Engine | Ships with macOS 27 (Core AI) | Python venv + `mlx-lm` | Upstream release archive |
-| Runtime artifact | Swift sidecar, compiled against a pinned `apple/coreai-models` | Python venv + locked `mlx-lm` | GGUF release archive |
+| Runtime artifact | Swift sidecar, compiled against a pinned `john-rocky/coreai-models` (`0.2.2-zoo` fork) | Python venv + locked `mlx-lm` | GGUF release archive |
 | Install | `runtimes pull` is a no-op (engine is OS-bundled); first run builds the sidecar | `runtimes pull` (fetches a venv) | `runtimes pull` (fetches a release) |
 | Models | `.aimodel` bundle (`metadata.json` + `*.aimodel/` + tokenizer/) | HF repo snapshot | GGUF file(s) |
 | Host | Apple Silicon, macOS 27+ only | Apple Silicon only | Cross-platform |
@@ -21,7 +21,10 @@ cache: [coreai-specialization.md](../methodology/coreai-specialization.md).
 ## Runtime
 
 The Core AI *engine* ships with macOS 27. The URI names the Swift-package pin
-the sidecar is compiled against (Apple's `coreai-models` / `CoreAILM` product):
+the sidecar is compiled against: the `john-rocky/coreai-models` zoo fork of
+Apple's `coreai-models` (`CoreAILM` product), pinned at `0.2.2-zoo`. See
+`Package.swift` for why the fork is required (Apple upstream cannot yet chunk a
+multi-token prefill into the S=1 decode bundles pipette benchmarks):
 
 ```bash
 pipette runtimes pull --runtime 'core-ai-macos-pipette://version=0.2.2-zoo'

@@ -425,8 +425,11 @@ pub struct CoreAiMacosPipette {
 }
 
 /// The pinned Swift-package stack the desktop Core AI sidecar is compiled
-/// against (from the crate's `swift/Package.resolved`). Today that is Apple's
-/// `coreai-models` (`CoreAILM` product).
+/// against (from the crate's `swift/Package.resolved`). Today that is the
+/// `john-rocky/coreai-models` zoo fork of Apple's `coreai-models` (`CoreAILM`
+/// product) — pinned at `0.2.2-zoo` because Apple upstream still cannot chunk
+/// a multi-token prefill into the S=1 decode bundles pipette benchmarks (see
+/// the `Package.swift` comment).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct CoreAiSwiftStack {
     pub coreai_models: SourceRepository,
