@@ -162,7 +162,13 @@ final class CoreAIEngine: @unchecked Sendable {
         }
         let genSeconds = seconds(from: genStart, to: .now)
         let promptTps = promptSeconds > 0 ? Double(prompt.count) / promptSeconds : 0
-        let decodeCount = max(0, count - 1)
+        // Pipette's contract is deterministic: a decode of N tokens must report
+        // completion_tokens == N. The llama-bench convention of attributing the
+        // first generated token to prefill (count - 1) does not apply here — it
+        // would under-report by one and fail a 1-token max-memory cell. The
+        // decode span still starts at the first token (genStart), so genTps is
+        // the rate over that span.
+        let decodeCount = count
         let genTps = genSeconds > 0 ? Double(decodeCount) / genSeconds : 0
         return GenResult(
             promptTps: promptTps,
