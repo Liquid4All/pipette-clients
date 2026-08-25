@@ -132,6 +132,10 @@ final class CoreAIEngine: @unchecked Sendable {
     /// llm-benchmark: promptTps over the prefill span (to first generated
     /// token), genTps over the decode span (from first token onward).
     func generate(prompt: [Int32], maxTokens: Int) async throws -> GenResult {
+        // A short settle between generations. Without it the Core AI engine can
+        // still be draining the previous decode when the next rep starts, which
+        // perturbs the very first prompt_seconds measurement. Deliberately best-
+        // effort (`try?`): a scheduling miss is not worth failing the run over.
         try? await Task.sleep(for: .milliseconds(50))
         try await engine.reset()
 
@@ -201,7 +205,14 @@ final class SidecarServer: @unchecked Sendable {
         guard let p = NWEndpoint.Port(rawValue: port) else {
             throw SidecarError.badRequest("invalid port")
         }
-        self.listener = try NWListener(using: .tcp, on: p)
+        // Restrict the listener to loopback so the benchmark endpoints
+        // (including /shutdown) are never reachable from the LAN. The Rust
+        // client always connects to 127.0.0.1, and the MLX sidecar binds the
+        // same way. requiredInterfaceType must be set on the parameters before
+        // the listener is created; NWListener.requiredLocalEndpoint is get-only.
+        let params = NWParameters.tcp
+        params.requiredInterfaceType = .loopback
+        self.listener = try NWListener(using: params, on: p)
     }
 
     func start() {
@@ -230,8 +241,22 @@ final class SidecarServer: @unchecked Sendable {
     }
 
     private func requestComplete(_ data: Data) -> Bool {
-        guard let s = String(data: data, encoding: .utf8) else { return false }
-        return s.contains("\r\n\r\n")
+        guard let s = String(data: data, encoding: .utf8),
+              let headerEnd = s.range(of: "\r\n\r\n") else {
+            return false
+        }
+        let header = s[s.startIndex..<headerEnd.lowerBound]
+        // The fixed pipette client sends the whole body in one write, but honor
+        // Content-Length anyway so a request whose body arrives in a later TCP
+        // segment is still read correctly.
+        let length = header
+            .components(separatedBy: "\r\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0.lowercased().hasPrefix("content-length:") }
+            .flatMap { $0.split(separator: ":").last }
+            .flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let length else { return true } // no body expected; headers are enough
+        return data.count >= headerEnd.upperBound.utf16Offset(in: s) + length
     }
 
     private func dispatch(_ raw: Data, to conn: NWConnection) {
