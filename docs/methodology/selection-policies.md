@@ -180,23 +180,21 @@ result, so a runtime change is visible to anyone comparing numbers.
 
 Each result artifact preserves the selection it ran under: model, weight source
 and quantization, runtime name, runtime version, and the effective runtime
-flags. Two results are comparable only when those recorded fields match. A
-difference in any of them (a different GGUF conversion, a newer vLLM build, a
-re-pinned `llama.cpp`) is a difference in the experiment, not a difference in
-the model, and must be read that way.
+flags. Pipette records those coordinates to identify the experiment, but they do
+not universally identify the resolved model artifact byte-for-byte. Two results
+are comparable only when those recorded fields match. A difference in any of
+them (a different GGUF conversion, a newer vLLM build, a re-pinned `llama.cpp`)
+is a difference in the experiment, not a difference in the model, and must be
+read that way. Exact reproduction across time therefore also requires resolving
+the same underlying artifact or snapshot.
 
-Matching the recorded selection remains required for comparison: it describes
-the model and runtime coordinates used by the experiment. Those coordinates do
-not universally guarantee byte-for-byte identity of the resolved model
-artifact. Consequently, exact reproduction across time also depends on
-resolving the same underlying artifact or snapshot.
-
-For HuggingFace sources, reproducibility is strongest when `revision` resolves
-to an immutable commit; the field also accepts tags and branches, and an omitted
-revision resolves to `main`. GGUF model specifications already support optional
-per-file SHA-256 fields when a digest is available. Directory-backed MLX, Torch,
-and OpenVINO model specifications do not currently expose equivalent per-file
-content digests.
+For Hugging Face sources, a commit SHA in `revision` gives the recorded
+selection a stable repository coordinate across time. Tags and branches also
+resolve to immutable commits at a point in time, but the same ref may resolve to
+a different commit later; an omitted revision resolves to `main`. GGUF model
+specifications already support optional per-file SHA-256 fields when a digest is
+available. Directory-backed MLX, Torch, and OpenVINO model specifications do not
+currently expose equivalent per-file content digests.
 
 Each result also records the volatile run environment it was measured in: the
 device's power state and the thermal/cooling conditions it ran under. Those are
