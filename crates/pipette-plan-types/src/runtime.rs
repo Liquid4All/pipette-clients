@@ -29,6 +29,10 @@ pub enum Runtime {
     /// llama.cpp running in-process inside the iOS pipette app.
     LlamacppIosPipette(LlamacppIosPipette),
     MlxMacosPipette(MlxMacosPipette),
+    /// Apple Core AI on the desktop macOS CLI, driven by the bundled Swift
+    /// sidecar. Unlike MLX, the engine ships with macOS 27 — the runtime is a
+    /// marker; only the model bundle is authored.
+    CoreAiMacosPipette(CoreAiMacosPipette),
     /// MLX running in-process inside the iOS pipette app (mlx-swift) — the
     /// on-device counterpart to the desktop `MlxMacosPipette` (Python/uv) runtime.
     MlxIosPipette(MlxIosPipette),
@@ -405,6 +409,12 @@ pub struct MlxMacosPipette {
     pub source: UvRuntimeSource,
 }
 
+/// Apple Core AI desktop CLI runtime. Carries no build of ours — the engine
+/// (Core AI / FoundationModels) ships with macOS 27 — so it is an empty marker
+/// like [`AppleFoundation`]; the model bundle carries the only authored identity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct CoreAiMacosPipette {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct DockerVllm {
     pub image_name: NonEmptyString,
@@ -607,6 +617,7 @@ impl Runtime {
             Runtime::LlamacppApkPipette(_) => "llamacpp_apk_pipette",
             Runtime::LlamacppIosPipette(_) => "llamacpp_ios_pipette",
             Runtime::MlxMacosPipette(_) => "mlx_macos_pipette",
+            Runtime::CoreAiMacosPipette(_) => "core_ai_macos_pipette",
             Runtime::MlxIosPipette(_) => "mlx_ios_pipette",
             Runtime::DockerVllm(_) => "docker_vllm",
             Runtime::DockerSglang(_) => "docker_sglang",
@@ -768,6 +779,7 @@ impl std::fmt::Display for Runtime {
             Runtime::LlamacppApkPipette(rt) => rt.fmt(f),
             Runtime::LlamacppIosPipette(rt) => rt.fmt(f),
             Runtime::MlxMacosPipette(rt) => rt.fmt(f),
+            Runtime::CoreAiMacosPipette(_) => write!(f, "core_ai_macos_pipette"),
             Runtime::MlxIosPipette(rt) => rt.fmt(f),
             Runtime::DockerVllm(rt) => rt.fmt(f),
             Runtime::DockerSglang(rt) => rt.fmt(f),
@@ -1054,6 +1066,7 @@ pub enum RuntimeType {
     LlamacppApkPipette,
     LlamacppIosPipette,
     MlxMacosPipette,
+    CoreAiMacosPipette,
     MlxIosPipette,
     DockerVllm,
     DockerSglang,
@@ -1072,6 +1085,7 @@ impl RuntimeType {
             Runtime::LlamacppApkPipette(_) => Self::LlamacppApkPipette,
             Runtime::LlamacppIosPipette(_) => Self::LlamacppIosPipette,
             Runtime::MlxMacosPipette(_) => Self::MlxMacosPipette,
+            Runtime::CoreAiMacosPipette(_) => Self::CoreAiMacosPipette,
             Runtime::MlxIosPipette(_) => Self::MlxIosPipette,
             Runtime::DockerVllm(_) => Self::DockerVllm,
             Runtime::DockerSglang(_) => Self::DockerSglang,

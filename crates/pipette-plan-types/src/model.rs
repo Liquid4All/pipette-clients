@@ -35,6 +35,11 @@ pub enum Model {
     Mlx(Mlx),
     Torch(Torch),
     Openvino(Openvino),
+    /// Apple Core AI `.aimodel` bundle, directory-shaped (metadata.json +
+    /// *.aimodel/ + tokenizer/). Like [`Mlx`], the source carries an HF repo or
+    /// an on-disk path; the bundle is materialized to a directory the Swift
+    /// sidecar loads with `LanguageBundle(at:)`.
+    CoreAi(CoreAi),
     /// Apple Foundation Models, text variant — a bare marker (the model
     /// ships with the OS, so there's no repo/filename to author). The
     /// `…Text` qualifier leaves room for a future `AppleFoundationVision`.
@@ -419,6 +424,17 @@ pub struct Openvino {
     pub source: ModelSource,
 }
 
+/// Apple Core AI `.aimodel` bundle, directory-shaped: `metadata.json` +
+/// `*.aimodel/main.mlirb` + optional `tokenizer/`. Loaded by the Swift sidecar
+/// with Apple's `LanguageBundle(at:)`. For HF sources the subdirectory within
+/// the repo (`prefix`) selects the variant — e.g. `gpu-pipelined/…` under
+/// `mlboydaisuke/Qwen3.8-27B-CoreAI`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct CoreAi {
+    #[serde(flatten)]
+    pub source: ModelSource,
+}
+
 impl Model {
     /// The access token this model carries for fetching, if any. Only a gated
     /// HF source arm can carry one; local sources and AFM never do.
@@ -429,6 +445,7 @@ impl Model {
             Model::Mlx(m) => m.source.auth_token(),
             Model::Torch(m) => m.source.auth_token(),
             Model::Openvino(m) => m.source.auth_token(),
+            Model::CoreAi(m) => m.source.auth_token(),
             Model::AppleFoundationText => None,
         }
     }
@@ -463,6 +480,11 @@ impl Model {
                     repo.auth_token = None;
                 }
             }
+            Model::CoreAi(m) => {
+                if let ModelSource::HuggingFace { repo, .. } = &mut m.source {
+                    repo.auth_token = None;
+                }
+            }
             Model::AppleFoundationText => {}
         }
         model
@@ -493,6 +515,10 @@ pub fn inject_hf_auth_token(model: &mut Model, token: AuthToken) -> bool {
             _ => None,
         },
         Model::Openvino(m) => match &mut m.source {
+            ModelSource::HuggingFace { repo, .. } => Some(repo),
+            _ => None,
+        },
+        Model::CoreAi(m) => match &mut m.source {
             ModelSource::HuggingFace { repo, .. } => Some(repo),
             _ => None,
         },
@@ -543,6 +569,12 @@ impl std::fmt::Display for Openvino {
     }
 }
 
+impl std::fmt::Display for CoreAi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.source.reference())
+    }
+}
+
 /// `{repo}[:{path}]` — the canonical string identifier for a
 /// model: what goes on the CLI as `--model <ref>`, what shows up in
 /// logs/errors, what the warehouse keys on. Distinct from this type's
@@ -557,6 +589,7 @@ impl std::fmt::Display for Model {
             Model::Mlx(m) => m.fmt(f),
             Model::Torch(m) => m.fmt(f),
             Model::Openvino(m) => m.fmt(f),
+            Model::CoreAi(m) => m.fmt(f),
             // Matches the AFM client's submitted `model_name`
             // (`AFMRuntime.submissionModelName`), so plan refs, warehouse
             // keys, and submissions all agree.
@@ -576,6 +609,7 @@ pub enum ModelType {
     Mlx,
     Torch,
     Openvino,
+    CoreAi,
     AppleFoundationText,
 }
 
@@ -589,6 +623,7 @@ impl ModelType {
             Model::Mlx(_) => Self::Mlx,
             Model::Torch(_) => Self::Torch,
             Model::Openvino(_) => Self::Openvino,
+            Model::CoreAi(_) => Self::CoreAi,
             Model::AppleFoundationText => Self::AppleFoundationText,
         }
     }

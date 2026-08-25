@@ -51,10 +51,10 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use pipette_plan_types::{
-    default_repository_url, DockerSglang, DockerVllm, LlamaCppFlavor, LlamacppCliStockTools,
-    LlamacppCliStockToolsSource, MlxMacosPipette, MlxMacosPipetteFlavor, NonEmptyString,
-    RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, SourceRepository, UvBuild,
-    UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang, UvVllm, VllmFlavor,
+    default_repository_url, CoreAiMacosPipette, DockerSglang, DockerVllm, LlamaCppFlavor,
+    LlamacppCliStockTools, LlamacppCliStockToolsSource, MlxMacosPipette, MlxMacosPipetteFlavor,
+    NonEmptyString, RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, SourceRepository,
+    UvBuild, UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang, UvVllm, VllmFlavor,
 };
 
 // Key names, shared by the parser and [`runtime_to_uri`] so the two directions
@@ -89,6 +89,7 @@ const KEY_PYTHON: &str = "python";
 pub(crate) enum Scheme {
     LlamacppCliStockTools,
     MlxMacosPipette,
+    CoreAiMacosPipette,
     DockerVllm,
     DockerSglang,
     UvVllm,
@@ -559,6 +560,9 @@ pub fn parse_runtime_uri(input: &str) -> Result<Runtime, RuntimeUriError> {
     match scheme {
         Scheme::LlamacppCliStockTools => parse_llama_cpp(pairs),
         Scheme::MlxMacosPipette => parse_mlx(pairs),
+        Scheme::CoreAiMacosPipette => Ok(Runtime::CoreAiMacosPipette(
+            CoreAiMacosPipette::default(),
+        )),
         Scheme::DockerVllm => parse_docker_vllm(pairs),
         Scheme::DockerSglang => parse_docker_sglang(pairs),
         Scheme::UvVllm => parse_uv_vllm(pairs),
@@ -754,6 +758,11 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
             );
             ensure_catalog_backed(&rt.source, || uv_catalog_source_from_uri(&slug))?;
             Ok(body.finish())
+        }
+        // Core AI is a desktop runtime (macOS 27+): the engine ships with the OS,
+        // so the URI carries no keys — an empty body.
+        Runtime::CoreAiMacosPipette(_) => {
+            Ok(Body::new(Scheme::CoreAiMacosPipette).finish())
         }
         // On-device app runtimes + Apple Foundation aren't addressable via the
         // desktop CLI — the same reject-list `refs.rs` enforces.
@@ -1161,6 +1170,7 @@ mod tests {
     #[case("llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=macos-x64")]
     #[case("llamacpp-cli-stock-tools://url=ex.com/llama-b1.tar.gz&flavor=macos-arm64")]
     #[case("mlx-macos-pipette://version=0.31.3&flavor=macos-arm64")]
+    #[case("core-ai-macos-pipette://")]
     #[case("docker-vllm://image=vllm/vllm-openai&tag=v0.10.0&flavor=nvidia_gpu")]
     #[case("docker-sglang://image=lmsysorg/sglang&tag=v0.4.0&flavor=amd_gpu")]
     #[case("uv-vllm://server=0.21.0&build=cu121&python=3.12")]

@@ -62,6 +62,7 @@ fn runtime_capability_flags(runtime: &Runtime) -> Vec<String> {
         Runtime::UvVllm(rt) => ("uv_vllm", Some(rt.runtime_version())),
         Runtime::UvSglang(rt) => ("uv_sglang", Some(rt.runtime_version())),
         Runtime::AppleFoundation(_) => ("apple_foundation", None),
+        Runtime::CoreAiMacosPipette(_) => ("core_ai", None),
     };
     let general = format!("runtime:{name}");
     match version {

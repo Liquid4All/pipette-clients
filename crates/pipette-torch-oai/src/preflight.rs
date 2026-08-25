@@ -46,6 +46,7 @@ pub fn assert_gpu_ready(runtime: &Runtime) -> anyhow::Result<()> {
         | Runtime::LlamacppApkPipette(_)
         | Runtime::LlamacppIosPipette(_)
         | Runtime::MlxMacosPipette(_)
+        | Runtime::CoreAiMacosPipette(_)
         | Runtime::MlxIosPipette(_)
         // OpenVINO talks to Intel CPU/iGPU/NPU through its own runtime, not
         // through torch, so none of the CUDA/ROCm probes apply.

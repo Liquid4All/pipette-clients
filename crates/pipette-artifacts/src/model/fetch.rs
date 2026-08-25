@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256 as Sha256Hasher};
 
 use pipette_http::HttpClient;
 use pipette_plan_types::{
-    AbsolutePath, AuthToken, GgufText, GgufTextSource, GgufVision, GgufVisionSource, HfRepo, Mlx,
-    Model, ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
+    AbsolutePath, AuthToken, CoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, HfRepo,
+    Mlx, Model, ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
 };
 
 use super::stored::{to_stored, ModelStoredError};
@@ -581,10 +581,14 @@ pub(crate) fn declared_size_bytes(
         })
         | Model::Openvino(Openvino {
             source: ModelSource::AbsoluteDir { dir },
+        })
+        | Model::CoreAi(CoreAi {
+            source: ModelSource::AbsoluteDir { dir },
         }) => Some(walk(dir)),
         Model::Mlx(Mlx { source })
         | Model::Torch(Torch { source })
-        | Model::Openvino(Openvino { source }) => hf_dir_size_bytes(http, HF_ENDPOINT, source),
+        | Model::Openvino(Openvino { source })
+        | Model::CoreAi(CoreAi { source }) => hf_dir_size_bytes(http, HF_ENDPOINT, source),
         Model::GgufText(_) | Model::GgufVision(_) => remote_files_size_bytes(http, declared)?,
     })
 }
