@@ -197,7 +197,9 @@ impl PlatformDetector {
                 .or_else(|| kernel_release.clone()),
             device_os_build: kernel_release.clone(),
             device_os_security_patch: None,
-            device_chip_model: cpuinfo_chip_model().or_else(Self::device_tree_model),
+            device_chip_model: cpuinfo_chip_model()
+                .or_else(Self::device_tree_model)
+                .or_else(Self::dmi_board_name),
             device_ram_bytes: proc_memtotal_bytes(),
             device_gpu_model: gpu_model,
             device_gpu_vram_bytes: gpu_vram,
@@ -224,6 +226,17 @@ impl PlatformDetector {
             return Some(DeviceFormFactor::Embedded);
         }
         None
+    }
+
+    /// `/sys/devices/virtual/dmi/id/board_name` — last resort for the chip model
+    /// on ARM64 hosts where the kernel emits neither `Hardware` nor `model name`
+    /// in /proc/cpuinfo and the device-tree model node is absent or empty.
+    /// Observed on NVIDIA GB10 / DGX Spark class boards.
+    fn dmi_board_name() -> Option<String> {
+        std::fs::read_to_string("/sys/devices/virtual/dmi/id/board_name")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// `/proc/device-tree/model` — the board name on hosts with no DMI
