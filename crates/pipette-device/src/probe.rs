@@ -199,7 +199,7 @@ impl PlatformDetector {
             device_os_security_patch: None,
             device_chip_model: cpuinfo_chip_model()
                 .or_else(Self::device_tree_model)
-                .or_else(Self::dmi_board_name),
+                .or_else(Self::dmi_chip_model_fallback),
             device_ram_bytes: proc_memtotal_bytes(),
             device_gpu_model: gpu_model,
             device_gpu_vram_bytes: gpu_vram,
@@ -207,10 +207,7 @@ impl PlatformDetector {
     }
 
     fn detect_device_name() -> Option<String> {
-        std::fs::read_to_string("/sys/devices/virtual/dmi/id/product_name")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        Self::dmi_field("product_name")
             .or_else(Self::device_tree_model)
             .or_else(|| cmd_output("hostname", &[]))
     }
@@ -228,15 +225,41 @@ impl PlatformDetector {
         None
     }
 
-    /// `/sys/devices/virtual/dmi/id/board_name` — last resort for the chip model
-    /// on ARM64 hosts where the kernel emits neither `Hardware` nor `model name`
-    /// in /proc/cpuinfo and the device-tree model node is absent or empty.
-    /// Observed on NVIDIA GB10 / DGX Spark class boards.
-    fn dmi_board_name() -> Option<String> {
-        std::fs::read_to_string("/sys/devices/virtual/dmi/id/board_name")
+    /// Read one `/sys/devices/virtual/dmi/id/<field>`, trimmed. Empty is absent.
+    fn dmi_field(field: &str) -> Option<String> {
+        std::fs::read_to_string(format!("/sys/devices/virtual/dmi/id/{field}"))
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Last resort for the chip model: the DMI board name.
+    ///
+    /// Reached only when `/proc/cpuinfo` carries neither `Hardware` nor `model
+    /// name` and there is no `/proc/device-tree/model`, which is precisely the
+    /// state that otherwise hard-fails `probe()`. Observed on NVIDIA GB10 /
+    /// DGX Spark class boards, where `/proc/cpuinfo` exposes only raw MIDR
+    /// fields and no device tree exists at all.
+    ///
+    /// This records a board identifier in a field that elsewhere holds silicon
+    /// names (`Apple M3`, `ro.soc.model`). The degradation is deliberate and
+    /// already present one link up: `device_tree_model` is itself documented as
+    /// the board name on hosts with no DMI. A payload reading
+    /// `device_chip_model = EdgeXpert (MS-C931)` is this fallback firing, not a
+    /// detection bug.
+    ///
+    /// Firmware placeholders are rejected rather than recorded. Being the
+    /// terminal link, an unfiltered junk value would become a fleet's permanent
+    /// chip model with no signal, trading a loud failure for a quiet wrong
+    /// answer.
+    fn dmi_chip_model_fallback() -> Option<String> {
+        let board = Self::dmi_field("board_name")?;
+        if DMI_PLACEHOLDERS.contains(&board.to_ascii_lowercase().as_str()) {
+            log::debug!("device_chip_model: ignoring DMI placeholder board_name {board:?}");
+            return None;
+        }
+        log::debug!("device_chip_model resolved from DMI board_name {board:?}");
+        Some(board)
     }
 
     /// `/proc/device-tree/model` — the board name on hosts with no DMI
@@ -608,6 +631,20 @@ fn cmd_output(cmd: &str, args: &[&str]) -> Option<String> {
         Some(text)
     }
 }
+
+/// Placeholder strings firmware ships when a DMI field was never populated.
+/// Compared lower-case, so only the canonical spellings are listed.
+#[cfg(target_os = "linux")]
+const DMI_PLACEHOLDERS: [&str; 8] = [
+    "default string",
+    "to be filled by o.e.m.",
+    "to be filled by oem",
+    "system product name",
+    "system manufacturer",
+    "none",
+    "unknown",
+    "not applicable",
+];
 
 /// Parse chip model from `/proc/cpuinfo` (`Hardware` or `model name` field).
 #[cfg(any(target_os = "linux", target_os = "android"))]
