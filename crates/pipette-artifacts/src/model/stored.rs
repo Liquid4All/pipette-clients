@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use pipette_plan_types::{
-    AbsolutePath, CoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, Mlx, Model,
+    AbsolutePath, AppleCoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, Mlx, Model,
     ModelSource, Openvino, RelativePath, RepoSubpath, ResourceUrl, Torch,
 };
 
@@ -100,7 +100,7 @@ pub fn to_stored(model: &Model, base: &Path) -> Result<Model, ModelStoredError> 
         Model::Openvino(m) => Model::Openvino(Openvino {
             source: dir_to_stored(&m.source, base, abs)?,
         }),
-        Model::CoreAi(m) => Model::CoreAi(CoreAi {
+        Model::AppleCoreAi(m) => Model::AppleCoreAi(AppleCoreAi {
             source: dir_to_stored(&m.source, base, abs)?,
         }),
         Model::AppleFoundationText => Model::AppleFoundationText,
@@ -174,9 +174,9 @@ pub fn under_root(stored: &Model, root: &Path) -> Result<Model, ModelStoredError
                 JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },
             },
         }),
-        Model::CoreAi(CoreAi {
+        Model::AppleCoreAi(AppleCoreAi {
             source: ModelSource::RelativeDir { dir },
-        }) => Model::CoreAi(CoreAi {
+        }) => Model::AppleCoreAi(AppleCoreAi {
             source: match join(dir.as_ref())? {
                 JoinedPath::Rel(dir) => ModelSource::RelativeDir { dir },
                 JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },

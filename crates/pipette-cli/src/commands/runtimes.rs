@@ -210,7 +210,7 @@ impl PullArgs {
 
         // Core AI is OS-bundled: `ensure_runtime` returns the declared pin
         // without writing a store entry, so there is no manifest to locate.
-        if matches!(declared, Runtime::CoreAiMacosPipette(_)) {
+        if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
             println!("Ready: `{declared}` (engine ships with macOS; sidecar built on first run)");
             return Ok(());
         }

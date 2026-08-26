@@ -18,8 +18,8 @@ use pipette_plan_types::ModelType;
 /// to Core AI.
 const REQUIRED_FILES: &[&str] = &["metadata.json"];
 
-/// Bound Core AI bundle directory: `Model::CoreAi` + `AbsoluteDir` after
+/// Bound Core AI bundle directory: `Model::AppleCoreAi` + `AbsoluteDir` after
 /// ensure/bind.
 pub fn require_coreai_model_dir(req: &RunRequest) -> anyhow::Result<PathBuf> {
-    require_bound_model_dir(&req.model.bound, ModelType::CoreAi, REQUIRED_FILES)
+    require_bound_model_dir(&req.model.bound, ModelType::AppleCoreAi, REQUIRED_FILES)
 }

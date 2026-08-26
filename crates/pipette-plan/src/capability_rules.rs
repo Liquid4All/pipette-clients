@@ -267,7 +267,7 @@ fn policy_for(runtime: RuntimeType) -> Policy {
             when: &[],
         },
         // Desktop Apple Core AI: Apple silicon. The engine ships with macOS 27.
-        CoreAiMacosPipette => Policy {
+        AppleCoreAiMacosPipette => Policy {
             requires: &["os:macos"],
             one_of: &[],
             any_of: &[Group::Exactly(APPLE_SILICON)],

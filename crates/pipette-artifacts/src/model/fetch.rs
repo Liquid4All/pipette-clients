@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256 as Sha256Hasher};
 
 use pipette_http::HttpClient;
 use pipette_plan_types::{
-    AbsolutePath, AuthToken, CoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource,
+    AbsolutePath, AppleCoreAi, AuthToken, GgufText, GgufTextSource, GgufVision, GgufVisionSource,
     HfRepo, Mlx, Model, ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
 };
 
@@ -115,7 +115,7 @@ pub fn plan_downloads(declared: &Model, into: &Model) -> Result<Vec<Download>, M
         (Model::Mlx(_), _)
         | (Model::Torch(_), _)
         | (Model::Openvino(_), _)
-        | (Model::CoreAi(_), _) => Err(ModelFetchError::NotFetchable(
+        | (Model::AppleCoreAi(_), _) => Err(ModelFetchError::NotFetchable(
             "directory snapshots need a network repo listing; planned by the fetcher, not here"
                 .to_owned(),
         )),
@@ -415,10 +415,10 @@ fn fetch_model_with_hf_endpoint(
             }),
         )
         | (
-            Model::CoreAi(CoreAi {
+            Model::AppleCoreAi(AppleCoreAi {
                 source: ModelSource::AbsoluteDir { dir: src },
             }),
-            Model::CoreAi(CoreAi {
+            Model::AppleCoreAi(AppleCoreAi {
                 source: ModelSource::AbsoluteDir { dir: dest },
             }),
         ) => {
@@ -454,7 +454,9 @@ fn plan(
         (Model::Openvino(d), Model::Openvino(i)) => {
             plan_dir(http, hf_endpoint, &d.source, &i.source)
         }
-        (Model::CoreAi(d), Model::CoreAi(i)) => plan_dir(http, hf_endpoint, &d.source, &i.source),
+        (Model::AppleCoreAi(d), Model::AppleCoreAi(i)) => {
+            plan_dir(http, hf_endpoint, &d.source, &i.source)
+        }
         _ => plan_downloads(declared, into),
     }
 }
@@ -592,13 +594,15 @@ pub(crate) fn declared_size_bytes(
         | Model::Openvino(Openvino {
             source: ModelSource::AbsoluteDir { dir },
         })
-        | Model::CoreAi(CoreAi {
+        | Model::AppleCoreAi(AppleCoreAi {
             source: ModelSource::AbsoluteDir { dir },
         }) => Some(walk(dir)),
         Model::Mlx(Mlx { source })
         | Model::Torch(Torch { source })
         | Model::Openvino(Openvino { source })
-        | Model::CoreAi(CoreAi { source }) => hf_dir_size_bytes(http, HF_ENDPOINT, source),
+        | Model::AppleCoreAi(AppleCoreAi { source }) => {
+            hf_dir_size_bytes(http, HF_ENDPOINT, source)
+        }
         Model::GgufText(_) | Model::GgufVision(_) => remote_files_size_bytes(http, declared)?,
     })
 }
@@ -791,7 +795,9 @@ mod tests {
     use httpmock::prelude::*;
     use rstest::rstest;
 
-    use pipette_plan_types::{CoreAi, GgufText, GgufVision, HfOrg, HfRepoName, HfRevision, Mlx};
+    use pipette_plan_types::{
+        AppleCoreAi, GgufText, GgufVision, HfOrg, HfRepoName, HfRevision, Mlx,
+    };
 
     use super::*;
 
@@ -1090,12 +1096,12 @@ mod tests {
         fs::write(src.join("metadata.json"), b"{}")?;
         let dest = tmp.path().join("store/blobs");
 
-        let declared = Model::CoreAi(CoreAi {
+        let declared = Model::AppleCoreAi(AppleCoreAi {
             source: ModelSource::AbsoluteDir {
                 dir: AbsolutePath::try_new(src.to_string_lossy().into_owned())?,
             },
         });
-        let into = Model::CoreAi(CoreAi {
+        let into = Model::AppleCoreAi(AppleCoreAi {
             source: ModelSource::AbsoluteDir {
                 dir: AbsolutePath::try_new(dest.to_string_lossy().into_owned())?,
             },

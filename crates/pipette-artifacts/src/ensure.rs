@@ -67,7 +67,7 @@ pub fn ensure_runtime(
     // nothing to install into the runtime store. `RuntimeStorageKey::of`
     // rejects it (same as AFM / on-device), so we must not call `store.find`
     // / `store.ensure`. The bound form is the declared pin itself.
-    if let Runtime::CoreAiMacosPipette(_) = declared {
+    if let Runtime::AppleCoreAiMacosPipette(_) = declared {
         return Ok(declared.clone());
     }
     let policy = collecting_policy(ctx, store.find(declared)?.is_some());
@@ -182,7 +182,7 @@ pub fn runtime_download_size(
     store: &RuntimeArtifactStore,
     declared: &Runtime,
 ) -> Result<Option<u64>, RuntimeStoreError> {
-    if matches!(declared, Runtime::CoreAiMacosPipette(_)) {
+    if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
         return Ok(Some(0));
     }
     if store.find(declared)?.is_some() {
@@ -470,7 +470,7 @@ mod tests {
     fn ensure_runtime_returns_core_ai_without_a_store_entry() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
         let store = RuntimeArtifactStore::new(tmp.path().join("runtimes"));
-        let declared = Runtime::CoreAiMacosPipette(Default::default());
+        let declared = Runtime::AppleCoreAiMacosPipette(Default::default());
         let bound = ensure_runtime(&test_ctx()?, &store, &declared)?;
         assert_eq!(bound, declared);
         assert!(

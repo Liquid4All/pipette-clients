@@ -62,7 +62,7 @@ fn runtime_capability_flags(runtime: &Runtime) -> Vec<String> {
         Runtime::UvVllm(rt) => ("uv_vllm", Some(rt.runtime_version())),
         Runtime::UvSglang(rt) => ("uv_sglang", Some(rt.runtime_version())),
         Runtime::AppleFoundation(_) => ("apple_foundation", None),
-        Runtime::CoreAiMacosPipette(rt) => (
+        Runtime::AppleCoreAiMacosPipette(rt) => (
             "core_ai",
             Some(
                 rt.packages
@@ -134,7 +134,7 @@ pub fn installed_runtime_capabilities(
             #[cfg(target_os = "macos")]
             {
                 if coreai_supported_os() {
-                    runtime_capability_flags(&Runtime::CoreAiMacosPipette(Default::default()))
+                    runtime_capability_flags(&Runtime::AppleCoreAiMacosPipette(Default::default()))
                 } else {
                     Vec::new()
                 }

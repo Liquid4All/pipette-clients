@@ -37,8 +37,8 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use pipette_plan_types::{
-    CoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, HfRepo, HfRevision, Mlx, Model,
-    ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
+    AppleCoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, HfRepo, HfRevision, Mlx,
+    Model, ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
 };
 
 // Key names, shared by the parser and [`model_to_uri`] so the two directions
@@ -67,7 +67,9 @@ enum Scheme {
     Mlx,
     Torch,
     Openvino,
-    CoreAi,
+    /// Wire scheme stays `core-ai`; only the Rust name tracks the plan type.
+    #[strum(serialize = "core-ai")]
+    AppleCoreAi,
 }
 
 impl Scheme {
@@ -359,7 +361,7 @@ pub fn parse_model_uri(input: &str) -> Result<Model, ModelUriError> {
         Scheme::Openvino => Ok(Model::Openvino(Openvino {
             source: parse_dir_source(pairs)?,
         })),
-        Scheme::CoreAi => Ok(Model::CoreAi(CoreAi {
+        Scheme::AppleCoreAi => Ok(Model::AppleCoreAi(AppleCoreAi {
             source: parse_dir_source(pairs)?,
         })),
     }
@@ -443,7 +445,7 @@ pub fn model_to_uri(model: &Model) -> Result<String, ModelUriError> {
         Model::Mlx(m) => dir_to_uri(Scheme::Mlx, &m.source),
         Model::Torch(m) => dir_to_uri(Scheme::Torch, &m.source),
         Model::Openvino(m) => dir_to_uri(Scheme::Openvino, &m.source),
-        Model::CoreAi(m) => dir_to_uri(Scheme::CoreAi, &m.source),
+        Model::AppleCoreAi(m) => dir_to_uri(Scheme::AppleCoreAi, &m.source),
         Model::AppleFoundationText => {
             Err(ModelUriError::NotImportable("apple-foundation".to_owned()))
         }
@@ -742,10 +744,10 @@ mod tests {
     )]
     #[case("torch://repo=org/repo", ModelType::Torch, "org/repo")]
     #[case("torch://repo=org/repo&prefix=sub", ModelType::Torch, "org/repo:sub")]
-    #[case("core-ai://repo=org/repo", ModelType::CoreAi, "org/repo")]
+    #[case("core-ai://repo=org/repo", ModelType::AppleCoreAi, "org/repo")]
     #[case(
         "core-ai://repo=org/repo&prefix=gpu-pipelined/int4",
-        ModelType::CoreAi,
+        ModelType::AppleCoreAi,
         "org/repo:gpu-pipelined/int4"
     )]
     #[case("openvino://repo=org/repo", ModelType::Openvino, "org/repo")]

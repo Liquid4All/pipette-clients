@@ -135,7 +135,7 @@ impl RuntimeStorageKey {
             Runtime::LlamacppApkPipette(_)
             | Runtime::LlamacppIosPipette(_)
             | Runtime::MlxIosPipette(_)
-            | Runtime::CoreAiMacosPipette(_)
+            | Runtime::AppleCoreAiMacosPipette(_)
             | Runtime::AppleFoundation(_) => return Err(not_storable()),
         };
         Ok(RuntimeStorageKey(bound_to(

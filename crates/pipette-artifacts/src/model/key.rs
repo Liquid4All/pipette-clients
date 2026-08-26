@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use pipette_plan_types::{
-    CoreAi, GgufTextSource, GgufVisionSource, HfRepo, Mlx, Model, ModelSource, Openvino, Torch,
+    AppleCoreAi, GgufTextSource, GgufVisionSource, HfRepo, Mlx, Model, ModelSource, Openvino, Torch,
 };
 
 use crate::entry::BLOBS_DIR_NAME;
@@ -98,7 +98,7 @@ impl ModelStorageKey {
             Model::Mlx(Mlx { source })
             | Model::Torch(Torch { source })
             | Model::Openvino(Openvino { source })
-            | Model::CoreAi(CoreAi { source }) => match source {
+            | Model::AppleCoreAi(AppleCoreAi { source }) => match source {
                 ModelSource::HuggingFace { repo, prefix } => repo_segments(repo)
                     .into_iter()
                     .chain(prefix.iter().map(|p| p.to_string()))

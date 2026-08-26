@@ -1,6 +1,6 @@
 //! The Model family: [`Model`] and its per-format variant structs
 //! ([`GgufText`], [`GgufVision`], [`Mlx`], [`Torch`], [`Openvino`],
-//! [`CoreAi`]), each
+//! [`AppleCoreAi`]), each
 //! carrying a per-format source enum ([`GgufTextSource`], [`GgufVisionSource`],
 //! [`ModelSource`]), plus [`ModelFlags`] and the gguf-file entries. Re-
 //! exported flat from `lib.rs`, so consumers reference these as
@@ -41,7 +41,10 @@ pub enum Model {
     /// *.aimodel/ + tokenizer/). Like [`Mlx`], the source carries an HF repo or
     /// an on-disk path; the bundle is materialized to a directory the Swift
     /// sidecar loads with `LanguageBundle(at:)`.
-    CoreAi(CoreAi),
+    /// Wire tag stays `core_ai` (serde rename): the TOML/JSON authoring shape is
+    /// public API and the reviewer asked for a Rust-name change, not a format break.
+    #[serde(rename = "core_ai")]
+    AppleCoreAi(AppleCoreAi),
     /// Apple Foundation Models, text variant — a bare marker (the model
     /// ships with the OS, so there's no repo/filename to author). The
     /// `…Text` qualifier leaves room for a future `AppleFoundationVision`.
@@ -432,7 +435,7 @@ pub struct Openvino {
 /// the repo (`prefix`) selects the variant — e.g. `gpu-pipelined/…` under
 /// `mlboydaisuke/Qwen3.8-27B-CoreAI`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
-pub struct CoreAi {
+pub struct AppleCoreAi {
     #[serde(flatten)]
     pub source: ModelSource,
 }
@@ -447,7 +450,7 @@ impl Model {
             Model::Mlx(m) => m.source.auth_token(),
             Model::Torch(m) => m.source.auth_token(),
             Model::Openvino(m) => m.source.auth_token(),
-            Model::CoreAi(m) => m.source.auth_token(),
+            Model::AppleCoreAi(m) => m.source.auth_token(),
             Model::AppleFoundationText => None,
         }
     }
@@ -482,7 +485,7 @@ impl Model {
                     repo.auth_token = None;
                 }
             }
-            Model::CoreAi(m) => {
+            Model::AppleCoreAi(m) => {
                 if let ModelSource::HuggingFace { repo, .. } = &mut m.source {
                     repo.auth_token = None;
                 }
@@ -520,7 +523,7 @@ pub fn inject_hf_auth_token(model: &mut Model, token: AuthToken) -> bool {
             ModelSource::HuggingFace { repo, .. } => Some(repo),
             _ => None,
         },
-        Model::CoreAi(m) => match &mut m.source {
+        Model::AppleCoreAi(m) => match &mut m.source {
             ModelSource::HuggingFace { repo, .. } => Some(repo),
             _ => None,
         },
@@ -571,7 +574,7 @@ impl std::fmt::Display for Openvino {
     }
 }
 
-impl std::fmt::Display for CoreAi {
+impl std::fmt::Display for AppleCoreAi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.source.reference())
     }
@@ -591,7 +594,7 @@ impl std::fmt::Display for Model {
             Model::Mlx(m) => m.fmt(f),
             Model::Torch(m) => m.fmt(f),
             Model::Openvino(m) => m.fmt(f),
-            Model::CoreAi(m) => m.fmt(f),
+            Model::AppleCoreAi(m) => m.fmt(f),
             // Matches the AFM client's submitted `model_name`
             // (`AFMRuntime.submissionModelName`), so plan refs, warehouse
             // keys, and submissions all agree.
@@ -611,7 +614,9 @@ pub enum ModelType {
     Mlx,
     Torch,
     Openvino,
-    CoreAi,
+    #[serde(rename = "core_ai")]
+    #[strum(serialize = "core_ai")]
+    AppleCoreAi,
     AppleFoundationText,
 }
 
@@ -625,7 +630,7 @@ impl ModelType {
             Model::Mlx(_) => Self::Mlx,
             Model::Torch(_) => Self::Torch,
             Model::Openvino(_) => Self::Openvino,
-            Model::CoreAi(_) => Self::CoreAi,
+            Model::AppleCoreAi(_) => Self::AppleCoreAi,
             Model::AppleFoundationText => Self::AppleFoundationText,
         }
     }

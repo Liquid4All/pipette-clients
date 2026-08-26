@@ -53,7 +53,7 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use pipette_plan_types::{
-    default_repository_url, CoreAiMacosPipette, DockerSglang, DockerVllm, LlamaCppFlavor,
+    default_repository_url, AppleCoreAiMacosPipette, DockerSglang, DockerVllm, LlamaCppFlavor,
     LlamacppCliStockTools, LlamacppCliStockToolsSource, MlxMacosPipette, MlxMacosPipetteFlavor,
     NonEmptyString, RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, SourceRepository,
     UvBuild, UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang, UvVllm, VllmFlavor,
@@ -91,7 +91,10 @@ const KEY_PYTHON: &str = "python";
 pub(crate) enum Scheme {
     LlamacppCliStockTools,
     MlxMacosPipette,
-    CoreAiMacosPipette,
+    /// Wire scheme stays `core-ai-macos-pipette` — the authored URI shape is
+    /// public API; only the Rust variant name tracks the plan type.
+    #[strum(serialize = "core-ai-macos-pipette")]
+    AppleCoreAiMacosPipette,
     DockerVllm,
     DockerSglang,
     UvVllm,
@@ -467,12 +470,12 @@ fn parse_mlx(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
 }
 
 fn parse_coreai(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
-    let mut rt = CoreAiMacosPipette::bundled();
+    let mut rt = AppleCoreAiMacosPipette::bundled();
     if let Some(version) = p.take(KEY_VERSION) {
         rt.packages.coreai_models.repository_version = non_empty(KEY_VERSION, version)?;
     }
     p.finish()?;
-    Ok(Runtime::CoreAiMacosPipette(rt))
+    Ok(Runtime::AppleCoreAiMacosPipette(rt))
 }
 
 fn parse_docker_vllm(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
@@ -571,7 +574,7 @@ pub fn parse_runtime_uri(input: &str) -> Result<Runtime, RuntimeUriError> {
     match scheme {
         Scheme::LlamacppCliStockTools => parse_llama_cpp(pairs),
         Scheme::MlxMacosPipette => parse_mlx(pairs),
-        Scheme::CoreAiMacosPipette => parse_coreai(pairs),
+        Scheme::AppleCoreAiMacosPipette => parse_coreai(pairs),
         Scheme::DockerVllm => parse_docker_vllm(pairs),
         Scheme::DockerSglang => parse_docker_sglang(pairs),
         Scheme::UvVllm => parse_uv_vllm(pairs),
@@ -770,8 +773,8 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
         }
         // Core AI is a desktop runtime (macOS 27+): the engine ships with the OS,
         // the URI carries the bundled `coreai-models` pin as `version`.
-        Runtime::CoreAiMacosPipette(rt) => {
-            let mut body = Body::new(Scheme::CoreAiMacosPipette);
+        Runtime::AppleCoreAiMacosPipette(rt) => {
+            let mut body = Body::new(Scheme::AppleCoreAiMacosPipette);
             body.push(
                 KEY_VERSION,
                 rt.packages.coreai_models.repository_version.as_ref(),

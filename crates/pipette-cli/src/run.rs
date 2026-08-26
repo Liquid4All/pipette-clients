@@ -178,7 +178,7 @@ fn require_desktop_runtime(runtime: &Runtime) -> anyhow::Result<()> {
     match runtime {
         Runtime::LlamacppCliStockTools(_)
         | Runtime::MlxMacosPipette(_)
-        | Runtime::CoreAiMacosPipette(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
         | Runtime::DockerVllm(_)
         | Runtime::DockerSglang(_)
         | Runtime::UvVllm(_)
@@ -317,9 +317,11 @@ fn dispatch_run(
         (Runtime::MlxMacosPipette(_), _) => anyhow::bail!("the MLX runtime runs on macOS only"),
 
         #[cfg(target_os = "macos")]
-        (Runtime::CoreAiMacosPipette(_), _) => pipette_coreai::run(req, &readiness_gate, &observer),
+        (Runtime::AppleCoreAiMacosPipette(_), _) => {
+            pipette_coreai::run(req, &readiness_gate, &observer)
+        }
         #[cfg(not(target_os = "macos"))]
-        (Runtime::CoreAiMacosPipette(_), _) => {
+        (Runtime::AppleCoreAiMacosPipette(_), _) => {
             anyhow::bail!("the Core AI runtime runs on macOS 27+ only")
         }
 

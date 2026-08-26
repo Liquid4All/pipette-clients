@@ -32,7 +32,10 @@ pub enum Runtime {
     /// Apple Core AI on the desktop macOS CLI, driven by the bundled Swift
     /// sidecar. Unlike MLX, the engine ships with macOS 27 — the runtime is a
     /// marker; only the model bundle is authored.
-    CoreAiMacosPipette(CoreAiMacosPipette),
+    /// Wire tag / CLI ref stays `core_ai_macos_pipette` (explicit serde rename:
+    /// the authored URI/TOML shape is public API; only the Rust name changes).
+    #[serde(rename = "core_ai_macos_pipette")]
+    AppleCoreAiMacosPipette(AppleCoreAiMacosPipette),
     /// MLX running in-process inside the iOS pipette app (mlx-swift) — the
     /// on-device counterpart to the desktop `MlxMacosPipette` (Python/uv) runtime.
     MlxIosPipette(MlxIosPipette),
@@ -420,7 +423,7 @@ pub struct MlxMacosPipette {
 /// stack together carry a published number; unlike [`AppleFoundation`], the
 /// weights do not ship with the OS.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
-pub struct CoreAiMacosPipette {
+pub struct AppleCoreAiMacosPipette {
     pub packages: CoreAiSwiftStack,
 }
 
@@ -435,7 +438,7 @@ pub struct CoreAiSwiftStack {
     pub coreai_models: SourceRepository,
 }
 
-impl CoreAiMacosPipette {
+impl AppleCoreAiMacosPipette {
     /// The bundled pin, built from a compile-time constant that always
     /// satisfies the grammar.
     ///
@@ -452,7 +455,7 @@ impl CoreAiMacosPipette {
     }
 }
 
-impl CoreAiMacosPipette {
+impl AppleCoreAiMacosPipette {
     /// The pin this client was built to compile. An empty
     /// `core-ai-macos-pipette://` URI resolves to this.
     pub fn bundled() -> Self {
@@ -471,7 +474,7 @@ impl CoreAiMacosPipette {
     }
 }
 
-impl Default for CoreAiMacosPipette {
+impl Default for AppleCoreAiMacosPipette {
     fn default() -> Self {
         Self::bundled()
     }
@@ -679,7 +682,7 @@ impl Runtime {
             Runtime::LlamacppApkPipette(_) => "llamacpp_apk_pipette",
             Runtime::LlamacppIosPipette(_) => "llamacpp_ios_pipette",
             Runtime::MlxMacosPipette(_) => "mlx_macos_pipette",
-            Runtime::CoreAiMacosPipette(_) => "core_ai_macos_pipette",
+            Runtime::AppleCoreAiMacosPipette(_) => "core_ai_macos_pipette",
             Runtime::MlxIosPipette(_) => "mlx_ios_pipette",
             Runtime::DockerVllm(_) => "docker_vllm",
             Runtime::DockerSglang(_) => "docker_sglang",
@@ -780,7 +783,7 @@ impl std::fmt::Display for MlxIosPipette {
     }
 }
 
-impl std::fmt::Display for CoreAiMacosPipette {
+impl std::fmt::Display for AppleCoreAiMacosPipette {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.packages.fmt(f)
     }
@@ -853,7 +856,7 @@ impl std::fmt::Display for Runtime {
             Runtime::LlamacppApkPipette(rt) => rt.fmt(f),
             Runtime::LlamacppIosPipette(rt) => rt.fmt(f),
             Runtime::MlxMacosPipette(rt) => rt.fmt(f),
-            Runtime::CoreAiMacosPipette(rt) => rt.fmt(f),
+            Runtime::AppleCoreAiMacosPipette(rt) => rt.fmt(f),
             Runtime::MlxIosPipette(rt) => rt.fmt(f),
             Runtime::DockerVllm(rt) => rt.fmt(f),
             Runtime::DockerSglang(rt) => rt.fmt(f),
@@ -1140,7 +1143,7 @@ pub enum RuntimeType {
     LlamacppApkPipette,
     LlamacppIosPipette,
     MlxMacosPipette,
-    CoreAiMacosPipette,
+    AppleCoreAiMacosPipette,
     MlxIosPipette,
     DockerVllm,
     DockerSglang,
@@ -1159,7 +1162,7 @@ impl RuntimeType {
             Runtime::LlamacppApkPipette(_) => Self::LlamacppApkPipette,
             Runtime::LlamacppIosPipette(_) => Self::LlamacppIosPipette,
             Runtime::MlxMacosPipette(_) => Self::MlxMacosPipette,
-            Runtime::CoreAiMacosPipette(_) => Self::CoreAiMacosPipette,
+            Runtime::AppleCoreAiMacosPipette(_) => Self::AppleCoreAiMacosPipette,
             Runtime::MlxIosPipette(_) => Self::MlxIosPipette,
             Runtime::DockerVllm(_) => Self::DockerVllm,
             Runtime::DockerSglang(_) => Self::DockerSglang,
