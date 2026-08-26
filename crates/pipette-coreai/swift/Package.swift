@@ -8,8 +8,8 @@ import PackageDescription
 //
 // # Why john-rocky/coreai-models (zoo fork), not apple/coreai-models
 //
-// The maintainer review (PR #13) asked us to depend on Apple's upstream. We
-// tried and had to come back, and this comment is the record of why.
+// Apple's upstream was tried first; we had to come back to the fork, and this
+// comment is the record of why.
 //
 // - `apple/coreai-models@main` (as of 2026-08-25) does NOT compile against the
 //   macOS 27 / Xcode-beta 27 SDK in use here: `CoreAILanguageModel` still uses

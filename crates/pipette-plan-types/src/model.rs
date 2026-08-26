@@ -1,5 +1,6 @@
 //! The Model family: [`Model`] and its per-format variant structs
-//! ([`GgufText`], [`GgufVision`], [`Mlx`], [`Torch`], [`Openvino`]), each
+//! ([`GgufText`], [`GgufVision`], [`Mlx`], [`Torch`], [`Openvino`],
+//! [`CoreAi`]), each
 //! carrying a per-format source enum ([`GgufTextSource`], [`GgufVisionSource`],
 //! [`ModelSource`]), plus [`ModelFlags`] and the gguf-file entries. Re-
 //! exported flat from `lib.rs`, so consumers reference these as
@@ -22,6 +23,7 @@ use crate::{
 ///   { type = "mlx",         source = "huggingface", org = "LiquidAI",   repo_name = "LFM2.5-350M-MLX-4bit" },
 ///   { type = "torch",       source = "huggingface", org = "meta-llama", repo_name = "Llama-3.2-1B" },
 ///   { type = "openvino",    source = "huggingface", org = "LiquidAI",   repo_name = "LFM2.5-350M-ov", prefix = "int4-sym-cw" },
+///   { type = "core_ai",     source = "huggingface", org = "mlboydaisuke", repo_name = "Qwen3.8-27B-CoreAI", prefix = "qwen3_8_27b_decode_int4lin" },
 /// ]
 /// ```
 ///

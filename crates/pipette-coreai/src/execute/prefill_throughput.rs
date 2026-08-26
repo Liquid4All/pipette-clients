@@ -33,8 +33,13 @@ pub(super) fn run(
         .map_err(anyhow::Error::from)?;
     let prefill_tokens = benchmark.parameter_prefill_tokens;
 
+    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
+    // gate: a first-use `swift build -c release` saturates every core for
+    // minutes and would sit between the gate certifying the device as thermally
+    // idle and the measurement that certification is for.
+    let sidecar = crate::sidecar::require_coreai_sidecar()?;
     readiness_gate()?;
-    let server = server::start_server(req)?;
+    let server = server::start_server(req, Some(sidecar))?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p)");
     let warmup: PrefillThroughputResponse = throughput_http::post_json(
@@ -65,7 +70,7 @@ pub(super) fn run(
             measurement::expect_tokens("prompt_tokens", response.prompt_tokens, prefill_tokens)?;
             throughput_http::validate_tps("prompt_tps", response.prompt_tps)
                 .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            throughput_http::time_ms_from_tps(prefill_tokens, response.prompt_tps)
+            throughput_http::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
         },
     )?;
     let stats = measured.stats();

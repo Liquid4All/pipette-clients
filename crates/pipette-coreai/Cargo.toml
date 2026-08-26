@@ -27,4 +27,3 @@ thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 rstest.workspace = true
-serde_json.workspace = true

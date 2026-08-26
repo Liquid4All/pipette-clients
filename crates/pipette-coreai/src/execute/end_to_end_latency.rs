@@ -36,8 +36,13 @@ pub(super) fn run(
     let prefill_tokens = benchmark.parameter_prefill_tokens;
     let decode_tokens = benchmark.parameter_decode_tokens;
 
+    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
+    // gate: a first-use `swift build -c release` saturates every core for
+    // minutes and would sit between the gate certifying the device as thermally
+    // idle and the measurement that certification is for.
+    let sidecar = crate::sidecar::require_coreai_sidecar()?;
     readiness_gate()?;
-    let server = server::start_server(req)?;
+    let server = server::start_server(req, Some(sidecar))?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
     validate_response(
@@ -48,7 +53,7 @@ pub(super) fn run(
     .context("invalid /end_to_end_latency warmup")?;
 
     let measured = measurement::run(
-        "end_to_end_latency",
+        ENDPOINT,
         readiness_gate,
         observer,
         |_| Ok(()),

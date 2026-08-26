@@ -58,6 +58,7 @@ or `bench/` (collides with the benchmark noun).
 | `pipette-cli`         | The unified `pipette` client binary (bundles the runtime libraries below); includes the planner claim loop (`pipette worker`) |
 | `pipette-llamacpp`    | llama.cpp runner (library) |
 | `pipette-mlx`         | MLX runner (library) |
+| `pipette-coreai`      | Apple Core AI runner (library): Swift sidecar over `.aimodel` bundles, macOS 27+ |
 | `pipette-openvino`    | OpenVINO GenAI runner for IR models on Intel CPU / GPU / NPU |
 | `pipette-torch-oai`   | OpenAI-compatible runner (library) for PyTorch/HuggingFace models served by Docker or uv runtimes (vLLM, SGLang) |
 
@@ -75,6 +76,7 @@ graph TD
     subgraph impls["Runtime libraries"]
         llamacpp["pipette-llamacpp"]
         mlx["pipette-mlx"]
+        coreai["pipette-coreai"]
         openvino["pipette-openvino"]
         torch["pipette-torch-oai"]
     end
@@ -92,9 +94,10 @@ graph TD
     end
 
     pipette --> artifacts & ops & workspace & mgmt & device
-    pipette --> llamacpp & mlx & openvino & torch
+    pipette --> llamacpp & mlx & coreai & openvino & torch
     llamacpp --> ops & readiness & mgmt & device
     mlx --> ops & readiness & venv & device
+    coreai --> ops & subprocess
     openvino --> ops & venv & subprocess
     torch --> ops & readiness & venv & device
     plan --> readiness & workspace & types
@@ -284,7 +287,8 @@ compatibility is validated up front: GGUF pairs with the llama.cpp
 runtimes (`llamacpp_cli_stock_tools`, `llamacpp_apk_pipette`), MLX pairs
 with `mlx_macos_pipette` / `mlx_ios_pipette`, and Torch/HF pairs with
 Docker or uv OpenAI-compatible runtimes, and OpenVINO IR (`openvino`) pairs
-with `uv_openvino`.
+with `uv_openvino`, and Core AI `.aimodel` bundles pair with
+`core_ai_macos_pipette` (macOS 27+ only).
 
 `binary_path` and `work_dir` are per-transport: different targets can
 have the binary installed at different paths. The plan runner passes

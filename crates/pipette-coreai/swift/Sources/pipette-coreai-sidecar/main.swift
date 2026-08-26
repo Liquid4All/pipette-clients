@@ -39,10 +39,12 @@ enum SidecarError: Error, CustomStringConvertible {
     case unknownArg(String)
     case missingModel
     case badRequest(String)
+    case invalidArg(String, String)
 
     var description: String {
         switch self {
         case .missingArg(let a): return "missing value for argument \(a)"
+        case .invalidArg(let name, let raw): return "invalid value for --\(name): \(raw)"
         case .unknownArg(let a): return "unknown argument \(a)"
         case .missingModel: return "--model <bundle-dir> is required"
         case .badRequest(let m): return m
@@ -65,14 +67,21 @@ func parseArgs(_ args: [String]) throws -> Args {
         let a = argv[i]
         switch a {
         case "--model": modelDir = try next()
-        case "--port": port = UInt16(try next()) ?? 0
-        case "--seed": seed = UInt64(try next()) ?? 0
+        case "--port": port = try parseArg(try next(), as: UInt16.self, name: "port")
+        case "--seed": seed = try parseArg(try next(), as: UInt64.self, name: "seed")
         default: throw SidecarError.unknownArg(a)
         }
         i += 1
     }
     guard let modelDir else { throw SidecarError.missingModel }
     return Args(modelDir: modelDir, port: port, seed: seed)
+}
+
+private func parseArg<T: FixedWidthInteger>(_ raw: String, as _: T.Type, name: String) throws -> T {
+    guard let value = T(raw) else {
+        throw SidecarError.invalidArg(name, raw)
+    }
+    return value
 }
 
 // ---------------------------------------------------------------------------
@@ -131,14 +140,20 @@ final class CoreAIEngine: @unchecked Sendable {
     /// Run one generation. Returns per-phase timing derived like Apple's
     /// llm-benchmark: promptTps over the prefill span (to first generated
     /// token), genTps over the decode span (from first token onward).
-    func generate(prompt: [Int32], maxTokens: Int) async throws -> GenResult {
+    ///
+    /// `prepare()` must be called before this — the settle sleep and KV reset
+    /// are setup, not measurement, and would otherwise land inside an
+    /// end-to-end latency reading.
+    func prepare() async {
         // A short settle between generations. Without it the Core AI engine can
         // still be draining the previous decode when the next rep starts, which
         // perturbs the very first prompt_seconds measurement. Deliberately best-
         // effort (`try?`): a scheduling miss is not worth failing the run over.
         try? await Task.sleep(for: .milliseconds(50))
-        try await engine.reset()
+        try? await engine.reset()
+    }
 
+    func generate(prompt: [Int32], maxTokens: Int) async throws -> GenResult {
         let options = InferenceOptions(maxTokens: maxTokens, includeLogits: false)
         let sampling = SamplingConfiguration(temperature: 0)
         let start = ContinuousClock.now
@@ -149,11 +164,9 @@ final class CoreAIEngine: @unchecked Sendable {
         var promptSeconds: Double = 0
         var genStart = ContinuousClock.now
         var count = 0
-        var firstTokenAt: ContinuousClock.Instant?
 
         for try await _ in stream {
-            if firstTokenAt == nil {
-                firstTokenAt = ContinuousClock.now
+            if count == 0 {
                 let now = ContinuousClock.now
                 promptSeconds = seconds(from: start, to: now)
                 genStart = now
@@ -161,21 +174,22 @@ final class CoreAIEngine: @unchecked Sendable {
             count += 1
         }
         let genSeconds = seconds(from: genStart, to: .now)
+        let totalSeconds = seconds(from: start, to: .now)
         let promptTps = promptSeconds > 0 ? Double(prompt.count) / promptSeconds : 0
         // Pipette's contract is deterministic: a decode of N tokens must report
-        // completion_tokens == N. The llama-bench convention of attributing the
-        // first generated token to prefill (count - 1) does not apply here — it
-        // would under-report by one and fail a 1-token max-memory cell. The
-        // decode span still starts at the first token (genStart), so genTps is
-        // the rate over that span.
+        // completion_tokens == N (so a 1-token max-memory cell validates). But
+        // the rate over the span [firstToken, end] covers only the N-1
+        // inter-token intervals, so the numerator for tps is count - 1 — using
+        // `count` would overstate throughput by N/(N-1) (~14% at 8 tokens).
         let decodeCount = count
-        let genTps = genSeconds > 0 ? Double(decodeCount) / genSeconds : 0
+        let genTps = (genSeconds > 0 && count > 1) ? Double(count - 1) / genSeconds : 0
         return GenResult(
             promptTps: promptTps,
             genTps: genTps,
             promptTokens: prompt.count,
             completionTokens: decodeCount,
-            genSeconds: genSeconds
+            genSeconds: genSeconds,
+            totalSeconds: totalSeconds
         )
     }
 
@@ -191,6 +205,8 @@ struct GenResult {
     let promptTokens: Int
     let completionTokens: Int
     let genSeconds: Double
+    // Whole-generation span (prefill + decode), matching MLX's e2e timing.
+    let totalSeconds: Double
 }
 
 // ---------------------------------------------------------------------------
@@ -314,20 +330,26 @@ final class SidecarServer: @unchecked Sendable {
             guard let obj = try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any] else {
                 return json(["error": "request body must be a JSON object"], status: 400)
             }
+            // Setup (settle + KV reset) happens here, outside any timed
+            // region — mirroring pipette-ops' prepare contract.
+            await engine.prepare()
             switch path {
             case "/prefill_throughput":
                 guard let n = obj["prompt_tokens"] as? Int, n > 0 else {
                     return json(["error": "'prompt_tokens' must be a positive integer"], status: 400)
                 }
                 let r = try await engine.generate(prompt: engine.randomPrompt(count: n), maxTokens: 1)
-                return json(["prompt_tps": r.promptTps, "prompt_tokens": n])
+                // Echo the ACTUALS, not the request: the client-side
+                // determinism guard compares these against the requested
+                // counts and must be able to fire on an early stop.
+                return json(["prompt_tps": r.promptTps, "prompt_tokens": r.promptTokens])
             case "/decode_throughput":
                 guard let p = obj["prompt_tokens"] as? Int, p > 0,
                       let d = obj["decode_tokens"] as? Int, d > 0 else {
                     return json(["error": "'prompt_tokens'/'decode_tokens' positive ints required"], status: 400)
                 }
                 let r = try await engine.generate(prompt: engine.randomPrompt(count: p), maxTokens: d)
-                return json(["generation_tps": r.genTps, "decode_tokens": d])
+                return json(["generation_tps": r.genTps, "decode_tokens": r.completionTokens])
             case "/max_memory_usage":
                 guard let p = obj["prompt_tokens"] as? Int, p > 0,
                       let d = obj["decode_tokens"] as? Int, d > 0 else {
@@ -342,7 +364,7 @@ final class SidecarServer: @unchecked Sendable {
                 }
                 let r = try await engine.generate(prompt: engine.randomPrompt(count: n), maxTokens: d)
                 return json([
-                    "total_ms": r.genSeconds * 1000.0,
+                    "total_ms": r.totalSeconds * 1000.0,
                     "prompt_tokens": r.promptTokens,
                     "completion_tokens": r.completionTokens,
                 ])

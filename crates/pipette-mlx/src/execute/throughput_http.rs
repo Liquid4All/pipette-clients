@@ -29,8 +29,8 @@ pub(super) fn validate_tps(metric: &str, tps: f64) -> anyhow::Result<()> {
     pipette_ops::measurement::validate_tps(metric, tps)
 }
 
-pub(super) fn time_ms_from_tps(tokens: u32, tps: f64) -> anyhow::Result<f64> {
-    pipette_ops::measurement::time_ms_from_tps(tokens, tps)
+pub(super) fn time_ms_from_tps(metric: &str, tokens: u32, tps: f64) -> anyhow::Result<f64> {
+    pipette_ops::measurement::time_ms_from_tps(metric, tokens, tps)
 }
 
 #[cfg(test)]
@@ -40,14 +40,14 @@ mod tests {
     #[test]
     fn converts_tps_to_ms() -> anyhow::Result<()> {
         // 512 tokens / 1024 tok/s = 0.5 s = 500 ms.
-        assert_eq!(time_ms_from_tps(512, 1024.0)?, 500.0);
+        assert_eq!(time_ms_from_tps("test", 512, 1024.0)?, 500.0);
         Ok(())
     }
 
     #[test]
     fn rejects_invalid_tps_values() {
-        assert!(time_ms_from_tps(512, 0.0).is_err());
-        assert!(time_ms_from_tps(512, f64::NAN).is_err());
-        assert!(time_ms_from_tps(512, -1.0).is_err());
+        assert!(time_ms_from_tps("test", 512, 0.0).is_err());
+        assert!(time_ms_from_tps("test", 512, f64::NAN).is_err());
+        assert!(time_ms_from_tps("test", 512, -1.0).is_err());
     }
 }

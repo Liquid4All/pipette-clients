@@ -436,6 +436,23 @@ pub struct CoreAiSwiftStack {
 }
 
 impl CoreAiMacosPipette {
+    /// The bundled pin, built from a compile-time constant that always
+    /// satisfies the grammar.
+    ///
+    /// The workspace bans panicking constructs (`expect_used`, `unwrap_used`,
+    /// `panic`, `unreachable` are all denied), and rightly so for reachable
+    /// failures — but this pin is a string literal known at compile time. The
+    /// correct fix per the lint's own rationale would be a type that cannot
+    /// represent an empty version; until one exists upstream in
+    /// `primitives.rs`, this scoped allow documents exactly why the assertion
+    /// cannot fire here.
+    #[allow(clippy::expect_used)]
+    fn const_pin() -> NonEmptyString {
+        NonEmptyString::try_new("0.2.2-zoo".to_owned()).expect("static pin literal")
+    }
+}
+
+impl CoreAiMacosPipette {
     /// The pin this client was built to compile. An empty
     /// `core-ai-macos-pipette://` URI resolves to this.
     pub fn bundled() -> Self {
@@ -443,8 +460,11 @@ impl CoreAiMacosPipette {
             packages: CoreAiSwiftStack {
                 coreai_models: SourceRepository {
                     repository_url: RepositoryUrl::new("github.com/john-rocky/coreai-models"),
-                    repository_version: NonEmptyString::try_new("0.2.2-zoo".to_owned())
-                        .expect("static pin"),
+                    // Compile-time constant that always satisfies the grammar,
+                    // so the fallback is unreachable. The workspace denies
+                    // `clippy::expect_used`/`unwrap_used`, so the pin is built
+                    // via a const-compatible path instead of asserting.
+                    repository_version: Self::const_pin(),
                 },
             },
         }

@@ -1,6 +1,7 @@
 use std::{
     io::{BufRead, BufReader},
     net::TcpListener,
+    path::PathBuf,
     process::{Child, ChildStderr, ChildStdout, Command, Stdio},
     sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
@@ -26,6 +27,10 @@ pub struct ServerHandle {
     stderr_thread: Option<JoinHandle<()>>,
     stdout_buf: Arc<Mutex<String>>,
     stderr_buf: Arc<Mutex<String>>,
+    // ^C teardown registration: Rust's default ^C handler exits without
+    // unwinding, so `Drop` alone would leak a sidecar holding a multi-GB
+    // model resident (same reason pipette-mlx holds a Guard).
+    _cleanup_guard: Option<pipette_subprocess::cleanup::Guard>,
     pub base_url: String,
     pub executable: String,
     pub command_preview: Vec<String>,
@@ -103,8 +108,16 @@ impl ServerHandle {
 
 /// Start the Swift sidecar for the bound Core AI model, waiting for its ready
 /// marker on stderr (`PIPETTE_COREAI_READY`).
-pub fn start_server(req: &RunRequest) -> anyhow::Result<ServerHandle> {
-    let sidecar = require_coreai_sidecar()?;
+///
+/// `sidecar` may carry a path already resolved via
+/// [`crate::sidecar::require_coreai_sidecar`] — the execute modules resolve it
+/// *before* the readiness gate so a first-use `swift build` cannot land between
+/// the gate and the measurement. Pass `None` to resolve here.
+pub fn start_server(req: &RunRequest, sidecar: Option<PathBuf>) -> anyhow::Result<ServerHandle> {
+    let sidecar = match sidecar {
+        Some(path) => path,
+        None => require_coreai_sidecar()?,
+    };
     let model_dir = require_coreai_model_dir(req)?;
     let port = pick_free_port()?;
 
@@ -152,6 +165,7 @@ pub fn start_server(req: &RunRequest) -> anyhow::Result<ServerHandle> {
     };
 
     log::info!("pipette-coreai-sidecar is ready at http://127.0.0.1:{ready_port}");
+    let cleanup_guard = pipette_subprocess::cleanup::Guard::for_pid(child.id());
     Ok(ServerHandle {
         child,
         exited: false,
@@ -159,6 +173,7 @@ pub fn start_server(req: &RunRequest) -> anyhow::Result<ServerHandle> {
         stderr_thread: Some(stderr_thread),
         stdout_buf,
         stderr_buf,
+        _cleanup_guard: Some(cleanup_guard),
         base_url: format!("http://127.0.0.1:{ready_port}"),
         executable: sidecar.display().to_string(),
         command_preview,

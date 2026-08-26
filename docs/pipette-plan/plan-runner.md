@@ -317,7 +317,8 @@ runtimes = [{ type = "mlx_macos_pipette", version = "0.31.3", requirements = { t
 Model and runtime compatibility is validated when the plan loads:
 GGUF models pair with `llamacpp_cli_stock_tools` (or the mobile
 `llamacpp_apk_pipette` / `llamacpp_ios_pipette`), MLX models with
-`mlx_macos_pipette` / `mlx_ios_pipette`, Torch/HF models with Docker or uv
+`mlx_macos_pipette` / `mlx_ios_pipette`, Core AI `.aimodel` models with
+`core_ai_macos_pipette`, Torch/HF models with Docker or uv
 OpenAI-compatible runtimes, and the `apple_foundation_text` model with the
 `apple_foundation` runtime (Apple Foundation Models on iOS). AFM is a bare marker. The
 model and runtime carry no fields, since the model ships with the OS:

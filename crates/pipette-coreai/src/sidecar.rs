@@ -54,7 +54,9 @@ fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("swift");
     if !src.join("Package.swift").is_file() {
         anyhow::bail!(
-            "bundled Swift package not found at {} (pipette-coreai built without swift/)",
+            "bundled Swift package not found at {}: this pipette binary was \
+             built without swift/ (common for a distributed binary). Point \
+             {SIDECAR_BIN_ENV} at a prebuilt `pipette-coreai-sidecar` instead.",
             src.display()
         );
     }

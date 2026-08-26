@@ -51,8 +51,9 @@ pub fn validate_tps(metric: &str, tps: f64) -> anyhow::Result<()> {
 }
 
 /// Convert a tokens/sec reading into the milliseconds the result schema stores.
-pub fn time_ms_from_tps(tokens: u32, tps: f64) -> anyhow::Result<f64> {
-    let tps = positive_finite("throughput", tps)?;
+/// `metric` names the throughput in error messages (e.g. `/prefill_throughput`).
+pub fn time_ms_from_tps(metric: &str, tokens: u32, tps: f64) -> anyhow::Result<f64> {
+    let tps = positive_finite(metric, tps)?;
     Ok((tokens as f64 / tps) * 1000.0)
 }
 

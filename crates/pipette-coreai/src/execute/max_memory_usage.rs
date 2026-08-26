@@ -38,7 +38,12 @@ pub(super) fn run(req: &RunRequest) -> anyhow::Result<RunResponse> {
     // sidecar construction, *before* READY. The poller starts after READY, so
     // a cold-cache compile peak is excluded by policy. See
     // docs/methodology/coreai-specialization.md.
-    let mut server = server::start_server(req)?;
+    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
+    // gate: a first-use `swift build -c release` saturates every core for
+    // minutes and would sit between the gate certifying the device as thermally
+    // idle and the measurement that certification is for.
+    let sidecar = crate::sidecar::require_coreai_sidecar()?;
+    let mut server = server::start_server(req, Some(sidecar))?;
     let phys_poller = host::spawn_phys_footprint_poller(server.pid() as i32);
 
     let response_result: anyhow::Result<MaxMemoryUsageResponse> = throughput_http::post_json(
