@@ -53,7 +53,7 @@ pub(super) fn run(
         },
     )?;
     measurement::expect_tokens(
-        "{ENDPOINT} warmup decode_tokens",
+        &format!("{ENDPOINT} warmup decode_tokens"),
         warmup.decode_tokens,
         decode_tokens,
     )?;
