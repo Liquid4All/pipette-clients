@@ -230,7 +230,7 @@ fn spawn_stdout_reader(stdout: ChildStdout, stdout_buf: Arc<Mutex<String>>) -> J
             .for_each(|line| {
                 if !line.trim().is_empty() {
                     log::info!(target: "pipette_coreai::server", "{line}");
-                    push_capped_line(&stdout_buf, &line);
+                    pipette_subprocess::push_capped_line(&stdout_buf, &line, OUTPUT_CAPTURE_BYTES);
                 }
             });
     })
@@ -246,7 +246,7 @@ fn spawn_stderr_reader(
         let read_result = BufReader::new(stderr).lines().try_for_each(|line| {
             let line = line?;
             log::info!(target: "pipette_coreai::server", "{line}");
-            push_capped_line(&stderr_buf, &line);
+            pipette_subprocess::push_capped_line(&stderr_buf, &line, OUTPUT_CAPTURE_BYTES);
             if line.contains("PIPETTE_COREAI_READY") {
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(Ok(line));
@@ -265,17 +265,6 @@ fn spawn_stderr_reader(
         }
     });
     (rx, handle)
-}
-
-fn push_capped_line(buf: &Arc<Mutex<String>>, line: &str) {
-    let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
-    buf.push_str(line);
-    buf.push('\n');
-    if buf.len() > OUTPUT_CAPTURE_BYTES {
-        let over = buf.len() - OUTPUT_CAPTURE_BYTES;
-        let cutoff = buf[over..].find('\n').map(|i| over + i + 1).unwrap_or(over);
-        buf.drain(..cutoff);
-    }
 }
 
 fn wait_for_ready_marker(

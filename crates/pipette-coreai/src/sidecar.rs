@@ -6,19 +6,23 @@ use std::{
 };
 
 use anyhow::Context;
+use pipette_plan_types::AppleCoreAiMacosPipette;
 
 /// Env override for the sidecar binary path (bypasses building).
 const SIDECAR_BIN_ENV: &str = "PIPETTE_COREAI_SIDECAR";
+/// Env override for the Swift package directory (when the binary is off the
+/// build machine and `CARGO_MANIFEST_DIR` no longer points at sources).
+const SIDECAR_SWIFT_ENV: &str = "PIPETTE_COREAI_SWIFT";
+/// Env override for the cache root (tests; operators who want a non-default
+/// location). Default: `~/Library/Caches/pipette-coreai`.
+const SIDECAR_CACHE_ENV: &str = "PIPETTE_COREAI_CACHE";
 
 /// Resolve the Swift sidecar binary.
 ///
 /// Honors `PIPETTE_COREAI_SIDECAR` (a prebuilt path — used by CI and local
 /// dev to skip the Swift build). Otherwise builds the crate's bundled
-/// `swift/` package into `~/Library/Caches/pipette-coreai/` and copies the
-/// product there. The product directory is taken from
-/// `swift build --show-bin-path -c release` so it is not tied to one
-/// toolchain's layout (Xcode-beta uses `.build/out/Products/Release`;
-/// stock SwiftPM uses `.build/<triple>/release`).
+/// `swift/` package into a **pin-keyed** cache directory and copies the
+/// product there. A pin bump therefore cannot keep executing a stale binary.
 pub fn require_coreai_sidecar() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os(SIDECAR_BIN_ENV) {
         let path = PathBuf::from(path);
@@ -38,28 +42,79 @@ pub fn require_coreai_sidecar() -> anyhow::Result<PathBuf> {
     build_sidecar(&bin)
 }
 
-/// `~/Library/Caches/pipette-coreai/` — one compiled sidecar reused across
-/// workspaces. Not keyed on the model store: the sidecar is the runtime, not
-/// a per-model artifact.
+/// Delete the sidecar cache root (every pin). Returns whether anything was
+/// removed. Used by `pipette runtimes remove` for this OS-bundled runtime.
+pub fn clear_sidecar_cache() -> anyhow::Result<bool> {
+    let root = sidecar_cache_root()?;
+    if !root.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(&root)
+        .with_context(|| format!("removing the Core AI sidecar cache at {}", root.display()))?;
+    Ok(true)
+}
+
+fn bundled_pin() -> String {
+    AppleCoreAiMacosPipette::bundled()
+        .packages
+        .coreai_models
+        .repository_version
+        .to_string()
+}
+
+fn sidecar_cache_root() -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os(SIDECAR_CACHE_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME").context("cannot resolve $HOME for the sidecar cache")?;
+    Ok(PathBuf::from(home).join("Library/Caches/pipette-coreai"))
+}
+
+/// `cache_root/<pin>/` — one compiled sidecar per bundled pin.
 fn sidecar_cache_dir() -> anyhow::Result<PathBuf> {
-    let cache = std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Library/Caches/pipette-coreai"))
-        .context("cannot resolve $HOME for the sidecar cache")?;
+    let cache = sidecar_cache_root()?.join(bundled_pin());
     std::fs::create_dir_all(&cache)
         .with_context(|| format!("failed to create {}", cache.display()))?;
     Ok(cache)
 }
 
-fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("swift");
-    if !src.join("Package.swift").is_file() {
+fn swift_package_dir() -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os(SIDECAR_SWIFT_ENV) {
+        let path = PathBuf::from(path);
+        if path.join("Package.swift").is_file() {
+            return Ok(path);
+        }
         anyhow::bail!(
-            "bundled Swift package not found at {}: this pipette binary was \
-             built without swift/ (common for a distributed binary). Point \
-             {SIDECAR_BIN_ENV} at a prebuilt `pipette-coreai-sidecar` instead.",
-            src.display()
+            "{SIDECAR_SWIFT_ENV}={} has no Package.swift",
+            path.display()
         );
     }
+    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("swift");
+    if bundled.join("Package.swift").is_file() {
+        return Ok(bundled);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().take(8) {
+            for candidate in [
+                ancestor.join("crates/pipette-coreai/swift"),
+                ancestor.join("swift"),
+            ] {
+                if candidate.join("Package.swift").is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    anyhow::bail!(
+        "bundled Swift package not found (this pipette binary was built without \
+         swift/ nearby, common for a distributed binary). Point {SIDECAR_BIN_ENV} \
+         at a prebuilt `pipette-coreai-sidecar`, or {SIDECAR_SWIFT_ENV} at the \
+         crate's swift/ directory."
+    )
+}
+
+fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
+    let src = swift_package_dir()?;
     log::info!(
         "building pipette-coreai sidecar from {} (cache {})",
         src.display(),
@@ -102,4 +157,42 @@ fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
         )
     })?;
     Ok(bin.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_dir_is_keyed_on_the_bundled_pin() -> anyhow::Result<()> {
+        let tmp =
+            std::env::temp_dir().join(format!("pipette-coreai-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // SAFETY: test-only env for this process; not run in parallel with
+        // other tests that read the same vars.
+        std::env::set_var(SIDECAR_CACHE_ENV, &tmp);
+        let dir = sidecar_cache_dir()?;
+        assert!(
+            dir.ends_with(bundled_pin()),
+            "expected pin-keyed cache, got {}",
+            dir.display()
+        );
+        assert!(dir.starts_with(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var(SIDECAR_CACHE_ENV);
+        Ok(())
+    }
+
+    #[test]
+    fn clear_sidecar_cache_is_a_no_op_when_missing() -> anyhow::Result<()> {
+        let tmp = std::env::temp_dir().join(format!(
+            "pipette-coreai-cache-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var(SIDECAR_CACHE_ENV, &tmp);
+        assert!(!clear_sidecar_cache()?);
+        std::env::remove_var(SIDECAR_CACHE_ENV);
+        Ok(())
+    }
 }

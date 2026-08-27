@@ -6,10 +6,12 @@
 //! [`cleanup`] stays a named module: the `cleanup::` prefix is what every
 //! spawn site already reads by.
 
+mod capture;
 mod command;
 mod sigpipe;
 
 pub mod cleanup;
 
+pub use capture::push_capped_line;
 pub use command::{argv, echo_debug, echo_info, render, which};
 pub use sigpipe::reset_sigpipe;

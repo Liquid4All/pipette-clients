@@ -68,9 +68,9 @@ pub(super) fn run(
         |idx, rep| {
             let response = &rep.value;
             measurement::expect_tokens("prompt_tokens", response.prompt_tokens, prefill_tokens)?;
-            throughput_http::validate_tps("prompt_tps", response.prompt_tps)
+            measurement::validate_tps("prompt_tps", response.prompt_tps)
                 .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            throughput_http::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
+            measurement::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
         },
     )?;
     let stats = measured.stats();

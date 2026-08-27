@@ -20,10 +20,12 @@ That cache is **outside** pipette's model store.
 3. Pipette does **not** clear the specialization cache between runs. A
    published number is a warm-cache number unless the operator wiped
    `AIModelCache` (or the OS version changed, which invalidates the cache).
-4. Two runs of the same cell can still differ by cache state (cold vs warm,
-   or a purge under storage pressure). The result payload does not yet
-   record a cache-hit bit; treat that as part of the host environment
-   alongside thermal state.
+4. The sidecar snapshots Apple's cache directories around
+   `EngineFactory.createEngine` and prints
+   `specialization_cache=hit|miss` on the `PIPETTE_COREAI_READY` line (also
+   on `GET /health`). A hit means no new cache files appeared during load.
+   Two runs of the same cell can still differ by cache state; the READY
+   line is the record of which one produced that run.
 
 Ahead-of-time compilation (`xcrun coreai-build compile`) can shrink on-device
 specialization. It is an operator choice, not something the harness does.

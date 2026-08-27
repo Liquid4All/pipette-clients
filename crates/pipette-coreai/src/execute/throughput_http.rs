@@ -23,29 +23,3 @@ where
     http.json_request(Method::POST, &url, None, Some(body))
         .with_context(|| format!("POST {endpoint} to pipette-coreai-sidecar failed"))
 }
-
-pub(super) fn validate_tps(metric: &str, tps: f64) -> anyhow::Result<()> {
-    pipette_ops::measurement::validate_tps(metric, tps)
-}
-
-pub(super) fn time_ms_from_tps(metric: &str, tokens: u32, tps: f64) -> anyhow::Result<f64> {
-    pipette_ops::measurement::time_ms_from_tps(metric, tokens, tps)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn converts_tps_to_ms() -> anyhow::Result<()> {
-        assert_eq!(time_ms_from_tps("test", 512, 1024.0)?, 500.0);
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_invalid_tps_values() {
-        assert!(time_ms_from_tps("test", 512, 0.0).is_err());
-        assert!(time_ms_from_tps("test", 512, f64::NAN).is_err());
-        assert!(time_ms_from_tps("test", 512, -1.0).is_err());
-    }
-}

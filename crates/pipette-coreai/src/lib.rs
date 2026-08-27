@@ -19,3 +19,5 @@ pub mod execute;
 
 #[cfg(target_os = "macos")]
 pub use execute::run;
+#[cfg(target_os = "macos")]
+pub use sidecar::{clear_sidecar_cache, require_coreai_sidecar};

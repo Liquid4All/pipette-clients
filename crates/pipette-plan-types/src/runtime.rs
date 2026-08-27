@@ -428,7 +428,10 @@ pub struct AppleCoreAiMacosPipette {
 }
 
 /// The pinned Swift-package stack the desktop Core AI sidecar is compiled
-/// against (from the crate's `swift/Package.resolved`). Today that is the
+/// against (from the crate's `swift/Package.resolved`). `coreai_models` is the
+/// engine; `swift_transformers` / `xgrammar` / `swift_jinja` affect
+/// tokenization and decode, so they travel with the identity the same way
+/// [`MlxSwiftStack`] records three repos. Today `coreai_models` is the
 /// `john-rocky/coreai-models` zoo fork of Apple's `coreai-models` (`CoreAILM`
 /// product) — pinned at `0.2.2-zoo` because Apple upstream still cannot chunk
 /// a multi-token prefill into the S=1 decode bundles pipette benchmarks (see
@@ -436,6 +439,9 @@ pub struct AppleCoreAiMacosPipette {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct CoreAiSwiftStack {
     pub coreai_models: SourceRepository,
+    pub swift_transformers: SourceRepository,
+    pub xgrammar: SourceRepository,
+    pub swift_jinja: SourceRepository,
 }
 
 impl AppleCoreAiMacosPipette {
@@ -450,8 +456,8 @@ impl AppleCoreAiMacosPipette {
     /// `primitives.rs`, this scoped allow documents exactly why the assertion
     /// cannot fire here.
     #[allow(clippy::expect_used)]
-    fn const_pin() -> NonEmptyString {
-        NonEmptyString::try_new("0.2.2-zoo".to_owned()).expect("static pin literal")
+    fn const_pin(literal: &'static str) -> NonEmptyString {
+        NonEmptyString::try_new(literal.to_owned()).expect("static pin literal")
     }
 }
 
@@ -463,11 +469,19 @@ impl AppleCoreAiMacosPipette {
             packages: CoreAiSwiftStack {
                 coreai_models: SourceRepository {
                     repository_url: RepositoryUrl::new("github.com/john-rocky/coreai-models"),
-                    // Compile-time constant that always satisfies the grammar,
-                    // so the fallback is unreachable. The workspace denies
-                    // `clippy::expect_used`/`unwrap_used`, so the pin is built
-                    // via a const-compatible path instead of asserting.
-                    repository_version: Self::const_pin(),
+                    repository_version: Self::const_pin("0.2.2-zoo"),
+                },
+                swift_transformers: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/huggingface/swift-transformers"),
+                    repository_version: Self::const_pin("1.3.3"),
+                },
+                xgrammar: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/mlc-ai/xgrammar"),
+                    repository_version: Self::const_pin("0.2.2"),
+                },
+                swift_jinja: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/huggingface/swift-jinja"),
+                    repository_version: Self::const_pin("2.4.2"),
                 },
             },
         }
@@ -803,7 +817,11 @@ impl std::fmt::Display for MlxSwiftStack {
 
 impl std::fmt::Display for CoreAiSwiftStack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "coreai-models={}", self.coreai_models)
+        write!(
+            f,
+            "coreai-models={} swift-transformers={} xgrammar={} swift-jinja={}",
+            self.coreai_models, self.swift_transformers, self.xgrammar, self.swift_jinja
+        )
     }
 }
 
@@ -2019,6 +2037,33 @@ swift_transformers = { repository_url = "github.com/huggingface/swift-transforme
         };
         assert_eq!(rt.flavor, MlxIosPipetteFlavor::IosArm64);
         assert_eq!(rt.packages.mlx_swift.repository_version.as_ref(), "0.25.6");
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_macos_pipette_runtime_parses() -> anyhow::Result<()> {
+        let runtime: Runtime = toml::from_str(
+            r#"type = "core_ai_macos_pipette"
+
+[packages]
+coreai_models = { repository_url = "github.com/john-rocky/coreai-models", repository_version = "0.2.2-zoo" }
+swift_transformers = { repository_url = "github.com/huggingface/swift-transformers", repository_version = "1.3.3" }
+xgrammar = { repository_url = "github.com/mlc-ai/xgrammar", repository_version = "0.2.2" }
+swift_jinja = { repository_url = "github.com/huggingface/swift-jinja", repository_version = "2.4.2" }"#,
+        )
+        .context("coreai macos pipette runtime should parse")?;
+        let Runtime::AppleCoreAiMacosPipette(rt) = &runtime else {
+            anyhow::bail!("expected AppleCoreAiMacosPipette, got {runtime:?}");
+        };
+        assert_eq!(
+            rt.packages.coreai_models.repository_version.as_ref(),
+            "0.2.2-zoo"
+        );
+        assert_eq!(
+            rt.packages.swift_transformers.repository_version.as_ref(),
+            "1.3.3"
+        );
+        assert!(rt.to_string().contains("swift-transformers="));
         Ok(())
     }
 

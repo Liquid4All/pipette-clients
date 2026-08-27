@@ -346,7 +346,8 @@ fn policy_for(runtime: RuntimeType) -> Policy {
 //
 // OS-VERSION FLOORS (deferred, deliberately): several real policies have an
 // OS-version minimum — AFM needs macOS 26.0+/iOS 26+, desktop MLX needs macOS
-// 14+, iOS MLX needs iOS 17.2+. None is expressible today. The server
+// 14+, iOS MLX needs iOS 17.2+, desktop Core AI needs macOS 27+. None is
+// expressible today. The server
 // normalizes `device_os_version` verbatim, so a device reports its full version
 // (`os_version:26.1`); a rule requiring `os_version:26` would therefore match
 // nothing, and enumerating every point release is unbounded. Injecting an

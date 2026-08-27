@@ -75,9 +75,9 @@ pub(super) fn run(
         |idx, rep| {
             let response = &rep.value;
             measurement::expect_tokens("decode_tokens", response.decode_tokens, decode_tokens)?;
-            throughput_http::validate_tps("generation_tps", response.generation_tps)
+            measurement::validate_tps("generation_tps", response.generation_tps)
                 .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            throughput_http::time_ms_from_tps(ENDPOINT, decode_tokens, response.generation_tps)
+            measurement::time_ms_from_tps(ENDPOINT, decode_tokens, response.generation_tps)
         },
     )?;
     let stats = measured.stats();

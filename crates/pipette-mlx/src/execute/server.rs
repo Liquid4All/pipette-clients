@@ -276,7 +276,7 @@ fn spawn_stdout_reader(
                 let _ = tx.send(Ok(line));
             } else if !line.trim().is_empty() {
                 log::info!(target: "pipette_mlx::server", "{line}");
-                push_capped_line(&stdout_buf, &line);
+                pipette_subprocess::push_capped_line(&stdout_buf, &line, OUTPUT_CAPTURE_BYTES);
             }
             Ok::<_, std::io::Error>(())
         });
@@ -300,23 +300,9 @@ fn spawn_stderr_reader(stderr: ChildStderr, stderr_buf: Arc<Mutex<String>>) -> J
             .map_while(std::result::Result::ok)
             .for_each(|line| {
                 log::info!(target: "pipette_mlx::server", "{line}");
-                push_capped_line(&stderr_buf, &line);
+                pipette_subprocess::push_capped_line(&stderr_buf, &line, OUTPUT_CAPTURE_BYTES);
             });
     })
-}
-
-/// Append `line` to a captured-output buffer, trimming whole lines off the
-/// front once it exceeds the cap so the buffer stays bounded (keeps the tail —
-/// the most relevant part when something fails).
-fn push_capped_line(buf: &Arc<Mutex<String>>, line: &str) {
-    let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
-    buf.push_str(line);
-    buf.push('\n');
-    if buf.len() > OUTPUT_CAPTURE_BYTES {
-        let over = buf.len() - OUTPUT_CAPTURE_BYTES;
-        let cutoff = buf[over..].find('\n').map(|i| over + i + 1).unwrap_or(over);
-        buf.drain(..cutoff);
-    }
 }
 
 fn wait_for_ready_marker(

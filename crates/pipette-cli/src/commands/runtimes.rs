@@ -209,10 +209,20 @@ impl PullArgs {
         drop(progress);
 
         // Core AI is OS-bundled: `ensure_runtime` returns the declared pin
-        // without writing a store entry, so there is no manifest to locate.
+        // without writing a store entry. Build (or reuse) the pin-keyed sidecar
+        // here so `runtimes pull` is the place a first-use `swift build` lands,
+        // not between the readiness gate and a measurement.
         if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
-            println!("Ready: `{declared}` (engine ships with macOS; sidecar built on first run)");
-            return Ok(());
+            #[cfg(target_os = "macos")]
+            {
+                let path = pipette_coreai::require_coreai_sidecar()?;
+                println!("Ready: `{declared}` (sidecar {})", path.display());
+                return Ok(());
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                anyhow::bail!("Apple Core AI sidecar can only be built on macOS 27+");
+            }
         }
         let entry = store
             .find(&declared)?
@@ -228,6 +238,22 @@ impl PullArgs {
 impl RemoveArgs {
     pub fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
         let declared = resolve_runtime_arg(ws, &self.runtime)?;
+        if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
+            #[cfg(target_os = "macos")]
+            {
+                if pipette_coreai::clear_sidecar_cache()? {
+                    println!("Removed sidecar cache for `{declared}`");
+                } else {
+                    println!("`{declared}` is not installed");
+                }
+                return Ok(());
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                println!("`{declared}` is not installed");
+                return Ok(());
+            }
+        }
         let store = ws.runtimes();
         if store.remove(&declared)? {
             println!("Removed `{declared}`");

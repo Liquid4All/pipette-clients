@@ -14,7 +14,7 @@ cache: [coreai-specialization.md](../methodology/coreai-specialization.md).
 |---|---------|-----|-----------|
 | Engine | Ships with macOS 27 (Core AI) | Python venv + `mlx-lm` | Upstream release archive |
 | Runtime artifact | Swift sidecar, compiled against a pinned `john-rocky/coreai-models` (`0.2.2-zoo` fork) | Python venv + locked `mlx-lm` | GGUF release archive |
-| Install | `runtimes pull` is a no-op (engine is OS-bundled); first run builds the sidecar | `runtimes pull` (fetches a venv) | `runtimes pull` (fetches a release) |
+| Install | `runtimes pull` builds the pin-keyed sidecar; `runtimes remove` clears it | `runtimes pull` (fetches a venv) | `runtimes pull` (fetches a release) |
 | Models | `.aimodel` bundle (`metadata.json` + `*.aimodel/` + tokenizer/) | HF repo snapshot | GGUF file(s) |
 | Host | Apple Silicon, macOS 27+ only | Apple Silicon only | Cross-platform |
 
@@ -30,9 +30,11 @@ multi-token prefill into the S=1 decode bundles pipette benchmarks):
 pipette runtimes pull --runtime 'core-ai-macos-pipette://version=0.2.2-zoo'
 ```
 
-`runtimes pull` succeeds without writing a store entry. The sidecar is compiled
-from the crate's bundled `swift/` package on first use (cached under
-`~/Library/Caches/pipette-coreai/`). That build needs `swift` on `PATH`.
+`runtimes pull` succeeds without writing a store entry, and **builds** the
+sidecar (or reuses the pin-keyed cache at
+`~/Library/Caches/pipette-coreai/<pin>/`). That build needs `swift` on `PATH`.
+`runtimes remove` deletes the cache. A URI `version=` other than the bundled
+pin is rejected: the sidecar is compiled against that pin only.
 
 `PIPETTE_COREAI_SIDECAR=/path/to/binary` skips the Swift build and uses a
 prebuilt sidecar. It is an optional override, not a requirement, once

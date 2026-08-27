@@ -93,6 +93,10 @@ final class CoreAIEngine: @unchecked Sendable {
     let vocabSize: Int
     let name: String
     let seed: UInt64
+    let eosTokenId: Int32?
+    /// True when Apple's specialization cache already had this model's
+    /// artifacts before `createEngine` (no new cache files appeared).
+    let specializationCacheHit: Bool
 
     init(bundleDir: URL, seed: UInt64) async throws {
         // S=1 zoo decode bundles (catalog hint "pipelined") are static graphs that
@@ -114,10 +118,14 @@ final class CoreAIEngine: @unchecked Sendable {
             function: bundle.language.functionMap?.name(for: "main") ?? "main"
         )
         let configData = try JSONEncoder().encode(config)
+        let beforeCache = specializationCacheFiles()
         self.engine = try await EngineFactory.createEngine(config: configData, modelURL: modelURL)
+        let afterCache = specializationCacheFiles()
+        self.specializationCacheHit = !beforeCache.isEmpty && afterCache == beforeCache
         self.vocabSize = bundle.vocabSize
         self.name = bundle.name
         self.seed = seed
+        self.eosTokenId = loadEosTokenId(from: bundleDir)
     }
 
     /// Deterministic pseudo-random token prompt of exactly `count` tokens.
@@ -132,7 +140,22 @@ final class CoreAIEngine: @unchecked Sendable {
             z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
             z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
             z = z ^ (z >> 31)
-            out.append(Int32(z % v))
+            var token = Int32(z % v)
+            // Skip EOS so a uniform vocab sample cannot plant a stop token in
+            // the prompt (MLX's `_suppress_eos` equivalent for this path).
+            if let eos = eosTokenId, v > 1 {
+                var guardCount = 0
+                while token == eos && guardCount < 8 {
+                    state = state &+ 0x9E37_79B9_7F4A_7C15
+                    z = state
+                    z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+                    z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+                    z = z ^ (z >> 31)
+                    token = Int32(z % v)
+                    guardCount += 1
+                }
+            }
+            out.append(token)
         }
         return out
     }
@@ -209,6 +232,40 @@ struct GenResult {
     let totalSeconds: Double
 }
 
+/// Snapshot Apple's on-disk specialization cache so we can tell a warm load
+/// from a cold compile. Paths match the locations Core AI writes today.
+func loadEosTokenId(from bundleDir: URL) -> Int32? {
+    let url = bundleDir.appendingPathComponent("tokenizer/tokenizer_config.json")
+    guard let data = try? Data(contentsOf: url),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        return nil
+    }
+    if let n = obj["eos_token_id"] as? Int {
+        return Int32(n)
+    }
+    return nil
+}
+
+func specializationCacheFiles() -> Set<String> {
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+    let roots = [
+        home.appendingPathComponent("Library/Caches/com.apple.coreai"),
+        home.appendingPathComponent("Library/Caches/AIModelCache"),
+    ]
+    var files = Set<String>()
+    for root in roots {
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            continue
+        }
+        for case let url as URL in enumerator {
+            files.insert(url.path)
+        }
+    }
+    return files
+}
+
 // ---------------------------------------------------------------------------
 // Minimal HTTP server (Network framework)
 // ---------------------------------------------------------------------------
@@ -221,6 +278,8 @@ final class SidecarServer: @unchecked Sendable {
     let port: UInt16
     let engine: CoreAIEngine
     let listener: NWListener
+    private let chainLock = NSLock()
+    private var postChain: Task<Void, Never> = Task {}
 
     init(port: UInt16, engine: CoreAIEngine) throws {
         self.port = port
@@ -244,7 +303,7 @@ final class SidecarServer: @unchecked Sendable {
             switch state {
             case .ready:
                 FileHandle.standardError.write(
-                    Data("PIPETTE_COREAI_READY port=\(self.port) model=\(self.engine.name)\n".utf8)
+                    Data("PIPETTE_COREAI_READY port=\(self.port) model=\(self.engine.name) specialization_cache=\(self.engine.specializationCacheHit ? "hit" : "miss")\n".utf8)
                 )
             case .failed(let error):
                 FileHandle.standardError.write(
@@ -311,15 +370,24 @@ final class SidecarServer: @unchecked Sendable {
         let body = String(s[headerEnd.upperBound...])
 
         if method == "GET" && path == "/health" {
-            respond(json(["ok": true]), to: conn)
+            respond(json([
+                "ok": true,
+                "specialization_cache_hit": engine.specializationCacheHit,
+            ]), to: conn)
         } else if method == "POST" && path == "/shutdown" {
             respond(json(["ok": true]), to: conn)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(0) }
         } else if method == "POST" {
-            Task {
+            // Serialise generations: two concurrent POSTs would interleave
+            // engine.reset() / generate() on this @unchecked Sendable class.
+            chainLock.lock()
+            let previous = postChain
+            postChain = Task {
+                await previous.value
                 let response = await self.post(path, body: body)
                 self.respond(response, to: conn)
             }
+            chainLock.unlock()
         } else {
             respond(json(["error": "unknown endpoint: \(method) \(path)"], status: 404), to: conn)
         }

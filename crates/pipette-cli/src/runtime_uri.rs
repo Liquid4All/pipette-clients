@@ -470,9 +470,16 @@ fn parse_mlx(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
 }
 
 fn parse_coreai(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
-    let mut rt = AppleCoreAiMacosPipette::bundled();
+    let rt = AppleCoreAiMacosPipette::bundled();
     if let Some(version) = p.take(KEY_VERSION) {
-        rt.packages.coreai_models.repository_version = non_empty(KEY_VERSION, version)?;
+        let version = non_empty(KEY_VERSION, version)?;
+        let bundled = rt.packages.coreai_models.repository_version.as_ref();
+        if version.as_ref() != bundled {
+            return Err(RuntimeUriError::NotRepresentable(format!(
+                "core-ai-macos-pipette version `{version}` is not the bundled pin `{bundled}`; \
+                 the sidecar is compiled against that pin only"
+            )));
+        }
     }
     p.finish()?;
     Ok(Runtime::AppleCoreAiMacosPipette(rt))
@@ -965,6 +972,32 @@ mod tests {
             parse_runtime_uri("mlx-macos-pipette://version=0.0.0-not-in-catalog"),
             Err(RuntimeUriError::NotRepresentable(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_unknown_version_is_not_representable() -> anyhow::Result<()> {
+        assert!(matches!(
+            parse_runtime_uri("core-ai-macos-pipette://version=9.9.9"),
+            Err(RuntimeUriError::NotRepresentable(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_bundled_version_round_trips() -> anyhow::Result<()> {
+        let runtime = parse_runtime_uri("core-ai-macos-pipette://version=0.2.2-zoo")?;
+        let Runtime::AppleCoreAiMacosPipette(rt) = runtime else {
+            anyhow::bail!("expected AppleCoreAiMacosPipette");
+        };
+        assert_eq!(
+            rt.packages.coreai_models.repository_version.as_ref(),
+            "0.2.2-zoo"
+        );
+        assert_eq!(
+            runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt))?,
+            "core-ai-macos-pipette://version=0.2.2-zoo"
+        );
         Ok(())
     }
 
