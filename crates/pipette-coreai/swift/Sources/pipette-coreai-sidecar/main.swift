@@ -93,7 +93,7 @@ final class CoreAIEngine: @unchecked Sendable {
     let vocabSize: Int
     let name: String
     let seed: UInt64
-    let eosTokenId: Int32?
+    let eosTokenIds: Set<Int32>
     /// True when Apple's specialization cache already had this model's
     /// artifacts before `createEngine` (no new cache files appeared).
     let specializationCacheHit: Bool
@@ -125,7 +125,7 @@ final class CoreAIEngine: @unchecked Sendable {
         self.vocabSize = bundle.vocabSize
         self.name = bundle.name
         self.seed = seed
-        self.eosTokenId = loadEosTokenId(from: bundleDir)
+        self.eosTokenIds = loadEosTokenIds(from: bundleDir)
     }
 
     /// Deterministic pseudo-random token prompt of exactly `count` tokens.
@@ -143,9 +143,9 @@ final class CoreAIEngine: @unchecked Sendable {
             var token = Int32(z % v)
             // Skip EOS so a uniform vocab sample cannot plant a stop token in
             // the prompt (MLX's `_suppress_eos` equivalent for this path).
-            if let eos = eosTokenId, v > 1 {
+            if !eosTokenIds.isEmpty && v > 1 {
                 var guardCount = 0
-                while token == eos && guardCount < 8 {
+                while eosTokenIds.contains(token) && guardCount < 16 {
                     state = state &+ 0x9E37_79B9_7F4A_7C15
                     z = state
                     z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
@@ -153,6 +153,13 @@ final class CoreAIEngine: @unchecked Sendable {
                     z = z ^ (z >> 31)
                     token = Int32(z % v)
                     guardCount += 1
+                }
+                // Retry budget exhausted (pathological vocab): step
+                // deterministically to the next non-EOS id so EOS can never
+                // land in a prompt, rather than falling through with `token`
+                // still an EOS id.
+                while eosTokenIds.contains(token) {
+                    token = Int32((UInt64(bitPattern: Int64(token)) &+ 1) % v)
                 }
             }
             out.append(token)
@@ -232,19 +239,36 @@ struct GenResult {
     let totalSeconds: Double
 }
 
-/// Snapshot Apple's on-disk specialization cache so we can tell a warm load
-/// from a cold compile. Paths match the locations Core AI writes today.
-func loadEosTokenId(from bundleDir: URL) -> Int32? {
-    let url = bundleDir.appendingPathComponent("tokenizer/tokenizer_config.json")
-    guard let data = try? Data(contentsOf: url),
-          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else {
-        return nil
+/// All EOS-like token ids to keep out of sampled prompts. Reads
+/// `tokenizer_config.json` then `generation_config.json`; accepts a scalar
+/// `eos_token_id` or an array of them (HF configs use both forms).
+func loadEosTokenIds(from bundleDir: URL) -> Set<Int32> {
+    var ids = Set<Int32>()
+    let candidates = [
+        bundleDir.appendingPathComponent("tokenizer/tokenizer_config.json"),
+        bundleDir.appendingPathComponent("tokenizer/generation_config.json"),
+        bundleDir.appendingPathComponent("generation_config.json"),
+    ]
+    for url in candidates {
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            continue
+        }
+        switch obj["eos_token_id"] {
+        case let n as Int:
+            ids.insert(Int32(truncatingIfNeeded: n))
+        case let arr as [Any]:
+            for item in arr {
+                if let n = item as? Int {
+                    ids.insert(Int32(truncatingIfNeeded: n))
+                }
+            }
+        default:
+            break
+        }
     }
-    if let n = obj["eos_token_id"] as? Int {
-        return Int32(n)
-    }
-    return nil
+    return ids
 }
 
 func specializationCacheFiles() -> Set<String> {

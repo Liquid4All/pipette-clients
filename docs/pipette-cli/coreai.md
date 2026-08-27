@@ -31,14 +31,22 @@ pipette runtimes pull --runtime 'core-ai-macos-pipette://version=0.2.2-zoo'
 ```
 
 `runtimes pull` succeeds without writing a store entry, and **builds** the
-sidecar (or reuses the pin-keyed cache at
-`~/Library/Caches/pipette-coreai/<pin>/`). That build needs `swift` on `PATH`.
-`runtimes remove` deletes the cache. A URI `version=` other than the bundled
-pin is rejected: the sidecar is compiled against that pin only.
+sidecar (or reuses the cache, keyed on the full bundled Swift stack, at
+`~/Library/Caches/pipette-coreai/<stack-key>/`). That build needs `swift` on
+`PATH`. `runtimes remove` deletes the cache. A `version=` (URI) or a JSON
+`--runtime` whose Swift stack differs from the bundled pin is rejected: the
+sidecar is compiled against that stack only, so any other pin would record a
+number the running binary did not produce.
 
-`PIPETTE_COREAI_SIDECAR=/path/to/binary` skips the Swift build and uses a
-prebuilt sidecar. It is an optional override, not a requirement, once
-`swift build --show-bin-path` can find the product.
+### Environment overrides
+
+- `PIPETTE_COREAI_SIDECAR=/path/to/binary`: skip the Swift build and use a
+  prebuilt sidecar. Optional, not a requirement.
+- `PIPETTE_COREAI_SWIFT=/path/to/swift`: point at the crate's `swift/`
+  package directory when the `pipette` binary was shipped away from its
+  build tree (so `CARGO_MANIFEST_DIR` no longer resolves).
+- `PIPETTE_COREAI_CACHE=/path`: override the cache root
+  (`~/Library/Caches/pipette-coreai` by default).
 
 ## Model
 

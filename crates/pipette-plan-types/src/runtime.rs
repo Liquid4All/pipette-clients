@@ -494,6 +494,18 @@ impl Default for AppleCoreAiMacosPipette {
     }
 }
 
+impl AppleCoreAiMacosPipette {
+    /// True when every pin in this runtime's Swift stack equals the pin this
+    /// client was compiled against. The sidecar is built from the bundled
+    /// `Package.resolved` only, so a runtime whose `packages` differ would
+    /// record a pin the executed binary does not have. Callers reject a
+    /// non-bundled stack rather than run the wrong identity (URI parse already
+    /// does; JSON/TOML `--runtime` and execute must too).
+    pub fn is_bundled(&self) -> bool {
+        self.packages == Self::bundled().packages
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct DockerVllm {
     pub image_name: NonEmptyString,
@@ -2064,6 +2076,54 @@ swift_jinja = { repository_url = "github.com/huggingface/swift-jinja", repositor
             "1.3.3"
         );
         assert!(rt.to_string().contains("swift-transformers="));
+        assert!(rt.is_bundled());
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_is_bundled_rejects_a_mutated_pin() -> anyhow::Result<()> {
+        let mut rt = AppleCoreAiMacosPipette::bundled();
+        assert!(rt.is_bundled());
+        // Any single pin differing from the built stack makes it non-bundled.
+        rt.packages.coreai_models.repository_version = NonEmptyString::try_new("9.9.9".to_owned())?;
+        assert!(!rt.is_bundled());
+        let mut rt2 = AppleCoreAiMacosPipette::bundled();
+        rt2.packages.xgrammar.repository_version = NonEmptyString::try_new("0.0.0".to_owned())?;
+        assert!(!rt2.is_bundled());
+        Ok(())
+    }
+
+    /// The `bundled()` pins are hand-maintained literals; they MUST match the
+    /// committed `swift/Package.resolved` or a benchmark records a pin the
+    /// sidecar was not built from. This guards the three added pins.
+    #[test]
+    fn bundled_pins_match_package_resolved() -> anyhow::Result<()> {
+        let resolved = include_str!("../../pipette-coreai/swift/Package.resolved");
+        let value: serde_json::Value = serde_json::from_str(resolved)?;
+        let pins = value["pins"].as_array().context("pins array")?;
+        let version_of = |identity: &str| -> Option<String> {
+            pins.iter()
+                .find(|p| p["identity"] == identity)
+                .and_then(|p| p["state"]["version"].as_str())
+                .map(str::to_owned)
+        };
+        let bundled = AppleCoreAiMacosPipette::bundled().packages;
+        assert_eq!(
+            Some(bundled.coreai_models.repository_version.to_string()),
+            version_of("coreai-models")
+        );
+        assert_eq!(
+            Some(bundled.swift_transformers.repository_version.to_string()),
+            version_of("swift-transformers")
+        );
+        assert_eq!(
+            Some(bundled.xgrammar.repository_version.to_string()),
+            version_of("xgrammar")
+        );
+        assert_eq!(
+            Some(bundled.swift_jinja.repository_version.to_string()),
+            version_of("swift-jinja")
+        );
         Ok(())
     }
 

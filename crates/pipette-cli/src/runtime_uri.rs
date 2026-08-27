@@ -809,11 +809,23 @@ fn mlx_flavor_str(flavor: &MlxMacosPipetteFlavor) -> &'static str {
 /// when the trimmed arg starts with `{`, else the compact URI grammar.
 pub fn parse_runtime_arg(arg: &str) -> anyhow::Result<Runtime> {
     let trimmed = arg.trim();
-    if trimmed.starts_with('{') {
-        Ok(serde_json::from_str::<Runtime>(trimmed)?)
+    let runtime = if trimmed.starts_with('{') {
+        serde_json::from_str::<Runtime>(trimmed)?
     } else {
-        Ok(parse_runtime_uri(trimmed)?)
+        parse_runtime_uri(trimmed)?
+    };
+    // A JSON/TOML `Runtime` object bypasses the URI grammar, so re-check the
+    // Core AI pin here: the sidecar is compiled against the bundled stack only,
+    // and a non-bundled `packages` would record a pin the binary does not have.
+    if let Runtime::AppleCoreAiMacosPipette(rt) = &runtime {
+        if !rt.is_bundled() {
+            anyhow::bail!(
+                "core-ai-macos-pipette runtime pins a Swift stack this client was \
+                 not built against; only the bundled pin is runnable"
+            );
+        }
     }
+    Ok(runtime)
 }
 
 /// A [`Runtime`] wrapper that serde-round-trips through the compact URI. It reads
@@ -981,6 +993,35 @@ mod tests {
             parse_runtime_uri("core-ai-macos-pipette://version=9.9.9"),
             Err(RuntimeUriError::NotRepresentable(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_json_with_nonbundled_pin_is_rejected() -> anyhow::Result<()> {
+        // A JSON `--runtime` object bypasses the URI grammar. parse_runtime_arg
+        // must still reject a Swift stack this client was not built against, or
+        // the recorded pin would lie about what binary ran.
+        let json = r#"{"type":"core_ai_macos_pipette","packages":{
+            "coreai_models":{"repository_url":"github.com/john-rocky/coreai-models","repository_version":"9.9.9"},
+            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.3.3"},
+            "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
+            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.4.2"}}}"#;
+        assert!(
+            parse_runtime_arg(json).is_err(),
+            "non-bundled JSON pin must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_json_with_bundled_pin_is_accepted() -> anyhow::Result<()> {
+        let json = r#"{"type":"core_ai_macos_pipette","packages":{
+            "coreai_models":{"repository_url":"github.com/john-rocky/coreai-models","repository_version":"0.2.2-zoo"},
+            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.3.3"},
+            "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
+            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.4.2"}}}"#;
+        let runtime = parse_runtime_arg(json)?;
+        assert!(matches!(runtime, Runtime::AppleCoreAiMacosPipette(_)));
         Ok(())
     }
 

@@ -54,12 +54,24 @@ pub fn clear_sidecar_cache() -> anyhow::Result<bool> {
     Ok(true)
 }
 
-fn bundled_pin() -> String {
-    AppleCoreAiMacosPipette::bundled()
+/// Cache key for the sidecar: a short digest over the **whole** bundled Swift
+/// stack, not only `coreai_models`. Bumping `swift-transformers` / `xgrammar` /
+/// `swift-jinja` while holding `coreai_models` at `0.2.2-zoo` changes the
+/// runtime identity (`Display`), so it must change the cache directory too —
+/// otherwise a stale binary is reused under a new identity.
+fn bundled_stack_key() -> String {
+    use std::hash::{Hash, Hasher};
+    let stack = AppleCoreAiMacosPipette::bundled().to_string();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    stack.hash(&mut hasher);
+    // Prefix with the human-readable coreai_models pin so the directory is
+    // still recognizable; suffix with the stack hash so any pin bump moves it.
+    let coreai_models = AppleCoreAiMacosPipette::bundled()
         .packages
         .coreai_models
         .repository_version
-        .to_string()
+        .to_string();
+    format!("{coreai_models}-{:016x}", hasher.finish())
 }
 
 fn sidecar_cache_root() -> anyhow::Result<PathBuf> {
@@ -72,7 +84,7 @@ fn sidecar_cache_root() -> anyhow::Result<PathBuf> {
 
 /// `cache_root/<pin>/` — one compiled sidecar per bundled pin.
 fn sidecar_cache_dir() -> anyhow::Result<PathBuf> {
-    let cache = sidecar_cache_root()?.join(bundled_pin());
+    let cache = sidecar_cache_root()?.join(bundled_stack_key());
     std::fs::create_dir_all(&cache)
         .with_context(|| format!("failed to create {}", cache.display()))?;
     Ok(cache)
@@ -162,37 +174,53 @@ fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Both tests mutate the process-global `PIPETTE_COREAI_CACHE`. `cargo test`
+    // runs them in parallel by default, so serialize env access here.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn cache_dir_is_keyed_on_the_bundled_pin() -> anyhow::Result<()> {
+    fn cache_dir_is_keyed_on_the_full_stack() -> anyhow::Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("pipette-coreai-cache-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        // SAFETY: test-only env for this process; not run in parallel with
-        // other tests that read the same vars.
         std::env::set_var(SIDECAR_CACHE_ENV, &tmp);
         let dir = sidecar_cache_dir()?;
+        std::env::remove_var(SIDECAR_CACHE_ENV);
         assert!(
-            dir.ends_with(bundled_pin()),
-            "expected pin-keyed cache, got {}",
+            dir.ends_with(bundled_stack_key()),
+            "expected full-stack-keyed cache, got {}",
             dir.display()
         );
+        // Key changes when any pin in the stack changes: the hash suffix is over
+        // the whole `Display`, not only `coreai_models`.
+        let key = bundled_stack_key();
+        let coreai_only = AppleCoreAiMacosPipette::bundled()
+            .packages
+            .coreai_models
+            .repository_version
+            .to_string();
+        assert!(key.starts_with(&coreai_only));
+        assert_ne!(key, coreai_only, "key must include the stack hash");
         assert!(dir.starts_with(&tmp));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var(SIDECAR_CACHE_ENV);
         Ok(())
     }
 
     #[test]
     fn clear_sidecar_cache_is_a_no_op_when_missing() -> anyhow::Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "pipette-coreai-cache-missing-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var(SIDECAR_CACHE_ENV, &tmp);
-        assert!(!clear_sidecar_cache()?);
+        let result = clear_sidecar_cache();
         std::env::remove_var(SIDECAR_CACHE_ENV);
+        assert!(!result?);
         Ok(())
     }
 }
