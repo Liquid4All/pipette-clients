@@ -104,37 +104,43 @@ fn validate_response(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
-    fn validates_response_shape() -> anyhow::Result<()> {
-        validate_response(
-            &MaxMemoryUsageResponse {
-                prompt_tokens: 8,
-                completion_tokens: 1,
-            },
-            8,
-            1,
-        )?;
+    fn valid_response() -> MaxMemoryUsageResponse {
+        MaxMemoryUsageResponse {
+            prompt_tokens: 8,
+            completion_tokens: 1,
+        }
+    }
 
-        assert!(validate_response(
-            &MaxMemoryUsageResponse {
-                prompt_tokens: 7,
-                completion_tokens: 1,
-            },
-            8,
-            1,
-        )
-        .is_err());
-        assert!(validate_response(
-            &MaxMemoryUsageResponse {
-                prompt_tokens: 8,
-                completion_tokens: 2,
-            },
-            8,
-            1,
-        )
-        .is_err());
-        Ok(())
+    #[rstest]
+    #[case::ok(valid_response(), 8, 1, true)]
+    #[case::prompt_mismatch(
+        MaxMemoryUsageResponse {
+            prompt_tokens: 7,
+            ..valid_response()
+        },
+        8,
+        1,
+        false
+    )]
+    #[case::completion_mismatch(
+        MaxMemoryUsageResponse {
+            completion_tokens: 2,
+            ..valid_response()
+        },
+        8,
+        1,
+        false
+    )]
+    fn validates_response(
+        #[case] response: MaxMemoryUsageResponse,
+        #[case] prompt: u32,
+        #[case] completion: u32,
+        #[case] ok: bool,
+    ) {
+        assert_eq!(validate_response(&response, prompt, completion).is_ok(), ok);
     }
 }
