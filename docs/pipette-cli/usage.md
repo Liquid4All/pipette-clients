@@ -36,6 +36,18 @@ pipette benchmarks run \
 pipette results list
 ```
 
+### macOS Gatekeeper
+
+If macOS prevents a downloaded `pipette` binary from running because its
+developer cannot be verified, remove the quarantine attribute after verifying
+that the binary came from a trusted source:
+
+```bash
+xattr -d com.apple.quarantine /path/to/pipette
+```
+
+`sudo` is normally unnecessary when you own the binary.
+
 The runtime and the model are fetched on first use; nothing needs pulling ahead
 of time. Everything below adds to this: registration and `sync` only matter once
 you want results in the management server.
