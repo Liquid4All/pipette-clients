@@ -51,10 +51,6 @@ pub enum ModelFetchError {
     /// an empty repo or, more often, a mistyped `prefix`.
     #[error("{0}")]
     NothingToFetch(String),
-    /// The model-info response could not identify the immutable snapshot whose
-    /// file listing it returned, so downloading that listing would be racy.
-    #[error("Hugging Face model-info for `{repo}` did not return a valid 40-character commit SHA")]
-    UnresolvedHfCommit { repo: String },
     /// The downloaded bytes didn't match the declared `sha256`.
     #[error("sha256 mismatch for {dest}: expected {expected}, got {actual}")]
     Sha256Mismatch {
@@ -253,23 +249,24 @@ fn hf_resolve_url(
     ResourceUrl::try_new(url.clone()).map_err(|_| ModelFetchError::InvalidUrl(url))
 }
 
-/// Map a HuggingFace repo `listing` to the files to pull for a directory model.
-/// With a `prefix`, only that subtree is pulled and the prefix is stripped so the
-/// files land directly under `dest_dir` (which already ends in the prefix);
+/// Map a HuggingFace model-info response to the files to pull for a directory
+/// model. With a `prefix`, only that subtree is pulled and the prefix is stripped
+/// so the files land directly under `dest_dir` (which already ends in the prefix);
 /// without one, the whole snapshot lands under `dest_dir`. Directory models carry
 /// no per-file `sha256`, so none is verified. Network-free — the caller supplies
-/// the listing.
+/// the resolved revision and listing together in `info`.
 fn plan_dir_downloads(
     repo: &HfRepo,
     prefix: Option<&RepoSubpath>,
     dest_dir: &AbsolutePath,
-    listing: &HfRepoListing,
+    info: &HfModelInfo,
 ) -> Result<Vec<Download>, ModelFetchError> {
     let prefix_slash = prefix.map(|prefix| format!("{}/", prefix.as_ref()));
-    let downloads: Vec<Download> = listing
-        .files
+    let downloads: Vec<Download> = info
+        .siblings
         .iter()
-        .filter_map(|rfilename| {
+        .filter_map(|sibling| {
+            let rfilename = &sibling.rfilename;
             // A prefix keeps only its subtree; the stripped tail is the local layout.
             let relative = match &prefix_slash {
                 Some(prefix) => rfilename.strip_prefix(prefix)?,
@@ -279,7 +276,7 @@ fn plan_dir_downloads(
         })
         .map(|(rfilename, relative)| {
             Ok(Download {
-                url: hf_resolve_url(repo, &listing.resolved_revision, rfilename)?,
+                url: hf_resolve_url(repo, &info.sha, rfilename)?,
                 auth: repo.auth_token.clone(),
                 sha256: None,
                 dest: local_join(dest_dir, &relative)?,
@@ -311,14 +308,8 @@ fn local_join(dir: &AbsolutePath, relative: &str) -> Result<AbsolutePath, ModelF
 /// immutable revision and its file list.
 #[derive(Deserialize)]
 struct HfModelInfo {
-    sha: Option<String>,
+    sha: String,
     siblings: Vec<HfSibling>,
-}
-
-/// One model-info response kept intact through directory download planning.
-struct HfRepoListing {
-    resolved_revision: String,
-    files: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -473,8 +464,13 @@ fn plan_dir(
     };
     match declared {
         ModelSource::HuggingFace { repo, prefix } => {
-            let listing = list_repo_files(http, hf_endpoint, repo)?;
-            plan_dir_downloads(repo, prefix.as_ref(), dest_dir, &listing)
+            let info = repo_info(http, hf_endpoint, repo, false)?;
+            let requested_revision = repo.revision.as_ref().map_or("main", AsRef::as_ref);
+            log::info!(
+                "Hugging Face repo {repo} revision {requested_revision} resolved to {}",
+                info.sha
+            );
+            plan_dir_downloads(repo, prefix.as_ref(), dest_dir, &info)
         }
         ModelSource::AbsoluteDir { .. } | ModelSource::RelativeDir { .. } => {
             Err(ModelFetchError::NotFetchable(
@@ -506,27 +502,6 @@ fn repo_info(
         .and_then(reqwest::blocking::Response::error_for_status)
         .and_then(|response| response.json())
         .map_err(|source| ModelFetchError::Http { url, source })
-}
-
-/// The resolved commit and repo-relative paths returned together for `repo`.
-fn list_repo_files(
-    http: &HttpClient,
-    hf_endpoint: &str,
-    repo: &HfRepo,
-) -> Result<HfRepoListing, ModelFetchError> {
-    let HfModelInfo { sha, siblings } = repo_info(http, hf_endpoint, repo, false)?;
-    let resolved_revision = sha
-        .filter(|sha| sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()))
-        .ok_or_else(|| ModelFetchError::UnresolvedHfCommit {
-            repo: repo.to_string(),
-        })?;
-    Ok(HfRepoListing {
-        resolved_revision,
-        files: siblings
-            .into_iter()
-            .map(|sibling| sibling.rfilename)
-            .collect(),
-    })
 }
 
 /// `Content-Length` for `url`, from a HEAD. `None` whenever the server declines
@@ -802,7 +777,7 @@ mod tests {
 
     const SHA_A: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     const HF_COMMIT_A: &str = "0123456789abcdef0123456789abcdef01234567";
-    const HF_COMMIT_B: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    const HF_COMMIT_B: &str = "resolved-v2-snapshot";
 
     /// Store base the planning tests re-home into. Platform-shaped for the same
     /// reason [`QUOTA_PROBE_BASE`] is: `to_stored` picks its `Absolute*` arms off
@@ -853,13 +828,6 @@ mod tests {
                 sha256: Some(Sha256::try_new(SHA_A.to_owned())?),
             },
         }))
-    }
-
-    fn hf_listing(resolved_revision: &str, files: &[&str]) -> HfRepoListing {
-        HfRepoListing {
-            resolved_revision: resolved_revision.to_owned(),
-            files: files.iter().map(ToString::to_string).collect(),
-        }
     }
 
     /// Plans exactly one download for `declared`, or fails the test.
@@ -1118,11 +1086,16 @@ mod tests {
     fn dir_downloads_map_the_whole_snapshot() -> anyhow::Result<()> {
         let repo = hf_repo(None, Some("hf_tok"))?;
         let dest = AbsolutePath::try_new("/store/entry/blobs".to_owned())?;
-        let listing = hf_listing(
-            HF_COMMIT_A,
-            &["config.json", "model.safetensors", "tokenizer/vocab.json"],
-        );
-        let downloads = plan_dir_downloads(&repo, None, &dest, &listing)?;
+        let info = HfModelInfo {
+            sha: HF_COMMIT_A.to_owned(),
+            siblings: ["config.json", "model.safetensors", "tokenizer/vocab.json"]
+                .map(|rfilename| HfSibling {
+                    rfilename: rfilename.to_owned(),
+                    size: None,
+                })
+                .into(),
+        };
+        let downloads = plan_dir_downloads(&repo, None, &dest, &info)?;
         let urls: Vec<&str> = downloads.iter().map(|d| d.url.as_ref()).collect();
         assert_eq!(
             urls,
@@ -1160,21 +1133,26 @@ mod tests {
         let prefix = RepoSubpath::try_new("4bit")?;
         // `dest_dir` already ends in the prefix (that's what `to_stored` produces).
         let dest = AbsolutePath::try_new("/store/entry/blobs/4bit".to_owned())?;
-        let listing = hf_listing(
-            HF_COMMIT_B,
-            &[
+        let info = HfModelInfo {
+            sha: HF_COMMIT_B.to_owned(),
+            siblings: [
                 "README.md", // outside the subtree — dropped
                 "4bit/config.json",
                 "4bit/weights/model.safetensors",
-            ],
-        );
-        let downloads = plan_dir_downloads(&repo, Some(&prefix), &dest, &listing)?;
+            ]
+            .map(|rfilename| HfSibling {
+                rfilename: rfilename.to_owned(),
+                size: None,
+            })
+            .into(),
+        };
+        let downloads = plan_dir_downloads(&repo, Some(&prefix), &dest, &info)?;
         let urls: Vec<&str> = downloads.iter().map(|d| d.url.as_ref()).collect();
         assert_eq!(
             urls,
             [
-                "https://huggingface.co/meta/llama/resolve/fedcba9876543210fedcba9876543210fedcba98/4bit/config.json",
-                "https://huggingface.co/meta/llama/resolve/fedcba9876543210fedcba9876543210fedcba98/4bit/weights/model.safetensors",
+                "https://huggingface.co/meta/llama/resolve/resolved-v2-snapshot/4bit/config.json",
+                "https://huggingface.co/meta/llama/resolve/resolved-v2-snapshot/4bit/weights/model.safetensors",
             ]
         );
         let dests: Vec<&str> = downloads.iter().map(|d| d.dest.as_ref()).collect();
@@ -1193,9 +1171,17 @@ mod tests {
         let repo = hf_repo(None, None)?;
         let prefix = RepoSubpath::try_new("8bit")?;
         let dest = AbsolutePath::try_new("/store/entry/blobs/8bit".to_owned())?;
-        let listing = hf_listing(HF_COMMIT_A, &["README.md", "4bit/config.json"]);
+        let info = HfModelInfo {
+            sha: HF_COMMIT_A.to_owned(),
+            siblings: ["README.md", "4bit/config.json"]
+                .map(|rfilename| HfSibling {
+                    rfilename: rfilename.to_owned(),
+                    size: None,
+                })
+                .into(),
+        };
         assert!(matches!(
-            plan_dir_downloads(&repo, Some(&prefix), &dest, &listing),
+            plan_dir_downloads(&repo, Some(&prefix), &dest, &info),
             Err(ModelFetchError::NothingToFetch(_))
         ));
         Ok(())
@@ -1205,9 +1191,12 @@ mod tests {
     fn an_empty_repo_listing_is_rejected() -> anyhow::Result<()> {
         let repo = hf_repo(None, None)?;
         let dest = AbsolutePath::try_new("/store/entry/blobs".to_owned())?;
-        let listing = hf_listing(HF_COMMIT_A, &[]);
+        let info = HfModelInfo {
+            sha: HF_COMMIT_A.to_owned(),
+            siblings: vec![],
+        };
         assert!(matches!(
-            plan_dir_downloads(&repo, None, &dest, &listing),
+            plan_dir_downloads(&repo, None, &dest, &info),
             Err(ModelFetchError::NothingToFetch(_))
         ));
         Ok(())
@@ -1219,9 +1208,15 @@ mod tests {
         // `AbsolutePath` rejects `..` segments, so it surfaces as InvalidDestination.
         let repo = hf_repo(None, None)?;
         let dest = AbsolutePath::try_new("/store/entry/blobs".to_owned())?;
-        let listing = hf_listing(HF_COMMIT_A, &["../../etc/passwd"]);
+        let info = HfModelInfo {
+            sha: HF_COMMIT_A.to_owned(),
+            siblings: vec![HfSibling {
+                rfilename: "../../etc/passwd".to_owned(),
+                size: None,
+            }],
+        };
         assert!(matches!(
-            plan_dir_downloads(&repo, None, &dest, &listing),
+            plan_dir_downloads(&repo, None, &dest, &info),
             Err(ModelFetchError::InvalidDestination(_))
         ));
         Ok(())
@@ -1240,9 +1235,9 @@ mod tests {
     // ---- network path: the real reqwest HTTP against a mock server ----------
     //
     // `plan_downloads` / `plan_dir_downloads` are covered purely above; these
-    // drive `fetch` (download_one → stream_to_file → sha verify) and
-    // `list_repo_files` (GET → JSON → snapshot) over an actual socket. The
-    // client is the standard TLS-configured one, which also serves plain HTTP.
+    // drive `fetch` (download_one → stream_to_file → sha verify) and `repo_info`
+    // (GET → JSON → snapshot) over an actual socket. The client is the standard
+    // TLS-configured one, which also serves plain HTTP.
 
     fn test_http() -> anyhow::Result<HttpClient> {
         Ok(HttpClient::new("pipette-test")?)
@@ -1400,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn list_repo_files_sends_the_repo_bearer_token() -> anyhow::Result<()> {
+    fn repo_info_sends_the_repo_bearer_token() -> anyhow::Result<()> {
         let server = MockServer::start();
         let hit = server.mock(|when, then| {
             when.method(GET)
@@ -1412,44 +1407,16 @@ mod tests {
             }));
         });
 
-        let listing = list_repo_files(
+        let info = repo_info(
             &test_http()?,
             &server.base_url(),
             &hf_repo(None, Some("hf_tok"))?,
+            false,
         )?;
 
         hit.assert();
-        assert_eq!(listing.resolved_revision, HF_COMMIT_A);
-        assert_eq!(listing.files, ["config.json"]);
-        Ok(())
-    }
-
-    #[test]
-    fn list_repo_files_rejects_missing_or_invalid_snapshot_sha() -> anyhow::Result<()> {
-        for sha in [None, Some("main")] {
-            let server = MockServer::start();
-            server.mock(|when, then| {
-                when.method(GET)
-                    .path("/api/models/meta/llama/revision/main");
-                let body = match sha {
-                    Some(sha) => serde_json::json!({
-                        "sha": sha,
-                        "siblings": [{ "rfilename": "config.json" }]
-                    }),
-                    None => serde_json::json!({
-                        "siblings": [{ "rfilename": "config.json" }]
-                    }),
-                };
-                then.status(200).json_body(body);
-            });
-
-            let result = list_repo_files(&test_http()?, &server.base_url(), &hf_repo(None, None)?);
-
-            assert!(
-                matches!(result, Err(ModelFetchError::UnresolvedHfCommit { .. })),
-                "unexpected result for sha {sha:?}"
-            );
-        }
+        assert_eq!(info.sha, HF_COMMIT_A);
+        assert_eq!(info.siblings[0].rfilename, "config.json");
         Ok(())
     }
 
@@ -1582,6 +1549,7 @@ mod tests {
                 .path("/api/models/meta/llama/revision/main")
                 .query_param("blobs", "true");
             then.status(200).json_body(serde_json::json!({
+                "sha": HF_COMMIT_A,
                 "siblings": [
                     { "rfilename": "README.md", "size": 1 },
                     { "rfilename": "4bit/config.json", "size": 40 },
@@ -1607,6 +1575,7 @@ mod tests {
         server.mock(|when, then| {
             when.method(GET).path_contains("/api/models/");
             then.status(200).json_body(serde_json::json!({
+                "sha": HF_COMMIT_A,
                 "siblings": [
                     { "rfilename": "config.json", "size": 40 },
                     { "rfilename": "model.safetensors" },
@@ -1626,14 +1595,19 @@ mod tests {
     }
 
     #[test]
-    fn list_repo_files_surfaces_a_non_success_status() -> anyhow::Result<()> {
+    fn repo_info_surfaces_a_non_success_status() -> anyhow::Result<()> {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(GET).path_contains("/api/models/");
             then.status(500);
         });
 
-        match list_repo_files(&test_http()?, &server.base_url(), &hf_repo(None, None)?) {
+        match repo_info(
+            &test_http()?,
+            &server.base_url(),
+            &hf_repo(None, None)?,
+            false,
+        ) {
             Ok(_) => anyhow::bail!("expected an HTTP error"),
             Err(e) => anyhow::ensure!(
                 matches!(e, ModelFetchError::Http { .. }),
