@@ -6,6 +6,8 @@ package ai.liquid.pipette.compose.models
 import ai.liquid.pipette.ByteFormat
 import ai.liquid.pipette.ModelFile
 import ai.liquid.pipette.compose.AddModelGroupUi
+import ai.liquid.pipette.compose.AndroidSearchBar
+import ai.liquid.pipette.compose.AndroidTopAppBar
 import ai.liquid.pipette.compose.BrandLogo
 import ai.liquid.pipette.compose.CapsuleOutlineButton
 import ai.liquid.pipette.compose.Chip
@@ -13,7 +15,7 @@ import ai.liquid.pipette.compose.ConfirmAction
 import ai.liquid.pipette.compose.DownloadedGroupUi
 import ai.liquid.pipette.compose.IosCard
 import ai.liquid.pipette.compose.IosDivider
-import ai.liquid.pipette.compose.PageHeaderLarge
+import ai.liquid.pipette.compose.OutlinedAndroidCard
 import ai.liquid.pipette.compose.PillTabBarReservedHeight
 import ai.liquid.pipette.compose.QuantPill
 import ai.liquid.pipette.compose.SearchField
@@ -67,119 +69,128 @@ fun ModelsScreen(state: ModelsUiState, onIntent: (ModelsIntent) -> Unit) {
     return
   }
   val colors = PipetteTheme.colors
-  Column(
-    modifier =
-      Modifier.fillMaxSize()
-        .verticalScroll(rememberScrollState())
-        .windowInsetsPadding(WindowInsets.statusBars)
-        .padding(horizontal = 20.dp)
-        .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight),
-    verticalArrangement = Arrangement.spacedBy(14.dp),
-  ) {
-    Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-      PageHeaderLarge("Your models", modifier = Modifier.weight(1f))
+  // Pinned Material toolbar + independently scrolling content pane. The
+  // toolbar sits flush against the status-bar inset (no gap above), and the
+  // scrolling pane below opens its own top gap so content sits off the
+  // toolbar.
+  Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+    AndroidTopAppBar(title = "Your models") {
       CapsuleOutlineButton(
         "Add models",
         onClick = { onIntent(ModelsIntent.OpenAddModels) },
-        height = 38,
-        fontSize = 14,
+        height = 36,
+        fontSize = 13,
         leadingIcon = ai.liquid.pipette.R.drawable.ic_search,
+        modifier = Modifier.padding(end = 8.dp),
       )
     }
-    SearchField(
-      value = state.searchQuery,
-      onValueChange = { onIntent(ModelsIntent.ApplyDownloadedSearch(it)) },
-      placeholder = "Search your downloaded models",
-    )
+    Column(
+      modifier =
+        Modifier.weight(1f)
+          .fillMaxWidth()
+          .verticalScroll(rememberScrollState())
+          .padding(horizontal = 20.dp)
+          .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight),
+      verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+      AndroidSearchBar(
+        hint = "Search your downloaded models",
+        value = state.searchQuery,
+        onValueChange = { onIntent(ModelsIntent.ApplyDownloadedSearch(it)) },
+      )
 
-    when {
-      // A download in flight is about to populate the list — don't flash the empty-state card.
-      !state.hasAnyModel && state.activeDownloads.isNotEmpty() -> Unit
-      !state.hasAnyModel ->
-        IosCard(cornerRadius = 18) {
-          Text(
-            "No models downloaded. Use Add models to download for benchmarking.",
-            style = TextStyle(fontSize = 16.sp, lineHeight = 22.sp),
-            color = colors.gray,
-            modifier = Modifier.padding(24.dp),
-          )
-        }
-      !state.matched ->
-        IosCard(cornerRadius = 18) {
-          Text("No matching models.", style = TextStyle(fontSize = 15.sp), color = colors.gray, modifier = Modifier.padding(24.dp))
-        }
-      else ->
-        IosCard(cornerRadius = 18) {
-          state.downloadedGroups.forEachIndexed { i, group ->
-            if (i > 0) IosDivider()
-            DownloadedGroup(group, onIntent)
-          }
-          if (state.mmprojs.isNotEmpty()) {
-            IosDivider()
+      when {
+        // A download in flight is about to populate the list — don't flash the empty-state card.
+        !state.hasAnyModel && state.activeDownloads.isNotEmpty() -> Unit
+        !state.hasAnyModel ->
+          OutlinedAndroidCard(cornerRadius = 18) {
             Text(
-              "MMProjectors",
-              style = TextStyle(fontSize = 13.sp),
+              "No models downloaded. Use Add models to download for benchmarking.",
+              style = TextStyle(fontSize = 16.sp, lineHeight = 22.sp),
               color = colors.gray,
-              modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+              modifier = Modifier.padding(24.dp),
             )
-            state.mmprojs.forEach { row ->
-              Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                  Text(row.title, style = TextStyle(fontSize = 16.sp), color = colors.label)
-                  Text(row.subtitle, style = TextStyle(fontSize = 13.sp), color = colors.gray)
+          }
+        !state.matched ->
+          OutlinedAndroidCard(cornerRadius = 18) {
+            Text("No matching models.", style = TextStyle(fontSize = 15.sp), color = colors.gray, modifier = Modifier.padding(24.dp))
+          }
+        else ->
+          OutlinedAndroidCard(cornerRadius = 18) {
+            state.downloadedGroups.forEachIndexed { i, group ->
+              if (i > 0) IosDivider()
+              DownloadedGroup(group, onIntent)
+            }
+            if (state.mmprojs.isNotEmpty()) {
+              IosDivider()
+              Text(
+                "MMProjectors",
+                style = TextStyle(fontSize = 13.sp),
+                color = colors.gray,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+              )
+              state.mmprojs.forEach { row ->
+                Row(
+                  modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                ) {
+                  Column(Modifier.weight(1f)) {
+                    Text(row.title, style = TextStyle(fontSize = 16.sp), color = colors.label)
+                    Text(row.subtitle, style = TextStyle(fontSize = 13.sp), color = colors.gray)
+                  }
                 }
               }
             }
           }
-        }
-    }
+      }
 
-    if (state.activeDownloads.isNotEmpty()) {
-      SectionTitle("Active downloads")
-      IosCard(cornerRadius = 16) {
-        state.activeDownloads.forEachIndexed { i, d ->
-          if (i > 0) IosDivider()
-          Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Text(d.filename, style = TextStyle(fontSize = 16.sp), color = colors.label, modifier = Modifier.weight(1f))
-              // A waiting row shows its state rather than a percentage: the percentage isn't moving, and saying "63%" over a stalled bar reads as a
-              // hung download rather than one waiting for a network.
-              val badge = if (d.totalBytes > 0 && !d.isWaitingForNetwork) "${d.bytesRead * 100 / d.totalBytes}%" else d.displayLabel
-              StatusBadge(badge, if (d.isFailed) colors.red else colors.gray)
-            }
-            if (d.totalBytes > 0 && !d.isFailed) {
-              ai.liquid.pipette.compose.AppLinearProgress(
-                fraction = d.bytesRead.toDouble() / d.totalBytes.toDouble(),
-                modifier = Modifier.padding(top = 8.dp),
-              )
-              Text(
-                "${ByteFormat.fileSize(d.bytesRead)} / ${ByteFormat.fileSize(d.totalBytes)}",
-                style = TextStyle(fontSize = 13.sp),
-                color = colors.gray,
-                modifier = Modifier.padding(top = 4.dp),
-              )
-            } else {
-              Text(d.message, style = TextStyle(fontSize = 13.sp), color = colors.gray, modifier = Modifier.padding(top = 4.dp))
-            }
-            Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-              val (label, action) =
-                when {
-                  d.isFailed -> "Resume" to ModelsIntent.ResumeDownload(d.key)
-                  d.isPaused -> "Resume" to ModelsIntent.ResumeDownload(d.key)
-                  else -> "Pause" to ModelsIntent.PauseDownload(d.key)
-                }
-              Text(label, style = TextStyle(fontSize = 14.sp), color = colors.label, modifier = Modifier.clickableNoRipple { onIntent(action) })
-              Text(
-                "Cancel",
-                style = TextStyle(fontSize = 14.sp),
-                color = colors.red,
-                modifier = Modifier.clickableNoRipple { onIntent(ModelsIntent.CancelDownload(d.key)) },
-              )
+      if (state.activeDownloads.isNotEmpty()) {
+        SectionTitle("Active downloads")
+        OutlinedAndroidCard(cornerRadius = 16) {
+          state.activeDownloads.forEachIndexed { i, d ->
+            if (i > 0) IosDivider()
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(d.filename, style = TextStyle(fontSize = 16.sp), color = colors.label, modifier = Modifier.weight(1f))
+                // A waiting row shows its state rather than a percentage: the percentage isn't moving, and saying "63%" over a stalled bar reads as a
+                // hung download rather than one waiting for a network.
+                val badge = if (d.totalBytes > 0 && !d.isWaitingForNetwork) "${d.bytesRead * 100 / d.totalBytes}%" else d.displayLabel
+                StatusBadge(badge, if (d.isFailed) colors.red else colors.gray)
+              }
+              if (d.totalBytes > 0 && !d.isFailed) {
+                ai.liquid.pipette.compose.AppLinearProgress(
+                  fraction = d.bytesRead.toDouble() / d.totalBytes.toDouble(),
+                  modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                  "${ByteFormat.fileSize(d.bytesRead)} / ${ByteFormat.fileSize(d.totalBytes)}",
+                  style = TextStyle(fontSize = 13.sp),
+                  color = colors.gray,
+                  modifier = Modifier.padding(top = 4.dp),
+                )
+              } else {
+                Text(d.message, style = TextStyle(fontSize = 13.sp), color = colors.gray, modifier = Modifier.padding(top = 4.dp))
+              }
+              Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                val (label, action) =
+                  when {
+                    d.isFailed -> "Resume" to ModelsIntent.ResumeDownload(d.key)
+                    d.isPaused -> "Resume" to ModelsIntent.ResumeDownload(d.key)
+                    else -> "Pause" to ModelsIntent.PauseDownload(d.key)
+                  }
+                Text(label, style = TextStyle(fontSize = 14.sp), color = colors.label, modifier = Modifier.clickableNoRipple { onIntent(action) })
+                Text(
+                  "Cancel",
+                  style = TextStyle(fontSize = 14.sp),
+                  color = colors.red,
+                  modifier = Modifier.clickableNoRipple { onIntent(ModelsIntent.CancelDownload(d.key)) },
+                )
+              }
             }
           }
         }
       }
-    }
+    } // end inner padded column
   }
 }
 
