@@ -6,29 +6,12 @@ import PackageDescription
 // prefill/decode/e2e/memory). Built and cached by pipette-coreai's Rust
 // sidecar module; the Rust side spawns it and drives the endpoints.
 //
-// # Why john-rocky/coreai-models (zoo fork), not apple/coreai-models
+// # Official Apple dependency
 //
-// Apple's upstream was tried first; we had to come back to the fork, and this
-// comment is the record of why.
-//
-// - `apple/coreai-models@main` (as of 2026-08-25) does NOT compile against the
-//   macOS 27 / Xcode-beta 27 SDK in use here: `CoreAILanguageModel` still uses
-//   `LanguageModelCapabilities(capabilities:)`, which dropped its label in the
-//   beta 5 SDK, and `KVCache+CoreAI` assigns through a get-only `shape`. The
-//   fix for the label is committed in the fork but not yet upstream.
-//   **As of Xcode 27.0 Beta 6 (27A5252f), upstream `main` compiles**, so the
-//   SDK-drift half of this is resolved.
-// - Even on beta 6, upstream `main` still crashes on the S=1 decode-only
-//   bundles pipette benchmarks: its `CoreAIStaticShapeEngine` cannot chunk a
-//   multi-token prefill into the single-token static graph ("Shape at
-//   dimension 1 of 256 is not a valid substitution for source shape 1"). The
-//   fork's static-shape engine has the chunked-prefill
-//   (`gather_embeddings_<batch>` + per-batch stepping) that Apple's lacks.
-//
-// The fork (`0.2.2-zoo`) is Apple's code plus a small set of zoo patches
-// (see `git log upstream/main..HEAD` in john-rocky/coreai-models). It is
-// required for S=1 decode bundles until upstream grows chunked prefill.
-// Revisit upstream on each SDK bump; the delta is expected to shrink.
+// Apple PR #227 fixes descriptor-driven prefill and logits allocation for S=1
+// decode bundles. Pin its merged commit so the benchmark runtime is reproducible.
+// The complete resolved Swift stack is also recorded in the Rust runtime identity.
+// https://github.com/apple/coreai-models/pull/227
 //
 // # Why not Apple's `llm-server`
 //
@@ -44,7 +27,7 @@ let package = Package(
     name: "pipette-coreai-sidecar",
     platforms: [.macOS("27.0")],
     dependencies: [
-        .package(url: "https://github.com/john-rocky/coreai-models", exact: "0.2.2-zoo"),
+        .package(url: "https://github.com/apple/coreai-models", revision: "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"),
     ],
     targets: [
         .executableTarget(

@@ -161,7 +161,7 @@ EXAMPLES:
 
   # Core AI (macOS 27+): engine ships with the OS; the URI names the
   # bundled coreai-models pin and the Swift sidecar is built from source.
-  pipette runtimes pull --runtime 'core-ai-macos-pipette://version=0.2.2-zoo'
+  pipette runtimes pull --runtime 'core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60'
 
   # OpenVINO (Linux/Windows) -- one venv per version; `device` is per cell, not per install
   pipette runtimes pull --runtime 'uv-openvino://version=2026.2.1'

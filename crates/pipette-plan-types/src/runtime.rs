@@ -431,11 +431,8 @@ pub struct AppleCoreAiMacosPipette {
 /// against (from the crate's `swift/Package.resolved`). `coreai_models` is the
 /// engine; `swift_transformers` / `xgrammar` / `swift_jinja` affect
 /// tokenization and decode, so they travel with the identity the same way
-/// [`MlxSwiftStack`] records three repos. Today `coreai_models` is the
-/// `john-rocky/coreai-models` zoo fork of Apple's `coreai-models` (`CoreAILM`
-/// product) — pinned at `0.2.2-zoo` because Apple upstream still cannot chunk
-/// a multi-token prefill into the S=1 decode bundles pipette benchmarks (see
-/// the `Package.swift` comment).
+/// [`MlxSwiftStack`] records three repos. `coreai_models` uses the official
+/// Apple commit containing PR #227's descriptor-driven S=1 support.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct CoreAiSwiftStack {
     pub coreai_models: SourceRepository,
@@ -468,12 +465,12 @@ impl AppleCoreAiMacosPipette {
         Self {
             packages: CoreAiSwiftStack {
                 coreai_models: SourceRepository {
-                    repository_url: RepositoryUrl::new("github.com/john-rocky/coreai-models"),
-                    repository_version: Self::const_pin("0.2.2-zoo"),
+                    repository_url: RepositoryUrl::new("github.com/apple/coreai-models"),
+                    repository_version: Self::const_pin("27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"),
                 },
                 swift_transformers: SourceRepository {
                     repository_url: RepositoryUrl::new("github.com/huggingface/swift-transformers"),
-                    repository_version: Self::const_pin("1.3.3"),
+                    repository_version: Self::const_pin("1.2.0"),
                 },
                 xgrammar: SourceRepository {
                     repository_url: RepositoryUrl::new("github.com/mlc-ai/xgrammar"),
@@ -481,7 +478,7 @@ impl AppleCoreAiMacosPipette {
                 },
                 swift_jinja: SourceRepository {
                     repository_url: RepositoryUrl::new("github.com/huggingface/swift-jinja"),
-                    repository_version: Self::const_pin("2.4.2"),
+                    repository_version: Self::const_pin("2.3.2"),
                 },
             },
         }
@@ -2058,10 +2055,10 @@ swift_transformers = { repository_url = "github.com/huggingface/swift-transforme
             r#"type = "core_ai_macos_pipette"
 
 [packages]
-coreai_models = { repository_url = "github.com/john-rocky/coreai-models", repository_version = "0.2.2-zoo" }
-swift_transformers = { repository_url = "github.com/huggingface/swift-transformers", repository_version = "1.3.3" }
+coreai_models = { repository_url = "github.com/apple/coreai-models", repository_version = "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60" }
+swift_transformers = { repository_url = "github.com/huggingface/swift-transformers", repository_version = "1.2.0" }
 xgrammar = { repository_url = "github.com/mlc-ai/xgrammar", repository_version = "0.2.2" }
-swift_jinja = { repository_url = "github.com/huggingface/swift-jinja", repository_version = "2.4.2" }"#,
+swift_jinja = { repository_url = "github.com/huggingface/swift-jinja", repository_version = "2.3.2" }"#,
         )
         .context("coreai macos pipette runtime should parse")?;
         let Runtime::AppleCoreAiMacosPipette(rt) = &runtime else {
@@ -2069,11 +2066,11 @@ swift_jinja = { repository_url = "github.com/huggingface/swift-jinja", repositor
         };
         assert_eq!(
             rt.packages.coreai_models.repository_version.as_ref(),
-            "0.2.2-zoo"
+            "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
         );
         assert_eq!(
             rt.packages.swift_transformers.repository_version.as_ref(),
-            "1.3.3"
+            "1.2.0"
         );
         assert!(rt.to_string().contains("swift-transformers="));
         assert!(rt.is_bundled());
@@ -2093,37 +2090,41 @@ swift_jinja = { repository_url = "github.com/huggingface/swift-jinja", repositor
         Ok(())
     }
 
-    /// The `bundled()` pins are hand-maintained literals; they MUST match the
-    /// committed `swift/Package.resolved` or a benchmark records a pin the
-    /// sidecar was not built from. This guards the three added pins.
+    /// Runtime identity must match the committed Swift lockfile, including
+    /// revision-only pins and repository changes from a fork to upstream.
     #[test]
     fn bundled_pins_match_package_resolved() -> anyhow::Result<()> {
-        let resolved = include_str!("../../pipette-coreai/swift/Package.resolved");
-        let value: serde_json::Value = serde_json::from_str(resolved)?;
-        let pins = value["pins"].as_array().context("pins array")?;
-        let version_of = |identity: &str| -> Option<String> {
-            pins.iter()
-                .find(|p| p["identity"] == identity)
-                .and_then(|p| p["state"]["version"].as_str())
-                .map(str::to_owned)
-        };
-        let bundled = AppleCoreAiMacosPipette::bundled().packages;
-        assert_eq!(
-            Some(bundled.coreai_models.repository_version.to_string()),
-            version_of("coreai-models")
-        );
-        assert_eq!(
-            Some(bundled.swift_transformers.repository_version.to_string()),
-            version_of("swift-transformers")
-        );
-        assert_eq!(
-            Some(bundled.xgrammar.repository_version.to_string()),
-            version_of("xgrammar")
-        );
-        assert_eq!(
-            Some(bundled.swift_jinja.repository_version.to_string()),
-            version_of("swift-jinja")
-        );
+        let resolved: serde_json::Value =
+            serde_json::from_str(include_str!("../../pipette-coreai/swift/Package.resolved"))?;
+        let pins = resolved["pins"].as_array().context("Swift lockfile pins")?;
+        let stack = AppleCoreAiMacosPipette::bundled().packages;
+        for (identity, repository) in [
+            ("coreai-models", stack.coreai_models),
+            ("swift-transformers", stack.swift_transformers),
+            ("xgrammar", stack.xgrammar),
+            ("swift-jinja", stack.swift_jinja),
+        ] {
+            let pin = pins
+                .iter()
+                .find(|pin| pin["identity"] == identity)
+                .with_context(|| format!("missing Swift pin {identity}"))?;
+            let state = &pin["state"];
+            let version = state["version"]
+                .as_str()
+                .or_else(|| state["revision"].as_str())
+                .context("Swift pin version or revision")?;
+            assert_eq!(
+                repository.repository_version.as_ref(),
+                version,
+                "{identity}"
+            );
+            let location = pin["location"].as_str().context("Swift pin location")?;
+            assert_eq!(
+                repository.repository_url,
+                RepositoryUrl::new(location),
+                "{identity}"
+            );
+        }
         Ok(())
     }
 

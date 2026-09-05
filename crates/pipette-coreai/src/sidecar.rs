@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
+
 use pipette_plan_types::AppleCoreAiMacosPipette;
 
 /// Env override for the sidecar binary path (bypasses building).
@@ -56,7 +57,7 @@ pub fn clear_sidecar_cache() -> anyhow::Result<bool> {
 
 /// Cache key for the sidecar: a short digest over the **whole** bundled Swift
 /// stack, not only `coreai_models`. Bumping `swift-transformers` / `xgrammar` /
-/// `swift-jinja` while holding `coreai_models` at `0.2.2-zoo` changes the
+/// `swift-jinja` while holding `coreai_models` fixed changes the
 /// runtime identity (`Display`), so it must change the cache directory too —
 /// otherwise a stale binary is reused under a new identity.
 fn bundled_stack_key() -> String {
@@ -173,8 +174,9 @@ fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
+
+    use super::*;
 
     // Both tests mutate the process-global `PIPETTE_COREAI_CACHE`. `cargo test`
     // runs them in parallel by default, so serialize env access here.
