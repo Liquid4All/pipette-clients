@@ -9,7 +9,6 @@ import ai.liquid.pipette.compose.AddModelGroupUi
 import ai.liquid.pipette.compose.AndroidSearchBar
 import ai.liquid.pipette.compose.AndroidTopAppBar
 import ai.liquid.pipette.compose.BrandLogo
-import ai.liquid.pipette.compose.CapsuleOutlineButton
 import ai.liquid.pipette.compose.Chip
 import ai.liquid.pipette.compose.ConfirmAction
 import ai.liquid.pipette.compose.DownloadedGroupUi
@@ -69,128 +68,136 @@ fun ModelsScreen(state: ModelsUiState, onIntent: (ModelsIntent) -> Unit) {
     return
   }
   val colors = PipetteTheme.colors
-  // Pinned Material toolbar + independently scrolling content pane. The
-  // toolbar sits flush against the status-bar inset (no gap above), and the
-  // scrolling pane below opens its own top gap so content sits off the
-  // toolbar.
-  Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
-    AndroidTopAppBar(title = "Your models") {
-      CapsuleOutlineButton(
-        "Add models",
-        onClick = { onIntent(ModelsIntent.OpenAddModels) },
-        height = 36,
-        fontSize = 13,
-        leadingIcon = ai.liquid.pipette.R.drawable.ic_search,
-        modifier = Modifier.padding(end = 8.dp),
-      )
-    }
-    Column(
-      modifier =
-        Modifier.weight(1f)
-          .fillMaxWidth()
-          .verticalScroll(rememberScrollState())
-          .padding(horizontal = 20.dp)
-          .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight),
-      verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-      AndroidSearchBar(
-        hint = "Search your downloaded models",
-        value = state.searchQuery,
-        onValueChange = { onIntent(ModelsIntent.ApplyDownloadedSearch(it)) },
-      )
+  // Pinned Material toolbar + independently scrolling content pane, with the
+  // "Add models" action rehomed from the toolbar into a FloatingActionButton
+  // at the bottom-right (Android convention for the screen's primary create
+  // action; matches the Jobs tab).
+  Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+    Column(modifier = Modifier.fillMaxSize()) {
+      AndroidTopAppBar(title = "Your models")
+      Column(
+        modifier =
+          Modifier.weight(1f)
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+      ) {
+        AndroidSearchBar(
+          hint = "Search your downloaded models",
+          value = state.searchQuery,
+          onValueChange = { onIntent(ModelsIntent.ApplyDownloadedSearch(it)) },
+        )
 
-      when {
-        // A download in flight is about to populate the list — don't flash the empty-state card.
-        !state.hasAnyModel && state.activeDownloads.isNotEmpty() -> Unit
-        !state.hasAnyModel ->
-          OutlinedAndroidCard(cornerRadius = 18) {
-            Text(
-              "No models downloaded. Use Add models to download for benchmarking.",
-              style = TextStyle(fontSize = 16.sp, lineHeight = 22.sp),
-              color = colors.gray,
-              modifier = Modifier.padding(24.dp),
-            )
-          }
-        !state.matched ->
-          OutlinedAndroidCard(cornerRadius = 18) {
-            Text("No matching models.", style = TextStyle(fontSize = 15.sp), color = colors.gray, modifier = Modifier.padding(24.dp))
-          }
-        else ->
-          OutlinedAndroidCard(cornerRadius = 18) {
-            state.downloadedGroups.forEachIndexed { i, group ->
-              if (i > 0) IosDivider()
-              DownloadedGroup(group, onIntent)
-            }
-            if (state.mmprojs.isNotEmpty()) {
-              IosDivider()
+        when {
+          // A download in flight is about to populate the list — don't flash the empty-state card.
+          !state.hasAnyModel && state.activeDownloads.isNotEmpty() -> Unit
+          !state.hasAnyModel ->
+            OutlinedAndroidCard(cornerRadius = 18) {
               Text(
-                "MMProjectors",
-                style = TextStyle(fontSize = 13.sp),
+                "No models downloaded. Use Add models to download for benchmarking.",
+                style = TextStyle(fontSize = 16.sp, lineHeight = 22.sp),
                 color = colors.gray,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+                modifier = Modifier.padding(24.dp),
               )
-              state.mmprojs.forEach { row ->
-                Row(
-                  modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
-                  verticalAlignment = Alignment.CenterVertically,
-                ) {
-                  Column(Modifier.weight(1f)) {
-                    Text(row.title, style = TextStyle(fontSize = 16.sp), color = colors.label)
-                    Text(row.subtitle, style = TextStyle(fontSize = 13.sp), color = colors.gray)
+            }
+          !state.matched ->
+            OutlinedAndroidCard(cornerRadius = 18) {
+              Text("No matching models.", style = TextStyle(fontSize = 15.sp), color = colors.gray, modifier = Modifier.padding(24.dp))
+            }
+          else ->
+            OutlinedAndroidCard(cornerRadius = 18) {
+              state.downloadedGroups.forEachIndexed { i, group ->
+                if (i > 0) IosDivider()
+                DownloadedGroup(group, onIntent)
+              }
+              if (state.mmprojs.isNotEmpty()) {
+                IosDivider()
+                Text(
+                  "MMProjectors",
+                  style = TextStyle(fontSize = 13.sp),
+                  color = colors.gray,
+                  modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+                )
+                state.mmprojs.forEach { row ->
+                  Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                  ) {
+                    Column(Modifier.weight(1f)) {
+                      Text(row.title, style = TextStyle(fontSize = 16.sp), color = colors.label)
+                      Text(row.subtitle, style = TextStyle(fontSize = 13.sp), color = colors.gray)
+                    }
                   }
                 }
               }
             }
-          }
-      }
+        }
 
-      if (state.activeDownloads.isNotEmpty()) {
-        SectionTitle("Active downloads")
-        OutlinedAndroidCard(cornerRadius = 16) {
-          state.activeDownloads.forEachIndexed { i, d ->
-            if (i > 0) IosDivider()
-            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(d.filename, style = TextStyle(fontSize = 16.sp), color = colors.label, modifier = Modifier.weight(1f))
-                // A waiting row shows its state rather than a percentage: the percentage isn't moving, and saying "63%" over a stalled bar reads as a
-                // hung download rather than one waiting for a network.
-                val badge = if (d.totalBytes > 0 && !d.isWaitingForNetwork) "${d.bytesRead * 100 / d.totalBytes}%" else d.displayLabel
-                StatusBadge(badge, if (d.isFailed) colors.red else colors.gray)
-              }
-              if (d.totalBytes > 0 && !d.isFailed) {
-                ai.liquid.pipette.compose.AppLinearProgress(
-                  fraction = d.bytesRead.toDouble() / d.totalBytes.toDouble(),
-                  modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                  "${ByteFormat.fileSize(d.bytesRead)} / ${ByteFormat.fileSize(d.totalBytes)}",
-                  style = TextStyle(fontSize = 13.sp),
-                  color = colors.gray,
-                  modifier = Modifier.padding(top = 4.dp),
-                )
-              } else {
-                Text(d.message, style = TextStyle(fontSize = 13.sp), color = colors.gray, modifier = Modifier.padding(top = 4.dp))
-              }
-              Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                val (label, action) =
-                  when {
-                    d.isFailed -> "Resume" to ModelsIntent.ResumeDownload(d.key)
-                    d.isPaused -> "Resume" to ModelsIntent.ResumeDownload(d.key)
-                    else -> "Pause" to ModelsIntent.PauseDownload(d.key)
-                  }
-                Text(label, style = TextStyle(fontSize = 14.sp), color = colors.label, modifier = Modifier.clickableNoRipple { onIntent(action) })
-                Text(
-                  "Cancel",
-                  style = TextStyle(fontSize = 14.sp),
-                  color = colors.red,
-                  modifier = Modifier.clickableNoRipple { onIntent(ModelsIntent.CancelDownload(d.key)) },
-                )
+        if (state.activeDownloads.isNotEmpty()) {
+          SectionTitle("Active downloads")
+          OutlinedAndroidCard(cornerRadius = 16) {
+            state.activeDownloads.forEachIndexed { i, d ->
+              if (i > 0) IosDivider()
+              Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  Text(d.filename, style = TextStyle(fontSize = 16.sp), color = colors.label, modifier = Modifier.weight(1f))
+                  // A waiting row shows its state rather than a percentage: the percentage isn't moving, and saying "63%" over a stalled bar reads as
+                  // a
+                  // hung download rather than one waiting for a network.
+                  val badge = if (d.totalBytes > 0 && !d.isWaitingForNetwork) "${d.bytesRead * 100 / d.totalBytes}%" else d.displayLabel
+                  StatusBadge(badge, if (d.isFailed) colors.red else colors.gray)
+                }
+                if (d.totalBytes > 0 && !d.isFailed) {
+                  ai.liquid.pipette.compose.AppLinearProgress(
+                    fraction = d.bytesRead.toDouble() / d.totalBytes.toDouble(),
+                    modifier = Modifier.padding(top = 8.dp),
+                  )
+                  Text(
+                    "${ByteFormat.fileSize(d.bytesRead)} / ${ByteFormat.fileSize(d.totalBytes)}",
+                    style = TextStyle(fontSize = 13.sp),
+                    color = colors.gray,
+                    modifier = Modifier.padding(top = 4.dp),
+                  )
+                } else {
+                  Text(d.message, style = TextStyle(fontSize = 13.sp), color = colors.gray, modifier = Modifier.padding(top = 4.dp))
+                }
+                Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                  val (label, action) =
+                    when {
+                      d.isFailed -> "Resume" to ModelsIntent.ResumeDownload(d.key)
+                      d.isPaused -> "Resume" to ModelsIntent.ResumeDownload(d.key)
+                      else -> "Pause" to ModelsIntent.PauseDownload(d.key)
+                    }
+                  Text(label, style = TextStyle(fontSize = 14.sp), color = colors.label, modifier = Modifier.clickableNoRipple { onIntent(action) })
+                  Text(
+                    "Cancel",
+                    style = TextStyle(fontSize = 14.sp),
+                    color = colors.red,
+                    modifier = Modifier.clickableNoRipple { onIntent(ModelsIntent.CancelDownload(d.key)) },
+                  )
+                }
               }
             }
           }
         }
-      }
-    } // end inner padded column
+      } // end inner padded/scrolling column
+    } // end column that holds toolbar + scroll
+    androidx.compose.material3.FloatingActionButton(
+      onClick = { onIntent(ModelsIntent.OpenAddModels) },
+      containerColor = colors.label,
+      contentColor = colors.background,
+      // Sit above the pill tab bar with a standard 16 dp inset from the right
+      // edge; matches the Jobs tab FAB placement.
+      modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp + PillTabBarReservedHeight),
+    ) {
+      androidx.compose.material3.Icon(
+        painter = androidx.compose.ui.res.painterResource(ai.liquid.pipette.R.drawable.ic_plus),
+        contentDescription = "Add models",
+        modifier = Modifier.size(24.dp),
+      )
+    }
   }
 }
 

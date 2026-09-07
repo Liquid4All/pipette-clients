@@ -60,6 +60,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -124,31 +125,34 @@ private fun JobListScaffold(state: JobsUiState.JobList, onIntent: (JobsIntent) -
   val colors = PipetteTheme.colors
   // Toolbar sits flush against the status-bar inset — no extra `top` padding
   // above it, so the toolbar is edge-to-edge. Post-toolbar content gets its
-  // own top gap inside the scrolling pane.
-  Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
-    // Pinned toolbar — sits outside the scrolling column below.
-    AndroidTopAppBar(title = stringResource(R.string.job_list_title)) {
-      if (state.hasModels) {
-        Box(
-          modifier =
-            Modifier.size(40.dp).clip(androidx.compose.foundation.shape.CircleShape).background(colors.label).clickableNoRipple {
-              onIntent(JobsIntent.OpenWizard)
-            },
-          contentAlignment = Alignment.Center,
-        ) {
-          Icon(painter = painterResource(R.drawable.ic_plus), contentDescription = null, tint = colors.background, modifier = Modifier.size(20.dp))
-        }
+  // own top gap inside the scrolling pane. The "Create job" action lives in a
+  // FloatingActionButton at the bottom-right (Android convention for the
+  // screen's primary create action) rather than in the toolbar's actions slot.
+  Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+    Column(modifier = Modifier.fillMaxSize()) {
+      AndroidTopAppBar(title = stringResource(R.string.job_list_title))
+      Column(
+        modifier =
+          Modifier.weight(1f)
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight)
+      ) {
+        JobListContent(state, onIntent)
       }
     }
-    Column(
-      modifier =
-        Modifier.weight(1f)
-          .fillMaxWidth()
-          .verticalScroll(rememberScrollState())
-          .padding(horizontal = 20.dp)
-          .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight)
-    ) {
-      JobListContent(state, onIntent)
+    if (state.hasModels) {
+      FloatingActionButton(
+        onClick = { onIntent(JobsIntent.OpenWizard) },
+        containerColor = colors.label,
+        contentColor = colors.background,
+        // Sit above the pill tab bar with a standard 16 dp inset from the
+        // right edge; the top of the FAB clears the bottom of the last card.
+        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp + PillTabBarReservedHeight),
+      ) {
+        Icon(painter = painterResource(R.drawable.ic_plus), contentDescription = "Create job", modifier = Modifier.size(24.dp))
+      }
     }
   }
 }
