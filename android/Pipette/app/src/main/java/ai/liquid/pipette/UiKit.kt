@@ -146,7 +146,7 @@ class UiKit(private val context: Context) {
       elevation = dp(2).toFloat()
       setTitleTypeface(serifBold, Typeface.BOLD)
       if (onNavigationClick != null) setNavigationOnClickListener { onNavigationClick() }
-      layoutParams = LinearLayout.LayoutParams(MATCH, dp(56)).apply { setMargins(0, 0, 0, dp(8)) }
+      layoutParams = LinearLayout.LayoutParams(MATCH, dp(TOOLBAR_HEIGHT_DP)).apply { setMargins(0, 0, 0, dp(8)) }
     }
 
   private fun MaterialToolbar.setTitleTypeface(face: Typeface, style: Int) {
@@ -155,7 +155,7 @@ class UiKit(private val context: Context) {
       val child = getChildAt(i)
       if (child is TextView) {
         child.setTypeface(face, style)
-        child.textSize = 20f
+        child.textSize = TOOLBAR_TITLE_SP
       }
     }
   }
@@ -181,7 +181,7 @@ class UiKit(private val context: Context) {
       setPadding(dp(16), dp(12), dp(16), dp(12))
       val icon = ContextCompat.getDrawable(context, R.drawable.ic_search)?.mutate()
       icon?.setTint(colorMuted())
-      icon?.setBounds(0, 0, dp(20), dp(20))
+      icon?.setBounds(0, 0, dp(SEARCH_ICON_DP), dp(SEARCH_ICON_DP))
       setCompoundDrawablesRelative(icon, null, null, null)
       compoundDrawablePadding = dp(12)
       imeOptions = EditorInfo.IME_ACTION_SEARCH
@@ -209,7 +209,7 @@ class UiKit(private val context: Context) {
       }
     return MaterialCardView(context).apply {
       radius = dp(18).toFloat()
-      cardElevation = dp(3).toFloat()
+      cardElevation = dp(ELEVATED_CARD_ELEVATION_DP).toFloat()
       strokeWidth = 0
       setCardBackgroundColor(colorSurface())
       layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, dp(8), 0, dp(8)) }
@@ -547,5 +547,9 @@ class UiKit(private val context: Context) {
     private const val CHECKBOX_SIZE_DP = 24
     private const val CHECK_TEXT_SP = 13f
     private const val CAPSULE_RADIUS_DP = 100
+    private const val TOOLBAR_HEIGHT_DP = 56
+    private const val TOOLBAR_TITLE_SP = 20f
+    private const val SEARCH_ICON_DP = 20
+    private const val ELEVATED_CARD_ELEVATION_DP = 3
   }
 }

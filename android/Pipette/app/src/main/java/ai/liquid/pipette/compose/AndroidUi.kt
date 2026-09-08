@@ -1,3 +1,7 @@
+// Compose primitives sized in dp/sp literals (title text, search-bar pill height, icon sizes) —
+// follow the same file-level MagicNumber suppression the sibling screens use for the same reason.
+@file:Suppress("MagicNumber")
+
 package ai.liquid.pipette.compose
 
 import ai.liquid.pipette.R
