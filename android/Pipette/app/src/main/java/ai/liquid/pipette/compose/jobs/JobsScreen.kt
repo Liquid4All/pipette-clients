@@ -9,6 +9,8 @@ import ai.liquid.pipette.JobCell
 import ai.liquid.pipette.JobManifest
 import ai.liquid.pipette.JobStatus
 import ai.liquid.pipette.R
+import ai.liquid.pipette.compose.AndroidSearchBar
+import ai.liquid.pipette.compose.AndroidTopAppBar
 import ai.liquid.pipette.compose.AppTextField
 import ai.liquid.pipette.compose.Chip
 import ai.liquid.pipette.compose.ConfirmAction
@@ -19,14 +21,13 @@ import ai.liquid.pipette.compose.JobCardUi
 import ai.liquid.pipette.compose.JobLiveActivity
 import ai.liquid.pipette.compose.MutedLabel
 import ai.liquid.pipette.compose.OutlineButton
-import ai.liquid.pipette.compose.PageHeaderLarge
+import ai.liquid.pipette.compose.OutlinedAndroidCard
 import ai.liquid.pipette.compose.PillTabBarReservedHeight
 import ai.liquid.pipette.compose.PrimaryButton
 import ai.liquid.pipette.compose.PropertyChipRow
 import ai.liquid.pipette.compose.QuantPill
 import ai.liquid.pipette.compose.ResultsGridUi
 import ai.liquid.pipette.compose.RotatingChevron
-import ai.liquid.pipette.compose.SearchBlock
 import ai.liquid.pipette.compose.SearchField
 import ai.liquid.pipette.compose.accentColor
 import ai.liquid.pipette.compose.clickableNoRipple
@@ -35,6 +36,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,6 +60,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -96,19 +99,60 @@ fun JobsScreen(state: JobsUiState, onIntent: (JobsIntent) -> Unit) {
     return
   }
   if (state is JobsUiState.Detail) BackHandler { onIntent(JobsIntent.BackToJobs) }
-  Column(
-    modifier =
-      Modifier.fillMaxSize()
-        .verticalScroll(rememberScrollState())
-        .windowInsetsPadding(WindowInsets.statusBars)
-        .padding(horizontal = 20.dp)
-        .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight)
-  ) {
-    when (state) {
-      is JobsUiState.JobList -> JobListContent(state, onIntent)
-      is JobsUiState.Detail -> DetailContent(state, onIntent)
-      is JobsUiState.CellDetail -> Unit
-      is JobsUiState.Wizard -> Unit
+  // JobList pins the Material toolbar and scrolls the content pane underneath.
+  // Detail keeps its own iOS chrome (a nav bar rendered inside the scroll).
+  when (state) {
+    is JobsUiState.JobList -> JobListScaffold(state, onIntent)
+    is JobsUiState.Detail ->
+      Column(
+        modifier =
+          Modifier.fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = 20.dp)
+            .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight)
+      ) {
+        DetailContent(state, onIntent)
+      }
+    is JobsUiState.CellDetail -> Unit
+    is JobsUiState.Wizard -> Unit
+  }
+}
+
+/** Pinned Material toolbar + independently scrolling content pane for the job list. */
+@Composable
+private fun JobListScaffold(state: JobsUiState.JobList, onIntent: (JobsIntent) -> Unit) {
+  val colors = PipetteTheme.colors
+  // Toolbar sits flush against the status-bar inset — no extra `top` padding
+  // above it, so the toolbar is edge-to-edge. Post-toolbar content gets its
+  // own top gap inside the scrolling pane. The "Create job" action lives in a
+  // FloatingActionButton at the bottom-right (Android convention for the
+  // screen's primary create action) rather than in the toolbar's actions slot.
+  Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+    Column(modifier = Modifier.fillMaxSize()) {
+      AndroidTopAppBar(title = stringResource(R.string.job_list_title))
+      Column(
+        modifier =
+          Modifier.weight(1f)
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(top = 12.dp, bottom = 18.dp + PillTabBarReservedHeight)
+      ) {
+        JobListContent(state, onIntent)
+      }
+    }
+    if (state.hasModels) {
+      FloatingActionButton(
+        onClick = { onIntent(JobsIntent.OpenWizard) },
+        containerColor = colors.label,
+        contentColor = colors.background,
+        // Sit above the pill tab bar with a standard 16 dp inset from the
+        // right edge; the top of the FAB clears the bottom of the last card.
+        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp + PillTabBarReservedHeight),
+      ) {
+        Icon(painter = painterResource(R.drawable.ic_plus), contentDescription = "Create job", modifier = Modifier.size(24.dp))
+      }
     }
   }
 }
@@ -217,24 +261,21 @@ private fun EngineMissingBanner() {
 
 @Composable
 private fun JobListContent(state: JobsUiState.JobList, onIntent: (JobsIntent) -> Unit) {
-  val colors = PipetteTheme.colors
-  if (!state.engineAvailable) EngineMissingBanner()
-  Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-    PageHeaderLarge(stringResource(R.string.job_list_title), modifier = Modifier.weight(1f))
-    if (state.hasModels) {
-      Box(
-        modifier =
-          Modifier.size(44.dp).clip(androidx.compose.foundation.shape.CircleShape).background(colors.label).clickableNoRipple {
-            onIntent(JobsIntent.OpenWizard)
-          },
-        contentAlignment = Alignment.Center,
-      ) {
-        Icon(painter = painterResource(R.drawable.ic_plus), contentDescription = null, tint = colors.background, modifier = Modifier.size(22.dp))
-      }
-    }
+  // The pinned toolbar and the outer scroll/padding live in JobListScaffold —
+  // this composable renders only what belongs in the scrolling content pane.
+  // The scaffold already spaces content off the toolbar (top = 12.dp on the
+  // scroll pane), so this composable starts straight into the search bar and
+  // only inserts spacers between siblings below it.
+  if (!state.engineAvailable) {
+    EngineMissingBanner()
+    Spacer(Modifier.height(12.dp))
   }
-  androidx.compose.foundation.layout.Spacer(Modifier.height(14.dp))
-  SearchBlock(stringResource(R.string.job_list_search), state.searchQuery, { onIntent(JobsIntent.ApplyJobSearch(it)) })
+  AndroidSearchBar(
+    hint = stringResource(R.string.job_list_search),
+    value = state.searchQuery,
+    onValueChange = { onIntent(JobsIntent.ApplyJobSearch(it)) },
+  )
+  Spacer(Modifier.height(14.dp))
   when {
     !state.hasModels ->
       JobsEmptyState(
@@ -259,7 +300,7 @@ private fun JobListContent(state: JobsUiState.JobList, onIntent: (JobsIntent) ->
         onButton = {},
       )
     else ->
-      IosCard(cornerRadius = 18) {
+      OutlinedAndroidCard(cornerRadius = 18) {
         state.jobs.forEachIndexed { i, card ->
           if (i > 0) IosDivider(modifier = Modifier.padding(start = 20.dp))
           JobRow(card, onIntent)
@@ -319,15 +360,16 @@ private fun JobsEmptyState(title: String, subtitle: String, buttonLabel: String?
   }
 }
 
-/** Compact tappable job row (iOS JobRow): title + optional progress + meta line; whole row navigates to detail. */
+/** Compact tappable job row: title + optional progress + meta line; whole row navigates to detail. */
 @Composable
 private fun JobRow(card: ai.liquid.pipette.compose.JobCardUi, onIntent: (JobsIntent) -> Unit) {
   val colors = PipetteTheme.colors
+  // Standard Compose `clickable` (not the app's clickableNoRipple helper) so
+  // the row shows Material ripple feedback — the Android-styled Jobs tab wants
+  // ripples, and they're clipped to the elevated card's rounded shape.
   Column(
     modifier =
-      Modifier.fillMaxWidth()
-        .clickableNoRipple { onIntent(JobsIntent.OpenJobDetail(card.manifest.jobId)) }
-        .padding(horizontal = 20.dp, vertical = 16.dp),
+      Modifier.fillMaxWidth().clickable { onIntent(JobsIntent.OpenJobDetail(card.manifest.jobId)) }.padding(horizontal = 20.dp, vertical = 16.dp),
     verticalArrangement = Arrangement.spacedBy(10.dp),
   ) {
     Text(card.manifest.displayTitle, style = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.SemiBold), color = colors.label, maxLines = 2)
