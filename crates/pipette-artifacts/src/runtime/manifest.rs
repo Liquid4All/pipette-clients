@@ -75,11 +75,15 @@ pub struct RuntimeManifest {
 }
 
 /// Host-absolute install root already on `stored`, if any.
-fn absolute_install_root(stored: &Runtime) -> Option<&str> {
-    use pipette_plan_types::{LlamacppCliStockToolsSource, UvRuntimeSource};
+pub(crate) fn absolute_install_root(stored: &Runtime) -> Option<&str> {
+    use pipette_plan_types::{LlamacppCliStockToolsSource, LloomServeSource, UvRuntimeSource};
     match stored {
         Runtime::LlamacppCliStockTools(rt) => match &rt.source {
             LlamacppCliStockToolsSource::AbsoluteDir { dir } => Some(dir.as_ref()),
+            _ => None,
+        },
+        Runtime::LloomServeMacos(rt) => match &rt.source {
+            LloomServeSource::AbsoluteDir { dir } => Some(dir.as_ref()),
             _ => None,
         },
         Runtime::UvVllm(rt) => match &rt.source {
@@ -105,7 +109,7 @@ fn absolute_install_root(stored: &Runtime) -> Option<&str> {
 /// Entry-relative install subtree from `stored`, or `None` when the entry root
 /// is the install root (docker) or the root is already absolute on `stored`.
 fn install_rel(stored: &Runtime) -> Result<Option<&str>, RuntimeManifestError> {
-    use pipette_plan_types::{LlamacppCliStockToolsSource, UvRuntimeSource};
+    use pipette_plan_types::{LlamacppCliStockToolsSource, LloomServeSource, UvRuntimeSource};
     if absolute_install_root(stored).is_some() {
         return Ok(None);
     }
@@ -114,6 +118,12 @@ fn install_rel(stored: &Runtime) -> Result<Option<&str>, RuntimeManifestError> {
             LlamacppCliStockToolsSource::RelativeDir { dir } => Ok(Some(dir.as_ref())),
             other => Err(RuntimeManifestError::Corrupt(format!(
                 "stored llama.cpp source is not RelativeDir: {other:?}"
+            ))),
+        },
+        Runtime::LloomServeMacos(rt) => match &rt.source {
+            LloomServeSource::RelativeDir { dir } => Ok(Some(dir.as_ref())),
+            other => Err(RuntimeManifestError::Corrupt(format!(
+                "stored lloom-serve source is not RelativeDir: {other:?}"
             ))),
         },
         Runtime::UvVllm(rt) => match &rt.source {
@@ -238,8 +248,8 @@ impl RuntimeManifest {
     /// Llama → `AbsoluteDir`; UV/MLX → `AbsolutePreinstalled`; docker unchanged.
     pub fn bind_under(&self, runtimes_dir: &Path) -> Result<Runtime, RuntimeManifestError> {
         use pipette_plan_types::{
-            AbsolutePath, LlamacppCliStockTools, LlamacppCliStockToolsSource, MlxMacosPipette,
-            UvOpenvino, UvRuntimeSource, UvSglang, UvVllm,
+            AbsolutePath, LlamacppCliStockTools, LlamacppCliStockToolsSource, LloomServeMacos,
+            LloomServeSource, MlxMacosPipette, UvOpenvino, UvRuntimeSource, UvSglang, UvVllm,
         };
 
         let install = self.install_dir(runtimes_dir)?;
@@ -254,6 +264,10 @@ impl RuntimeManifest {
                     flavor: rt.flavor.clone(),
                 }))
             }
+            Runtime::LloomServeMacos(rt) => Ok(Runtime::LloomServeMacos(LloomServeMacos {
+                source: LloomServeSource::AbsoluteDir { dir: abs(install)? },
+                flavor: rt.flavor,
+            })),
             Runtime::UvVllm(rt) => Ok(Runtime::UvVllm(UvVllm {
                 server_version: rt.server_version.clone(),
                 build: rt.build.clone(),

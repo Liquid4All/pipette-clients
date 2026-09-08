@@ -38,6 +38,9 @@ fn runtime_capability_flags(runtime: &Runtime) -> Vec<String> {
             Some(rt.source.repository_version.as_ref().to_string()),
         ),
         Runtime::MlxMacosPipette(rt) => ("mlx", Some(rt.version.as_ref().to_string())),
+        // A native binary from an archive: the archive coordinate is the
+        // version this box advertises (no release tags yet).
+        Runtime::LloomServeMacos(rt) => ("lloom", Some(rt.source.reference().to_string())),
         // The device is not in the flag: it is a per-cell choice over one
         // installed venv, so what this box has is `openvino:<version>` and the
         // plan picks CPU/GPU/NPU on top of it.

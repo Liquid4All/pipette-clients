@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! uri    ::= scheme "://" body            ; split on the FIRST "://"
-//! scheme ::= "llamacpp-cli-stock-tools" | "mlx-macos-pipette"
+//! scheme ::= "llamacpp-cli-stock-tools" | "mlx-macos-pipette" | "lloom-serve-macos"
 //!          | "docker-vllm" | "docker-sglang"
 //!          | "uv-vllm" | "uv-sglang" | "uv-openvino"
 //! body   ::= "" | pair ("&" pair)*        ; keys unordered, each at most once
@@ -25,6 +25,7 @@
 //! |-------------------------------|------------------------------------------------------------|
 //! | `llamacpp-cli-stock-tools`    | `version`(+*`repo`*) **xor** `url`; `flavor`               |
 //! | `mlx-macos-pipette`           | `version`; *`flavor`* (default `macos-arm64`)               |
+//! | `lloom-serve-macos`           | `url`; *`flavor`* (default `macos-arm64`)                   |
 //! | `docker-vllm` / `docker-sglang` | `image`, `tag`; *`flavor`* (default `nvidia_gpu`)        |
 //! | `uv-vllm` / `uv-sglang`       | `server`, `build`, `python`                                |
 //! | `uv-openvino`                 | `version` (the device is a per-cell runtime flag)          |
@@ -52,9 +53,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use pipette_plan_types::{
     default_repository_url, DockerSglang, DockerVllm, LlamaCppFlavor, LlamacppCliStockTools,
-    LlamacppCliStockToolsSource, MlxMacosPipette, MlxMacosPipetteFlavor, NonEmptyString,
-    RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, SourceRepository, UvBuild,
-    UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang, UvVllm, VllmFlavor,
+    LlamacppCliStockToolsSource, LloomServeFlavor, LloomServeMacos, LloomServeSource,
+    MlxMacosPipette, MlxMacosPipetteFlavor, NonEmptyString, RemoteArchiveUrl, RepositoryUrl,
+    Runtime, SglangFlavor, SourceRepository, UvBuild, UvPythonVersion, UvRuntimeSource,
+    UvServerVersion, UvSglang, UvVllm, VllmFlavor,
 };
 
 // Key names, shared by the parser and [`runtime_to_uri`] so the two directions
@@ -89,6 +91,7 @@ const KEY_PYTHON: &str = "python";
 pub(crate) enum Scheme {
     LlamacppCliStockTools,
     MlxMacosPipette,
+    LloomServeMacos,
     DockerVllm,
     DockerSglang,
     UvVllm,
@@ -133,8 +136,9 @@ pub enum RuntimeUriError {
 
     #[error(
         "unknown runtime URI scheme `{0}` (expected `llamacpp-cli-stock-tools`, \
-         `mlx-macos-pipette`, `docker-vllm`, `docker-sglang`, `uv-vllm`, `uv-sglang`, \
-         or `uv-openvino`; a scheme is the runtime type with `-` for `_`)"
+         `mlx-macos-pipette`, `lloom-serve-macos`, `docker-vllm`, `docker-sglang`, \
+         `uv-vllm`, `uv-sglang`, or `uv-openvino`; a scheme is the runtime type with `-` \
+         for `_`)"
     )]
     UnknownScheme(String),
 
@@ -463,6 +467,29 @@ fn parse_mlx(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     }))
 }
 
+fn parse_lloom_serve(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
+    let url = remote_archive_url(KEY_URL, p.require(KEY_URL)?)?;
+    let flavor = match p.take(KEY_FLAVOR) {
+        Some(f) => parse_lloom_flavor(f)?,
+        None => LloomServeFlavor::MacosArm64,
+    };
+    p.finish()?;
+    Ok(Runtime::LloomServeMacos(LloomServeMacos {
+        source: LloomServeSource::RemoteArchive { url },
+        flavor,
+    }))
+}
+
+fn parse_lloom_flavor(s: &str) -> Result<LloomServeFlavor, RuntimeUriError> {
+    match s {
+        "macos-arm64" => Ok(LloomServeFlavor::MacosArm64),
+        other => Err(RuntimeUriError::InvalidValue {
+            key: KEY_FLAVOR,
+            message: format!("unknown lloom-serve flavor `{other}` (expected `macos-arm64`)"),
+        }),
+    }
+}
+
 fn parse_docker_vllm(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     let image_name = non_empty(KEY_IMAGE, p.require(KEY_IMAGE)?)?;
     let image_tag = non_empty(KEY_TAG, p.require(KEY_TAG)?)?;
@@ -559,6 +586,7 @@ pub fn parse_runtime_uri(input: &str) -> Result<Runtime, RuntimeUriError> {
     match scheme {
         Scheme::LlamacppCliStockTools => parse_llama_cpp(pairs),
         Scheme::MlxMacosPipette => parse_mlx(pairs),
+        Scheme::LloomServeMacos => parse_lloom_serve(pairs),
         Scheme::DockerVllm => parse_docker_vllm(pairs),
         Scheme::DockerSglang => parse_docker_sglang(pairs),
         Scheme::UvVllm => parse_uv_vllm(pairs),
@@ -685,6 +713,19 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
                 | LlamacppCliStockToolsSource::AbsoluteDir { .. } => {
                     return Err(RuntimeUriError::NotRepresentable(
                         "a local (installed) llama.cpp runtime".to_owned(),
+                    ));
+                }
+            }
+            body.push(KEY_FLAVOR, &rt.flavor.to_string())?;
+            Ok(body.finish())
+        }
+        Runtime::LloomServeMacos(rt) => {
+            let mut body = Body::new(Scheme::LloomServeMacos);
+            match &rt.source {
+                LloomServeSource::RemoteArchive { url } => body.url(KEY_URL, url)?,
+                LloomServeSource::RelativeDir { .. } | LloomServeSource::AbsoluteDir { .. } => {
+                    return Err(RuntimeUriError::NotRepresentable(
+                        "a local (installed) lloom-serve runtime".to_owned(),
                     ));
                 }
             }

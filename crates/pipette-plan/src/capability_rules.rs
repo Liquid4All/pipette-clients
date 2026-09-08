@@ -266,6 +266,13 @@ fn policy_for(runtime: RuntimeType) -> Policy {
             any_of: &[Group::Exactly(APPLE_SILICON)],
             when: &[],
         },
+        // lloom-serve (Metal, native binary): Apple silicon macOS, as MLX.
+        LloomServeMacos => Policy {
+            requires: &["os:macos"],
+            one_of: &[],
+            any_of: &[Group::Exactly(APPLE_SILICON)],
+            when: &[],
+        },
         // In-process iOS MLX (mlx-swift): A12 Bionic or newer — the iPhone XS
         // is the oldest qualifying device. iOS 17.2 floor deferred.
         MlxIosPipette => Policy {

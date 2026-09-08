@@ -131,7 +131,11 @@ fn install_llamacpp(
 
 /// Download archive bytes over HTTPS (RemoteArchive is scheme-less host/path;
 /// callers pass `download_url()`).
-fn read_archive(http: &HttpClient, url: &str, reporter: &mut Reporter) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn read_archive(
+    http: &HttpClient,
+    url: &str,
+    reporter: &mut Reporter,
+) -> anyhow::Result<Vec<u8>> {
     let mut response = http
         .client()
         .get(url)
@@ -169,7 +173,7 @@ fn read_archive(http: &HttpClient, url: &str, reporter: &mut Reporter) -> anyhow
 }
 
 /// The archive kind from a filename/URL: `.zip` → zip, else tar.gz.
-fn infer_archive_kind(name: &str) -> ArchiveKind {
+pub(crate) fn infer_archive_kind(name: &str) -> ArchiveKind {
     if name.ends_with(".zip") {
         ArchiveKind::Zip
     } else {
@@ -178,7 +182,7 @@ fn infer_archive_kind(name: &str) -> ArchiveKind {
 }
 
 #[derive(Clone, Copy)]
-enum ArchiveKind {
+pub(crate) enum ArchiveKind {
     Zip,
     TarGz,
 }
@@ -189,7 +193,7 @@ enum ArchiveKind {
 /// Path-traversal safety: the zip path normalizes each entry via
 /// `mangled_name()`; the tar path relies on `tar::Archive::unpack`, which
 /// refuses to write outside `destination` (rejecting `..` components).
-fn extract_archive(
+pub(crate) fn extract_archive(
     archive_bytes: &[u8],
     kind: ArchiveKind,
     destination: &Path,
@@ -237,7 +241,7 @@ fn extract_archive(
 }
 
 /// Recursively locate `expected_name` under `root`; errors if absent.
-fn find_binary(root: &Path, expected_name: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn find_binary(root: &Path, expected_name: &str) -> anyhow::Result<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in
@@ -258,7 +262,7 @@ fn find_binary(root: &Path, expected_name: &str) -> anyhow::Result<PathBuf> {
     )
 }
 
-fn binary_name(base: &str) -> String {
+pub(crate) fn binary_name(base: &str) -> String {
     if cfg!(windows) {
         format!("{base}.exe")
     } else {

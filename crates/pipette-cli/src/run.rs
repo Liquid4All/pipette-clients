@@ -178,6 +178,7 @@ fn require_desktop_runtime(runtime: &Runtime) -> anyhow::Result<()> {
     match runtime {
         Runtime::LlamacppCliStockTools(_)
         | Runtime::MlxMacosPipette(_)
+        | Runtime::LloomServeMacos(_)
         | Runtime::DockerVllm(_)
         | Runtime::DockerSglang(_)
         | Runtime::UvVllm(_)
@@ -188,7 +189,7 @@ fn require_desktop_runtime(runtime: &Runtime) -> anyhow::Result<()> {
         | Runtime::MlxIosPipette(_)
         | Runtime::AppleFoundation(_) => anyhow::bail!(
             "runtime `{runtime}` is not a desktop CLI runtime; \
-             allowed: llamacpp_cli_stock_tools, mlx_macos_pipette, \
+             allowed: llamacpp_cli_stock_tools, mlx_macos_pipette, lloom_serve_macos, \
              docker_vllm, docker_sglang, uv_vllm, uv_sglang, uv_openvino"
         ),
     }
@@ -314,6 +315,14 @@ fn dispatch_run(
         }
         #[cfg(not(target_os = "macos"))]
         (Runtime::MlxMacosPipette(_), _) => anyhow::bail!("the MLX runtime runs on macOS only"),
+        #[cfg(target_os = "macos")]
+        (Runtime::LloomServeMacos(_), _) => {
+            pipette_lloom::run(req, &ws.eval_completions(), &readiness_gate, &observer)
+        }
+        #[cfg(not(target_os = "macos"))]
+        (Runtime::LloomServeMacos(_), _) => {
+            anyhow::bail!("the lloom-serve runtime runs on macOS only")
+        }
 
         (
             Runtime::DockerVllm(_)

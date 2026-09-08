@@ -15,6 +15,7 @@ members = [
     "crates/pipette-plan",
     "crates/pipette-llamacpp",
     "crates/pipette-mlx",
+    "crates/pipette-lloom",
     "crates/pipette-openvino",
     "crates/pipette-android",
     "crates/pipette-torch-oai",
@@ -42,6 +43,7 @@ default-members = [
     "crates/pipette-plan",
     "crates/pipette-llamacpp",
     "crates/pipette-mlx",
+    "crates/pipette-lloom",
     "crates/pipette-openvino",
     "crates/pipette-torch-oai",
     "crates/pipette-cli",
@@ -91,6 +93,7 @@ pipette-llamacpp = { path = "crates/pipette-llamacpp" }
 pipette-memprobe-metal = { path = "crates/pipette-memprobe-metal" }
 pipette-mgmt-client = { path = "crates/pipette-mgmt-client" }
 pipette-mlx = { path = "crates/pipette-mlx" }
+pipette-lloom = { path = "crates/pipette-lloom" }
 pipette-openvino = { path = "crates/pipette-openvino" }
 pipette-ops = { path = "crates/pipette-ops" }
 pipette-plan-types = { path = "crates/pipette-plan-types" }

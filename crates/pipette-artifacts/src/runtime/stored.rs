@@ -5,8 +5,8 @@
 //! runtime (RelativeDir / RelativePreinstalled / docker identity).
 
 use pipette_plan_types::{
-    LlamacppCliStockTools, LlamacppCliStockToolsSource, MlxMacosPipette, RelativePath, Runtime,
-    UvOpenvino, UvRuntimeSource, UvSglang, UvVllm,
+    LlamacppCliStockTools, LlamacppCliStockToolsSource, LloomServeMacos, LloomServeSource,
+    MlxMacosPipette, RelativePath, Runtime, UvOpenvino, UvRuntimeSource, UvSglang, UvVllm,
 };
 
 use crate::entry::BLOBS_DIR_NAME;
@@ -50,6 +50,10 @@ pub fn to_stored(declared: &Runtime) -> Result<Runtime, RuntimeStoredError> {
                 flavor: rt.flavor.clone(),
             }))
         }
+        Runtime::LloomServeMacos(rt) => Ok(Runtime::LloomServeMacos(LloomServeMacos {
+            source: LloomServeSource::RelativeDir { dir: blobs_dir()? },
+            flavor: rt.flavor,
+        })),
         Runtime::DockerVllm(rt) => Ok(Runtime::DockerVllm(rt.clone())),
         Runtime::DockerSglang(rt) => Ok(Runtime::DockerSglang(rt.clone())),
         Runtime::UvVllm(rt) => Ok(Runtime::UvVllm(UvVllm {

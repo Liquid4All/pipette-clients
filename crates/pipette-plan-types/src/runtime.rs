@@ -29,6 +29,11 @@ pub enum Runtime {
     /// llama.cpp running in-process inside the iOS pipette app.
     LlamacppIosPipette(LlamacppIosPipette),
     MlxMacosPipette(MlxMacosPipette),
+    /// lloom's `lloom-serve` (the LFM2 engine on Metal, `ocean1/lloom`)
+    /// driven as a local sidecar on macOS: a native binary from a prebuilt
+    /// archive, speaking the same `/prefill_throughput` … `/eval` contract
+    /// the MLX sidecar does, plus `/tokenize` and `/v1/completions`.
+    LloomServeMacos(LloomServeMacos),
     /// MLX running in-process inside the iOS pipette app (mlx-swift) — the
     /// on-device counterpart to the desktop `MlxMacosPipette` (Python/uv) runtime.
     MlxIosPipette(MlxIosPipette),
@@ -405,6 +410,85 @@ pub struct MlxMacosPipette {
     pub source: UvRuntimeSource,
 }
 
+/// `lloom-serve` on macOS: a native binary sourced from a prebuilt archive
+/// (declared), installed under the store entry (`relative_dir`), bound to an
+/// absolute root at run time (`absolute_dir`) — the llama.cpp CLI runtime's
+/// shape, minus the GitHub-release arm until releases exist. The runner finds
+/// the `lloom-serve` binary anywhere under the bound root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct LloomServeMacos {
+    #[serde(flatten)]
+    pub source: LloomServeSource,
+    pub flavor: LloomServeFlavor,
+}
+
+/// Where a `lloom-serve` install comes from. Tagged `source`, the same dialect
+/// as [`LlamacppCliStockToolsSource`]: `remote_archive` (`url`) is the one
+/// declared / pullable form; `relative_dir` / `absolute_dir` (`dir`) are the
+/// stored and bound forms.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum LloomServeSource {
+    /// Prebuilt archive at a remote host/path. See [`RemoteArchiveUrl`].
+    RemoteArchive { url: RemoteArchiveUrl },
+    /// Portable install layout under the store entry (e.g. `blobs`).
+    RelativeDir { dir: RelativePath },
+    /// Absolute install root on the host after bind.
+    AbsoluteDir { dir: AbsolutePath },
+}
+
+impl LloomServeSource {
+    /// The ref-ish token used in the `--runtime` display form: the archive
+    /// coordinate, or the install directory.
+    pub fn reference(&self) -> &str {
+        match self {
+            LloomServeSource::RemoteArchive { url } => url.as_ref(),
+            LloomServeSource::RelativeDir { dir } => dir.as_ref(),
+            LloomServeSource::AbsoluteDir { dir } => dir.as_ref(),
+        }
+    }
+
+    pub fn origin_slug(&self) -> &str {
+        match self {
+            LloomServeSource::RemoteArchive { .. } => "remote-archive",
+            LloomServeSource::RelativeDir { .. } | LloomServeSource::AbsoluteDir { .. } => "local",
+        }
+    }
+}
+
+impl std::fmt::Display for LloomServeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LloomServeSource::RemoteArchive { url } => write!(f, "{url}"),
+            LloomServeSource::RelativeDir { dir } => write!(f, "relative-dir:{dir}"),
+            LloomServeSource::AbsoluteDir { dir } => write!(f, "absolute-dir:{dir}"),
+        }
+    }
+}
+
+impl std::fmt::Display for LloomServeMacos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.source, self.flavor)
+    }
+}
+
+/// The one build `lloom-serve` ships for: Apple silicon macOS (Metal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "clap", clap(rename_all = "kebab-case"))]
+pub enum LloomServeFlavor {
+    MacosArm64,
+}
+
+impl std::fmt::Display for LloomServeFlavor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LloomServeFlavor::MacosArm64 => "macos-arm64",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct DockerVllm {
     pub image_name: NonEmptyString,
@@ -607,6 +691,7 @@ impl Runtime {
             Runtime::LlamacppApkPipette(_) => "llamacpp_apk_pipette",
             Runtime::LlamacppIosPipette(_) => "llamacpp_ios_pipette",
             Runtime::MlxMacosPipette(_) => "mlx_macos_pipette",
+            Runtime::LloomServeMacos(_) => "lloom_serve_macos",
             Runtime::MlxIosPipette(_) => "mlx_ios_pipette",
             Runtime::DockerVllm(_) => "docker_vllm",
             Runtime::DockerSglang(_) => "docker_sglang",
@@ -633,6 +718,7 @@ impl Runtime {
             Runtime::LlamacppIosPipette(rt) => {
                 format!("{}:{}", rt.source.repository_version, rt.flavor)
             }
+            Runtime::LloomServeMacos(rt) => format!("{}:{}", rt.source.reference(), rt.flavor),
             // The remaining variants' `Display` already is the binary ref form.
             other => other.to_string(),
         }
@@ -768,6 +854,7 @@ impl std::fmt::Display for Runtime {
             Runtime::LlamacppApkPipette(rt) => rt.fmt(f),
             Runtime::LlamacppIosPipette(rt) => rt.fmt(f),
             Runtime::MlxMacosPipette(rt) => rt.fmt(f),
+            Runtime::LloomServeMacos(rt) => rt.fmt(f),
             Runtime::MlxIosPipette(rt) => rt.fmt(f),
             Runtime::DockerVllm(rt) => rt.fmt(f),
             Runtime::DockerSglang(rt) => rt.fmt(f),
@@ -1054,6 +1141,7 @@ pub enum RuntimeType {
     LlamacppApkPipette,
     LlamacppIosPipette,
     MlxMacosPipette,
+    LloomServeMacos,
     MlxIosPipette,
     DockerVllm,
     DockerSglang,
@@ -1072,6 +1160,7 @@ impl RuntimeType {
             Runtime::LlamacppApkPipette(_) => Self::LlamacppApkPipette,
             Runtime::LlamacppIosPipette(_) => Self::LlamacppIosPipette,
             Runtime::MlxMacosPipette(_) => Self::MlxMacosPipette,
+            Runtime::LloomServeMacos(_) => Self::LloomServeMacos,
             Runtime::MlxIosPipette(_) => Self::MlxIosPipette,
             Runtime::DockerVllm(_) => Self::DockerVllm,
             Runtime::DockerSglang(_) => Self::DockerSglang,
@@ -1227,6 +1316,38 @@ mod tests {
         let repo = RepositoryUrl::new("git@gitlab.com:acme/fork.git");
         assert_eq!(repo.as_ref(), "gitlab.com/acme/fork");
         assert_eq!(repo.org_repo(), "acme/fork");
+    }
+
+    #[test]
+    fn lloom_serve_from_archive_url_parses_and_displays() -> anyhow::Result<()> {
+        let runtime: Runtime = toml::from_str(
+            r#"type = "lloom_serve_macos"
+source = "remote_archive"
+url = "https://example.com/lloom-serve-macos-arm64.tar.gz"
+flavor = "macos-arm64""#,
+        )
+        .context("archive runtime should parse")?;
+        let Runtime::LloomServeMacos(rt) = &runtime else {
+            anyhow::bail!("expected LloomServeMacos");
+        };
+        assert!(matches!(rt.source, LloomServeSource::RemoteArchive { .. }));
+        assert_eq!(rt.source.origin_slug(), "remote-archive");
+        assert_eq!(
+            rt.source.reference(),
+            "example.com/lloom-serve-macos-arm64.tar.gz"
+        );
+        assert_eq!(
+            runtime.cli_ref(),
+            "example.com/lloom-serve-macos-arm64.tar.gz:macos-arm64"
+        );
+        assert_eq!(runtime.headless_token(), "lloom_serve_macos");
+        assert_eq!(RuntimeType::of(&runtime), RuntimeType::LloomServeMacos);
+        // JSON round trip keeps the flattened `source` tag.
+        let json = serde_json::to_value(&runtime)?;
+        assert_eq!(json["type"], "lloom_serve_macos");
+        assert_eq!(json["source"], "remote_archive");
+        assert_eq!(serde_json::from_value::<Runtime>(json)?, runtime);
+        Ok(())
     }
 
     #[test]

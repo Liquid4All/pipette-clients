@@ -19,7 +19,7 @@ management server.
 
 | CLI | Inference backends | Build |
 |-----|--------------------|-------|
-| `pipette`      | `llama.cpp`, MLX, OpenVINO, vLLM, SGLang | `cargo build --release -p pipette-cli` |
+| `pipette`      | `llama.cpp`, MLX, lloom-serve, OpenVINO, vLLM, SGLang | `cargo build --release -p pipette-cli` |
 | `pipette-plan` | orchestrates `pipette` across remote devices | `cargo build --release -p pipette-plan` |
 
 ### Clients: native mobile apps

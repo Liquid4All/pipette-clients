@@ -1852,6 +1852,7 @@ dependencies = [
  "pipette-doomloop",
  "pipette-http",
  "pipette-llamacpp",
+ "pipette-lloom",
  "pipette-mgmt-client",
  "pipette-mlx",
  "pipette-openvino",
@@ -1934,6 +1935,25 @@ dependencies = [
  "toml",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "pipette-lloom"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "pipette-doomloop",
+ "pipette-http",
+ "pipette-memprobe-metal",
+ "pipette-ops",
+ "pipette-plan-types",
+ "pipette-subprocess",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

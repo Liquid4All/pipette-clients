@@ -4,11 +4,13 @@
 
 mod key;
 mod manifest;
+pub(crate) use manifest::absolute_install_root;
 pub(crate) mod store;
 mod stored;
 
 pub(crate) mod docker;
 pub(crate) mod llamacpp;
+pub(crate) mod lloom;
 pub(crate) mod mlx;
 pub(crate) mod openvino;
 pub(crate) mod uv;

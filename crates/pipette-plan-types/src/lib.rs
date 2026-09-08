@@ -97,6 +97,8 @@ pub fn is_compatible(model: &Model, runtime: &Runtime) -> bool {
             LlamacppCliStockTools(_) | LlamacppApkPipette(_) | LlamacppIosPipette(_),
         ) => true,
         (Mlx(_), MlxMacosPipette(_) | MlxIosPipette(_)) => true,
+        // lloom-serve loads the HF safetensors snapshot a Torch model names.
+        (Torch(_), LloomServeMacos(_)) => true,
         (Torch(_), DockerVllm(_) | DockerSglang(_) | UvVllm(_) | UvSglang(_)) => true,
         (AppleFoundationText, AppleFoundation(_)) => true,
         (Openvino(_), UvOpenvino(_)) => true,

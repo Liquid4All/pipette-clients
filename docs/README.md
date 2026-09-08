@@ -59,7 +59,7 @@ families described in the [top-level README](../README.md):
 
 - [pipette-cli usage](pipette-cli/usage.md): unified `pipette` client; start here
 - [Naming models, runtimes, and flags](pipette-cli/models-and-runtimes.md): the URI and JSON notation for `--model` / `--runtime` / `--runtime-flags`, with recipes
-- [llama.cpp](pipette-cli/llamacpp.md) · [MLX](pipette-cli/mlx.md) · [torch-oai](pipette-cli/torch-oai.md) · [OpenVINO](pipette-cli/openvino.md): runtime backends
+- [llama.cpp](pipette-cli/llamacpp.md) · [MLX](pipette-cli/mlx.md) · [lloom-serve](pipette-cli/lloom.md) · [torch-oai](pipette-cli/torch-oai.md) · [OpenVINO](pipette-cli/openvino.md): runtime backends
 - [Eval checkpoint & resume](pipette-cli/eval-checkpoint.md)
 - [pipette-plan](pipette-plan/plan-runner.md): plan orchestrator (separate binary)
 - [Job generation](pipette-plan/job-generation.md): expanding a plan into jobs for the `pipette-mgmt` server

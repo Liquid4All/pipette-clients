@@ -1,0 +1,34 @@
+# Example plan: unified pipette client, lloom-serve runtime on one Mac over SSH.
+#
+# State written to
+# .pipette-plan/plans/lloom-macbook-example/state.jsonl.
+
+plan_id = "lloom-macbook-example"
+benchmarks = [
+  "prefill_throughput_512",
+  "decode_throughput_512_100",
+  "end_to_end_latency_512_256",
+  "max_memory_usage_512",
+]
+
+[[transports]]
+client_id   = "macbook"
+type        = "ssh"
+host        = "macbook"
+user        = "me"
+port        = 22
+binary_path = "/Users/me/pipette/pipette"
+work_dir    = "/Users/me/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["macbook"]
+models = [
+  { type = "torch", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-2.6B" },
+]
+runtimes = [
+  { type = "lloom_serve_macos", source = "remote_archive", url = "example.com/lloom-serve-macos-arm64.tar.gz", flavor = "macos-arm64" },
+]

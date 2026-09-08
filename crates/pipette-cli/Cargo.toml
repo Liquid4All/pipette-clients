@@ -28,6 +28,7 @@ pipette-ops.workspace = true
 pipette-readiness.workspace = true
 pipette-subprocess.workspace = true
 pipette-mlx.workspace = true
+pipette-lloom.workspace = true
 pipette-openvino.workspace = true
 pipette-plan-types.workspace = true
 pipette-workspace.workspace = true

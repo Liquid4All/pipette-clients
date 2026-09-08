@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use pipette_plan_types::{LlamacppCliStockToolsSource, Runtime, UvRuntimeSource};
+use pipette_plan_types::{LlamacppCliStockToolsSource, LloomServeSource, Runtime, UvRuntimeSource};
 
 use crate::model::{bound_to, slug_from};
 
@@ -76,6 +76,22 @@ impl RuntimeStorageKey {
                     }
                     LlamacppCliStockToolsSource::RelativeDir { .. }
                     | LlamacppCliStockToolsSource::AbsoluteDir { .. } => return Err(not_storable()),
+                }
+                segs.push(rt.flavor.to_string());
+                segs
+            }
+            Runtime::LloomServeMacos(rt) => {
+                // Declared only: the remote archive. Installed RelativeDir /
+                // AbsoluteDir are bind-time forms, not keys.
+                let mut segs = vec!["lloom-serve".to_owned()];
+                match &rt.source {
+                    LloomServeSource::RemoteArchive { url } => {
+                        segs.push("remote-archive".to_owned());
+                        segs.push(url.to_string());
+                    }
+                    LloomServeSource::RelativeDir { .. } | LloomServeSource::AbsoluteDir { .. } => {
+                        return Err(not_storable())
+                    }
                 }
                 segs.push(rt.flavor.to_string());
                 segs

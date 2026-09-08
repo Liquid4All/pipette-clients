@@ -135,6 +135,7 @@ PULLABLE SCHEMES (runtimes pull) -- a scheme is the runtime type with `-` for `_
   docker-vllm                image, tag; [flavor] (default nvidia_gpu)   -- pulled into the docker daemon
   docker-sglang              image, tag; [flavor] (default nvidia_gpu)   -- pulled into the docker daemon
   mlx-macos-pipette          version; [flavor] (default macos-arm64)     -- catalog: mlx_macos_pipette (macOS)
+  lloom-serve-macos          url; [flavor] (default macos-arm64)         -- a prebuilt lloom-serve archive (macOS)
   uv-vllm                    server, build, python                       -- catalog: uv_vllm (Linux)
   uv-sglang                  server, build, python                       -- catalog: uv_sglang (Linux)
   uv-openvino                version                                     -- catalog: uv_openvino (Linux/Windows)
@@ -152,6 +153,9 @@ EXAMPLES:
   # docker (vLLM / SGLang): pulled into the docker daemon
   pipette runtimes pull --runtime 'docker-vllm://image=vllm/vllm-openai&tag=v0.10.0'
   pipette runtimes pull --runtime 'docker-sglang://image=lmsysorg/sglang&tag=v0.4.0&flavor=amd_gpu'
+
+  # lloom-serve (macOS) from a prebuilt archive URL (no scheme in the value; https is implied)
+  pipette runtimes pull --runtime 'lloom-serve-macos://url=example.com/lloom-serve-macos-arm64.tar.gz&flavor=macos-arm64'
 
   # MLX (macOS) / uv (Linux): catalog installs; list with runtimes catalog <type>
   pipette runtimes pull --runtime 'mlx-macos-pipette://version=0.31.3&flavor=macos-arm64'

@@ -63,6 +63,15 @@ pub fn ensure_runtime(
     store: &RuntimeArtifactStore,
     declared: &Runtime,
 ) -> Result<Runtime, RuntimeStoreError> {
+    // A runtime declared at an absolute install root on this host — a local
+    // build of llama.cpp or lloom-serve, a preinstalled venv — is already the
+    // bound form `bind_under` would produce. There is nothing to fetch and no
+    // storage key to file it under (`RuntimeStorageKey` refuses these), so it
+    // binds to itself; whether the root actually holds the binary is the
+    // runner's check, as it is for a store-bound root.
+    if crate::runtime::absolute_install_root(declared).is_some() {
+        return Ok(declared.clone());
+    }
     let policy = collecting_policy(ctx, store.find(declared)?.is_some());
     if let Some(policy) = policy {
         quota::refuse_if_oversize(
@@ -261,6 +270,19 @@ fn install_runtime(
         }
         Runtime::MlxMacosPipette(_) => install_mlx_runtime(uv_bin(ctx)?, declared, blobs_dir),
         Runtime::UvOpenvino(_) => install_openvino_runtime(uv_bin(ctx)?, declared, blobs_dir),
+        Runtime::LloomServeMacos(_) => {
+            let mut reporter = Reporter::new(
+                ctx.progress.clone(),
+                declared.cli_ref(),
+                runtime_size_bytes(declared),
+            );
+            crate::runtime::lloom::install_lloom_archive(
+                &ctx.download_http_client,
+                declared,
+                blobs_dir,
+                &mut reporter,
+            )
+        }
         Runtime::LlamacppCliStockTools(_) => {
             // The archive is the one runtime install that streams bytes this
             // process can count; uv and docker report their own progress on
@@ -296,6 +318,38 @@ mod tests {
 
     fn test_ctx() -> anyhow::Result<ArtifactsContext> {
         Ok(ArtifactsContext::new(HttpClient::new("pipette-test")?))
+    }
+
+    /// A local build binds to itself: no fetch, no store entry, the same
+    /// `AbsoluteDir` form the store would hand back after an install.
+    #[test]
+    fn an_absolute_dir_runtime_binds_to_itself_without_a_store_entry() -> anyhow::Result<()> {
+        use pipette_plan_types::{
+            LlamaCppFlavor, LlamacppCliStockTools, LlamacppCliStockToolsSource, LloomServeFlavor,
+            LloomServeMacos, LloomServeSource,
+        };
+        let tmp = tempfile::tempdir()?;
+        let store = RuntimeArtifactStore::new(tmp.path().join("runtimes"));
+        let dir = AbsolutePath::try_new(tmp.path().join("local-build").display().to_string())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for declared in [
+            Runtime::LloomServeMacos(LloomServeMacos {
+                source: LloomServeSource::AbsoluteDir { dir: dir.clone() },
+                flavor: LloomServeFlavor::MacosArm64,
+            }),
+            Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
+                source: LlamacppCliStockToolsSource::AbsoluteDir { dir: dir.clone() },
+                flavor: LlamaCppFlavor::MacosArm64,
+            }),
+        ] {
+            let bound = ensure_runtime(&test_ctx()?, &store, &declared)?;
+            assert_eq!(bound, declared);
+        }
+        assert!(
+            !tmp.path().join("runtimes").exists(),
+            "binding a local build must not create a store entry"
+        );
+        Ok(())
     }
 
     /// A local gguf model authored at `root/<name>.gguf`, so `ensure_model`

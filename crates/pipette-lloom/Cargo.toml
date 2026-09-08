@@ -1,0 +1,27 @@
+[package]
+name = "pipette-lloom"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pipette-doomloop = { workspace = true, features = ["plan"] }
+pipette-http.workspace = true
+pipette-memprobe-metal.workspace = true
+log.workspace = true
+pipette-subprocess.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

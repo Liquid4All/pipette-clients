@@ -64,6 +64,7 @@ pub fn require_bound_venv(bound: &Runtime, expected: &[RuntimeType]) -> anyhow::
         Runtime::UvOpenvino(rt) => &rt.source,
         // Installed as an archive, an image, or not at all.
         Runtime::LlamacppCliStockTools(_)
+        | Runtime::LloomServeMacos(_)
         | Runtime::LlamacppApkPipette(_)
         | Runtime::LlamacppIosPipette(_)
         | Runtime::MlxIosPipette(_)
