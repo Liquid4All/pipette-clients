@@ -58,15 +58,26 @@ import androidx.compose.ui.unit.sp
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AndroidTopAppBar(title: String, modifier: Modifier = Modifier, actions: @Composable RowScope.() -> Unit = {}) {
+fun AndroidTopAppBar(
+  title: String,
+  modifier: Modifier = Modifier,
+  navigationIcon: @Composable () -> Unit = {},
+  actions: @Composable RowScope.() -> Unit = {},
+) {
   val colors = PipetteTheme.colors
   TopAppBar(
     title = { Text(title, style = serif(22), color = colors.label, maxLines = 1) },
     colors =
-      TopAppBarDefaults.topAppBarColors(containerColor = colors.background, titleContentColor = colors.label, actionIconContentColor = colors.label),
+      TopAppBarDefaults.topAppBarColors(
+        containerColor = colors.background,
+        titleContentColor = colors.label,
+        navigationIconContentColor = colors.label,
+        actionIconContentColor = colors.label,
+      ),
     // The screens already inset for the status bar at the outer scroll, so the
     // toolbar itself shouldn't add another status-bar inset on top.
     windowInsets = androidx.compose.foundation.layout.WindowInsets(0),
+    navigationIcon = navigationIcon,
     actions = actions,
     // No .shadow(...) — `shadow(2.dp)` draws on all four sides of the toolbar,
     // and the strip above it in the outer column let the top shadow show as
