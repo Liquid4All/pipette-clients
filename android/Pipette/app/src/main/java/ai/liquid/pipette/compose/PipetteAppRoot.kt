@@ -8,6 +8,7 @@ import ai.liquid.pipette.R
 import ai.liquid.pipette.Tab
 import ai.liquid.pipette.compose.jobs.JobsScreen
 import ai.liquid.pipette.compose.jobs.JobsViewModel
+import ai.liquid.pipette.compose.models.AddModelsScreen
 import ai.liquid.pipette.compose.models.ModelsScreen
 import ai.liquid.pipette.compose.models.ModelsViewModel
 import ai.liquid.pipette.compose.nav.Route
@@ -210,10 +211,20 @@ private fun Chrome(
   val backStack = rememberNavBackStack(shellState.selectedTab.toRoute())
   LaunchedEffect(shellState.selectedTab) {
     val root = shellState.selectedTab.toRoute()
+    // Reset the stack to the tab's root on tab switch. This also drops any pushed detail (e.g. Add models)
+    // so switching tabs doesn't strand a nested screen behind the scenes.
     if (backStack.lastOrNull() != root) {
       backStack.clear()
       backStack.add(root)
     }
+  }
+  // Mirror the Models VM's addModelsOpen flag onto the backstack: opening the flow pushes Route.AddModels,
+  // closing it (via the back button, system back, or a successful download) pops the entry. The VM stays
+  // the source of truth so nothing else in the app has to know about the nav wiring.
+  LaunchedEffect(modelsState.addModelsOpen) {
+    val hasAddModels = backStack.contains(Route.AddModels)
+    if (modelsState.addModelsOpen && !hasAddModels) backStack.add(Route.AddModels)
+    else if (!modelsState.addModelsOpen && hasAddModels) backStack.remove(Route.AddModels)
   }
 
   // Full-screen covers hide the pill bar (iOS fullScreenCover): the Jobs new-job wizard / cell detail
@@ -237,6 +248,7 @@ private fun Chrome(
         entryProvider<NavKey> {
           entry<Route.Jobs> { JobsScreen(jobsState, jobsVm::onIntent) }
           entry<Route.Models> { ModelsScreen(modelsState, modelsVm::onIntent) }
+          entry<Route.AddModels> { AddModelsScreen(modelsState, modelsVm::onIntent) }
           entry<Route.Settings> { SettingsScreen(settingsState, settingsVm::onIntent) }
         },
     )
