@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
+
 use pipette_plan_types::AppleCoreAiMacosPipette;
 
 /// Env override for the sidecar binary path (bypasses building).
@@ -173,8 +174,9 @@ fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
+
+    use super::*;
 
     // Both tests mutate the process-global `PIPETTE_COREAI_CACHE`. `cargo test`
     // runs them in parallel by default, so serialize env access here.
