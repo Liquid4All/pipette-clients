@@ -100,14 +100,6 @@ final class CoreAIEngine: @unchecked Sendable {
     let specializationCacheHit: Bool
 
     init(bundleDir: URL, seed: UInt64) async throws {
-        // S=1 zoo decode bundles (catalog hint "pipelined") are static graphs that
-        // accept a single token per forward; multi-token prefill chunks are rejected
-        // (shape-substitution fatal). COREAI_CHUNK_THRESHOLD=1 makes the runtime
-        // chunk the prompt into 1-token steps — the same guard coreai-kit's
-        // ModelRuntime sets for its .pipelined engine variant.
-        if getenv("COREAI_CHUNK_THRESHOLD") == nil {
-            setenv("COREAI_CHUNK_THRESHOLD", "1", 1)
-        }
         let bundle = try LanguageBundle(at: bundleDir)
         let modelURL = try bundle.requireModelURL(for: "main")
         let config = ModelConfig(

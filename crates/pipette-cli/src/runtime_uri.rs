@@ -1009,10 +1009,10 @@ mod tests {
         // must still reject a Swift stack this client was not built against, or
         // the recorded pin would lie about what binary ran.
         let json = r#"{"type":"core_ai_macos_pipette","packages":{
-            "coreai_models":{"repository_url":"github.com/john-rocky/coreai-models","repository_version":"9.9.9"},
-            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.3.3"},
+            "coreai_models":{"repository_url":"github.com/apple/coreai-models","repository_version":"9.9.9"},
+            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.2.0"},
             "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
-            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.4.2"}}}"#;
+            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.3.2"}}}"#;
         assert!(
             parse_runtime_arg(json).is_err(),
             "non-bundled JSON pin must be rejected"
@@ -1023,10 +1023,10 @@ mod tests {
     #[test]
     fn coreai_json_with_bundled_pin_is_accepted() -> anyhow::Result<()> {
         let json = r#"{"type":"core_ai_macos_pipette","packages":{
-            "coreai_models":{"repository_url":"github.com/john-rocky/coreai-models","repository_version":"0.2.2-zoo"},
-            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.3.3"},
+            "coreai_models":{"repository_url":"github.com/apple/coreai-models","repository_version":"27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"},
+            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.2.0"},
             "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
-            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.4.2"}}}"#;
+            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.3.2"}}}"#;
         let runtime = parse_runtime_arg(json)?;
         assert!(matches!(runtime, Runtime::AppleCoreAiMacosPipette(_)));
         Ok(())
@@ -1034,17 +1034,19 @@ mod tests {
 
     #[test]
     fn coreai_bundled_version_round_trips() -> anyhow::Result<()> {
-        let runtime = parse_runtime_uri("core-ai-macos-pipette://version=0.2.2-zoo")?;
+        let runtime = parse_runtime_uri(
+            "core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60",
+        )?;
         let Runtime::AppleCoreAiMacosPipette(rt) = runtime else {
             anyhow::bail!("expected AppleCoreAiMacosPipette");
         };
         assert_eq!(
             rt.packages.coreai_models.repository_version.as_ref(),
-            "0.2.2-zoo"
+            "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
         );
         assert_eq!(
             runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt))?,
-            "core-ai-macos-pipette://version=0.2.2-zoo"
+            "core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
         );
         Ok(())
     }
@@ -1282,7 +1284,7 @@ mod tests {
     #[case("llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=macos-x64")]
     #[case("llamacpp-cli-stock-tools://url=ex.com/llama-b1.tar.gz&flavor=macos-arm64")]
     #[case("mlx-macos-pipette://version=0.31.3&flavor=macos-arm64")]
-    #[case("core-ai-macos-pipette://version=0.2.2-zoo")]
+    #[case("core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60")]
     #[case("docker-vllm://image=vllm/vllm-openai&tag=v0.10.0&flavor=nvidia_gpu")]
     #[case("docker-sglang://image=lmsysorg/sglang&tag=v0.4.0&flavor=amd_gpu")]
     #[case("uv-vllm://server=0.21.0&build=cu121&python=3.12")]

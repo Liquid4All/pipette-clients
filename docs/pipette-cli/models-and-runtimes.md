@@ -114,7 +114,7 @@ There is no `sha256` on these four: they name a directory, not a file.
 --runtime 'llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=linux-x64-cpu'
 --runtime 'llamacpp-cli-stock-tools://url=https://example.com/llama-b1.tar.gz&flavor=macos-arm64'
 --runtime 'mlx-macos-pipette://version=0.31.3'
---runtime 'core-ai-macos-pipette://version=0.2.2-zoo'
+--runtime 'core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60'
 --runtime 'docker-vllm://image=vllm/vllm-openai&tag=v0.20.2&flavor=nvidia_gpu'
 --runtime 'uv-vllm://server=0.21.0&build=cu121&python=3.12'
 --runtime 'uv-openvino://version=2026.2.1'
