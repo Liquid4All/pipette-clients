@@ -781,6 +781,13 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
         // Core AI is a desktop runtime (macOS 27+): the engine ships with the OS,
         // the URI carries the bundled `coreai-models` pin as `version`.
         Runtime::AppleCoreAiMacosPipette(rt) => {
+            if !rt.is_bundled() {
+                return Err(RuntimeUriError::NotRepresentable(
+                    "a core-ai-macos-pipette runtime whose Swift stack is not the bundled pin \
+                     (pass it as a JSON `--runtime` object)"
+                        .to_owned(),
+                ));
+            }
             let mut body = Body::new(Scheme::AppleCoreAiMacosPipette);
             body.push(
                 KEY_VERSION,
@@ -1038,6 +1045,20 @@ mod tests {
         assert_eq!(
             runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt))?,
             "core-ai-macos-pipette://version=0.2.2-zoo"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_nonbundled_stack_has_no_uri_form() -> anyhow::Result<()> {
+        let mut rt = AppleCoreAiMacosPipette::bundled();
+        rt.packages.coreai_models.repository_version = NonEmptyString::try_new("9.9.9".to_owned())?;
+        assert!(
+            matches!(
+                runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt)),
+                Err(RuntimeUriError::NotRepresentable(_))
+            ),
+            "a non-bundled stack must not render as the bundled URI"
         );
         Ok(())
     }

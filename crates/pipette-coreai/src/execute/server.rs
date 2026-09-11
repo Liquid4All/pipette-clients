@@ -144,6 +144,10 @@ pub fn start_server(req: &RunRequest, sidecar: Option<PathBuf>) -> anyhow::Resul
             sidecar.display()
         )
     })?;
+    // Register before READY: first-load specialization can take up to
+    // READY_TIMEOUT, and a ^C in that window exits without unwinding.
+    // Drop/kill later is not enough — the default handler calls process::exit.
+    let cleanup_guard = pipette_subprocess::cleanup::Guard::for_pid(child.id());
 
     let stdout = take_child_stdout(&mut child)?;
     let stderr = take_child_stderr(&mut child)?;
@@ -165,7 +169,6 @@ pub fn start_server(req: &RunRequest, sidecar: Option<PathBuf>) -> anyhow::Resul
     };
 
     log::info!("pipette-coreai-sidecar is ready at http://127.0.0.1:{ready_port}");
-    let cleanup_guard = pipette_subprocess::cleanup::Guard::for_pid(child.id());
     Ok(ServerHandle {
         child,
         exited: false,

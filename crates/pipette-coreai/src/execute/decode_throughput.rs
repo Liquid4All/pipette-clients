@@ -34,6 +34,7 @@ pub(super) fn run(
         .map_err(anyhow::Error::from)?;
     let prefill_tokens = benchmark.parameter_prefill_tokens;
     let decode_tokens = benchmark.parameter_decode_tokens;
+    require_decode_interval(decode_tokens)?;
 
     // Resolve (and, on first use, build) the sidecar BEFORE the readiness
     // gate: a first-use `swift build -c release` saturates every core for
@@ -44,6 +45,7 @@ pub(super) fn run(
     let server = server::start_server(req, Some(sidecar))?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
+    throughput_http::prepare(&server.base_url)?;
     let warmup: DecodeThroughputResponse = throughput_http::post_json(
         &server.base_url,
         ENDPOINT,
@@ -61,7 +63,7 @@ pub(super) fn run(
         ENDPOINT,
         readiness_gate,
         observer,
-        |_| Ok(()),
+        |_| throughput_http::prepare(&server.base_url),
         |_| {
             throughput_http::post_json::<_, DecodeThroughputResponse>(
                 &server.base_url,
@@ -93,4 +95,39 @@ pub(super) fn run(
             server.stderr(),
         )
     })
+}
+
+/// Decode tps is counted over N-1 inter-token intervals (first token starts
+/// the clock). A 1-token cell would report generation_tps=0 and fail mid-run
+/// with a vacuous metric error.
+fn require_decode_interval(decode_tokens: u32) -> anyhow::Result<()> {
+    if decode_tokens < 2 {
+        anyhow::bail!(
+            "decode_throughput requires decode_tokens >= 2 \
+             (generation_tps is counted over N-1 inter-token intervals; \
+             a 1-token decode has no interval)"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_single_token_decode() {
+        let result = require_decode_interval(1);
+        assert!(result.is_err(), "1-token decode must fail");
+        if let Err(err) = result {
+            let msg = format!("{err:#}");
+            assert!(msg.contains("decode_tokens >= 2"), "{msg}");
+            assert!(msg.contains("N-1"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn accepts_two_token_decode() {
+        assert!(require_decode_interval(2).is_ok());
+    }
 }

@@ -23,3 +23,11 @@ where
     http.json_request(Method::POST, &url, None, Some(body))
         .with_context(|| format!("POST {endpoint} to pipette-coreai-sidecar failed"))
 }
+
+/// Untimed KV reset + settle. Call from `measurement::run`'s prepare
+/// closure (and before warmup) so the sidecar's 50 ms sleep cannot land
+/// inside an end-to-end wall clock.
+pub(super) fn prepare(base_url: &str) -> anyhow::Result<()> {
+    let _: serde_json::Value = post_json(base_url, "/prepare", &serde_json::json!({}))?;
+    Ok(())
+}

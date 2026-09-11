@@ -45,6 +45,7 @@ pub(super) fn run(
     let server = server::start_server(req, Some(sidecar))?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
+    throughput_http::prepare(&server.base_url)?;
     validate_response(
         &run_latency_request(&server.base_url, prefill_tokens, decode_tokens)?,
         prefill_tokens,
@@ -56,7 +57,7 @@ pub(super) fn run(
         ENDPOINT,
         readiness_gate,
         observer,
-        |_| Ok(()),
+        |_| throughput_http::prepare(&server.base_url),
         |_| run_latency_request(&server.base_url, prefill_tokens, decode_tokens),
         |idx, rep| {
             validate_response(&rep.value, prefill_tokens, decode_tokens)

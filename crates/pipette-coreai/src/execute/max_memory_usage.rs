@@ -46,6 +46,7 @@ pub(super) fn run(req: &RunRequest) -> anyhow::Result<RunResponse> {
     let mut server = server::start_server(req, Some(sidecar))?;
     let phys_poller = host::spawn_phys_footprint_poller(server.pid() as i32);
 
+    throughput_http::prepare(&server.base_url)?;
     let response_result: anyhow::Result<MaxMemoryUsageResponse> = throughput_http::post_json(
         &server.base_url,
         ENDPOINT,

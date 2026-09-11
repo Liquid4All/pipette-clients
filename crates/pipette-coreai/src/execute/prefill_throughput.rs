@@ -42,6 +42,7 @@ pub(super) fn run(
     let server = server::start_server(req, Some(sidecar))?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p)");
+    throughput_http::prepare(&server.base_url)?;
     let warmup: PrefillThroughputResponse = throughput_http::post_json(
         &server.base_url,
         ENDPOINT,
@@ -55,7 +56,7 @@ pub(super) fn run(
         ENDPOINT,
         readiness_gate,
         observer,
-        |_| Ok(()),
+        |_| throughput_http::prepare(&server.base_url),
         |_| {
             throughput_http::post_json::<_, PrefillThroughputResponse>(
                 &server.base_url,

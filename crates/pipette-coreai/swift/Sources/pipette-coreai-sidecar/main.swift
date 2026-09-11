@@ -13,6 +13,7 @@
 //
 // Endpoints (JSON, POST unless noted):
 //   GET  /health                        -> {"ok": true}
+//   POST /prepare                       -> {"ok": true}  (50ms settle + KV reset; untimed)
 //   POST /prefill_throughput            -> {"prompt_tps": f, "prompt_tokens": N}
 //   POST /decode_throughput             -> {"generation_tps": f, "decode_tokens": N}
 //   POST /max_memory_usage              -> {"prompt_tokens": N, "completion_tokens": M}
@@ -419,12 +420,16 @@ final class SidecarServer: @unchecked Sendable {
 
     private func post(_ path: String, body: String) async -> String {
         do {
+            if path == "/prepare" {
+                // Untimed setup. The Rust harness calls this from
+                // measurement::run's prepare closure so the 50 ms settle and
+                // KV reset cannot land inside an end-to-end wall clock.
+                await engine.prepare()
+                return json(["ok": true])
+            }
             guard let obj = try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any] else {
                 return json(["error": "request body must be a JSON object"], status: 400)
             }
-            // Setup (settle + KV reset) happens here, outside any timed
-            // region — mirroring pipette-ops' prepare contract.
-            await engine.prepare()
             switch path {
             case "/prefill_throughput":
                 guard let n = obj["prompt_tokens"] as? Int, n > 0 else {
@@ -437,8 +442,8 @@ final class SidecarServer: @unchecked Sendable {
                 return json(["prompt_tps": r.promptTps, "prompt_tokens": r.promptTokens])
             case "/decode_throughput":
                 guard let p = obj["prompt_tokens"] as? Int, p > 0,
-                      let d = obj["decode_tokens"] as? Int, d > 0 else {
-                    return json(["error": "'prompt_tokens'/'decode_tokens' positive ints required"], status: 400)
+                      let d = obj["decode_tokens"] as? Int, d > 1 else {
+                    return json(["error": "'decode_tokens' must be >= 2 (generation_tps is N-1 inter-token intervals)"], status: 400)
                 }
                 let r = try await engine.generate(prompt: engine.randomPrompt(count: p), maxTokens: d)
                 return json(["generation_tps": r.genTps, "decode_tokens": r.completionTokens])

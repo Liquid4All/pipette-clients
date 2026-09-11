@@ -22,8 +22,9 @@ const SIDECAR_CACHE_ENV: &str = "PIPETTE_COREAI_CACHE";
 ///
 /// Honors `PIPETTE_COREAI_SIDECAR` (a prebuilt path — used by CI and local
 /// dev to skip the Swift build). Otherwise builds the crate's bundled
-/// `swift/` package into a **pin-keyed** cache directory and copies the
-/// product there. A pin bump therefore cannot keep executing a stale binary.
+/// `swift/` package into a **pin-and-source-keyed** cache directory and
+/// copies the product there. A pin bump or a sidecar source change therefore
+/// cannot keep executing a stale binary.
 pub fn require_coreai_sidecar() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os(SIDECAR_BIN_ENV) {
         let path = PathBuf::from(path);
@@ -55,24 +56,66 @@ pub fn clear_sidecar_cache() -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Cache key for the sidecar: a short digest over the **whole** bundled Swift
-/// stack, not only `coreai_models`. Bumping `swift-transformers` / `xgrammar` /
-/// `swift-jinja` while holding `coreai_models` at `0.2.2-zoo` changes the
-/// runtime identity (`Display`), so it must change the cache directory too —
-/// otherwise a stale binary is reused under a new identity.
+/// True when this host can obtain a sidecar without guessing: a prebuilt
+/// override, a previously published cache entry, or `swift` on `PATH` so a
+/// first-use build can succeed. Used to advertise `runtime:core_ai` — the OS
+/// floor alone is not enough (a macOS 27 host with no toolchain and no cache
+/// would be dispatched cells that can only fail).
+pub fn sidecar_obtainable() -> bool {
+    if let Some(path) = std::env::var_os(SIDECAR_BIN_ENV) {
+        return PathBuf::from(path).is_file();
+    }
+    if let Ok(root) = sidecar_cache_root() {
+        if root
+            .join(bundled_stack_key())
+            .join("pipette-coreai-sidecar")
+            .is_file()
+        {
+            return true;
+        }
+    }
+    swift_on_path()
+}
+
+fn swift_on_path() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join("swift").is_file())
+}
+
+/// Cache key for the sidecar: a short digest over the bundled Swift stack
+/// *and* the sidecar's own sources. Bumping `swift-transformers` while holding
+/// `coreai_models` changes `Display`, so it must change the directory — and a
+/// `main.swift` tps-math fix with the pin held must too, otherwise an upgraded
+/// pipette keeps executing the pre-fix binary under the same recorded identity.
+///
+/// Hashed with SHA-256 (not `DefaultHasher`) so the key is stable across
+/// Rust releases; a toolchain bump must not silently strand the cache.
 fn bundled_stack_key() -> String {
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
+
+    // Compile-time snapshot: a source edit rebuilds this crate and moves the key.
+    const SIDECAR_SRC: &str = concat!(
+        include_str!("../swift/Sources/pipette-coreai-sidecar/main.swift"),
+        include_str!("../swift/Package.swift"),
+        include_str!("../swift/Package.resolved"),
+    );
     let stack = AppleCoreAiMacosPipette::bundled().to_string();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    stack.hash(&mut hasher);
-    // Prefix with the human-readable coreai_models pin so the directory is
-    // still recognizable; suffix with the stack hash so any pin bump moves it.
+    let mut hasher = Sha256::new();
+    hasher.update(stack.as_bytes());
+    hasher.update(SIDECAR_SRC.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        hex.push_str(&format!("{byte:02x}"));
+    }
     let coreai_models = AppleCoreAiMacosPipette::bundled()
         .packages
         .coreai_models
         .repository_version
         .to_string();
-    format!("{coreai_models}-{:016x}", hasher.finish())
+    format!("{coreai_models}-{hex}")
 }
 
 fn sidecar_cache_root() -> anyhow::Result<PathBuf> {
@@ -162,14 +205,93 @@ fn build_sidecar(bin: &Path) -> anyhow::Result<PathBuf> {
     if !built.is_file() {
         anyhow::bail!("swift build produced no binary at {}", built.display());
     }
-    std::fs::copy(&built, bin).with_context(|| {
-        format!(
-            "failed to copy sidecar from {} to {}",
-            built.display(),
-            bin.display()
-        )
-    })?;
+    verify_resolved_matches_bundled(&src)?;
+    publish_sidecar_atomically(&built, bin)?;
     Ok(bin.to_path_buf())
+}
+
+/// Refuse to cache a binary whose `Package.resolved` is not the stack
+/// `bundled()` records. A drifted checkout behind `CARGO_MANIFEST_DIR` (or
+/// `PIPETTE_COREAI_SWIFT`) would otherwise build under the bundled identity.
+fn verify_resolved_matches_bundled(src: &Path) -> anyhow::Result<()> {
+    let path = src.join("Package.resolved");
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).context("Package.resolved is not JSON")?;
+    let pins = value["pins"]
+        .as_array()
+        .context("Package.resolved missing pins")?;
+    let bundled = AppleCoreAiMacosPipette::bundled().packages;
+    let expected = [
+        (
+            "coreai-models",
+            bundled.coreai_models.repository_version.as_ref(),
+            bundled.coreai_models.repository_url.to_string(),
+        ),
+        (
+            "swift-transformers",
+            bundled.swift_transformers.repository_version.as_ref(),
+            bundled.swift_transformers.repository_url.to_string(),
+        ),
+        (
+            "xgrammar",
+            bundled.xgrammar.repository_version.as_ref(),
+            bundled.xgrammar.repository_url.to_string(),
+        ),
+        (
+            "swift-jinja",
+            bundled.swift_jinja.repository_version.as_ref(),
+            bundled.swift_jinja.repository_url.to_string(),
+        ),
+    ];
+    for (identity, version, url) in expected {
+        let pin = pins
+            .iter()
+            .find(|p| p["identity"] == identity)
+            .with_context(|| format!("Package.resolved missing pin {identity}"))?;
+        let resolved = pin["state"]["version"]
+            .as_str()
+            .or_else(|| pin["state"]["revision"].as_str())
+            .with_context(|| {
+                format!("Package.resolved pin {identity} has no version or revision")
+            })?;
+        if resolved != version {
+            anyhow::bail!(
+                "built sidecar Package.resolved {identity} is {resolved}, \
+                 bundled pin is {version}"
+            );
+        }
+        let location = pin["location"].as_str().unwrap_or("");
+        let location_norm = location.trim_end_matches(".git");
+        if !location_norm.contains(url.as_str()) {
+            anyhow::bail!(
+                "built sidecar Package.resolved {identity} location {location} \
+                 does not match bundled {url}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Stage beside the live path and rename over it. A torn `fs::copy` onto the
+/// live name would leave a truncated binary that every later run execs.
+fn publish_sidecar_atomically(built: &Path, dest: &Path) -> anyhow::Result<()> {
+    let tmp = dest.with_file_name(format!("pipette-coreai-sidecar.{}.tmp", std::process::id()));
+    if let Err(err) = std::fs::copy(built, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(err).context(format!(
+            "failed to stage sidecar from {} to {}",
+            built.display(),
+            tmp.display()
+        )));
+    }
+    if let Err(err) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(err)
+            .context(format!("failed to publish sidecar into {}", dest.display())));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -206,6 +328,15 @@ mod tests {
             .to_string();
         assert!(key.starts_with(&coreai_only));
         assert_ne!(key, coreai_only, "key must include the stack hash");
+        let prefix = format!("{coreai_only}-");
+        assert!(key.starts_with(&prefix));
+        let suffix = &key[prefix.len()..];
+        assert_eq!(suffix.len(), 16, "sha256 prefix is 8 bytes / 16 hex chars");
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash suffix must be hex, got {suffix}"
+        );
+        assert_eq!(key, bundled_stack_key(), "key must be stable");
         assert!(dir.starts_with(&tmp));
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
@@ -224,5 +355,11 @@ mod tests {
         std::env::remove_var(SIDECAR_CACHE_ENV);
         assert!(!result?);
         Ok(())
+    }
+
+    #[test]
+    fn bundled_package_resolved_matches_identity() -> anyhow::Result<()> {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("swift");
+        verify_resolved_matches_bundled(&src)
     }
 }
