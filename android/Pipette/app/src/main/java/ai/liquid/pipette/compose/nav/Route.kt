@@ -25,4 +25,13 @@ sealed interface Route : NavKey {
 
   /** Pushed full-screen cover: Models → Add models. Visibility mirrors the Models VM's addModelsOpen. */
   @Serializable data object AddModels : Route
+
+  /** Pushed full-screen cover: Jobs → Create a job (the new-job wizard). Mirrors JobsUiState.Wizard. */
+  @Serializable data object CreateJob : Route
+
+  /** Pushed detail: Jobs → per-job detail (results + progress). Mirrors JobsUiState.Detail. */
+  @Serializable data object JobDetail : Route
+
+  /** Pushed full-screen cover: Jobs → cell detail (opened from the results grid). Mirrors JobsUiState.CellDetail. */
+  @Serializable data object CellDetail : Route
 }

@@ -6,7 +6,11 @@ package ai.liquid.pipette.compose
 import ai.liquid.pipette.AuthGate
 import ai.liquid.pipette.R
 import ai.liquid.pipette.Tab
+import ai.liquid.pipette.compose.jobs.CellDetailScreen
+import ai.liquid.pipette.compose.jobs.CreateJobScreen
+import ai.liquid.pipette.compose.jobs.JobDetailScreen
 import ai.liquid.pipette.compose.jobs.JobsScreen
+import ai.liquid.pipette.compose.jobs.JobsUiState
 import ai.liquid.pipette.compose.jobs.JobsViewModel
 import ai.liquid.pipette.compose.models.AddModelsScreen
 import ai.liquid.pipette.compose.models.ModelsScreen
@@ -42,7 +46,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -194,6 +200,10 @@ fun PipetteAppRoot() {
   }
 }
 
+// Adding more Nav3 entries pushed this scaffold past detekt's default 15-branch threshold. The branchiness is inherent
+// to a top-level tab container that hosts every route + the state → backstack mirror + the pill-bar visibility check;
+// splitting it further doesn't buy readability. Keep the suppression scoped to just this function.
+@Suppress("CyclomaticComplexMethod")
 @Composable
 private fun Chrome(
   shellState: ai.liquid.pipette.compose.shell.ShellUiState,
@@ -227,11 +237,30 @@ private fun Chrome(
     else if (!modelsState.addModelsOpen && hasAddModels) backStack.remove(Route.AddModels)
   }
 
+  // Mirror the Jobs VM's sealed state variant onto the backstack: JobList stays on Route.Jobs, Wizard pushes
+  // Route.CreateJob, Detail pushes Route.JobDetail, CellDetail stacks Route.CellDetail on top of Route.JobDetail
+  // (since a cell detail is always opened from a job detail). Popping any of those (predictive back, system
+  // back, in-body back button) reduces to the equivalent JobsIntent, which flips the state back so the mirror
+  // stays consistent. The VM remains the source of truth.
+  LaunchedEffect(jobsState) {
+    val wantWizard = jobsState is JobsUiState.Wizard
+    val wantDetail = jobsState is JobsUiState.Detail
+    val wantCell = jobsState is JobsUiState.CellDetail
+    val hasWizard = backStack.contains(Route.CreateJob)
+    val hasDetail = backStack.contains(Route.JobDetail)
+    val hasCell = backStack.contains(Route.CellDetail)
+    if (wantWizard && !hasWizard) backStack.add(Route.CreateJob) else if (!wantWizard && hasWizard) backStack.remove(Route.CreateJob)
+    // The cell detail is opened from the job detail, so the shell keeps Route.JobDetail underneath it while
+    // the cell is on top. Detail == true covers both the plain-Detail state and CellDetail.
+    val needsDetail = wantDetail || wantCell
+    if (needsDetail && !hasDetail) backStack.add(Route.JobDetail) else if (!needsDetail && hasDetail) backStack.remove(Route.JobDetail)
+    if (wantCell && !hasCell) backStack.add(Route.CellDetail) else if (!wantCell && hasCell) backStack.remove(Route.CellDetail)
+  }
+
   // Full-screen covers hide the pill bar (iOS fullScreenCover): the Jobs new-job wizard / cell detail
   // and the Add Models flow.
   val hidePillBar =
-    (shellState.selectedTab == Tab.JOBS &&
-      (jobsState is ai.liquid.pipette.compose.jobs.JobsUiState.Wizard || jobsState is ai.liquid.pipette.compose.jobs.JobsUiState.CellDetail)) ||
+    (shellState.selectedTab == Tab.JOBS && (jobsState is JobsUiState.Wizard || jobsState is JobsUiState.CellDetail)) ||
       (shellState.selectedTab == Tab.MODELS && modelsState.addModelsOpen)
 
   Box(modifier = Modifier.fillMaxSize()) {
@@ -249,6 +278,24 @@ private fun Chrome(
           entry<Route.Jobs> { JobsScreen(jobsState, jobsVm::onIntent) }
           entry<Route.Models> { ModelsScreen(modelsState, modelsVm::onIntent) }
           entry<Route.AddModels> { AddModelsScreen(modelsState, modelsVm::onIntent) }
+          // The wizard/detail/cell entries need a JobsUiState variant to render; during the pop animation the
+          // state has already flipped back, so latch the last non-null variant and keep rendering it while the
+          // Nav3 entry animates out. Once the state matches again the latch is refreshed to the live value.
+          entry<Route.CreateJob> {
+            var last by remember { mutableStateOf<JobsUiState.Wizard?>(null) }
+            (jobsState as? JobsUiState.Wizard)?.let { last = it }
+            last?.let { CreateJobScreen(it, jobsVm::onIntent) }
+          }
+          entry<Route.JobDetail> {
+            var last by remember { mutableStateOf<JobsUiState.Detail?>(null) }
+            (jobsState as? JobsUiState.Detail)?.let { last = it }
+            last?.let { JobDetailScreen(it, jobsVm::onIntent) }
+          }
+          entry<Route.CellDetail> {
+            var last by remember { mutableStateOf<JobsUiState.CellDetail?>(null) }
+            (jobsState as? JobsUiState.CellDetail)?.let { last = it }
+            last?.let { CellDetailScreen(it, jobsVm::onIntent) }
+          }
           entry<Route.Settings> { SettingsScreen(settingsState, settingsVm::onIntent) }
         },
     )
