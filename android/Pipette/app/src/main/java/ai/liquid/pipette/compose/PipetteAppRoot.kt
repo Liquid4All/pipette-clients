@@ -230,8 +230,13 @@ private fun Chrome(
   }
   // Mirror the Models VM's addModelsOpen flag onto the backstack: opening the flow pushes Route.AddModels,
   // closing it (via the back button, system back, or a successful download) pops the entry. The VM stays
-  // the source of truth so nothing else in the app has to know about the nav wiring.
-  LaunchedEffect(modelsState.addModelsOpen) {
+  // the source of truth so nothing else in the app has to know about the nav wiring. Keyed on the selected
+  // tab too so that returning to Models with the flow still open (the VM keeps its state across tab
+  // switches) re-pushes Route.AddModels after the tab-switch effect above clears the stack — otherwise the
+  // user comes back to a blank list. Guarded to no-op while another tab is active so we don't push a Models
+  // route onto Jobs/Settings.
+  LaunchedEffect(modelsState.addModelsOpen, shellState.selectedTab) {
+    if (shellState.selectedTab != Tab.MODELS) return@LaunchedEffect
     val hasAddModels = backStack.contains(Route.AddModels)
     if (modelsState.addModelsOpen && !hasAddModels) backStack.add(Route.AddModels)
     else if (!modelsState.addModelsOpen && hasAddModels) backStack.remove(Route.AddModels)
@@ -242,7 +247,14 @@ private fun Chrome(
   // (since a cell detail is always opened from a job detail). Popping any of those (predictive back, system
   // back, in-body back button) reduces to the equivalent JobsIntent, which flips the state back so the mirror
   // stays consistent. The VM remains the source of truth.
-  LaunchedEffect(jobsState) {
+  //
+  // Keyed on the selected tab too so that returning to Jobs after switching tabs mid-Detail (the tab-switch
+  // effect above clears the stack to just Route.Jobs) re-pushes the wizard / detail / cell entries; without
+  // this the list would render blank because JobsScreen renders nothing when the state is a non-JobList
+  // variant, and the next interaction that assumed a live JobDetail entry would crash. Guarded to no-op
+  // while another tab is active so we don't push Jobs routes on top of Models/Settings.
+  LaunchedEffect(jobsState, shellState.selectedTab) {
+    if (shellState.selectedTab != Tab.JOBS) return@LaunchedEffect
     val wantWizard = jobsState is JobsUiState.Wizard
     val wantDetail = jobsState is JobsUiState.Detail
     val wantCell = jobsState is JobsUiState.CellDetail
