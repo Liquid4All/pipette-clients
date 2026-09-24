@@ -19,6 +19,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
+import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.card.MaterialCardView
@@ -132,6 +133,89 @@ class UiKit(private val context: Context) {
       layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, dp(6), 0, 0) }
       buildContent()
     }
+
+  /**
+   * A Material top app bar (Android [MaterialToolbar]). Fills the toolbar with the surface color and stamps the title in the same serif family the
+   * screens use for large headers, so the toolbar reads as native Android chrome without breaking the serif-title language shared with iOS.
+   */
+  fun androidToolbar(titleValue: String, onNavigationClick: (() -> Unit)? = null): MaterialToolbar =
+    MaterialToolbar(context).apply {
+      title = titleValue
+      setTitleTextColor(colorOnSurface())
+      setBackgroundColor(colorSurface())
+      elevation = dp(2).toFloat()
+      setTitleTypeface(serifBold, Typeface.BOLD)
+      if (onNavigationClick != null) setNavigationOnClickListener { onNavigationClick() }
+      layoutParams = LinearLayout.LayoutParams(MATCH, dp(TOOLBAR_HEIGHT_DP)).apply { setMargins(0, 0, 0, dp(8)) }
+    }
+
+  private fun MaterialToolbar.setTitleTypeface(face: Typeface, style: Int) {
+    // MaterialToolbar exposes the title TextView only indirectly; walk children to skin it.
+    for (i in 0 until childCount) {
+      val child = getChildAt(i)
+      if (child is TextView) {
+        child.setTypeface(face, style)
+        child.textSize = TOOLBAR_TITLE_SP
+      }
+    }
+  }
+
+  /**
+   * An Android-style search bar: rounded pill filled surface with a leading magnifier, matching the Material search-bar look. Uses the same "submit
+   * on IME action" contract as [iconSearchField] so the imperative screen re-render doesn't wipe focus mid-type.
+   */
+  fun androidSearchBar(hintValue: String, value: String, onSubmit: (String) -> Unit): EditText =
+    EditText(context).apply {
+      hint = hintValue
+      setText(value)
+      inputType = InputType.TYPE_CLASS_TEXT
+      setSingleLine(true)
+      setTextColor(colorOnSurface())
+      setHintTextColor(colorMuted())
+      background =
+        GradientDrawable().apply {
+          cornerRadius = dp(999).toFloat()
+          setColor(color(R.color.pipette_surface_variant))
+          setStroke(dp(1), colorOutline())
+        }
+      setPadding(dp(16), dp(12), dp(16), dp(12))
+      val icon = ContextCompat.getDrawable(context, R.drawable.ic_search)?.mutate()
+      icon?.setTint(colorMuted())
+      icon?.setBounds(0, 0, dp(SEARCH_ICON_DP), dp(SEARCH_ICON_DP))
+      setCompoundDrawablesRelative(icon, null, null, null)
+      compoundDrawablePadding = dp(12)
+      imeOptions = EditorInfo.IME_ACTION_SEARCH
+      setOnEditorActionListener { view, actionId, _ ->
+        if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+          onSubmit(view.text.toString())
+          true
+        } else {
+          false
+        }
+      }
+      layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, dp(4), 0, dp(8)) }
+    }
+
+  /**
+   * An elevated Material card. Same rounded shape as [card] but with a real shadow and no hairline stroke — reads as an Android elevated surface
+   * instead of the outlined iOS-style list card.
+   */
+  fun elevatedCard(buildContent: LinearLayout.() -> Unit): MaterialCardView {
+    val column =
+      LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(14), dp(16), dp(16))
+        buildContent()
+      }
+    return MaterialCardView(context).apply {
+      radius = dp(18).toFloat()
+      cardElevation = dp(ELEVATED_CARD_ELEVATION_DP).toFloat()
+      strokeWidth = 0
+      setCardBackgroundColor(colorSurface())
+      layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, dp(8), 0, dp(8)) }
+      addView(column)
+    }
+  }
 
   // --- Buttons ----------------------------------------------------------------
 
@@ -463,5 +547,9 @@ class UiKit(private val context: Context) {
     private const val CHECKBOX_SIZE_DP = 24
     private const val CHECK_TEXT_SP = 13f
     private const val CAPSULE_RADIUS_DP = 100
+    private const val TOOLBAR_HEIGHT_DP = 56
+    private const val TOOLBAR_TITLE_SP = 20f
+    private const val SEARCH_ICON_DP = 20
+    private const val ELEVATED_CARD_ELEVATION_DP = 3
   }
 }

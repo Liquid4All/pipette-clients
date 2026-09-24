@@ -210,6 +210,12 @@ abstract class Screen(protected val ctx: ScreenContext) {
 
   protected fun card(build: LinearLayout.() -> Unit) = ctx.ui.card(build)
 
+  protected fun elevatedCard(build: LinearLayout.() -> Unit) = ctx.ui.elevatedCard(build)
+
+  protected fun androidToolbar(title: String, onNavigationClick: (() -> Unit)? = null) = ctx.ui.androidToolbar(title, onNavigationClick)
+
+  protected fun androidSearchBar(hint: String, value: String, onSubmit: (String) -> Unit) = ctx.ui.androidSearchBar(hint, value, onSubmit)
+
   protected fun tile(build: LinearLayout.() -> Unit) = ctx.ui.tile(build)
 
   protected fun row(build: LinearLayout.() -> Unit) = ctx.ui.row(build = build)
