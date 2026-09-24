@@ -118,7 +118,13 @@ BUILD_DIR="$REPO_ROOT/ios/.build-llama/cmake-$MODE"
 # mismatch breaks the committed-stamp freshness gate and makes the submitted
 # runtime_version non-deterministic. A fixed 9 stays short, reproduces
 # everywhere, and is unambiguous for llama.cpp.
-GGML_COMMIT="$(git -C "$VENDOR" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)"
+#
+# PrismML fork build: the full 40-char sha instead. The fork's `prism-b*` tags
+# are not upstream `bNNNN` tags, so this pin reports untagged and the commit
+# *is* the submitted repository_version. Plans pin it by full sha, and the
+# headless path compares a plan's runtime to this build byte for byte, so a
+# 9-char stamp would refuse every plan-dispatched cell.
+GGML_COMMIT="$(git -C "$VENDOR" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 # The upstream tag on the same pin, when there is one. A tag is remote metadata,
 # not a property of the commit, and the submodule is a shallow clone with no tag

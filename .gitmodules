@@ -1,6 +1,6 @@
 [submodule "vendor/llama.cpp"]
 	path = vendor/llama.cpp
-	url = https://github.com/ggml-org/llama.cpp.git
+	url = https://github.com/PrismML-Eng/llama.cpp.git
 	shallow = true
 [submodule "vendor/kleidiai"]
 	path = vendor/kleidiai

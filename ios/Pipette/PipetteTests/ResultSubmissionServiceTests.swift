@@ -450,11 +450,11 @@ struct CellSubmissionStatusTests {
         // model_descriptor is required — always present, never null.
         #expect(payload["model_descriptor"] is String)
         // runtime_descriptor: the plan-types `llamacpp_ios_pipette` descriptor — the
-        // upstream repo + the built commit + the iOS flavor. Load knobs live in
+        // vendored repo + the built commit + the iOS flavor. Load knobs live in
         // runtime_flags, not the descriptor.
         let runtimeObj = try refObject(payload["runtime_descriptor"])
         #expect(runtimeObj["type"] as? String == "llamacpp_ios_pipette")
-        #expect(runtimeObj["repository_url"] as? String == "github.com/ggml-org/llama.cpp")
+        #expect(runtimeObj["repository_url"] as? String == "github.com/PrismML-Eng/llama.cpp")
         #expect(runtimeObj["flavor"] as? String == SubmissionRef.iosFlavor)
         // The built commit, which is where the version is stated.
         #expect(runtimeObj["repository_version"] as? String == LlamaCppBuildInfo.submissionVersion)
