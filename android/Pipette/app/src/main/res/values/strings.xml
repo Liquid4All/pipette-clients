@@ -47,6 +47,7 @@
     <string name="job_list_no_match_subtitle">Try a different job name.</string>
 
     <!-- Job detail -->
+    <string name="job_detail_title">Job</string>
     <string name="job_detail_property_gpu">GPU</string>
     <string name="job_detail_gpu_on">On</string>
     <string name="job_detail_gpu_off">Off</string>

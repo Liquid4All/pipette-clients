@@ -36,16 +36,25 @@ class JobsScreen(ctx: ScreenContext) : Screen(ctx) {
 
   private fun renderJobList(body: LinearLayout) {
     val hasModels = storage.availableModels().any { !it.isMmproj }
-    body.addView(displayTitle("Your jobs"))
+    // Android chrome: a Material top app bar in place of the serif page title,
+    // an Android search bar above the list, and elevated cards for each section
+    // so this tab reads as native Android rather than the iOS-outlined variant.
+    body.addView(androidToolbar("Your jobs"))
+    body.addView(
+      androidSearchBar("Search jobs", jobSearchText) {
+        jobSearchText = it
+        render()
+      }
+    )
     if (!vm.container.benchmarkEngine.isAvailable) {
       body.addView(
-        card {
+        elevatedCard {
           addView(mutedLabel("Native benchmark engine missing: jobs can be planned, but cells will fail until libpipette_android.so is packaged."))
         }
       )
     }
     body.addView(
-      card {
+      elevatedCard {
         addView(sectionTitle("Benchmark jobs"))
         if (!hasModels) {
           addView(mutedLabel("Download or add a model before creating a job."))
@@ -71,9 +80,8 @@ class JobsScreen(ctx: ScreenContext) : Screen(ctx) {
     val manifests = storage.loadAllJobManifests()
     val filteredManifests = manifests.filter { jobMatchesSearch(it, jobSearchText) }
     body.addView(
-      card {
+      elevatedCard {
         addView(sectionTitle("Jobs"))
-        addView(searchBlock("Search jobs", jobSearchText) { jobSearchText = it })
         if (manifests.isEmpty()) {
           addView(mutedLabel("No jobs yet."))
         } else if (filteredManifests.isEmpty()) {
