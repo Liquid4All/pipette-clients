@@ -199,6 +199,7 @@ impl PlatformDetector {
             device_os_security_patch: None,
             device_chip_model: cpuinfo_chip_model()
                 .or_else(Self::device_tree_model)
+                .or_else(Self::midr_chip_model)
                 .or_else(Self::dmi_chip_model_fallback),
             device_ram_bytes: proc_memtotal_bytes(),
             device_gpu_model: gpu_model,
@@ -233,20 +234,32 @@ impl PlatformDetector {
             .filter(|s| !s.is_empty())
     }
 
+    /// The ARM cores named by the raw MIDR fields in `/proc/cpuinfo`.
+    ///
+    /// Reached when `/proc/cpuinfo` carries neither `Hardware` nor `model name`
+    /// and there is no `/proc/device-tree/model`. Observed on NVIDIA GB10 /
+    /// DGX Spark class boards, where `/proc/cpuinfo` exposes only `CPU
+    /// implementer` / `CPU part` and no device tree exists at all. Those fields
+    /// identify the silicon, so they come ahead of the DMI board name.
+    fn midr_chip_model() -> Option<String> {
+        let cores = parse_cpuinfo_arm_cores(&std::fs::read_to_string("/proc/cpuinfo").ok()?)?;
+        log::debug!("device_chip_model resolved from /proc/cpuinfo MIDR fields {cores:?}");
+        Some(cores)
+    }
+
     /// Last resort for the chip model: the DMI board name.
     ///
     /// Reached only when `/proc/cpuinfo` carries neither `Hardware` nor `model
-    /// name` and there is no `/proc/device-tree/model`, which is precisely the
-    /// state that otherwise hard-fails `probe()`. Observed on NVIDIA GB10 /
-    /// DGX Spark class boards, where `/proc/cpuinfo` exposes only raw MIDR
-    /// fields and no device tree exists at all.
+    /// name`, there is no `/proc/device-tree/model`, and the MIDR fields do not
+    /// decode (another implementer, or an ARM part newer than `arm_core_name`
+    /// lists). That is precisely the state that otherwise hard-fails `probe()`.
     ///
     /// This records a board identifier in a field that elsewhere holds silicon
     /// names (`Apple M3`, `ro.soc.model`). The degradation is deliberate and
-    /// already present one link up: `device_tree_model` is itself documented as
-    /// the board name on hosts with no DMI. A payload reading
-    /// `device_chip_model = EdgeXpert (MS-C931)` is this fallback firing, not a
-    /// detection bug.
+    /// already present up the chain: `device_tree_model` is itself documented
+    /// as the board name on hosts with no DMI. A board SKU such as
+    /// `EdgeXpert (MS-C931)` in `device_chip_model` is this fallback firing,
+    /// not a detection bug.
     ///
     /// Firmware placeholders are rejected rather than recorded. Being the
     /// terminal link, an unfiltered junk value would become a fleet's permanent
@@ -673,6 +686,90 @@ fn cpuinfo_chip_model() -> Option<String> {
         }
     }
     None
+}
+
+/// Name the cores in `/proc/cpuinfo` from each processor's `CPU implementer`
+/// and `CPU part` (MIDR) fields. Heterogeneous layouts join the distinct core
+/// names in order of first appearance, as `lscpu` lists them
+/// (`Cortex-X925 + Cortex-A725`). `None` unless every core decodes, since a
+/// partial list would misdescribe the chip.
+#[cfg(any(target_os = "linux", test))]
+fn parse_cpuinfo_arm_cores(cpuinfo: &str) -> Option<String> {
+    let hex = |v: &str| u32::from_str_radix(v.strip_prefix("0x")?, 16).ok();
+    let mut names: Vec<&str> = Vec::new();
+    for block in cpuinfo.split("\n\n") {
+        let field = |key: &str| {
+            block.lines().find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                (k.trim() == key).then(|| v.trim())
+            })
+        };
+        let (Some(implementer), Some(part)) = (field("CPU implementer"), field("CPU part")) else {
+            continue;
+        };
+        let name = arm_core_name(hex(implementer)?, hex(part)?)?;
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    (!names.is_empty()).then(|| names.join(" + "))
+}
+
+/// ARM Ltd (implementer `0x41`) ARMv8-A and later application cores by MIDR
+/// part number. Transcribed from util-linux `sys-utils/lscpu-arm.c`, so the
+/// names match what `lscpu` prints. Other implementers are not decoded.
+#[cfg(any(target_os = "linux", test))]
+fn arm_core_name(implementer: u32, part: u32) -> Option<&'static str> {
+    if implementer != 0x41 {
+        return None;
+    }
+    Some(match part {
+        0xd01 => "Cortex-A32",
+        0xd02 => "Cortex-A34",
+        0xd03 => "Cortex-A53",
+        0xd04 => "Cortex-A35",
+        0xd05 => "Cortex-A55",
+        0xd06 => "Cortex-A65",
+        0xd07 => "Cortex-A57",
+        0xd08 => "Cortex-A72",
+        0xd09 => "Cortex-A73",
+        0xd0a => "Cortex-A75",
+        0xd0b => "Cortex-A76",
+        0xd0c => "Neoverse-N1",
+        0xd0d => "Cortex-A77",
+        0xd0e => "Cortex-A76AE",
+        0xd40 => "Neoverse-V1",
+        0xd41 => "Cortex-A78",
+        0xd42 => "Cortex-A78AE",
+        0xd43 => "Cortex-A65AE",
+        0xd44 => "Cortex-X1",
+        0xd46 => "Cortex-A510",
+        0xd47 => "Cortex-A710",
+        0xd48 => "Cortex-X2",
+        0xd49 => "Neoverse-N2",
+        0xd4a => "Neoverse-E1",
+        0xd4b => "Cortex-A78C",
+        0xd4c => "Cortex-X1C",
+        0xd4d => "Cortex-A715",
+        0xd4e => "Cortex-X3",
+        0xd4f => "Neoverse-V2",
+        0xd80 => "Cortex-A520",
+        0xd81 => "Cortex-A720",
+        0xd82 => "Cortex-X4",
+        0xd83 => "Neoverse-V3AE",
+        0xd84 => "Neoverse-V3",
+        0xd85 => "Cortex-X925",
+        0xd87 => "Cortex-A725",
+        0xd88 => "Cortex-A520AE",
+        0xd89 => "Cortex-A720AE",
+        0xd8a => "C1-Nano",
+        0xd8b => "C1-Pro",
+        0xd8c => "C1-Ultra",
+        0xd8e => "Neoverse-N3",
+        0xd8f => "Cortex-A320",
+        0xd90 => "C1-Premium",
+        _ => return None,
+    })
 }
 
 /// Parse `MemTotal` from `/proc/meminfo` and return bytes.
@@ -1410,6 +1507,77 @@ mod tests {
     #[case("Jetson", false)]
     fn dmi_placeholder_is_rejected(#[case] board: &str, #[case] placeholder: bool) {
         assert_eq!(is_dmi_placeholder(board), placeholder);
+    }
+
+    /// `/proc/cpuinfo` from a Jetson AGX Orin Developer Kit (5.15 tegra
+    /// kernel), first two of twelve processors.
+    const ORIN_CPUINFO: &str = "\
+processor\t: 0
+model name\t: ARMv8 Processor rev 1 (v8l)
+BogoMIPS\t: 62.50
+Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp uscat ilrcpc flagm paca pacg
+CPU implementer\t: 0x41
+CPU architecture: 8
+CPU variant\t: 0x0
+CPU part\t: 0xd42
+CPU revision\t: 1
+
+processor\t: 1
+model name\t: ARMv8 Processor rev 1 (v8l)
+BogoMIPS\t: 62.50
+Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp uscat ilrcpc flagm paca pacg
+CPU implementer\t: 0x41
+CPU architecture: 8
+CPU variant\t: 0x0
+CPU part\t: 0xd42
+CPU revision\t: 1
+";
+
+    /// `/proc/cpuinfo` from a Raspberry Pi 5 (6.12 rpi kernel), first processor
+    /// plus the trailing board block that carries no MIDR fields. Serial zeroed.
+    const PI5_CPUINFO: &str = "\
+processor\t: 0
+BogoMIPS\t: 108.00
+Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp
+CPU implementer\t: 0x41
+CPU architecture: 8
+CPU variant\t: 0x4
+CPU part\t: 0xd0b
+CPU revision\t: 1
+
+Revision\t: e04171
+Serial\t\t: 0000000000000000
+Model\t\t: Raspberry Pi 5 Model B Rev 1.1
+";
+
+    /// The NVIDIA GB10 (MSI EdgeXpert) shape: no `model name`, big and little
+    /// cores. Abbreviated to the fields the parser reads.
+    const GB10_CPUINFO: &str = "\
+processor\t: 0
+CPU implementer\t: 0x41
+CPU part\t: 0xd85
+
+processor\t: 1
+CPU implementer\t: 0x41
+CPU part\t: 0xd87
+
+processor\t: 2
+CPU implementer\t: 0x41
+CPU part\t: 0xd85
+";
+
+    #[rstest]
+    #[case(ORIN_CPUINFO, Some("Cortex-A78AE"))]
+    #[case(PI5_CPUINFO, Some("Cortex-A76"))]
+    #[case(GB10_CPUINFO, Some("Cortex-X925 + Cortex-A725"))]
+    // One core with a part the table does not know: no partial answer.
+    #[case("CPU implementer\t: 0x41\nCPU part\t: 0xd0b\n\nCPU implementer\t: 0x41\nCPU part\t: 0xfff\n", None)]
+    // Another implementer (Qualcomm Oryon) is not decoded.
+    #[case("CPU implementer\t: 0x51\nCPU part\t: 0x001\n", None)]
+    #[case("processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: Intel(R) Core(TM) Ultra X7 358H\n", None)]
+    #[case("", None)]
+    fn cpuinfo_arm_cores_decode_midr(#[case] cpuinfo: &str, #[case] want: Option<&str>) {
+        assert_eq!(parse_cpuinfo_arm_cores(cpuinfo).as_deref(), want);
     }
 
     // -- Windows --
