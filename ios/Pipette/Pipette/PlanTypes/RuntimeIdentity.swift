@@ -174,7 +174,7 @@ nonisolated enum Runtime: Hashable, Sendable, Codable {
         case .llamacppIosPipette:
             .llamacppIosPipette(
                 source: SourceRepository(
-                    repositoryUrl: SourceRepository.defaultRepositoryUrl,
+                    repositoryUrl: RepositoryUrl(SubmissionRef.llamaCppRepositoryUrl),
                     repositoryVersion: NonEmptyString(validated: LlamaCppBuildInfo.submissionVersion)),
                 flavor: .iosArm64, privateThermal: Runtime.privateThermalBuild)
         case .mlxIosPipette:
@@ -206,7 +206,7 @@ nonisolated enum Runtime: Hashable, Sendable, Codable {
         case .ggufText, .ggufVision:
             .llamacppIosPipette(
                 source: SourceRepository(
-                    repositoryUrl: SourceRepository.defaultRepositoryUrl,
+                    repositoryUrl: RepositoryUrl(SubmissionRef.llamaCppRepositoryUrl),
                     repositoryVersion: NonEmptyString(validated: LlamaCppBuildInfo.submissionVersion)),
                 flavor: .iosArm64, privateThermal: Runtime.privateThermalBuild)
         case .mlx:

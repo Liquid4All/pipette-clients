@@ -112,13 +112,9 @@ BUILD_SRC="$REPO_ROOT/ios/.build-llama/src-$MODE"
 BUILD_DIR="$REPO_ROOT/ios/.build-llama/cmake-$MODE"
 
 # Commit for the in-app version readout (formerly the Rust `llamaCppCommit()`).
-# Pin the abbreviation length (`--short=9`, not bare `--short`): the auto length
-# is environment-dependent — it grows with the object db, so a bare short hash is
-# 9 chars on a dev machine but 7 on a fresh CI checkout for the same commit. That
-# mismatch breaks the committed-stamp freshness gate and makes the submitted
-# runtime_version non-deterministic. A fixed 9 stays short, reproduces
-# everywhere, and is unambiguous for llama.cpp.
-GGML_COMMIT="$(git -C "$VENDOR" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)"
+# Full sha: the PrismML fork has no `bNNNN` tag, so the commit is the submitted
+# repository_version, and the headless path must match a plan's full-sha pin.
+GGML_COMMIT="$(git -C "$VENDOR" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 # The upstream tag on the same pin, when there is one. A tag is remote metadata,
 # not a property of the commit, and the submodule is a shallow clone with no tag

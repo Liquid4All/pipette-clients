@@ -26,11 +26,9 @@ nonisolated enum SubmissionRef {
     /// (both `#[serde(rename_all = "kebab-case")]`).
     static let iosFlavor = "ios-arm64"
 
-    /// The canonical upstream llama.cpp repo, scheme-less per the plan-types
-    /// `RepositoryUrl` sanitizer — matches `pipette_plan_types::default_repository_url`.
-    /// Also read by `headlessrun runtimes`, which reports the same build coordinates a
-    /// descriptor carries, so the two cannot disagree about what compiled.
-    static let llamaCppRepositoryUrl = "github.com/ggml-org/llama.cpp"
+    /// The repo this binary's llama.cpp was built from: the PrismML fork, not
+    /// `pipette_plan_types::default_repository_url`, which lacks the pinned commit.
+    static let llamaCppRepositoryUrl = "github.com/PrismML-Eng/llama.cpp"
 
     /// `model_descriptor`: the model coordinate, encoded by `Model` itself.
     ///
