@@ -254,7 +254,7 @@ impl PlatformDetector {
     /// answer.
     fn dmi_chip_model_fallback() -> Option<String> {
         let board = Self::dmi_field("board_name")?;
-        if DMI_PLACEHOLDERS.contains(&board.to_ascii_lowercase().as_str()) {
+        if is_dmi_placeholder(&board) {
             log::debug!("device_chip_model: ignoring DMI placeholder board_name {board:?}");
             return None;
         }
@@ -632,19 +632,29 @@ fn cmd_output(cmd: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// Placeholder strings firmware ships when a DMI field was never populated.
-/// Compared lower-case, so only the canonical spellings are listed.
-#[cfg(target_os = "linux")]
-const DMI_PLACEHOLDERS: [&str; 8] = [
+/// Placeholder strings firmware ships in `board_name` when it was never
+/// populated. Compared lower-case, so only the canonical spellings are listed.
+#[cfg(any(target_os = "linux", test))]
+const DMI_PLACEHOLDERS: [&str; 12] = [
     "default string",
     "to be filled by o.e.m.",
     "to be filled by oem",
-    "system product name",
-    "system manufacturer",
+    "base board product name",
+    "type2 - board product name",
+    "not specified",
+    "not applicable",
+    "not available",
+    "n/a",
     "none",
     "unknown",
-    "not applicable",
+    "undefined",
 ];
+
+/// Whether a DMI string is a firmware placeholder rather than a real value.
+#[cfg(any(target_os = "linux", test))]
+fn is_dmi_placeholder(value: &str) -> bool {
+    DMI_PLACEHOLDERS.contains(&value.trim().to_ascii_lowercase().as_str())
+}
 
 /// Parse chip model from `/proc/cpuinfo` (`Hardware` or `model name` field).
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1387,6 +1397,19 @@ mod tests {
         assert!(d.device_os_name.is_some());
         assert!(d.device_ram_bytes.context("device_ram_bytes")? >= 1024 * 1024 * 1024);
         Ok(())
+    }
+
+    #[rstest]
+    #[case("Default string", true)]
+    #[case("To Be Filled By O.E.M.", true)]
+    #[case("Base Board Product Name", true)]
+    #[case("Type2 - Board Product Name", true)]
+    #[case("Not Specified", true)]
+    #[case("  N/A  ", true)] // trimmed before comparing
+    #[case("EdgeXpert (MS-C931)", false)]
+    #[case("Jetson", false)]
+    fn dmi_placeholder_is_rejected(#[case] board: &str, #[case] placeholder: bool) {
+        assert_eq!(is_dmi_placeholder(board), placeholder);
     }
 
     // -- Windows --
