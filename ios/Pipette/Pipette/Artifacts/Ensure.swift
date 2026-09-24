@@ -50,7 +50,9 @@ func ensureModel(
     familyId: String? = nil,
     quant: String? = nil,
     declaredSizeBytes: Int64? = nil,
-    timeout: Duration = .seconds(1800),
+    // Sized for a ~6 GB GGUF at ~0.4 MB/s. Failed and paused transfers return early, so
+    // only a live one waits this long.
+    timeout: Duration = .seconds(4 * 60 * 60),
     progress: ((FetchProgress) -> Void)? = nil
 ) async throws -> Model {
     try await storage.modelStore.ensure(declared) { declared in
@@ -84,7 +86,7 @@ func ensureModel(
 ///
 /// A user-paused transfer is reported immediately rather than waited out — nothing will
 /// advance it, so holding the caller until the window expires would just delay the same
-/// answer by half an hour.
+/// answer by hours.
 ///
 /// `progress` fires only when the whole percent changes, so a caller can log or render
 /// every call without deduplicating: the poll is per-second but bytes move continuously,
