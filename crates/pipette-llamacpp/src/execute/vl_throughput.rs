@@ -22,9 +22,9 @@ use crate::server;
 /// Default HTTP timeout when `benchmark_flags.http_timeout` is unset.
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 120;
 
-/// Marker token that llama.cpp multimodal expects in the prompt string to
-/// indicate where each image should be inserted.
-const MEDIA_MARKER: &str = "<__media__>";
+/// Marker used by older llama-server builds that do not advertise the
+/// per-process marker through `/props`.
+const LEGACY_MEDIA_MARKER: &str = "<__media__>";
 
 /// VL throughput cell: bound `llama-server` + GGUF vision, typed [`VlThroughput`] body.
 pub fn run(
@@ -77,6 +77,7 @@ pub fn run(
 
         let client = HttpClient::blocking_with_timeout("pipette", http_timeout)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let media_marker = discover_media_marker(&client, &server.base_url)?;
         let eog_token_ids = server::discover_eog_token_ids(&server);
         let text_prompt = build_text_prompt(&client, &server.base_url, params.text_tokens)?;
         let image_b64 = generate_image_b64(params.image_width, params.image_height)?;
@@ -86,6 +87,7 @@ pub fn run(
         let warmup_resp = send_vl_completion(
             &client,
             &server.base_url,
+            &media_marker,
             &text_prompt,
             &image_b64,
             params.decode_tokens,
@@ -103,6 +105,7 @@ pub fn run(
                 send_vl_completion(
                     &client,
                     &server.base_url,
+                    &media_marker,
                     &text_prompt,
                     &image_b64,
                     params.decode_tokens,
@@ -256,9 +259,42 @@ fn tokenize_text(client: &Client, base_url: &str, content: &str) -> anyhow::Resu
     Ok(response.tokens)
 }
 
+#[derive(Debug, Deserialize)]
+struct ServerProps {
+    #[serde(default)]
+    media_marker: Option<String>,
+}
+
+fn discover_media_marker(client: &Client, base_url: &str) -> anyhow::Result<String> {
+    let response = client
+        .get(format!("{base_url}/props"))
+        .send()
+        .context("failed to call /props")?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        log::warn!("llama-server does not expose /props; using the legacy media marker");
+        return Ok(LEGACY_MEDIA_MARKER.to_string());
+    }
+
+    let props: ServerProps = response
+        .error_for_status()
+        .context("/props failed")?
+        .json()
+        .context("failed to parse /props response")?;
+
+    match props.media_marker.filter(|marker| !marker.is_empty()) {
+        Some(marker) => Ok(marker),
+        None => {
+            log::warn!("llama-server /props omitted media_marker; using the legacy marker");
+            Ok(LEGACY_MEDIA_MARKER.to_string())
+        }
+    }
+}
+
 fn send_vl_completion(
     client: &Client,
     base_url: &str,
+    media_marker: &str,
     text_prompt: &str,
     image_b64: &str,
     decode_tokens: u32,
@@ -266,9 +302,10 @@ fn send_vl_completion(
 ) -> anyhow::Result<VlCompletionResponse> {
     let logit_bias: Vec<(u32, bool)> = eog_token_ids.iter().map(|&id| (id, false)).collect();
 
-    // The prompt must contain <__media__> markers matching the number of
-    // images in multimodal_data. We place the marker before the text.
-    let prompt_with_marker = format!("{MEDIA_MARKER}{text_prompt}");
+    // The prompt must contain markers matching the number of images in
+    // multimodal_data. Newer llama-server builds randomize this marker per
+    // process and advertise the effective value through `/props`.
+    let prompt_with_marker = format!("{media_marker}{text_prompt}");
 
     let resp = client
         .post(format!("{base_url}/completion"))
