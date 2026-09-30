@@ -66,6 +66,7 @@ pub fn require_bound_venv(bound: &Runtime, expected: &[RuntimeType]) -> anyhow::
         Runtime::LlamacppCliStockTools(_)
         | Runtime::LlamacppApkPipette(_)
         | Runtime::LlamacppIosPipette(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
         | Runtime::MlxIosPipette(_)
         | Runtime::DockerVllm(_)
         | Runtime::DockerSglang(_)

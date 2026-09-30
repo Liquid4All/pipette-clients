@@ -63,6 +63,13 @@ pub fn ensure_runtime(
     store: &RuntimeArtifactStore,
     declared: &Runtime,
 ) -> Result<Runtime, RuntimeStoreError> {
+    // Core AI is a desktop runtime whose engine ships with macOS: there is
+    // nothing to install into the runtime store. `RuntimeStorageKey::of`
+    // rejects it (same as AFM / on-device), so we must not call `store.find`
+    // / `store.ensure`. The bound form is the declared pin itself.
+    if let Runtime::AppleCoreAiMacosPipette(_) = declared {
+        return Ok(declared.clone());
+    }
     let policy = collecting_policy(ctx, store.find(declared)?.is_some());
     if let Some(policy) = policy {
         quota::refuse_if_oversize(
@@ -175,6 +182,9 @@ pub fn runtime_download_size(
     store: &RuntimeArtifactStore,
     declared: &Runtime,
 ) -> Result<Option<u64>, RuntimeStoreError> {
+    if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
+        return Ok(Some(0));
+    }
     if store.find(declared)?.is_some() {
         return Ok(Some(0));
     }
@@ -453,6 +463,21 @@ mod tests {
             .set(seeded.clone())
             .map_err(|_| anyhow::anyhow!("set python_executable"))?;
         assert_eq!(resolve_python_executable(&ctx)?, seeded.as_path());
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_runtime_returns_core_ai_without_a_store_entry() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = RuntimeArtifactStore::new(tmp.path().join("runtimes"));
+        let declared = Runtime::AppleCoreAiMacosPipette(Default::default());
+        let bound = ensure_runtime(&test_ctx()?, &store, &declared)?;
+        assert_eq!(bound, declared);
+        assert!(
+            store.list()?.is_empty(),
+            "Core AI must not publish a store entry"
+        );
+        assert_eq!(runtime_download_size(&store, &declared)?, Some(0));
         Ok(())
     }
 }

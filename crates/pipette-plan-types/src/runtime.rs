@@ -29,6 +29,13 @@ pub enum Runtime {
     /// llama.cpp running in-process inside the iOS pipette app.
     LlamacppIosPipette(LlamacppIosPipette),
     MlxMacosPipette(MlxMacosPipette),
+    /// Apple Core AI on the desktop macOS CLI, driven by the bundled Swift
+    /// sidecar. Unlike MLX, the engine ships with macOS 27 — the runtime is a
+    /// marker; only the model bundle is authored.
+    /// Wire tag / CLI ref stays `core_ai_macos_pipette` (explicit serde rename:
+    /// the authored URI/TOML shape is public API; only the Rust name changes).
+    #[serde(rename = "core_ai_macos_pipette")]
+    AppleCoreAiMacosPipette(AppleCoreAiMacosPipette),
     /// MLX running in-process inside the iOS pipette app (mlx-swift) — the
     /// on-device counterpart to the desktop `MlxMacosPipette` (Python/uv) runtime.
     MlxIosPipette(MlxIosPipette),
@@ -405,6 +412,97 @@ pub struct MlxMacosPipette {
     pub source: UvRuntimeSource,
 }
 
+/// Apple Core AI desktop CLI runtime.
+///
+/// The inference *engine* ships with macOS 27, but the thing pipette actually
+/// runs is `pipette-coreai-sidecar`, compiled against the pinned Swift
+/// packages in [`CoreAiSwiftStack`]. Change that pin and the decode number
+/// changes under an otherwise identical cell — so the stack is part of the
+/// runtime identity, the same reason [`MlxIosPipette`] carries its
+/// `Package.resolved` pins. The `.aimodel` bundle (the model) *and* this
+/// stack together carry a published number; unlike [`AppleFoundation`], the
+/// weights do not ship with the OS.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct AppleCoreAiMacosPipette {
+    pub packages: CoreAiSwiftStack,
+}
+
+/// The pinned Swift-package stack the desktop Core AI sidecar is compiled
+/// against (from the crate's `swift/Package.resolved`). `coreai_models` is the
+/// engine; `swift_transformers` / `xgrammar` / `swift_jinja` affect
+/// tokenization and decode, so they travel with the identity the same way
+/// [`MlxSwiftStack`] records three repos. `coreai_models` uses the official
+/// Apple commit containing PR #227's descriptor-driven S=1 support.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct CoreAiSwiftStack {
+    pub coreai_models: SourceRepository,
+    pub swift_transformers: SourceRepository,
+    pub xgrammar: SourceRepository,
+    pub swift_jinja: SourceRepository,
+}
+
+impl AppleCoreAiMacosPipette {
+    /// The bundled pin, built from a compile-time constant that always
+    /// satisfies the grammar.
+    ///
+    /// The workspace bans panicking constructs (`expect_used`, `unwrap_used`,
+    /// `panic`, `unreachable` are all denied), and rightly so for reachable
+    /// failures — but this pin is a string literal known at compile time. The
+    /// correct fix per the lint's own rationale would be a type that cannot
+    /// represent an empty version; until one exists upstream in
+    /// `primitives.rs`, this scoped allow documents exactly why the assertion
+    /// cannot fire here.
+    #[allow(clippy::expect_used)]
+    fn const_pin(literal: &'static str) -> NonEmptyString {
+        NonEmptyString::try_new(literal.to_owned()).expect("static pin literal")
+    }
+}
+
+impl AppleCoreAiMacosPipette {
+    /// The pin this client was built to compile. An empty
+    /// `core-ai-macos-pipette://` URI resolves to this.
+    pub fn bundled() -> Self {
+        Self {
+            packages: CoreAiSwiftStack {
+                coreai_models: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/apple/coreai-models"),
+                    repository_version: Self::const_pin("27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"),
+                },
+                swift_transformers: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/huggingface/swift-transformers"),
+                    repository_version: Self::const_pin("1.2.0"),
+                },
+                xgrammar: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/mlc-ai/xgrammar"),
+                    repository_version: Self::const_pin("0.2.2"),
+                },
+                swift_jinja: SourceRepository {
+                    repository_url: RepositoryUrl::new("github.com/huggingface/swift-jinja"),
+                    repository_version: Self::const_pin("2.3.2"),
+                },
+            },
+        }
+    }
+}
+
+impl Default for AppleCoreAiMacosPipette {
+    fn default() -> Self {
+        Self::bundled()
+    }
+}
+
+impl AppleCoreAiMacosPipette {
+    /// True when every pin in this runtime's Swift stack equals the pin this
+    /// client was compiled against. The sidecar is built from the bundled
+    /// `Package.resolved` only, so a runtime whose `packages` differ would
+    /// record a pin the executed binary does not have. Callers reject a
+    /// non-bundled stack rather than run the wrong identity (URI parse already
+    /// does; JSON/TOML `--runtime` and execute must too).
+    pub fn is_bundled(&self) -> bool {
+        self.packages == Self::bundled().packages
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct DockerVllm {
     pub image_name: NonEmptyString,
@@ -607,6 +705,7 @@ impl Runtime {
             Runtime::LlamacppApkPipette(_) => "llamacpp_apk_pipette",
             Runtime::LlamacppIosPipette(_) => "llamacpp_ios_pipette",
             Runtime::MlxMacosPipette(_) => "mlx_macos_pipette",
+            Runtime::AppleCoreAiMacosPipette(_) => "core_ai_macos_pipette",
             Runtime::MlxIosPipette(_) => "mlx_ios_pipette",
             Runtime::DockerVllm(_) => "docker_vllm",
             Runtime::DockerSglang(_) => "docker_sglang",
@@ -707,6 +806,12 @@ impl std::fmt::Display for MlxIosPipette {
     }
 }
 
+impl std::fmt::Display for AppleCoreAiMacosPipette {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.packages.fmt(f)
+    }
+}
+
 /// The pinned Swift packages joined space-separated, each as its
 /// `SourceRepository` coordinate (`repo@version`), in field order.
 impl std::fmt::Display for MlxSwiftStack {
@@ -715,6 +820,16 @@ impl std::fmt::Display for MlxSwiftStack {
             f,
             "mlx-swift={} mlx-swift-lm={} swift-transformers={}",
             self.mlx_swift, self.mlx_swift_lm, self.swift_transformers
+        )
+    }
+}
+
+impl std::fmt::Display for CoreAiSwiftStack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "coreai-models={} swift-transformers={} xgrammar={} swift-jinja={}",
+            self.coreai_models, self.swift_transformers, self.xgrammar, self.swift_jinja
         )
     }
 }
@@ -768,6 +883,7 @@ impl std::fmt::Display for Runtime {
             Runtime::LlamacppApkPipette(rt) => rt.fmt(f),
             Runtime::LlamacppIosPipette(rt) => rt.fmt(f),
             Runtime::MlxMacosPipette(rt) => rt.fmt(f),
+            Runtime::AppleCoreAiMacosPipette(rt) => rt.fmt(f),
             Runtime::MlxIosPipette(rt) => rt.fmt(f),
             Runtime::DockerVllm(rt) => rt.fmt(f),
             Runtime::DockerSglang(rt) => rt.fmt(f),
@@ -1054,6 +1170,7 @@ pub enum RuntimeType {
     LlamacppApkPipette,
     LlamacppIosPipette,
     MlxMacosPipette,
+    AppleCoreAiMacosPipette,
     MlxIosPipette,
     DockerVllm,
     DockerSglang,
@@ -1072,6 +1189,7 @@ impl RuntimeType {
             Runtime::LlamacppApkPipette(_) => Self::LlamacppApkPipette,
             Runtime::LlamacppIosPipette(_) => Self::LlamacppIosPipette,
             Runtime::MlxMacosPipette(_) => Self::MlxMacosPipette,
+            Runtime::AppleCoreAiMacosPipette(_) => Self::AppleCoreAiMacosPipette,
             Runtime::MlxIosPipette(_) => Self::MlxIosPipette,
             Runtime::DockerVllm(_) => Self::DockerVllm,
             Runtime::DockerSglang(_) => Self::DockerSglang,
@@ -1928,6 +2046,85 @@ swift_transformers = { repository_url = "github.com/huggingface/swift-transforme
         };
         assert_eq!(rt.flavor, MlxIosPipetteFlavor::IosArm64);
         assert_eq!(rt.packages.mlx_swift.repository_version.as_ref(), "0.25.6");
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_macos_pipette_runtime_parses() -> anyhow::Result<()> {
+        let runtime: Runtime = toml::from_str(
+            r#"type = "core_ai_macos_pipette"
+
+[packages]
+coreai_models = { repository_url = "github.com/apple/coreai-models", repository_version = "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60" }
+swift_transformers = { repository_url = "github.com/huggingface/swift-transformers", repository_version = "1.2.0" }
+xgrammar = { repository_url = "github.com/mlc-ai/xgrammar", repository_version = "0.2.2" }
+swift_jinja = { repository_url = "github.com/huggingface/swift-jinja", repository_version = "2.3.2" }"#,
+        )
+        .context("coreai macos pipette runtime should parse")?;
+        let Runtime::AppleCoreAiMacosPipette(rt) = &runtime else {
+            anyhow::bail!("expected AppleCoreAiMacosPipette, got {runtime:?}");
+        };
+        assert_eq!(
+            rt.packages.coreai_models.repository_version.as_ref(),
+            "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
+        );
+        assert_eq!(
+            rt.packages.swift_transformers.repository_version.as_ref(),
+            "1.2.0"
+        );
+        assert!(rt.to_string().contains("swift-transformers="));
+        assert!(rt.is_bundled());
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_is_bundled_rejects_a_mutated_pin() -> anyhow::Result<()> {
+        let mut rt = AppleCoreAiMacosPipette::bundled();
+        assert!(rt.is_bundled());
+        // Any single pin differing from the built stack makes it non-bundled.
+        rt.packages.coreai_models.repository_version = NonEmptyString::try_new("9.9.9".to_owned())?;
+        assert!(!rt.is_bundled());
+        let mut rt2 = AppleCoreAiMacosPipette::bundled();
+        rt2.packages.xgrammar.repository_version = NonEmptyString::try_new("0.0.0".to_owned())?;
+        assert!(!rt2.is_bundled());
+        Ok(())
+    }
+
+    /// Runtime identity must match the committed Swift lockfile, including
+    /// revision-only pins and repository changes from a fork to upstream.
+    #[test]
+    fn bundled_pins_match_package_resolved() -> anyhow::Result<()> {
+        let resolved: serde_json::Value =
+            serde_json::from_str(include_str!("../../pipette-coreai/swift/Package.resolved"))?;
+        let pins = resolved["pins"].as_array().context("Swift lockfile pins")?;
+        let stack = AppleCoreAiMacosPipette::bundled().packages;
+        for (identity, repository) in [
+            ("coreai-models", stack.coreai_models),
+            ("swift-transformers", stack.swift_transformers),
+            ("xgrammar", stack.xgrammar),
+            ("swift-jinja", stack.swift_jinja),
+        ] {
+            let pin = pins
+                .iter()
+                .find(|pin| pin["identity"] == identity)
+                .with_context(|| format!("missing Swift pin {identity}"))?;
+            let state = &pin["state"];
+            let version = state["version"]
+                .as_str()
+                .or_else(|| state["revision"].as_str())
+                .context("Swift pin version or revision")?;
+            assert_eq!(
+                repository.repository_version.as_ref(),
+                version,
+                "{identity}"
+            );
+            let location = pin["location"].as_str().context("Swift pin location")?;
+            assert_eq!(
+                repository.repository_url,
+                RepositoryUrl::new(location),
+                "{identity}"
+            );
+        }
         Ok(())
     }
 

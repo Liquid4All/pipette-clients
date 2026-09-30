@@ -37,8 +37,8 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use pipette_plan_types::{
-    GgufText, GgufTextSource, GgufVision, GgufVisionSource, HfRepo, HfRevision, Mlx, Model,
-    ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
+    AppleCoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, HfRepo, HfRevision, Mlx,
+    Model, ModelSource, Openvino, RepoSubpath, ResourceUrl, Sha256, Torch,
 };
 
 // Key names, shared by the parser and [`model_to_uri`] so the two directions
@@ -67,6 +67,9 @@ enum Scheme {
     Mlx,
     Torch,
     Openvino,
+    /// Wire scheme stays `core-ai`; only the Rust name tracks the plan type.
+    #[strum(serialize = "core-ai")]
+    AppleCoreAi,
 }
 
 impl Scheme {
@@ -97,7 +100,7 @@ pub enum ModelUriError {
 
     #[error(
         "unknown model URI scheme `{0}` (expected `gguf-text`, `gguf-vision`, `mlx`, \
-         `torch`, or `openvino`)"
+         `core-ai`, `torch`, or `openvino`)"
     )]
     UnknownScheme(String),
 
@@ -358,6 +361,9 @@ pub fn parse_model_uri(input: &str) -> Result<Model, ModelUriError> {
         Scheme::Openvino => Ok(Model::Openvino(Openvino {
             source: parse_dir_source(pairs)?,
         })),
+        Scheme::AppleCoreAi => Ok(Model::AppleCoreAi(AppleCoreAi {
+            source: parse_dir_source(pairs)?,
+        })),
     }
 }
 
@@ -439,6 +445,7 @@ pub fn model_to_uri(model: &Model) -> Result<String, ModelUriError> {
         Model::Mlx(m) => dir_to_uri(Scheme::Mlx, &m.source),
         Model::Torch(m) => dir_to_uri(Scheme::Torch, &m.source),
         Model::Openvino(m) => dir_to_uri(Scheme::Openvino, &m.source),
+        Model::AppleCoreAi(m) => dir_to_uri(Scheme::AppleCoreAi, &m.source),
         Model::AppleFoundationText => {
             Err(ModelUriError::NotImportable("apple-foundation".to_owned()))
         }
@@ -737,6 +744,12 @@ mod tests {
     )]
     #[case("torch://repo=org/repo", ModelType::Torch, "org/repo")]
     #[case("torch://repo=org/repo&prefix=sub", ModelType::Torch, "org/repo:sub")]
+    #[case("core-ai://repo=org/repo", ModelType::AppleCoreAi, "org/repo")]
+    #[case(
+        "core-ai://repo=org/repo&prefix=gpu-pipelined/int4",
+        ModelType::AppleCoreAi,
+        "org/repo:gpu-pipelined/int4"
+    )]
     #[case("openvino://repo=org/repo", ModelType::Openvino, "org/repo")]
     #[case(
         "openvino://repo=LiquidAI/LFM2.5-350M-ov&prefix=int4-sym-cw",

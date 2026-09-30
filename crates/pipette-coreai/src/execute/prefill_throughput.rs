@@ -8,8 +8,6 @@ use pipette_plan_types::run::RunRequest;
 use pipette_plan_types::run::RunResponse;
 
 use super::{server, throughput_http};
-use crate::models::require_mlx_model_dir;
-use crate::runtimes::require_mlx_python;
 
 const ENDPOINT: &str = "/prefill_throughput";
 
@@ -34,13 +32,17 @@ pub(super) fn run(
         .as_prefill_throughput()
         .map_err(anyhow::Error::from)?;
     let prefill_tokens = benchmark.parameter_prefill_tokens;
-    let venv_python = require_mlx_python(req)?;
-    let model_dir = require_mlx_model_dir(req)?;
 
+    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
+    // gate: a first-use `swift build -c release` saturates every core for
+    // minutes and would sit between the gate certifying the device as thermally
+    // idle and the measurement that certification is for.
+    let sidecar = crate::sidecar::require_coreai_sidecar()?;
     readiness_gate()?;
-    let server = server::start_server(&venv_python, &model_dir, None)?;
+    let server = server::start_server(req, Some(sidecar))?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p)");
+    throughput_http::prepare(&server.base_url)?;
     let warmup: PrefillThroughputResponse = throughput_http::post_json(
         &server.base_url,
         ENDPOINT,
@@ -54,8 +56,7 @@ pub(super) fn run(
         ENDPOINT,
         readiness_gate,
         observer,
-        // No untimed per-rep setup: the server holds no state a rep resets.
-        |_| Ok(()),
+        |_| throughput_http::prepare(&server.base_url),
         |_| {
             throughput_http::post_json::<_, PrefillThroughputResponse>(
                 &server.base_url,
@@ -68,9 +69,9 @@ pub(super) fn run(
         |idx, rep| {
             let response = &rep.value;
             measurement::expect_tokens("prompt_tokens", response.prompt_tokens, prefill_tokens)?;
-            throughput_http::validate_tps("prompt_tps", response.prompt_tps)
+            measurement::validate_tps("prompt_tps", response.prompt_tps)
                 .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            throughput_http::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
+            measurement::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
         },
     )?;
     let stats = measured.stats();

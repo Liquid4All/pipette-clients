@@ -13,8 +13,8 @@
 use std::path::Path;
 
 use pipette_plan_types::{
-    AbsolutePath, GgufText, GgufTextSource, GgufVision, GgufVisionSource, Mlx, Model, ModelSource,
-    Openvino, RelativePath, RepoSubpath, ResourceUrl, Torch,
+    AbsolutePath, AppleCoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, Mlx, Model,
+    ModelSource, Openvino, RelativePath, RepoSubpath, ResourceUrl, Torch,
 };
 
 /// Why [`to_stored`] couldn't map a model to on-disk paths.
@@ -100,6 +100,9 @@ pub fn to_stored(model: &Model, base: &Path) -> Result<Model, ModelStoredError> 
         Model::Openvino(m) => Model::Openvino(Openvino {
             source: dir_to_stored(&m.source, base, abs)?,
         }),
+        Model::AppleCoreAi(m) => Model::AppleCoreAi(AppleCoreAi {
+            source: dir_to_stored(&m.source, base, abs)?,
+        }),
         Model::AppleFoundationText => Model::AppleFoundationText,
     })
 }
@@ -166,6 +169,14 @@ pub fn under_root(stored: &Model, root: &Path) -> Result<Model, ModelStoredError
         Model::Openvino(Openvino {
             source: ModelSource::RelativeDir { dir },
         }) => Model::Openvino(Openvino {
+            source: match join(dir.as_ref())? {
+                JoinedPath::Rel(dir) => ModelSource::RelativeDir { dir },
+                JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },
+            },
+        }),
+        Model::AppleCoreAi(AppleCoreAi {
+            source: ModelSource::RelativeDir { dir },
+        }) => Model::AppleCoreAi(AppleCoreAi {
             source: match join(dir.as_ref())? {
                 JoinedPath::Rel(dir) => ModelSource::RelativeDir { dir },
                 JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },

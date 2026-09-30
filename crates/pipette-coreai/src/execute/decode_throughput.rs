@@ -8,8 +8,6 @@ use pipette_plan_types::run::RunRequest;
 use pipette_plan_types::run::RunResponse;
 
 use super::{server, throughput_http};
-use crate::models::require_mlx_model_dir;
-use crate::runtimes::require_mlx_python;
 
 const ENDPOINT: &str = "/decode_throughput";
 
@@ -36,13 +34,18 @@ pub(super) fn run(
         .map_err(anyhow::Error::from)?;
     let prefill_tokens = benchmark.parameter_prefill_tokens;
     let decode_tokens = benchmark.parameter_decode_tokens;
-    let venv_python = require_mlx_python(req)?;
-    let model_dir = require_mlx_model_dir(req)?;
+    require_decode_interval(decode_tokens)?;
 
+    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
+    // gate: a first-use `swift build -c release` saturates every core for
+    // minutes and would sit between the gate certifying the device as thermally
+    // idle and the measurement that certification is for.
+    let sidecar = crate::sidecar::require_coreai_sidecar()?;
     readiness_gate()?;
-    let server = server::start_server(&venv_python, &model_dir, None)?;
+    let server = server::start_server(req, Some(sidecar))?;
 
     log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
+    throughput_http::prepare(&server.base_url)?;
     let warmup: DecodeThroughputResponse = throughput_http::post_json(
         &server.base_url,
         ENDPOINT,
@@ -51,19 +54,16 @@ pub(super) fn run(
             decode_tokens,
         },
     )?;
-    if warmup.decode_tokens != decode_tokens {
-        anyhow::bail!(
-            "{ENDPOINT} warmup returned decode_tokens {}, expected {decode_tokens}",
-            warmup.decode_tokens,
-        );
-    }
-
+    measurement::expect_tokens(
+        &format!("{ENDPOINT} warmup decode_tokens"),
+        warmup.decode_tokens,
+        decode_tokens,
+    )?;
     let measured = measurement::run(
         ENDPOINT,
         readiness_gate,
         observer,
-        // No untimed per-rep setup: the server holds no state a rep resets.
-        |_| Ok(()),
+        |_| throughput_http::prepare(&server.base_url),
         |_| {
             throughput_http::post_json::<_, DecodeThroughputResponse>(
                 &server.base_url,
@@ -77,9 +77,9 @@ pub(super) fn run(
         |idx, rep| {
             let response = &rep.value;
             measurement::expect_tokens("decode_tokens", response.decode_tokens, decode_tokens)?;
-            throughput_http::validate_tps("generation_tps", response.generation_tps)
+            measurement::validate_tps("generation_tps", response.generation_tps)
                 .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            throughput_http::time_ms_from_tps(ENDPOINT, decode_tokens, response.generation_tps)
+            measurement::time_ms_from_tps(ENDPOINT, decode_tokens, response.generation_tps)
         },
     )?;
     let stats = measured.stats();
@@ -95,4 +95,39 @@ pub(super) fn run(
             server.stderr(),
         )
     })
+}
+
+/// Decode tps is counted over N-1 inter-token intervals (first token starts
+/// the clock). A 1-token cell would report generation_tps=0 and fail mid-run
+/// with a vacuous metric error.
+fn require_decode_interval(decode_tokens: u32) -> anyhow::Result<()> {
+    if decode_tokens < 2 {
+        anyhow::bail!(
+            "decode_throughput requires decode_tokens >= 2 \
+             (generation_tps is counted over N-1 inter-token intervals; \
+             a 1-token decode has no interval)"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_single_token_decode() {
+        let result = require_decode_interval(1);
+        assert!(result.is_err(), "1-token decode must fail");
+        if let Err(err) = result {
+            let msg = format!("{err:#}");
+            assert!(msg.contains("decode_tokens >= 2"), "{msg}");
+            assert!(msg.contains("N-1"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn accepts_two_token_decode() {
+        assert!(require_decode_interval(2).is_ok());
+    }
 }

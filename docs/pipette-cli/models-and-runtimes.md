@@ -3,7 +3,7 @@
 **Scope:** the notation `pipette` takes for `--model`, `--runtime`,
 `--runtime-flags`, and `--model-flags`. Operator workflow is
 [usage.md](usage.md); backend specifics are [llama.cpp](llamacpp.md) ·
-[MLX](mlx.md) · [torch-oai](torch-oai.md) · [OpenVINO](openvino.md).
+[MLX](mlx.md) · [Core AI](coreai.md) · [torch-oai](torch-oai.md) · [OpenVINO](openvino.md).
 
 Every `pipette` run is one **cell**: a benchmark, a runtime, and a model. This
 page is how you spell the runtime and the model, and how you tune them.
@@ -47,6 +47,7 @@ Rules that bite:
 | `gguf-text` | one GGUF file | llama.cpp |
 | `gguf-vision` | GGUF weights + mmproj projector | llama.cpp |
 | `mlx` | HF repo snapshot (quantized safetensors) | MLX |
+| `core-ai` | HF repo snapshot (`.aimodel` bundle) | Core AI |
 | `torch` | HF repo snapshot (safetensors) | vLLM / SGLang, docker or uv |
 | `openvino` | compiled OpenVINO IR bundle | OpenVINO |
 
@@ -76,7 +77,7 @@ pullable: the weights ship with the OS.
 | `rev` | no | HF arm only; applies to both files |
 | `model_sha256`, `mmproj_sha256` | no | per-file digests |
 
-`mlx`, `torch`, and `openvino` share one HF-only grammar:
+`mlx`, `torch`, `openvino`, and `core-ai` share one HF-only grammar:
 
 | Key | Required | Meaning |
 |-----|----------|---------|
@@ -84,7 +85,7 @@ pullable: the weights ship with the OS.
 | `prefix` | no | subdirectory, when one repo bundles several variants |
 | `rev` | no | revision pin |
 
-There is no `sha256` on these three: they name a directory, not a file.
+There is no `sha256` on these four: they name a directory, not a file.
 `prefix` is how you pick one precision out of a multi-variant OpenVINO repo
 (`prefix=int4-sym-cw`), and one quant out of a multi-quant MLX repo.
 
@@ -103,6 +104,7 @@ There is no `sha256` on these three: they name a directory, not a file.
 |--------|------|-------|
 | `llamacpp-cli-stock-tools` | `version` (+ optional `repo`) **xor** `url`; `flavor` | `repo` defaults to `github.com/ggml-org/llama.cpp` |
 | `mlx-macos-pipette` | `version`; `flavor` | `flavor` defaults to `macos-arm64` |
+| `core-ai-macos-pipette` | `version` | OS-bundled engine (macOS 27+); `version` is the bundled `coreai-models` pin. The Swift sidecar is built from source. |
 | `docker-vllm`, `docker-sglang` | `image`, `tag`; `flavor` | `flavor` defaults to `nvidia_gpu`; pulled into the docker daemon |
 | `uv-vllm`, `uv-sglang` | `server`, `build`, `python` | catalog-backed venv |
 | `uv-openvino` | `version` | one venv serves cpu/gpu/npu, since the device is per cell |
@@ -112,6 +114,7 @@ There is no `sha256` on these three: they name a directory, not a file.
 --runtime 'llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=linux-x64-cpu'
 --runtime 'llamacpp-cli-stock-tools://url=https://example.com/llama-b1.tar.gz&flavor=macos-arm64'
 --runtime 'mlx-macos-pipette://version=0.31.3'
+--runtime 'core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60'
 --runtime 'docker-vllm://image=vllm/vllm-openai&tag=v0.20.2&flavor=nvidia_gpu'
 --runtime 'uv-vllm://server=0.21.0&build=cu121&python=3.12'
 --runtime 'uv-openvino://version=2026.2.1'
@@ -142,6 +145,7 @@ Checked before anything is downloaded.
 |------------|------------------|
 | `gguf_text`, `gguf_vision` | `llamacpp_cli_stock_tools` |
 | `mlx` | `mlx_macos_pipette` |
+| `core_ai` | `core_ai_macos_pipette` |
 | `torch` | `docker_vllm`, `docker_sglang`, `uv_vllm`, `uv_sglang` |
 | `openvino` | `uv_openvino` |
 

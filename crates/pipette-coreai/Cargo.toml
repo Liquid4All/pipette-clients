@@ -1,0 +1,30 @@
+[package]
+name = "pipette-coreai"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+# This crate only *runs* a Core AI cell. URI parse, plan-types identity, and
+# catalog work live in pipette-cli / pipette-plan-types, so Linux and Windows
+# builds of pipette-cli do not need anything from here. The whole crate is
+# therefore macOS-gated: off-macOS it compiles as an empty lib.
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+log.workspace = true
+pipette-http.workspace = true
+pipette-memprobe-metal.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+rstest.workspace = true

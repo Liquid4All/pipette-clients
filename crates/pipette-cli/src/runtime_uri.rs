@@ -11,6 +11,7 @@
 //! ```text
 //! uri    ::= scheme "://" body            ; split on the FIRST "://"
 //! scheme ::= "llamacpp-cli-stock-tools" | "mlx-macos-pipette"
+//!          | "core-ai-macos-pipette"
 //!          | "docker-vllm" | "docker-sglang"
 //!          | "uv-vllm" | "uv-sglang" | "uv-openvino"
 //! body   ::= "" | pair ("&" pair)*        ; keys unordered, each at most once
@@ -25,6 +26,7 @@
 //! |-------------------------------|------------------------------------------------------------|
 //! | `llamacpp-cli-stock-tools`    | `version`(+*`repo`*) **xor** `url`; `flavor`               |
 //! | `mlx-macos-pipette`           | `version`; *`flavor`* (default `macos-arm64`)               |
+//! | `core-ai-macos-pipette`       | *`version`* (default: bundled `coreai-models` pin)          |
 //! | `docker-vllm` / `docker-sglang` | `image`, `tag`; *`flavor`* (default `nvidia_gpu`)        |
 //! | `uv-vllm` / `uv-sglang`       | `server`, `build`, `python`                                |
 //! | `uv-openvino`                 | `version` (the device is a per-cell runtime flag)          |
@@ -51,10 +53,10 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use pipette_plan_types::{
-    default_repository_url, DockerSglang, DockerVllm, LlamaCppFlavor, LlamacppCliStockTools,
-    LlamacppCliStockToolsSource, MlxMacosPipette, MlxMacosPipetteFlavor, NonEmptyString,
-    RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, SourceRepository, UvBuild,
-    UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang, UvVllm, VllmFlavor,
+    default_repository_url, AppleCoreAiMacosPipette, DockerSglang, DockerVllm, LlamaCppFlavor,
+    LlamacppCliStockTools, LlamacppCliStockToolsSource, MlxMacosPipette, MlxMacosPipetteFlavor,
+    NonEmptyString, RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, SourceRepository,
+    UvBuild, UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang, UvVllm, VllmFlavor,
 };
 
 // Key names, shared by the parser and [`runtime_to_uri`] so the two directions
@@ -89,6 +91,10 @@ const KEY_PYTHON: &str = "python";
 pub(crate) enum Scheme {
     LlamacppCliStockTools,
     MlxMacosPipette,
+    /// Wire scheme stays `core-ai-macos-pipette` — the authored URI shape is
+    /// public API; only the Rust variant name tracks the plan type.
+    #[strum(serialize = "core-ai-macos-pipette")]
+    AppleCoreAiMacosPipette,
     DockerVllm,
     DockerSglang,
     UvVllm,
@@ -133,8 +139,8 @@ pub enum RuntimeUriError {
 
     #[error(
         "unknown runtime URI scheme `{0}` (expected `llamacpp-cli-stock-tools`, \
-         `mlx-macos-pipette`, `docker-vllm`, `docker-sglang`, `uv-vllm`, `uv-sglang`, \
-         or `uv-openvino`; a scheme is the runtime type with `-` for `_`)"
+         `mlx-macos-pipette`, `core-ai-macos-pipette`, `docker-vllm`, `docker-sglang`, \
+         `uv-vllm`, `uv-sglang`, or `uv-openvino`; a scheme is the runtime type with `-` for `_`)"
     )]
     UnknownScheme(String),
 
@@ -463,6 +469,22 @@ fn parse_mlx(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     }))
 }
 
+fn parse_coreai(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
+    let rt = AppleCoreAiMacosPipette::bundled();
+    if let Some(version) = p.take(KEY_VERSION) {
+        let version = non_empty(KEY_VERSION, version)?;
+        let bundled = rt.packages.coreai_models.repository_version.as_ref();
+        if version.as_ref() != bundled {
+            return Err(RuntimeUriError::NotRepresentable(format!(
+                "core-ai-macos-pipette version `{version}` is not the bundled pin `{bundled}`; \
+                 the sidecar is compiled against that pin only"
+            )));
+        }
+    }
+    p.finish()?;
+    Ok(Runtime::AppleCoreAiMacosPipette(rt))
+}
+
 fn parse_docker_vllm(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     let image_name = non_empty(KEY_IMAGE, p.require(KEY_IMAGE)?)?;
     let image_tag = non_empty(KEY_TAG, p.require(KEY_TAG)?)?;
@@ -559,6 +581,7 @@ pub fn parse_runtime_uri(input: &str) -> Result<Runtime, RuntimeUriError> {
     match scheme {
         Scheme::LlamacppCliStockTools => parse_llama_cpp(pairs),
         Scheme::MlxMacosPipette => parse_mlx(pairs),
+        Scheme::AppleCoreAiMacosPipette => parse_coreai(pairs),
         Scheme::DockerVllm => parse_docker_vllm(pairs),
         Scheme::DockerSglang => parse_docker_sglang(pairs),
         Scheme::UvVllm => parse_uv_vllm(pairs),
@@ -755,6 +778,23 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
             ensure_catalog_backed(&rt.source, || uv_catalog_source_from_uri(&slug))?;
             Ok(body.finish())
         }
+        // Core AI is a desktop runtime (macOS 27+): the engine ships with the OS,
+        // the URI carries the bundled `coreai-models` pin as `version`.
+        Runtime::AppleCoreAiMacosPipette(rt) => {
+            if !rt.is_bundled() {
+                return Err(RuntimeUriError::NotRepresentable(
+                    "a core-ai-macos-pipette runtime whose Swift stack is not the bundled pin \
+                     (pass it as a JSON `--runtime` object)"
+                        .to_owned(),
+                ));
+            }
+            let mut body = Body::new(Scheme::AppleCoreAiMacosPipette);
+            body.push(
+                KEY_VERSION,
+                rt.packages.coreai_models.repository_version.as_ref(),
+            )?;
+            Ok(body.finish())
+        }
         // On-device app runtimes + Apple Foundation aren't addressable via the
         // desktop CLI — the same reject-list `refs.rs` enforces.
         Runtime::LlamacppApkPipette(_)
@@ -776,11 +816,23 @@ fn mlx_flavor_str(flavor: &MlxMacosPipetteFlavor) -> &'static str {
 /// when the trimmed arg starts with `{`, else the compact URI grammar.
 pub fn parse_runtime_arg(arg: &str) -> anyhow::Result<Runtime> {
     let trimmed = arg.trim();
-    if trimmed.starts_with('{') {
-        Ok(serde_json::from_str::<Runtime>(trimmed)?)
+    let runtime = if trimmed.starts_with('{') {
+        serde_json::from_str::<Runtime>(trimmed)?
     } else {
-        Ok(parse_runtime_uri(trimmed)?)
+        parse_runtime_uri(trimmed)?
+    };
+    // A JSON/TOML `Runtime` object bypasses the URI grammar, so re-check the
+    // Core AI pin here: the sidecar is compiled against the bundled stack only,
+    // and a non-bundled `packages` would record a pin the binary does not have.
+    if let Runtime::AppleCoreAiMacosPipette(rt) = &runtime {
+        if !rt.is_bundled() {
+            anyhow::bail!(
+                "core-ai-macos-pipette runtime pins a Swift stack this client was \
+                 not built against; only the bundled pin is runnable"
+            );
+        }
     }
+    Ok(runtime)
 }
 
 /// A [`Runtime`] wrapper that serde-round-trips through the compact URI. It reads
@@ -939,6 +991,77 @@ mod tests {
             parse_runtime_uri("mlx-macos-pipette://version=0.0.0-not-in-catalog"),
             Err(RuntimeUriError::NotRepresentable(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_unknown_version_is_not_representable() -> anyhow::Result<()> {
+        assert!(matches!(
+            parse_runtime_uri("core-ai-macos-pipette://version=9.9.9"),
+            Err(RuntimeUriError::NotRepresentable(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_json_with_nonbundled_pin_is_rejected() -> anyhow::Result<()> {
+        // A JSON `--runtime` object bypasses the URI grammar. parse_runtime_arg
+        // must still reject a Swift stack this client was not built against, or
+        // the recorded pin would lie about what binary ran.
+        let json = r#"{"type":"core_ai_macos_pipette","packages":{
+            "coreai_models":{"repository_url":"github.com/apple/coreai-models","repository_version":"9.9.9"},
+            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.2.0"},
+            "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
+            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.3.2"}}}"#;
+        assert!(
+            parse_runtime_arg(json).is_err(),
+            "non-bundled JSON pin must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_json_with_bundled_pin_is_accepted() -> anyhow::Result<()> {
+        let json = r#"{"type":"core_ai_macos_pipette","packages":{
+            "coreai_models":{"repository_url":"github.com/apple/coreai-models","repository_version":"27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"},
+            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.2.0"},
+            "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
+            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.3.2"}}}"#;
+        let runtime = parse_runtime_arg(json)?;
+        assert!(matches!(runtime, Runtime::AppleCoreAiMacosPipette(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_bundled_version_round_trips() -> anyhow::Result<()> {
+        let runtime = parse_runtime_uri(
+            "core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60",
+        )?;
+        let Runtime::AppleCoreAiMacosPipette(rt) = runtime else {
+            anyhow::bail!("expected AppleCoreAiMacosPipette");
+        };
+        assert_eq!(
+            rt.packages.coreai_models.repository_version.as_ref(),
+            "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
+        );
+        assert_eq!(
+            runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt))?,
+            "core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coreai_nonbundled_stack_has_no_uri_form() -> anyhow::Result<()> {
+        let mut rt = AppleCoreAiMacosPipette::bundled();
+        rt.packages.coreai_models.repository_version = NonEmptyString::try_new("9.9.9".to_owned())?;
+        assert!(
+            matches!(
+                runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt)),
+                Err(RuntimeUriError::NotRepresentable(_))
+            ),
+            "a non-bundled stack must not render as the bundled URI"
+        );
         Ok(())
     }
 
@@ -1161,6 +1284,7 @@ mod tests {
     #[case("llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=macos-x64")]
     #[case("llamacpp-cli-stock-tools://url=ex.com/llama-b1.tar.gz&flavor=macos-arm64")]
     #[case("mlx-macos-pipette://version=0.31.3&flavor=macos-arm64")]
+    #[case("core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60")]
     #[case("docker-vllm://image=vllm/vllm-openai&tag=v0.10.0&flavor=nvidia_gpu")]
     #[case("docker-sglang://image=lmsysorg/sglang&tag=v0.4.0&flavor=amd_gpu")]
     #[case("uv-vllm://server=0.21.0&build=cu121&python=3.12")]
