@@ -76,6 +76,11 @@ all of these benchmarks) is described separately:
 
 - [Selection policies](selection-policies.md)
 
+Core AI's on-device specialization cache (outside the model store) is
+documented separately:
+
+- [Core AI specialization cache](coreai-specialization.md)
+
 The device environment (thermal state, power, and cooling) that every timing
 benchmark is measured under, and the per-platform specifics, are described
 separately:

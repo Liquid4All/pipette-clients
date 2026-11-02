@@ -6,7 +6,8 @@ installing runtimes, running benchmarks, and syncing results.
 - **[Naming models, runtimes, and flags](models-and-runtimes.md)**: the URI and
   JSON notation for `--model` / `--runtime` / `--runtime-flags`, with recipes.
   Start there when the question is *how do I express the thing I want to run*.
-- Backends: [llama.cpp](llamacpp.md) · [MLX](mlx.md) · [torch-oai](torch-oai.md) ·
+- Backends: [llama.cpp](llamacpp.md) · [MLX](mlx.md) · [Core AI](coreai.md) ·
+  [torch-oai](torch-oai.md) ·
   [OpenVINO](openvino.md) (also
   [IR](../openvino-ir.md) / [measurement](../openvino-measurement.md))
 - [Eval checkpoint & resume](eval-checkpoint.md)
@@ -53,6 +54,7 @@ You only need what the runtime(s) you use call for.
 | MLX | Apple Silicon Mac | [`uv`](https://docs.astral.sh/uv/) (`brew install uv`) |
 | torch-oai (vLLM / SGLang) | Linux host | Docker Engine for `docker-vllm://` / `docker-sglang://`, **or** `uv` for `uv-vllm://` / `uv-sglang://`; `nvidia-container-toolkit` for NVIDIA GPUs under Docker |
 | OpenVINO | Linux/Windows x86_64 | `uv` |
+| Core AI | Apple Silicon Mac | **macOS 27+** and a Swift toolchain on `PATH` (`swift build` compiles the bundled sidecar on first use) |
 
 **Conditional:**
 

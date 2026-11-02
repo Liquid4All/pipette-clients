@@ -85,6 +85,7 @@ pub fn to_stored(declared: &Runtime) -> Result<Runtime, RuntimeStoredError> {
         Runtime::LlamacppApkPipette(_)
         | Runtime::LlamacppIosPipette(_)
         | Runtime::MlxIosPipette(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
         | Runtime::AppleFoundation(_) => Err(RuntimeStoredError::NotStorable(declared.to_string())),
     }
 }

@@ -62,6 +62,16 @@ fn runtime_capability_flags(runtime: &Runtime) -> Vec<String> {
         Runtime::UvVllm(rt) => ("uv_vllm", Some(rt.runtime_version())),
         Runtime::UvSglang(rt) => ("uv_sglang", Some(rt.runtime_version())),
         Runtime::AppleFoundation(_) => ("apple_foundation", None),
+        Runtime::AppleCoreAiMacosPipette(rt) => (
+            "core_ai",
+            Some(
+                rt.packages
+                    .coreai_models
+                    .repository_version
+                    .as_ref()
+                    .to_string(),
+            ),
+        ),
     };
     let general = format!("runtime:{name}");
     match version {
@@ -72,6 +82,31 @@ fn runtime_capability_flags(runtime: &Runtime) -> Vec<String> {
         }
         _ => vec![general],
     }
+}
+
+/// True when this Mac's OS version satisfies the Core AI sidecar's declared
+/// platform floor (`Package.swift`: `.macOS("27.0")`). Reads `sw_vers` like
+/// `pipette-device`'s probe; on any read failure we do NOT advertise — a
+/// device that cannot state its version should not claim the newest runtime.
+#[cfg(target_os = "macos")]
+fn coreai_supported_os() -> bool {
+    const FLOOR_MAJOR: u32 = 27;
+
+    let Ok(output) = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+    else {
+        return false;
+    };
+    let Ok(version) = String::from_utf8(output.stdout) else {
+        return false;
+    };
+    version
+        .trim()
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= FLOOR_MAJOR)
 }
 
 /// Union of capability flags across every installed runtime in the workspace.
@@ -89,6 +124,28 @@ pub fn installed_runtime_capabilities(
     let flags: std::collections::BTreeSet<_> = manifests
         .iter()
         .flat_map(|m| runtime_capability_flags(&m.declared))
+        .chain({
+            // Core AI is OS-bundled: it never publishes a store manifest, but
+            // a macOS host can still run it. Advertise the bundled pin so a
+            // plan that requires `runtime:core_ai` matches this client —
+            // but only on macOS 27+, the floor the sidecar's Swift package
+            // declares (`platforms: [.macOS("27.0")]`), *and* only when a
+            // sidecar is obtainable (cached binary, PIPETTE_COREAI_SIDECAR,
+            // or `swift` on PATH). A macOS 27 fleet with neither would get
+            // dispatched cells that can only fail.
+            #[cfg(target_os = "macos")]
+            {
+                if coreai_supported_os() && pipette_coreai::sidecar_obtainable() {
+                    runtime_capability_flags(&Runtime::AppleCoreAiMacosPipette(Default::default()))
+                } else {
+                    Vec::new()
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Vec::new()
+            }
+        })
         .collect();
     Ok(flags.into_iter().collect())
 }

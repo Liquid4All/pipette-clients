@@ -1848,6 +1848,7 @@ dependencies = [
  "httpmock",
  "log",
  "pipette-artifacts",
+ "pipette-coreai",
  "pipette-device",
  "pipette-doomloop",
  "pipette-http",
@@ -1872,6 +1873,25 @@ dependencies = [
  "time",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "pipette-coreai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "pipette-http",
+ "pipette-memprobe-metal",
+ "pipette-ops",
+ "pipette-plan-types",
+ "pipette-subprocess",
+ "reqwest",
+ "rstest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

@@ -12,6 +12,9 @@ devlog/
 /target/
 **/*.rs.bk
 
+# Swift Package Manager build dirs (pipette-coreai sidecar)
+**/swift/.build/
+
 # Python
 __pycache__/
 .coverage

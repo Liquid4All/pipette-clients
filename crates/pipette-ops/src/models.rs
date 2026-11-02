@@ -33,6 +33,7 @@ pub fn require_bound_model_dir(
         Model::Mlx(m) => &m.source,
         Model::Torch(m) => &m.source,
         Model::Openvino(m) => &m.source,
+        Model::AppleCoreAi(m) => &m.source,
         Model::GgufText(_) | Model::GgufVision(_) | Model::AppleFoundationText => {
             anyhow::bail!("{expected} is not a directory-shaped model")
         }
