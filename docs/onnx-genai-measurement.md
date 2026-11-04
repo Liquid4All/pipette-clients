@@ -183,7 +183,8 @@ library: libcublasLt.so.13: cannot open shared object file: No such file or dire
 `onnxruntime-gpu` keeps the CUDA libraries behind its `[cuda]` and `[cudnn]`
 extras. Each CUDA row therefore resolves as
 `onnxruntime-gpu[cuda,cudnn]==<pinned version>` and pins the seven `nvidia-*`
-packages that the extras add, about 1.2 GB of wheels.
+packages that the extras add: about 1.3 GB (1.2 GiB) of Linux x86-64 wheels
+for each CUDA row.
 The venv then supplies the libraries, so two CUDA hosts measure the same stack
 whatever system toolkit each one holds.
 

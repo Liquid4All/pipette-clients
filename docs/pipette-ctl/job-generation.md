@@ -121,7 +121,7 @@ runtimes        = [{ type = "apple_foundation", private_thermal = true }]
 ```
 
 The proxy runs a job only on an admitted build whose manifest lists the job's
-runtime field by field. Every CI build is a private-API `-internal` build
+runtime field by field. The farm's app builds are private-API `-internal` builds
 ([private-API builds](../pipette-ios/private-thermal-release-build.md)), so an
 iOS runtime needs `private_thermal = true`, or no build carries it.
 

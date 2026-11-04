@@ -207,11 +207,11 @@ so the harness was sound.
 
 Then speed, 512 prefill / 100 decode, best of three:
 
-| precision | NPU prefill | NPU decode | decode tok/s |
-|---|---|---|---|
-| `int4-sym-cw` | 88.7 ms | 1133 ms | 94.8 |
-| `int8-sym` | 89.3 ms | 1262 ms | 84.4 |
-| `int8-asym` | 176.1 ms | 9749 ms | **10.3** |
+| precision | NPU prefill | NPU decode |
+|---|---|---|
+| `int4-sym-cw` | 88.7 ms | 1133 ms |
+| `int8-sym` | 89.3 ms | 1262 ms |
+| `int8-asym` | 176.1 ms | **9749 ms** |
 
 **Asymmetric int8 works on the NPU but is 8× slower than its peers**,
 probably because no optimized kernel exists for that layout.
@@ -230,7 +230,7 @@ refuses on its own, and the precision that silently misbehaves is a
 
 - A failure that throws needs no preflight: `int4-asym` already reports a
   clear compiler error, and a guard only swaps one clear message for another.
-- Refusing a cell suppresses findings. The 10.3 tok/s row above is exactly what
+- Refusing a cell suppresses findings. The `int8-asym` row above is exactly what
   the campaign exists to measure.
 - Detecting the one silent case cheaply does not work. Generated-token count
   fails (the broken pair runs to full length while a healthy one stops at 4);
