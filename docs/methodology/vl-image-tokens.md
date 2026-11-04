@@ -75,11 +75,11 @@ engine and the llama.cpp build: gemma-4-E2B at 512² counts 121 on llama.cpp
 counts depend on the build (see
 [Multiple images](#multiple-images-num_images-and-the-prompt)).
 
-**Reading older rows.** Rows from earlier client versions count differently:
+**Reading older rows.** Rows from a `client_version` dated before 2026-10-17, and
+rows from every `2026.08.1` public release, count differently:
 their multi-image llama-server rows and their MLX rows include the markers, a
 few tokens high per image. Their single-image llama-server rows include the
 markers only when the helper was unavailable, and the row does not record that.
-`client_version` tells these rows apart.
 
 **The marker scheme differs per model**, and the count per image can vary.
 For this reason, a marker-free count cannot be derived from a marker-inclusive

@@ -146,8 +146,9 @@ n_ctx = value[fp, W×H] × num_images + text_tokens + decode_tokens
 The margin covers the chat-template / media-marker scaffolding the server
 wraps the prompt in (the image count is exact and has no built-in slack): a
 64-token base plus 8 per image, because the template emits markers/separators
-**per image** (a flat margin overflowed at 80 frames, ~330 measured
-scaffolding tokens). This is
+**per image** (a flat margin overflowed at 80 frames; the code comment
+estimates that the LFM template adds about 2.5 tokens per image, about 200 past
+a flat 64). This is
 far tighter than the `(w/14)²` estimate, which is 5× or more above the count
 for Qwen and LFM, and it stays exact for tilers. A cell that pins `ctx_size` keeps it;
 `vl_max_memory` then skips the calibration, since it reports no `image_tokens`.

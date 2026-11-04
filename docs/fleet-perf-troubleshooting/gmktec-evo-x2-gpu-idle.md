@@ -2,7 +2,7 @@
 
 MiniCPM5 end-to-end (E2E) latency includes a large **cost to restore GPU memory after idle**. The standalone prefill and decode timers mostly exclude that cost. Event Tracing for Windows (ETW) shows that the driver evicts and then restores the GPU allocations of the server. A four-byte GPU keepalive every 100 ms reduced delayed E2E by **13.8–17.6% on all four GMKtec boxes**. When the keepalive stopped, the penalty returned.
 
-This explains the tested MiniCPM5 discrepancy. The exact AMD eviction policy, the separate OLMo decode discontinuity, and applicability to other models remain unresolved.
+This explains the tested MiniCPM5 discrepancy. The exact AMD eviction policy and the effect on other models are not known. The OLMo 3 decode dip at 2,048 and 4,096 tokens did not occur in the runs with the keepalive on. No run turned the keepalive off and on for OLMo, so the keepalive is not proven to be the fix.
 
 The workaround ships as [`tools/gpu-keepalive`](../../tools/gpu-keepalive/README.md). For the wider diagnostic ladder on this box type (driver, thermal, SoC power limit, tuner residue, silicon bin), see [`gmktec-evo-x2.md`](gmktec-evo-x2.md); GPU idle residency is one row in that table, not a substitute for it.
 

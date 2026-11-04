@@ -53,7 +53,8 @@ The device is a MacBook Neo (A18 Pro), which ships with no internal fan. The
 machine is modified with a passive thermal pad inside the case and an external
 active cooling pad under it; the setup is described in
 [Cooling on the MacBook Neo](device-conditions.md#cooling-on-the-macbook-neo).
-Every number in this article was measured on the modified machine. The internal
+Every number in this article was measured on the modified machine, on or before
+2026-07-28. The internal
 pad is present in every run, so **"cooled" and "uncooled" throughout this
 article mean with and without the *external* pad.**
 

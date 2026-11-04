@@ -359,8 +359,8 @@ and the row must say so.
 
 | Item | Qty | Unit | Purpose |
 |---|---|---|---|
-| Metering smart plug (Shelly Plug US Gen4, the model powerd drives; one is on the Linux host today) | 6 | ~$25 | Mac Studio ×4 wall scope; GMKtec ×4 wall scope (share across boxes by moving plugs, or buy 8); one reserved for calibration |
-| USB-C inline meter with a PC API (ChargerLAB KM003C; one is on the Linux host today, on Pi 9) | 4 | ~$100 | the attributable boundary of the Android phones and of the Pi 5s; the like-for-like check of `PDTR` on the laptops and Neo, inline on the adapter cable, and of `SystemPowerIn` on the iPhones; reports the negotiated supply; reads zero to confirm a power cut |
+| Metering smart plug (Shelly Plug US Gen4, the model powerd drives; one is on the Linux host on 2026-11-04) | 6 | ~$25 | Mac Studio ×4 wall scope; GMKtec ×4 wall scope (share across boxes by moving plugs, or buy 8); one reserved for calibration |
+| USB-C inline meter with a PC API (ChargerLAB KM003C; one is on the Linux host. It moved from Pi 9 to a phone for a powerd experiment on 2026-10-27) | 4 | ~$100 | the attributable boundary of the Android phones and of the Pi 5s; the like-for-like check of `PDTR` on the laptops and Neo, inline on the adapter cable, and of `SystemPowerIn` on the iPhones; reports the negotiated supply; reads zero to confirm a power cut |
 | Monsoon HV or Otii with battery bypass | 0 | ~$1k+ | not proposed: destructive to a flagship handset, and the fleet phones are production units |
 
 The plug count covers the desktops only. The laptops' attributable boundary is
@@ -381,8 +381,9 @@ check, the `wall` rows would carry the plug's specification class and the
 measured precision, as §3 requires.
 
 **A meter for the connected condition, powerd's switch for the disconnected
-one.** The handsets share Anker Prime 250W stations (A2345) at two to four
-phones per station. A smart plug on the wall side would therefore cut a group
+one.** The handsets share Anker Prime 250W stations (A2345). Each cooler pad
+also uses a port of its own, so a station serves fewer phones than it has
+ports. A smart plug on the wall side would therefore cut a group
 rather than one phone, and it would take the group's other handsets off charge
 during a run.
 
@@ -427,8 +428,12 @@ proposal, decides when each part exists:
     dies mid-window leaves a handset draining for at most one lease interval.
   - Open leases survive a powerd restart.
 
-  powerd's output request has no lease today. What stays outside powerd is what
-  needs the battery level, which powerd does not read. The readiness gate would
+  powerd's code on its `main` branch switches Anker ports and Shelly plugs,
+  and it takes the off state as a renewable lease. A test build switched an
+  Anker port off and on from the Linux host on 2026-11-01. On 2026-11-04, the
+  Linux host runs the powerd proof of concept from 2026-10-19, which has no
+  Anker adapter and no output lease. What stays outside powerd is what needs
+  the battery level, which powerd does not read. The readiness gate would
   check the charge floor before the client asks for the cut, and the farm side
   would own the recharge wait and the run-and-recharge alternation of the
   campaign.
@@ -505,7 +510,7 @@ excluded from the farm's normal scheduling, not mixed into the normal queue.
 
 | Phase | Work | Estimate |
 |---|---|---|
-| **0. Characterize** | plugs and meters in the rack; powerd's proof of concept, which logs the KM003C and the plug on the Linux host today; the spare plug in series with a working one to confirm the plugs agree; one MLX decode loop on a Mac Studio to bracket `PSTR` between IOReport and the plug; same for a GMKtec, plug above `ryzenadj`; one metered handset run to close the energy balance against `BatteryManager`; one metered Pi 5 sweep to bracket the PMIC rail sum under the connector reading and to confirm the 5 A contract survives the meter; on an MBP a meter inline on the adapter cable to check `PDTR` under load and to settle whether `PSTR` counts battery charging, and a probe of the `AppleSmartBattery` amperage and voltage keys for cadence, to check `PPBR`; the scaling sweep of [02-device-capabilities.md](02-device-capabilities.md) §7 on an M5 Max at full charge and again near 25 %, which sets the charge-gate floor; record precision and the accuracy bracket per device model; on one Mac server path, an idle baseline with and without a resident model, to settle whether the runtime joins the baseline key | 5–6 days once hardware arrives |
+| **0. Characterize** | plugs and meters in the rack; powerd's proof of concept on the Linux host, which logs the KM003C and the plug; the spare plug in series with a working one to confirm the plugs agree; one MLX decode loop on a Mac Studio to bracket `PSTR` between IOReport and the plug; same for a GMKtec, plug above `ryzenadj`; one metered handset run to close the energy balance against `BatteryManager`; one metered Pi 5 sweep to bracket the PMIC rail sum under the connector reading and to confirm the 5 A contract survives the meter; on an MBP a meter inline on the adapter cable to check `PDTR` under load and to settle whether `PSTR` counts battery charging, and a probe of the `AppleSmartBattery` amperage and voltage keys for cadence, to check `PPBR`; the scaling sweep of [02-device-capabilities.md](02-device-capabilities.md) §7 on an M5 Max at full charge and again near 25 %, which sets the charge-gate floor; record precision and the accuracy bracket per device model; on one Mac server path, an idle baseline with and without a resident model, to settle whether the runtime joins the baseline key | 5–6 days once hardware arrives |
 | **powerd (the lab's power service)** | planned in powerd's own project. This proposal needs the bindings, the sessions and the output control before the first `wall` and connector rows, and the output lease (PIP-698, §4) before the disconnected campaign | in powerd's plan; on the critical path for every `wall` and connector row |
 | **1. macOS, Windows and Pi 5 in the client** | the `energy_*` benchmark type in [pipette-mgmt `crates/pipette-plan-types`](https://github.com/Liquid4All/pipette-mgmt/blob/main/crates/pipette-plan-types/src/benchmark/mod.rs), three ids per device class mirrored from the largest prefill, decode and end-to-end timing ids; `EnergySampler` trait in `pipette-device` with IOReport, SMC `PSTR`, `ryzenadj` and `pi_pmic` implementations, the last polling `vcgencmd pmic_read_adc` at a few Hz and averaging, with the PD contract from the device tree and the throttle flags on the row; called from the per-rep observer beside `detect_thermal`; the stored idle baseline in the client store, keyed by power condition, taken during worker idle or on expiry; the short idle reading in `pipette-readiness` and its comparison with the stored band; the charge band, the controller-idle check and the pre-claim charge check in the same gate, which also cover the timing rows; the powerd `power` check in the gate and the session start before the window; the `-r N` / `-r 2N` process pair in `pipette-llamacpp`'s bench path, with `N` derived from the timing row and both processes' `samples_ns` parsed; the window bracket at the first and last streamed token on the server paths; the session stop after the window and the fatal path when it fails or reports estimated time; new result fields (or raw samples in the existing `device_hardware_readings` field, which no reader fills with power today). In pipette-mgmt: the stored columns, the derived rates, the linear model with its residual, and site display | 2 weeks, one engineer, plus the management service change |
 | **2. Android** | `BatteryManager` sampler in both engine flavors: beside the `ThermalSampler` callback that `android/native/benchmarks.rs` uses in the `rustEngine` flavor, and in the Kotlin port of the shipping `kotlinEngine` flavor (`LlamaBenchmark.kt`); the powerd session for the connector term; the charge band and the controller-idle check in the Android gate; net battery energy per rep on the row; the S26 charge-cap and cooler recorded as conditions. The disconnected campaign waits for powerd's output lease | 1–2 weeks, client side |

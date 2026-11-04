@@ -134,6 +134,10 @@ moves by about 7 MiB between sessions. On the NVIDIA host, Qwen3.5-2B and
 gemma-4-E2B read about 55 and 28 MiB lower in the host figure, and 60 and 6 MiB
 lower in the GPU figure.
 
+These figures are the peak of a one-token reply. A `vl_throughput` row records
+the server's peak over its whole run, and the same flags move that reading by
+different amounts ([vl-throughput.md](vl-throughput.md#context-checkpoints)).
+
 `no_cache = true` runs one slot. Rows split on their recorded `command` and on
 `runtime_flags`, which carries `no_cache` and `raw`. How to tell rows that ran
 four slots under `no_cache` is in
@@ -304,7 +308,9 @@ Three details differ from the desktop runner:
   decodes every token it samples, the last one included, a step the server
   skips. Its count is not checked: the loop runs every step it is asked for.
 
-Measured on an iPhone 17 Pro ([private-API build](../pipette-ios/private-thermal-release-build.md), iOS 27.0), the six catalog cells read
+Measured for PR #1533 (merged 2026-09-28) on an iPhone 17 Pro ([private-API build](../pipette-ios/private-thermal-release-build.md), iOS 27.0), the six
+`vl_max_memory` cells in the catalog then (every entry except
+`256x256_text1024_decode256_img5`) read
 1761 to 1875 MiB on LFM2.5-VL-1.6B Q4_K_M and 2057 to 2464 MiB on InternVL3.5-2B
 Q4_K_M, both with F16 projectors. Two passes agreed within 3 MiB, and the sampler
 matched the kernel's peak on every run. Sizing from the estimate instead would have

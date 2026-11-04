@@ -252,6 +252,7 @@ from noise in the test setup:
 The memory row is in MB (10^6 bytes); Section 8 gives memory in bytes.
 
 - **Floor Determination:** For identical `rustEngine` binaries with active TEC cooling, the between-arm delta is under 1% for decode throughput, peak memory, and prefill throughput, and under 5% for end-to-end latency. The table gives two measures for each benchmark: the between-arm detection threshold, and the per-arm spread (the larger of the two arms is the noise floor spread that Section 8 uses).
+- **Phase 4 Criterion:** Phase 4 uses the between-arm detection thresholds. A delta within a threshold is procedure noise. A delta above it is a divergence to check against the Section 2 invariants.
 
 ---
 
@@ -278,4 +279,7 @@ under the Section 5 protocol:
 
 Three deltas are larger than the Section 7 between-arm detection thresholds:
 decode (+5.06% against +/- 1.0%), memory (+0.58% against +/- 0.2%), and prefill
-(+3.32% against +/- 1.5%). The gate did not use those thresholds.
+(+3.32% against +/- 1.5%). Section 7 names those thresholds as the Phase 4
+criterion, and the gate did not use them. Under those thresholds, the Section 5
+protocol makes decode and prefill improvements (step 2: verify with an eval run)
+and memory a regression (step 3: profile, then a review with the product owner).

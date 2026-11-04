@@ -157,10 +157,9 @@ carrying `finish_reason` on the other engines' completions endpoint. That chunk
 is stamped as it arrives, before it is parsed; the usage trailer and `[DONE]`
 after it are outside the window.
 
-Stored rows from earlier client versions of every engine but llama.cpp are
-timed unstreamed, to the fully parsed reply. The `client_version` of a row
-tells the two methods apart. At 256 generated tokens, the unstreamed rows
-differ from streamed ones as follows:
+Stored rows of every engine but llama.cpp whose `client_version` is dated
+before 2026-10-02 are timed unstreamed, to the fully parsed reply. At 256
+generated tokens, the unstreamed rows differ from streamed ones as follows:
 
 - vLLM and MLX: by under 0.3%.
 - OVMS on a CPU: 1 to 2% longer.
@@ -367,7 +366,7 @@ drift across repetitions.
 | Linux | x86 / ARM benchmark host | 5 min | Hottest readable `/sys/class/thermal/thermal_zone*/temp` is `< 70C`; a host that exposes no zone at all gates on load alone | First `/proc/loadavg` field divided by available CPU count is `< 0.30`; for a process confined to some of the host's CPUs, their busy share from a 1-second `/proc/stat` delta instead |
 | Raspberry Pi 5 | Raspberry Pi 5 (BCM2712) | 5 min | No active-now bit (under-voltage, frequency capped, throttled, soft limit) in `vcgencmd get_throttled`, and the hottest zone is `< 80C` (the soft limit; hard is 85C) | As on Linux |
 | Jetson Orin | NVIDIA Jetson AGX Orin (Tegra234) | 5 min | Hottest zone `< 70C` (the hot-surface-alert trip; throttle 99C, critical 104.5C); no `cpufreq-cpu*`, `devfreq-*gpu*` or `*-throttle-alert` cooling device engaged; no new `soctherm_oc` over-current event | As on Linux, plus GPU load `< 5%` where the kernel exposes it |
-| macOS | MacBook Neo (A18 Pro); MacBook Pro (M4 Max, M5 Max) | 7 min | `OSThermalPressureLevel` is `0` (`nominal`), read from `com.apple.system.thermalpressurelevel`, and the die is `< 50C` where its sensors read | Busy cores from a 1-second Mach `host_statistics(HOST_CPU_LOAD_INFO)` tick delta are `< 1.0` |
+| macOS | MacBook Neo (A18 Pro); MacBook Pro (M5 Max) | 7 min | `OSThermalPressureLevel` is `0` (`nominal`), read from `com.apple.system.thermalpressurelevel`, and the die is `< 50C` where its sensors read | Busy cores from a 1-second Mach `host_statistics(HOST_CPU_LOAD_INFO)` tick delta are `< 1.0` |
 | Windows | GMKtec EVO-X2 (Ryzen AI MAX+ 395); Core Ultra 7 258V; Zenbook S 16 (Ryzen AI 9 HX 370) | 5 min | No sensor within `15C` of the platform's ACPI `CriticalTripPoint`, or at `95C` or above where the box reports none; no active throttle-reason flag; summed GPU-compute utilization `< 5%`; each sensor the host's `[readiness.windows] ceilings` name at or below its ceiling. Each applies only where the box exposes it | Busy share of all logical CPUs from a 1-second kernel32 `GetSystemTimes` delta is `<= 40%` (the only always-required signal) |
 | Other | | 0 sec | No probe | No probe |
 
@@ -930,13 +929,13 @@ iOS ONNX GenAI also stops after the last sample. iOS MLX samples one token from
 the prefill and then runs N decode steps, so on one device an iOS MLX row reads
 about one decode step higher than an iOS llama.cpp row of the same shape.
 
-Some stored iOS llama.cpp `end_to_end_latency` rows come from app versions that
-also decode the last token. Those rows read one decode step higher: the deepest
-step, at a depth of the prompt plus `parameter_decode_tokens` - 1. The
+Stored iOS llama.cpp `end_to_end_latency` rows whose `client_version` is dated
+before 2026-10-17 also decode the last token. Those rows read one decode step
+higher: the deepest step, at a depth of the prompt plus
+`parameter_decode_tokens` - 1. The
 `decode_time_ms / parameter_decode_tokens` of a same-model `decode_throughput`
 cell, or a little more, gives the size of that step: well under 1% of
-`total_time_ms` for the 256-token cells. `client_version` tells the two kinds of
-row apart.
+`total_time_ms` for the 256-token cells.
 
 **Thermal detection on iOS.** iOS exposes no public SoC temperature API, and the
 public `ProcessInfo.thermalState` enum can stay `.nominal` while the SoC has

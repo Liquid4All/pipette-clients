@@ -91,10 +91,11 @@ stderr lines, and the `mlxPeak=` field of MLX's memory log line.
 As a host figure the allocator counter under-counts. On-device cross-checks against
 llama.cpp's own buffer log show why: the Metal counter matches the sum of llama's Metal (`MTL0`) buffers
 to ~1 MiB, so it omits everything else the process holds: llama's own CPU-side
-buffers (~210 MiB on an 8B) plus non-buffer Metal driver / pipeline / residency
-state (~190 MiB on an 8B). Net, the allocator counter runs **~7% below
-`phys_footprint` on the 8B and ~17% below on the 230M** (a larger fraction on
-small models, where the fixed overhead is a bigger share), and with no GPU offload
+buffers (~210 MiB on LFM2.5-8B-A1B) plus non-buffer Metal driver / pipeline /
+residency state (~190 MiB on LFM2.5-8B-A1B). Net, the allocator counter runs
+**~7% below `phys_footprint` on LFM2.5-8B-A1B and ~17% below on the 230M** (a
+larger fraction on small models, where the fixed overhead is a bigger share),
+and with no GPU offload
 it collapses entirely (see On-device validation). The footprint is the figure that a
 device must fit, so it is the reported `max_host_bytes`.
 

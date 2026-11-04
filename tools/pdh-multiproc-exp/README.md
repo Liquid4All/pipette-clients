@@ -11,8 +11,9 @@ whether per-PID peaks sum to the adapter delta from baseline (ratio
 
 ## Build / run
 
-Windows only. Requires Rust + MSVC link.exe (the windows-sys crate
-needs the link library).
+Windows only. Requires Rust and the MSVC linker (`link.exe`). The windows-sys
+crate imports its functions through `raw-dylib`, so the build needs no Windows
+SDK import library.
 
 ```powershell
 cargo run --release -- <n_processes> <n_prompt>

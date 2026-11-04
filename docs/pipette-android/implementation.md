@@ -339,7 +339,8 @@ The `v1` payload is six newline-separated fields:
 
 The method and target limit a captured signature to that method and target, and
 the nonce makes it single-use, so the server rejects a replay inside the
-5-minute freshness window. The signature does not cover the body.
+freshness window. The server accepts an `X-Timestamp` up to 5 minutes before or
+after its own clock. The signature does not cover the body.
 
 Secret storage (`Secrets`): `SharedPreferences("pipette_secrets")`, with each
 value encrypted with AES-256-GCM under an Android Keystore key and stored as
@@ -917,12 +918,15 @@ Build and test commands are in [build.md](build.md#how-to-build).
 The app runs end to end, but it is not yet fully proven on physical hardware.
 The remaining work is mostly validation:
 
-- validate live registration and result submission against the management server
+- validate result submission against the management server (live registration
+  ran against the production server on 2026-08-05)
 - validate model and template downloads through WorkManager on a device,
   including large files, cancellation, process restart, and downloads that need
   a Hugging Face token
-- validate thermal and readiness behavior on physical devices (emulators do not
-  throttle realistically)
+- validate thermal and readiness gating on more physical devices: one Google
+  Pixel 10 Pro Fold passed the check
+  ([Track A validation](engine-port.md#6-readiness-simplification-track-a)), and
+  emulators do not throttle realistically
 - expand native ABI support if non-arm64 devices matter
 
 ## Useful Commands

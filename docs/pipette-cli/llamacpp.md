@@ -121,9 +121,8 @@ The full workflow (init, register, seed local benchmarks, sync, submit) is in
   - `no_cache = true` renders `--no-cache-prompt` and `--ctx-checkpoints 0`.
     It also renders `--parallel 1`, unless the cell sets a slot count above
     one. Left unset or `false`, `no_cache` adds nothing.
-  - Some stored `no_cache` rows come from client versions whose `no_cache`
-    rendered no `--parallel 1`. Those rows ran four slots, and their
-    `client_version` tells them apart.
+  - A client whose `client_version` is dated before 2026-10-17 rendered no
+    `--parallel 1` for `no_cache`. Its stored `no_cache` rows ran four slots.
   - Why: with the prompt cache off, llama-server still saves checkpoints of a
     hybrid or sliding-window model's state while it prefills. It reads one
     back only on a cache hit, so the checkpoints cost time and memory for no

@@ -92,7 +92,11 @@ studies did not have that criterion.
 - **Coolers:**
   - Neveika rev1: the 4 W Neveika 001 that
     [Device conditions](device-conditions.md#active-cooling) names as the
-    standard. The fleet setup is one on each side.
+    standard.
+  - Neveika rev2: a second revision of the Neveika pad. On 2026-10-14, the
+    fleet phones carried two coolers each, one on each side: two rev1, two
+    rev2, one of each, or a rev1 with a Black Shark. Phone 9 carried a rev2 on
+    each side on 2026-10-19 and 2026-10-22.
   - A 50 W cooler with a metal plate, in its 50 W mode, about 25 W from the
     charger.
   - A Black Shark cooler with a fan and a soft rubber pad. It has three modes:
@@ -145,7 +149,9 @@ thread (`ps -T -o S,PSR`). Every run also recorded each touch event with
 - **The skin limit.** The HAL gives `SKIN` the hot throttling thresholds 38, 40,
   42, 45 and 47 °C. Under a full load, `SKIN` reaches 38 °C in 80–100 s, and the
   governor then holds it there: the ceilings keep falling, to 2.2–2.7 GHz after
-  5 min.
+  5 min. A fleet analysis on 2026-10-13 saw the prime-core ceiling start to
+  fall when `SKIN` reached about 34 °C, below the first HAL threshold. This
+  study did not test that cap.
 - **The board.** `sys-therm-0` and `SKIN` follow the heat in the body of the
   phone. They change over minutes, and the die changes over seconds.
 - **The battery** is not a useful signal with a back cooler: the cooler sits on
@@ -488,10 +494,12 @@ memory throttling seen", not proof that there is none.
   was more humid, and AI mode formed condensation on the glass. The contacts
   moved and changed in number, which agrees with water on the glass. After the
   Black Shark moved to the back, the touch count was 0 for the full cycle.
-- **The fleet showed no touches.** On 2026-10-19, the fleet S26 Ultras read 0
-  touch events, and on 2026-10-22, phone 9 with a Neveika rev2 on each side
-  read 0. The touches in the fleet setup row of [Coolers](#coolers) come from
-  this handset's front Neveika rev1 and how it sat on the glass.
+- **Touches in the fleet.** On 2026-10-14, phones 4, 7 and 10 showed held
+  touches from a screen-side cooler. On 2026-10-19, the nine fleet S26 Ultras
+  that the check reached read 0 touch events. On 2026-10-21, phone 10 still
+  showed touches. On 2026-10-22, phone 9 with a Neveika rev2 on each side read
+  0. The touches in the fleet setup row of [Coolers](#coolers) come from this
+  handset's front Neveika rev1 and how it sat on the glass.
 - **The held-touch criterion.** In clients built on 2026-10-26 or later, the
   Android CLI gate holds a rep while it detects a held touch; the mechanism is in
   [End-to-end latency → Android](end-to-end-latency.md#android). On this phone
@@ -538,5 +546,6 @@ memory throttling seen", not proof that there is none.
   the back in quiet mode, on the same day, to find how much of that gain the
   front cooler gives. The front cooler gave touches in AI mode on a humid day.
 - **The fleet's front Neveika.** This handset's front Neveika rev1 registered as
-  a touch, and the fleet's did not on 2026-10-19. Check the fleet handsets again
-  before you compare fleet results with this note.
+  a touch. On 2026-10-21, phones 1–9 of the fleet showed no touches, and phone
+  10 did. Check the fleet handsets again before you compare fleet results with
+  this note.

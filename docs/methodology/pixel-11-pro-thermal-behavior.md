@@ -368,8 +368,8 @@ signs agree with water on the glass, not with a finger or a pad.
 
 The cause is condensation. The cooler holds the glass below the dew point of
 the room. Humid air in the gap between the plate and the screen then deposits
-water on the glass. The S26 Ultra handsets rest at about 32 °C and showed 0
-touch events at the same time.
+water on the glass. At the same time, the nine reachable S26 Ultra handsets of
+the fleet showed 0 touch events.
 
 In the second study, a soft pad on the glass registered as a touch without any
 water:

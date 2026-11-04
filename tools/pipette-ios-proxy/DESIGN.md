@@ -619,8 +619,8 @@ and also match `reporting a job failure`.
 
 Each release publishes the unsigned app archive `pipette-ios-<V>.xcarchive.zip`,
 its `pipette-ios-<V>.xcarchive.zip.sha256` (`sha256sum` output) and the
-manifest `pipette-ios-<V>.json` as GitHub release assets. The operator, or the
-lab's deployment, copies them into the bucket as
+manifest `pipette-ios-<V>.json` as GitHub release assets. The release workflow
+does not upload them to the bucket. The operator copies them into the bucket as
 `s3://<bucket>/<tag>/pipette-ios-<V>.xcarchive.zip` and so on. `V` is the app's
 own `client_version`. A release publishes one such build: the private-API
 build ([private-thermal-release-build.md](../../docs/pipette-ios/private-thermal-release-build.md)),

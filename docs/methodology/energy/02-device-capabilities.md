@@ -220,11 +220,13 @@ Consequences:
   split cancels. The proposal takes this route; see
   [03-proposal.md](03-proposal.md) §4.
 - The rack decides which route is cheap. The handsets share Anker Prime 250W
-  stations, four USB-C and two USB-A ports each, at two to four phones per
-  station. A smart plug on the wall side therefore cuts a group, not one phone,
-  and takes the group's other handsets off charge during a run. The stations
-  switch ports individually over Bluetooth; powerd's design adds an Anker
-  adapter for that switch, which the Linux host does not run yet
+  stations, four USB-C and two USB-A ports each. A cooler pad uses a port of its
+  own, so a station serves fewer phones than it has ports: in October 2026, each
+  Galaxy S26 Ultra used three ports, one for the phone and one for each pad. A
+  smart plug on the wall side therefore cuts a group, not one phone, and takes
+  the group's other handsets off charge during a run. The stations switch ports
+  individually over Bluetooth. powerd's Anker adapter reads and switches each
+  port. The powerd build on the Linux host on 2026-11-04 does not include it
   ([03-proposal.md](03-proposal.md) §4).
 - ODPM-style per-rail energy is unavailable on every phone in the farm. The
   Pixel 4 XL predates it and nothing else exposes it to the shell or to an app.
@@ -676,7 +678,8 @@ sources, poll gently, and define decode energy at a fixed depth and length.
   `SystemPowerIn` at the connector.
 - No inline meter was on Pi 1, so its rail sum has no connector
   bracket yet, and whether the meter passes the 5 V 5 A contract through is
-  untested. The KM003C on the Linux host monitors Pi 9 under powerd,
-  so the bracket is a matter of running the sweep on that Pi.
+  untested. The KM003C on the Linux host monitored Pi 9 under powerd until
+  2026-10-27, when a powerd experiment moved it to a phone. With the meter back
+  on a Pi, a sweep on that Pi gives the bracket.
 - Mac Studio 1 was used for the M3 Ultra; `sudo -n
   powermetrics` was not exercised there.

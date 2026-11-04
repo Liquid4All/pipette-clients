@@ -274,8 +274,9 @@ reads as an outage rather than as a zero.
 
 The catalog publishes one benchmark per MMSpec subset and draft length:
 `vl_spec_decode_mmspec_test_<subset>_k<k>`, the six subsets at `k` 7, 8 and 9.
-An entry that samples carries `_t<temperature>` in its id and pins no cut, so
-each engine samples under its own default `top_k`/`top_p`/`min_p`
+Every catalog entry is greedy. The id grammar gives a sampled entry a
+`_t<temperature>` suffix. Such an entry pins no cut, so each engine samples
+under its own default `top_k`/`top_p`/`min_p`
 (llama.cpp's are `40`/`0.95`/`0.05`); the acceptance rate moves with that
 distribution, so a sampled row compares only with rows from the same engine.
 

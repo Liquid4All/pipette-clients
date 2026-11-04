@@ -35,7 +35,7 @@ about 6 s.
 - **Handsets:** five iPhone 18 Pro (iPhone19,2), phone 1 to phone 5, paired to
   a Mac host. Jobs run through
   `pipette-ios-proxy`.
-- **Cooling:** each handset has an active cooler.
+- **Cooling:** each handset has one active cooler.
 - **Mode:** Single App Mode, which turns off the touch screen and the side
   buttons ([Accidental input](device-conditions.md#accidental-input)). Water on
   the glass therefore cannot deliver a touch, as it does on the

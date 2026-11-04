@@ -303,12 +303,16 @@ them off lowers `prompt_ms` by 28.5 ms (7.4%) on gemma-4-E2B and 3.5 ms (1.2%)
 on Qwen3.5-2B, each percentage of the reading with them on, and by less than
 run-to-run noise on LFM2.5-VL-450M, so `ttft` and `prefill_throughput` move
 with it, as does `end_to_end_latency` on rows that send `total_time_ms`.
-`predicted_ms` and the dense InternVL3.5-2B do not move. The recorded memory
-drops by the checkpoints that the server does not hold, about 19 MiB each on
-Qwen3.5-2B.
+`predicted_ms` and the dense InternVL3.5-2B do not move. A timing row records
+the server's peak memory over the whole run. On an `end_to_end_latency` row,
+Qwen3.5-2B records 38 MiB less with the checkpoints off: two checkpoints of
+19.3 MiB each. The `vl_max_memory` peak is a different reading, and the same
+flags move it by different amounts
+([vl-max-memory.md](vl-max-memory.md#server-flags)).
 
-One slot instead of the default four lowers the recorded memory by about 60 MiB
-on Qwen3.5-2B and 9 MiB on InternVL3.5-2B and moves the timings by at most
+One slot instead of the default four lowers the memory that the timing rows
+record by about 60 MiB on Qwen3.5-2B and 9 MiB on InternVL3.5-2B and moves
+the timings by at most
 3 ms; the one slower reading is gemma-4-E2B `prompt_ms`, 1.2 ms (0.3%). How
 to tell rows that ran four slots under `no_cache` is in
 [llamacpp.md](../pipette-cli/llamacpp.md#execution-notes) (No cache).
@@ -346,9 +350,11 @@ To compare `vl_throughput` results:
 - Read `end_to_end_latency` with its client's window in mind (see
   [End-to-end latency](#end-to-end-latency)), and do not compare it with an
   earlier row's `e2e_latency`, which sums its prefill and decode times.
-- Desktop rows from builds that did not scale `predicted_ms` read
-  `decode_throughput` high (1.6% at 64 decode tokens, 6.7% at 16); compare
-  desktop rows only on one side of that change, by `client_version`.
+- Desktop rows from a `client_version` dated 2026-10-14 or earlier, and some
+  dated 2026-10-15, do not scale `predicted_ms`. Rows from every `2026.08.1`
+  public release do not scale it either. These rows read `decode_throughput`
+  high (1.6% at 64 decode tokens, 6.7% at 16). Compare desktop rows only on one
+  side of that change.
 - On the MLX `0.7.1+lfm2-vl-speculative` row LFM2-VL's images precede the text,
   so its `prompt_tokens` can differ by a token from `0.7.4` and `llama-server`.
 

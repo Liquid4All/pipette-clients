@@ -324,10 +324,12 @@ part of the benchmark condition.
 Some stored rows come from client versions that timed decode another way.
 They do not compare with rows that the client times on its stream clock:
 
-- OpenVINO and ONNX GenAI rows that a per-process driver timed;
-- MLX rows read from the in-process `generation_tps` sidecar;
-- MLX rows whose interval ran to `[DONE]`. These carry that tail and read
-  slightly high.
+- OpenVINO and ONNX GenAI rows whose `client_version` is dated before
+  2026-09-25. A per-process driver timed them.
+- MLX rows dated before 2026-09-19. They read the in-process `generation_tps`
+  sidecar.
+- MLX rows dated 2026-09-19, and some MLX rows dated 2026-09-20. Their interval
+  ran to `[DONE]`, so they carry that tail and read slightly high.
 
 The `client_version` of a row tells the methods apart.
 

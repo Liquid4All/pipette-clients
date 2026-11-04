@@ -91,9 +91,11 @@ scaling relationship, not a single headline number. Some families carry a single
 point anyway, which is a gap in coverage rather than an exception to the policy:
 a newly onboarded model enters at whatever quant its benchmark run measured, and
 some repos offer nothing else worth cataloging. The published results are the
-inventory of which. The mobile apps offer a GGUF preset row only when the results
-dashboard publishes a reading for it on that handset, so a family shows one
-quant there exactly when one quant was published for that device. Because
+inventory of which. Each mobile app offers a GGUF preset row only when the results
+dashboard publishes a reading for it on the app's reference handset: the
+Galaxy S26 Ultra for Android and the iPhone 17 Pro for iOS. So a family shows
+one quant there exactly when the dashboard publishes one quant for that
+handset. Because
 quantization is part of the recorded selection, each point in that sweep stays
 reproducible, and a comparison between two models is
 only fair at the same quantization.

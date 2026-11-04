@@ -337,8 +337,9 @@ argv carries them whole.
 
 Pipette runs these entries on pipette's ASR build of llama.cpp at `362d8dc3e`
 (which contains its beam search, below), except LFM3, which needs a llama.cpp
-build with its `lfm3a` encoder. The ASR build carries Voxtral, Qwen2.5-Omni and MiniCPM-o audio fixes
-that no ggml-org release has, and `minicpmoa` exists only there. A stock
+build with the `lfm3a` encoder, such as ggml-org release b11960 or later. The
+ASR build carries Voxtral, Qwen2.5-Omni and MiniCPM-o audio fixes that no
+ggml-org release has, and `minicpmoa` exists only there. A stock
 ggml-org release runs these entries, but lacks those fixes, so its numbers are
 not comparable with the ASR build's, and it cannot run `minicpm_o` at all.
 

@@ -658,8 +658,8 @@ nobody signs or installs by hand.
 
 A release publishes the archive, its manifest, and a `.sha256` beside each as
 GitHub release assets ([Releasing](../../CONTRIBUTING.md#releasing)). The proxy
-reads them from a releases bucket, `s3://<bucket>/<tag>/`, that the device
-lab's deployment fills from the release. `ios/release-manifest.py` writes
+reads them from a releases bucket, `s3://<bucket>/<tag>/`, that the operator
+fills from the release. `ios/release-manifest.py` writes
 the manifest from what the archive compiled, so the proxy can match a job's
 runtime to a build before it downloads anything. A plan pins a build with
 `client_versions`

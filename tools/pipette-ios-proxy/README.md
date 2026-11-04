@@ -157,10 +157,10 @@ prune").
 
 Each release publishes the unsigned app archive
 `pipette-ios-<version>.xcarchive.zip`, its `.sha256`, and the manifest
-`pipette-ios-<version>.json` as GitHub release assets. The operator, or the
-lab's deployment, copies them into the releases bucket under `<tag>/`. The
-proxy reads that bucket with its own key pair, not through the management
-server. The `builds` verbs only list, pull and prune; `run` installs from the
+`pipette-ios-<version>.json` as GitHub release assets. The release workflow
+does not upload them to the bucket. The operator copies them into the releases
+bucket under `<tag>/`. The proxy reads that bucket with its own key pair, not
+through the management server. The `builds` verbs only list, pull and prune; `run` installs from the
 bucket in version mode (next section).
 [DESIGN section 8](DESIGN.md#8-app-builds-from-the-releases-bucket) has the
 bucket layout, the manifest, and the listing, pull and request rules.

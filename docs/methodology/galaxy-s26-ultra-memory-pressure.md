@@ -296,8 +296,9 @@ new maximum, in ms from the probe's start.
 The two effects read differently:
 
 - **A first-load swap.** `before_drop` shows about 2 GiB of `mem_free_bytes`
-  with most of RAM in `cached_bytes`; a log from a build that kept the cache
-  has no `before_drop`, and `before_cell` shows it. The cell's first
+  with most of RAM in `cached_bytes`. Clients whose `client_version` is dated
+  2026-10-21 or earlier, and some dated 2026-10-22, kept the cache; such a
+  build logs no `before_drop` line, and `before_cell` shows it. The cell's first
   `memory probe stopped` line carries a `peak_swap_ms` of a few thousand, and
   the later ones none. Through the CLI, a cell's first process logged a
   first-load swap with `peak_swap_ms=3256`: phone 1, gemma-4-E2B Q4_0,

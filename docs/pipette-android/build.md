@@ -415,8 +415,9 @@ for Android 15+ 16 KB pages.
 **The armv9 variants ship, and Pipette reports what they do, including wrong
 output.** On an armv9 device the loader may select an SVE-based backend, but the SVE configuration
 llama.cpp assumes isn't guaranteed across mobile armv9 SoCs: SVE2 is mandatory in
-the ARMv9 spec, yet vendors diverge; Qualcomm omits it entirely, and vector
-length / feature support varies elsewhere. When the selected backend doesn't match
+the ARMv9 spec, yet vendors diverge: SVE is not usable on the Snapdragon 8 Gen 3
+([ggml-org/llama.cpp#10906](https://github.com/ggml-org/llama.cpp/pull/10906)),
+and vector length / feature support varies elsewhere. When the selected backend doesn't match
 the silicon, the symptom depends on the workload: some hit an outright crash (the
 `svcntb() == QK8_0` abort,
 [ggml-org/llama.cpp#8109](https://github.com/ggml-org/llama.cpp/issues/8109)),

@@ -20,7 +20,10 @@ instead (see
 [private-API and public builds](../methodology/peak-memory-ios.md#private-api-and-public-builds)).
 
 The fixes came in PR #1517, merged 2026-09-28. Readings from builds without it are not
-comparable with later ones; a `client_version` dated before `2026.09.28` predates it.
+comparable with later ones. A `client_version` dated 2026-09-25 or earlier lacks the
+fixes, and one dated 2026-09-29 or later has them. Every `2026.08.1` public release
+lacks them. A development build names itself after its release train
+(`2026.08.1-dev-N-g<sha>`), so its `client_version` does not show whether it has them.
 Builds with the fixes also carry two single-cell fixes, which correct the reading of
 a cell measured alone, not carry-over:
 

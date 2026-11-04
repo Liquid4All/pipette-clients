@@ -50,6 +50,7 @@ hardware is.
 - **Signals:** the die temperature is the maximum over the host's `PMU tdie*`
   sensors (42 on these machines). The thermal-pressure level is
   `OSThermalPressureLevel`: 0 `nominal`, 1 `moderate`, 2 `heavy`.
+- **Dates:** all values are from on or before 2026-08-02.
 
 ## The failure with the level alone
 

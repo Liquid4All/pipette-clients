@@ -345,9 +345,9 @@ sample cut in its reasoning on that text. Content
 written before the reasoning stays in front of it, and reasoning streamed
 after the answer began joins the rest before the `</think>`. A reply with no
 reasoning is recorded as its content, unchanged, and an SGLang row keeps the
-content alone. Some stored vLLM rows come from client versions that kept the
-content alone. In those rows a sample cut in its reasoning reads as an empty
-completion (see [eval checkpoint](../pipette-cli/eval-checkpoint.md)).
+content alone. Stored vLLM rows whose `client_version` is dated 2026-10-14 or
+earlier, and some dated 2026-10-15, kept the content alone. In those rows a
+sample cut in its reasoning reads as an empty completion (see [eval checkpoint](../pipette-cli/eval-checkpoint.md)).
 
 MCQ samples first try vLLM's top-level `guided_choice` field. If the server
 rejects that extra field, the runner asks for one token with `logprobs` and

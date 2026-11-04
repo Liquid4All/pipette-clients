@@ -476,8 +476,11 @@ To compare `max_memory_usage` results:
   other. Without a warm-up, on an empty driver cache, llama.cpp rows read up to
   about 100 MiB higher, and MLX rows read from about 180 MiB lower to 55 MiB
   higher ([macOS](peak-memory-macos.md#mlx)). The command preview is the same
-  either way, so only the row's `client_version` tells them apart. CPU rows
-  read the same either way.
+  either way, so only the row's `client_version` tells them apart. On
+  llama.cpp, rows whose `client_version` is dated 2026-10-03 or earlier, and
+  some dated 2026-10-04, ran no warm-up. On MLX, rows dated 2026-10-04 or
+  earlier, and some dated 2026-10-05, ran no warm-up. CPU rows read the same
+  either way.
 - Compare torch-oai rows of one probe, and a torch-oai `max_host_bytes` with
   care against another engine's: it is a cgroup's own memory, not a `VmHWM`. A
   row whose command preview reads `memprobe: cgroup memory.peak` recorded the

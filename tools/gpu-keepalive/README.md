@@ -2,7 +2,7 @@
 
 A Windows service that periodically dispatches **one GPU thread to increment a four-byte buffer**, using Direct3D 11 on an explicitly selected hardware adapter. No model, inference server, desktop window, or third-party runtime is needed to run it.
 
-This is a configurable diagnostic/workaround for GPU idle behavior. Whether it preserves another process's GPU allocations must be measured on the target driver; submitting GPU work is not a residency lock. The deployment target is the GMKtec EVO-X2 fleet (Ryzen AI MAX+ 395 / Radeon 8060S); no other hardware has been tested.
+This is a configurable diagnostic/workaround for GPU idle behavior. Whether it preserves another process's GPU allocations must be measured on the target driver; submitting GPU work is not a residency lock. The deployment target is the GMKtec EVO-X2 fleet (Ryzen AI MAX+ 395 / Radeon 8060S). It also runs on Ryzen AI 9 HX 370 machines (Radeon 890M), where its effect is unmeasured.
 
 One binary, `gpu-keepalive.exe`, is three things: the CLI you type, the service that Windows starts at boot (`gpu-keepalive service`, which is not for interactive use), and a foreground pulse for experiments (`gpu-keepalive run`).
 

@@ -337,11 +337,11 @@ non-finite or non-positive, the backend fails, a request times out, or the
 readiness gate fails.
 
 Some stored rows come from client versions that timed prefill another way:
-OpenVINO and ONNX GenAI rows that a per-process driver timed over seed token
-ids, and MLX rows read from the in-process `prompt_tps` sidecar. These rows
-carry no HTTP or server-side tokenization cost, so they do not compare with
-rows that the client times on its stream clock. The `client_version` of a row
-tells the methods apart.
+OpenVINO and ONNX GenAI rows whose `client_version` is dated before
+2026-09-25, which a per-process driver timed over seed token ids, and MLX rows
+dated before 2026-09-19, read from the in-process `prompt_tps` sidecar. These
+rows carry no HTTP or server-side tokenization cost, so they do not compare
+with rows that the client times on its stream clock.
 
 To compare `prefill_throughput` results:
 

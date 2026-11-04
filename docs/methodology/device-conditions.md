@@ -126,9 +126,11 @@ gain.
 A **cooler** is one piezo-electric pad that clamps to the phone. A pad carries
 one or two **fans**, so the fan and cooler counts above differ. The sweep mixes
 the single-fan Black Shark FunCooler 5 NEO with the two-fan Neveika 001. We
-standardize on the two-fan **Neveika 001** (4 W over USB-A or USB-C; only one
-two-fan pad fits per side). Both pads take power from the same Anker A2345 Prime
-250 W charging station that powers the phone. The standard rig (two Neveika
+standardize on the two-fan **Neveika 001** (only one two-fan pad fits per
+side). Each pad has its own USB-C port on an Anker A2345 Prime 250 W charging
+station, and the phone has a port of its own. On 2026-10-15, some pads drew
+11–13 W, more than the station's USB-A ports supply, so the pads use the USB-C
+ports. The standard rig (two Neveika
 pads: two coolers, four fans) was not a row in the sweep. It sits between the
 two-cooler/three-fan and three-cooler/four-fan points, which both land at
 17–18 s with a standard deviation under 0.5 s.
@@ -138,10 +140,8 @@ or from a soft pad pressed on the glass. The Android CLI gate holds a rep while
 it detects a held touch; see
 [Android](end-to-end-latency.md#android) in the readiness criteria.
 
-The same two-cooler setup is recommended for **iPhone**. No cooler sweep exists
-for iPhone: the recommendation assumes that mid-rep throttling on a fanless phone
-under sustained load does not depend on the system on a chip (SoC). The iPhone
-18 Pro handsets each run with an active cooler
+No cooler sweep exists for **iPhone**. In the iPhone 18 Pro study (2026-10-16
+to 2026-10-19), each handset ran with one active cooler
 ([iPhone 18 Pro thermal behavior](iphone-18-pro-thermal-behavior.md)).
 
 ### Cooling on the MacBook Neo
@@ -151,7 +151,7 @@ modifications:
 
 - **A passive thermal pad inside the case**, which couples the CPU and GPU to
   the chassis. It is permanent, and it is by far the larger change. It gives the
-  SoC a heat sink that the product does not have.
+  system on a chip (SoC) a heat sink that the product does not have.
 - **One active cooling pad** under the case.
 
 **Neither is stock, so no published macOS number from this host describes a
@@ -205,10 +205,11 @@ therefore Samsung One UI features, under Samsung's names.
 **This list applies to the Galaxy S26 Ultra alone.** A Pixel 4 organizes its
 Settings app differently, and it lacks some of the features below. The cause may
 be the vendor, the Android version, or both, and we have not established which.
-Paths also move between One UI versions. This article gives no settings list for
-the Pixel 11 Pro handsets in the fleet. For another phone, use the list as a
-description of the behavior to look for, then find that behavior under the
-phone's own names.
+Paths also move between One UI versions. The Pixel 11 Pro handsets in the fleet
+also run under a settings list. The rig writes it and re-checks it over `adb`,
+like the list below, but this article does not reproduce it. For another phone,
+use the list as a description of the behavior to look for, then find that
+behavior under the phone's own names.
 
 The rig writes this state over `adb` and re-checks it, so a handset that drifts
 is reported rather than measured on. Six items carry no settings key, and a
@@ -881,8 +882,8 @@ The macOS gate's behavior on these hosts is characterized in
 | Platform / board | Representative hardware | Power | Cooling |
 | --- | --- | --- | --- |
 | Android phone | Galaxy S26 Ultra ×10; Pixel 11 Pro ×10; Galaxy S25 Ultra (Snapdragon 8 Elite) | mains | two piezo coolers, one per side |
-| iPhone (iOS) | iPhone 17 Pro ×10; iPhone 18 Pro ×5; iPhone 16 Pro Max; the [private-API build](../pipette-ios/private-thermal-release-build.md) | mains | iPhone 18 Pro: one active cooler per handset; two piezo coolers, one per side, recommended |
-| macOS | Mac Studio (M3 Ultra) ×4; MacBook Pro (M4 Max, M5 Max ×3); MacBook Neo (A18 Pro) | stock AC | Mac Studio and MacBook Pro stock; **Neo is thermally modified: passive pad inside the case plus one active cooling pad under it** |
+| iPhone (iOS) | iPhone 17 Pro ×10; iPhone 18 Pro ×5; iPhone 16 Pro Max; the [private-API build](../pipette-ios/private-thermal-release-build.md) | mains | iPhone 18 Pro: one active cooler per handset (2026-10-16 to 2026-10-19 study) |
+| macOS | Mac Studio (M3 Ultra) ×4; MacBook Pro (M5 Max) ×3; MacBook Neo (A18 Pro) | stock AC | Mac Studio and MacBook Pro stock; **Neo is thermally modified: passive pad inside the case plus one active cooling pad under it** |
 | Linux host (generic) | x86 / ARM benchmark host | stock AC | stock |
 | Raspberry Pi 5 (BCM2712) | Raspberry Pi 5 ×10 | sized PSU | stock |
 | Jetson Orin (Tegra234) | NVIDIA Jetson AGX Orin | stock AC | stock |
