@@ -32,7 +32,7 @@ files.
 | Bitstream Charter fonts | `android/Pipette/app/src/main/res/font/` | Bitstream-Charter | Used by the Android app UI. |
 | AOSP vector icons | `android/Pipette/app/src/main/res/drawable/`: `ic_arrow_back`, `ic_check`, `ic_chevron_left`, `ic_chevron_right`, `ic_close`, `ic_download`, `ic_eye`, `ic_eye_off`, `ic_more`, `ic_pause`, `ic_play`, `ic_plus`, `ic_pocket`, `ic_retry`, `ic_search`, `ic_signout`, `ic_upload`, `ic_warning` (`.xml`) | Apache-2.0 | Each of these XML files keeps its AOSP license header. |
 | Material Symbols and Material Icons | `android/Pipette/app/src/main/res/drawable/`: `ic_tab_jobs` (Material Symbols "assignment"), `ic_tab_models` ("deployed_code"), `ic_tab_settings` ("settings", rounded), `ic_tab_setup` (Material Icons "account_circle") (`.xml`) | Apache-2.0 | From Google's [material-design-icons](https://github.com/google/material-design-icons). The files carry no license header. |
-| Product/model provider logos | Android/iOS asset catalogs | Trademark/provenance review needed | Third-party marks are not licensed by this repository license. |
+| Model provider logos | `ios/Pipette/Pipette/Assets.xcassets/brand-*.imageset/`, `android/Pipette/app/src/main/res/drawable*/brand_*` | Trademarks of their owners | The Google (Gemma), IBM (Granite), Meta, Mistral AI and Qwen logos. The apps show a logo only to identify the provider of a model. The repository license does not cover these marks. The `brand_liquid` and `brand-liquid` logos are Liquid AI's own. |
 
 ## Generated Dependency Attributions
 
