@@ -255,7 +255,7 @@ llama.cpp release build tag. With one 16-slot server on 128 questions:
 | --- | --- | --- | --- |
 | `LLAMA_ARG_BACKEND_SAMPLING=1` | +11% | +12% | Samples on the GPU. Experimental: +3% at temperature 0.6 on Qwen2.5-1.5B, and b10216 aborted with it at 64 slots (`GGML_ASSERT(obj_new)`) |
 | `LLAMA_ARG_CTX_CHECKPOINTS=0` | +1.5% | +2.5% | Another H100 sweep measured +8.5 to 10.7% on gemma-4-12b-it at 16 slots, and no change on Nanbeige4.2-3B |
-| `GGML_CUDA_GRAPH_OPT=1` | +5% | none | Takes effect only with one visible GPU |
+| `GGML_CUDA_GRAPH_OPT=1` | +5% | none | Measured with one visible GPU per server |
 
 On a host with more than one GPU, give each worker, or each cell, one GPU with
 `CUDA_VISIBLE_DEVICES`. A `llama-server` that sees two GPUs splits the model's

@@ -45,10 +45,10 @@ or `bench/` (collides with the benchmark noun).
 | `pipette-workspace`   | Generic workspace lifecycle (init, open, manifest) |
 | `pipette-ops`         | The engine-side code that every engine shares and the plan-types contract does not define; see [`pipette-ops`](#pipette-ops) below |
 | `pipette-vl-spec-decode-corpus` | The packed corpus a `vl_spec_decode` job downloads through its `RunContext`, and its traversal: verify, unpack, walk `samples.jsonl` in file order, and send each turn (`turn`). Its own crate rather than a `pipette-ops` module because it needs `tar` (and through it `rustix`/`xattr`), `reqwest` and `base64`, and the APK links `pipette-ops` for a benchmark it cannot run; it depends on `pipette-ops`, never the reverse. The Swift counterpart is `ios/Pipette/Pipette/Benchmarks/VlSpecDecodeCorpus.swift` |
-| `pipette-completions` | The text-completion endpoint (`/completions`) that vLLM, SGLang, `mlx_lm.server`, OVMS (`/v3/completions`) and pipette's own Python servers answer: a request sent whole or streamed, read into a `pipette_ops::generation::Generation`. Every stream chunk with a choice is a token, on every server; the request body stays each engine's. Also `llama_server`, llama-server's timed chat dialect (`/health`, `/tokenize`, the unstreamed `/v1/chat/completions` with server-clock `timings`, and the `timings.image_n` image-token count that TensorRT Edge-LLM's server adds), which `pipette-llamacpp` and `pipette-trt-edgellm` share |
+| `pipette-completions` | The text-completion endpoint (`/completions`) that vLLM, SGLang, `mlx_lm.server`, OVMS (`/v3/completions`) and pipette's own Python servers answer: a request sent whole or streamed, read into a `pipette_ops::generation::Generation`. Every stream chunk with a choice is a token, on every server; the request body stays each engine's. Also `llama_server`, llama-server's timed chat dialect (`/health`, `/tokenize`, the unstreamed `/v1/chat/completions` with server-clock `timings`), which `pipette-llamacpp` uses |
 | `pipette-device`      | Host identity, power, and thermal probes (`DeviceInfo`, `detect_thermal`); the thermal shapes they fill live in `pipette-plan-types` |
 | `pipette-artifacts`   | Model / runtime artifact cache: storage keys, manifests, atomic stage/publish, fetch + install |
-| `pipette-artifacts-catalog` | What the artifact cache can install: the bundled runtime catalogs (the torch-oai uv presets for vLLM and SGLang, the MLX, OpenVINO and ONNX GenAI presets, the OVMS release pins and unpacked layout, the TensorRT Edge-LLM archive layout) and the live llama.cpp release listing. The CLI lists them and resolves `--runtime` URIs through them; `pipette-artifacts` checks an OVMS or TensorRT Edge-LLM download against its layout (and OVMS's pin), and `pipette-ovms` and `pipette-trt-edgellm` launch from the same layout |
+| `pipette-artifacts-catalog` | What the artifact cache can install: the bundled runtime catalogs (the torch-oai uv presets for vLLM and SGLang, the MLX, OpenVINO and ONNX GenAI presets, and the OVMS release pins and unpacked layout) and the live llama.cpp release listing. The CLI lists them and resolves `--runtime` URIs through them; `pipette-artifacts` checks an OVMS download against its layout and pin, and `pipette-ovms` launches from the same layout |
 | `pipette-readiness`   | Pre-benchmark readiness wait (`wait_until_ready`), one probe per platform. A probe that shells out (PowerShell, `dumpsys`, `vcgencmd`) runs it through `pipette-subprocess`'s `output_within`, killed at 30 s |
 | `pipette-wait`        | The caller's side of any long wait: `WaitCallbacks` (status / cancel / sleep, generic over the status type) and the cancellable sleep. Dependency-free; the readiness gate and the worker's reindex wait both report through it |
 | `pipette-venv`        | uv-provisioned Python venvs for vLLM, SGLang, desktop MLX, OpenVINO, and ONNX GenAI |
@@ -68,7 +68,6 @@ or `bench/` (collides with the benchmark noun).
 | `pipette-openvino`    | OpenVINO GenAI runner for IR models on Intel CPU / GPU / NPU |
 | `pipette-onnx-genai` | ONNX Runtime GenAI runner with an install-time execution provider |
 | `pipette-ovms`        | OpenVINO Model Server runner: a server launched per cell on an IR directory |
-| `pipette-trt-edgellm` | TensorRT Edge-LLM runner for a Jetson: engines built from a GGUF vision pair into the compile cache before the measured windows, then the VL cells over llama-server's dialect |
 | `pipette-torch-oai`   | OpenAI-compatible runner (library) for PyTorch/HuggingFace models served by Docker or uv runtimes (vLLM, SGLang) |
 | `pipette-android`     | The Android app's native core: the llama.cpp engine binding and the measurement kernel it shares with `android/native/`, compiled into the non-default `rustEngine` flavor's `.so`. Not linked by any host CLI |
 
@@ -121,7 +120,6 @@ graph TD
         openvino["pipette-openvino"]
         onnx["pipette-onnx-genai"]
         ovms["pipette-ovms"]
-        trt["pipette-trt-edgellm"]
         torch["pipette-torch-oai"]
     end
 
@@ -144,7 +142,7 @@ graph TD
     end
 
     pipette --> artifacts & catalog & ops & workspace & mgmt & device
-    pipette --> llamacpp & mlx & coreai & openvino & onnx & ovms & trt & torch
+    pipette --> llamacpp & mlx & coreai & openvino & onnx & ovms & torch
     pipette --> readiness & wait & programs & subprocess
     llamacpp --> ops & corpus & completions & subprocess
     mlx --> ops & corpus & completions & venv & subprocess
@@ -152,7 +150,6 @@ graph TD
     openvino --> ops & completions & venv & subprocess
     onnx --> ops & completions & venv & subprocess
     ovms --> catalog & ops & completions & subprocess
-    trt --> catalog & ops & completions & subprocess
     torch --> ops & corpus & completions & venv & programs & subprocess
     ctl --> readiness & wait & workspace & mgmt & types & subprocess & ssh
     readiness --> wait & device & subprocess

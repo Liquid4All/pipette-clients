@@ -259,26 +259,6 @@ Runtime flags that shape the server (context, batching, KV cache, mmap,
 threads, accelerator placement) are part of the benchmark condition and share
 the reserved-flag policy of the other `llama-server` benchmarks.
 
-**TensorRT Edge-LLM** (`trt_edgellm`, a Jetson) runs the `llama-server` path
-above request for request, through the same client
-([`pipette_completions::llama_server`](../../crates/pipette-completions/src/llama_server.rs)):
-the same filler, gray PNGs and chat body, the server's `timings` and the same
-reduction. It differs in four ways:
-
-- The engines are built first, by the server's `--build-only` into the
-  runtime's compile cache, before the server starts and outside the memory
-  observation. A warm cache makes that a check of a few seconds
-  ([TensorRT Edge-LLM](../pipette-cli/trt-edgellm.md)).
-- `image_tokens` is the server's own count, `timings.image_n`, which applies
-  the vision engine's resize bounds as the archive's `llama-mtmd-cli` shim
-  does, so no calibration helper runs. Each rep's count is checked like
-  `prompt_tokens`.
-- `prompt_ms` covers the on-GPU resize and normalization of the images, which
-  `llama-server` does on the CPU before its timer starts: about 1.3 ms on two
-  256x256 images and 7 ms on three 512x512 ones on an AGX Orin.
-- The row's `client_extras.trt_edgellm` is the engine stack the server's
-  `/props` reports (Edge-LLM commit, TensorRT, CUDA, L4T, SoC).
-
 **MLX (macOS)** drives `mlx_vlm.server`, the runtime's own OpenAI-compatible
 server, from a runtime row that ships `mlx-vlm` (for example `0.7.4`), with
 its prefix cache off (`APC_ENABLED=0`). It

@@ -12,7 +12,8 @@ Runs OpenAI-compatible servers as either:
 Shared operator flow and quickstart: [usage.md](usage.md). URI and per-cell
 flag notation: [models-and-runtimes.md](models-and-runtimes.md).
 
-**Host:** Linux. GPU depends on flavor (`nvidia_gpu`, `amd_gpu`, `cpu`). NVIDIA
+**Host:** Linux, the only host it has run on. The CLI does not refuse other
+hosts. GPU depends on flavor (`nvidia_gpu`, `amd_gpu`, `cpu`). NVIDIA
 Docker needs `nvidia-container-toolkit`. Tested primarily with
 `vllm/vllm-openai`. The `docker` and `uv` a run spawns are located when the
 command starts; see

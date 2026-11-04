@@ -37,8 +37,6 @@ Each path reads it from its own engine:
   llama-server. A count the measured `prompt_tokens` cannot hold fails the cell
   instead: the helper runs the server's own processor, so the images did not
   reach the server's prompt.
-- **TensorRT Edge-LLM: the server's own count**, `timings.image_n`, which
-  applies the vision engine's resize bounds. No calibration helper runs.
 
 `prompt_tokens` always carries the full prompt cost, markers included, so no cost
 is lost; `image_tokens` is the image-embedding share of it.

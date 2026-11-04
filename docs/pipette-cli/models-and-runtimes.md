@@ -4,8 +4,7 @@
 `--runtime-flags`, `--model-flags`, and `--benchmark-flags`. Operator workflow is
 [usage.md](usage.md); backend specifics are [llama.cpp](llamacpp.md) ·
 [MLX](mlx.md) · [Core AI](coreai.md) · [torch-oai](torch-oai.md) ·
-[OpenVINO](openvino.md) · [OVMS](../ovms.md) · [ONNX GenAI](onnx-genai.md) ·
-[TensorRT Edge-LLM](trt-edgellm.md).
+[OpenVINO](openvino.md) · [OVMS](../ovms.md) · [ONNX GenAI](onnx-genai.md).
 
 Every `pipette` run is one **cell**: a benchmark, a runtime, and a model. This
 page is how you spell the runtime and the model, and how you tune them.
@@ -91,7 +90,7 @@ against the same source as the weights:
 | Key | Required | Meaning |
 |-----|----------|---------|
 | `repo`, `model`, `mmproj`, `rev`, `model_sha256`, `mmproj_sha256` | as `gguf-vision` | |
-| `draft` | no | the drafter's own gguf. Omit it when the drafter is merged into `model`, as DSpark's release ships it |
+| `draft` | no | the drafter's own GGUF. Omit it only when the drafter is merged into `model`. DSpark's release ships the drafter on its own (`LiquidAI/LFM2.5-VL-3B-DSpark-GGUF`), paired with the target and projector from `LiquidAI/LFM2.5-VL-3B-GGUF` |
 | `draft_sha256` | no | digest for that file |
 
 The drafter is part of the *model's* identity, not a benchmark parameter: two
@@ -159,7 +158,7 @@ assembled yourself.
 ```bash
 --model 'gguf-text://repo=unsloth/gemma-3-270m-it-GGUF&path=gemma-3-270m-it-Q4_K_M.gguf'
 --model 'gguf-vision://repo=ggml-org/gemma-3-4b-it-GGUF&model=gemma-3-4b-it-Q4_K_M.gguf&mmproj=mmproj-model-f16.gguf'
---model 'gguf-vision-speculative://repo=example-org/LFM2.5-VL-3B-DSpark-GGUF&model=merged-f16.gguf&mmproj=mmproj-f16.gguf'
+--model 'gguf-vision-speculative://model=https://huggingface.co/LiquidAI/LFM2.5-VL-3B-GGUF/resolve/main/LFM2.5-VL-3B-F16.gguf&mmproj=https://huggingface.co/LiquidAI/LFM2.5-VL-3B-GGUF/resolve/main/mmproj-LFM2.5-VL-3B-F16.gguf&draft=https://huggingface.co/LiquidAI/LFM2.5-VL-3B-DSpark-GGUF/resolve/main/LFM2.5-VL-3B-DSpark-F16.gguf'
 --model 'mlx://repo=mlx-community/Qwen3.5-0.8B-4bit'
 --model 'mlx-speculative://repo=LiquidAI/LFM2.5-VL-3B-MLX-bf16&draft_repo=LiquidAI/LFM2.5-VL-3B-DSpark'
 --model 'torch://repo=Qwen/Qwen2.5-0.5B-Instruct'
@@ -181,7 +180,6 @@ assembled yourself.
 | `uv-openvino` | `version` | one venv serves cpu/gpu/npu, since the device is per cell |
 | `uv-onnx-genai` | `version`, `ep` | one venv per execution provider, since each provider is a separate wheel |
 | `ovms` | `version` (+ optional `repo`) **xor** `url`; `flavor` | an OpenVINO Model Server release archive per OS; `repo` defaults to `github.com/openvinotoolkit/model_server`. The device is per cell, as for `uv-openvino` |
-| `trt-edgellm` | `url`; `flavor` | a TensorRT Edge-LLM server archive for a Jetson ([TensorRT Edge-LLM](trt-edgellm.md)); upstream publishes none, so there is no catalog and no `version` |
 
 ```bash
 --runtime 'llamacpp-cli-stock-tools://version=b9305&flavor=macos-arm64'
@@ -195,7 +193,6 @@ assembled yourself.
 --runtime 'uv-openvino://version=2026.4.1'
 --runtime 'uv-onnx-genai://version=0.17.1&ep=cpu'
 --runtime 'ovms://version=v2026.4.1&flavor=windows-x64'
---runtime 'trt-edgellm://url=https://example.com/trt-edgellm-server-0.11.0-jetson-orin-cuda-13-4e3f9d23f052.tar.gz&flavor=jetson-orin-cuda-13'
 ```
 
 `flavor` selects the upstream asset, so a wrong flavor installs a binary that
@@ -230,7 +227,7 @@ For a **model**, `type` and `source` are both required (except
 `apple_foundation_text`, which has neither a source nor a URI). A `core_ai` model is a
 directory, with the same source fields as an `mlx` model. **Runtimes** vary:
 
-- `llamacpp_cli_stock_tools`, `ovms`, `trt_edgellm`, `mlx_macos_pipette` and
+- `llamacpp_cli_stock_tools`, `ovms`, `mlx_macos_pipette` and
   the `uv_*` runtimes carry a `source`.
 - `docker_vllm` and `docker_sglang` have no `source` field, because an image
   name and tag are the whole coordinate.
@@ -317,7 +314,7 @@ Each fetching arm has a vault twin. All four are JSON-only (see
 |------------|-----------|-------|-------|
 | `url` | `vault_url` | `gguf_text`, `gguf_vision`, `gguf_vision_speculative` | one gguf per path |
 | `huggingface` | `vault_archive` | `mlx`, `core_ai`, `torch`, `openvino`, `onnx_genai`, and either half of the speculative pairs | one tar, tar.gz or zip whose root is the model directory |
-| `remote_archive` | `vault_remote_archive` | `llamacpp_cli_stock_tools`, `ovms`, `trt_edgellm` | the release archive |
+| `remote_archive` | `vault_remote_archive` | `llamacpp_cli_stock_tools`, `ovms` | the release archive |
 | `pip_requirements_text` | `vault_wheelhouse` | every `uv_*` runtime and `mlx_macos_pipette` | an archive of wheels, installed with `--find-links` ahead of the plan's `install_flags` |
 
 Every vault arm carries `url`, exactly `/vault/resources/{resource_id}/content`

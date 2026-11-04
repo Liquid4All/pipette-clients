@@ -34,9 +34,9 @@ fixed.
 
 ## Runtime Backends
 
-The `pipette` CLI drives eight runtime backends: llama.cpp, MLX, Core AI,
-torch-oai (vLLM or SGLang), OpenVINO GenAI, ONNX Runtime GenAI, OVMS, and
-TensorRT Edge-LLM. The iOS app runs llama.cpp, MLX, ONNX Runtime GenAI, and
+The `pipette` CLI drives seven runtime backends: llama.cpp, MLX, Core AI,
+torch-oai (vLLM or SGLang), OpenVINO GenAI, ONNX Runtime GenAI, and OVMS.
+The iOS app runs llama.cpp, MLX, ONNX Runtime GenAI, and
 Apple Foundation; the Android app runs llama.cpp. Each backend consumes one
 weight format and takes its runtime from a public upstream at a pinned version,
 with these exceptions:
@@ -45,8 +45,6 @@ with these exceptions:
 - Core AI: the engine ships with macOS. Pipette builds its Swift sidecar
   locally against a pinned `apple/coreai-models` commit
   ([Core AI](../pipette-cli/coreai.md)).
-- TensorRT Edge-LLM: upstream publishes no server archive, so a runtime names
-  an archive by URL ([TensorRT Edge-LLM](../pipette-cli/trt-edgellm.md)).
 
 Published iOS results come from a build of this app with the private-API flags
 on (`PIPETTE_PRIVATE_THERMAL`, `PIPETTE_PRIVATE_MEMORY`). These flags read the

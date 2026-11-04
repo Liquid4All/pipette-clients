@@ -81,7 +81,6 @@ is in no OVMS observation, though its warm-up's GPU kernel compiles are
 | llama.cpp | the per-OS sampler, on the tool's process | all but the eval benchmarks |
 | MLX | the macOS sampler, on `mlx_lm.server` or `mlx_vlm.server` | all but `eval` |
 | OVMS, OpenVINO, ONNX GenAI | the per-OS sampler, on the server's process | all (these engines run no eval benchmark) |
-| TRT Edge-LLM | the Linux sampler, on the server's process | `vl_throughput` and `vl_max_memory` |
 | torch-oai | the server's cgroup's own memory, on uv less its other processes', sampled ([Linux](peak-memory-linux.md#host-counter)) | all but the eval benchmarks on Docker, and a uv `max_memory_usage` cell; on a Linux host only |
 
 The Core AI cells record no observation.
@@ -105,8 +104,7 @@ Two properties matter when reading them:
   how much.
 - **`observation_max_host_bytes` is resident-only, so it is not always the same
   quantity as `max_host_bytes` on the same row.** On Android and Linux,
-  llama.cpp's text, VL and ASR memory metrics and TRT Edge-LLM's
-  `vl_max_memory` use the swap-aware peak (`max(VmHWM, max(VmRSS + VmSwap))`).
+  llama.cpp's text, VL and ASR memory metrics use the swap-aware peak (`max(VmHWM, max(VmRSS + VmSwap))`).
   On a row that swapped, that metric reads *higher* than the observation beside
   it. The difference is the metric's swap uplift, shown rather than hidden.
   Every other metric reads the same counter as its observation.

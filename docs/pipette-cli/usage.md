@@ -10,8 +10,7 @@ installing runtimes, running benchmarks, and syncing results.
   [torch-oai](torch-oai.md) ·
   [OpenVINO](openvino.md) (also
   [IR](../openvino-ir.md) / [measurement](../openvino-measurement.md)) ·
-  [OVMS](../ovms.md) · [ONNX GenAI](onnx-genai.md) ·
-  [TensorRT Edge-LLM](trt-edgellm.md)
+  [OVMS](../ovms.md) · [ONNX GenAI](onnx-genai.md)
 - [How an eval runs](eval-runs.md) · [Eval checkpoint & resume](eval-checkpoint.md)
 
 Batch orchestration across devices is a separate binary: see
@@ -61,7 +60,6 @@ You only need what the runtime(s) you use call for.
 | OVMS | Linux/Windows x86_64; refused on any other OS before download | None: `pipette` downloads the upstream release archive |
 | ONNX GenAI CPU | macOS, Linux or Windows with a compatible wheel (includes macOS arm64) | `uv` |
 | ONNX GenAI CUDA | Linux x86_64 or Windows amd64 with an NVIDIA GPU | `uv`; NVIDIA driver 580 or newer, because the catalog row installs CUDA 13 libraries |
-| TensorRT Edge-LLM | NVIDIA Jetson (Linux arm64); refused on any other OS before install | The JetPack that the server archive was built for. See [TensorRT Edge-LLM](trt-edgellm.md) |
 
 **Conditional:**
 
@@ -380,7 +378,6 @@ decides where the build goes. Every install in the store is under `runtimes/`:
 | `uv-openvino://` | relocatable venv (Linux/Windows). One venv serves cpu, gpu and npu, because `device` is a per-cell setting | `runtimes catalog uv_openvino` |
 | `uv-onnx-genai://` | relocatable venv. One venv per execution provider, because each provider is a separate wheel | `runtimes catalog uv_onnx_genai` |
 | `ovms://` | upstream release archive (Linux/Windows), checked against the sha256 that the bundled catalog pins for it. The flavor must match the host | `runtimes catalog ovms` |
-| `trt-edgellm://` | server archive from its `url` (Linux arm64, NVIDIA Jetson) | — (no catalog; see [TensorRT Edge-LLM](trt-edgellm.md)) |
 
 A uv or MLX requirement set that is not a catalog row has no URI form. Pass it
 as a JSON `--runtime` with a full `pip_requirements_text` source.
@@ -446,7 +443,6 @@ Not every benchmark type runs on every runtime:
 | OVMS | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | ONNX GenAI | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Core AI (macOS 27+) | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| TensorRT Edge-LLM (Jetson) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 This table is the summary for every backend. Each backend page gives the
 conditions for its cells. The engine rejects an unsupported pair. For
@@ -697,15 +693,15 @@ The worker logs the outcome (`current`, `changed`, `fetched` when the cached
 definition had no ETag, `unchecked`) with the `benchmark_id`. It never writes
 `remote/state/sync.json`.
 
-**Older builds in the same workspace.** An older build keeps `<id>.json`,
-`index.json` and `sync.json` directly in `benchmarks/remote/`. It stores each
-definition as it parsed it, so it loses a parameter that it does not model.
-For example, release 2026.08.1 reads an 80-image VL benchmark back as one
-image. This build does not read those files. It deletes them only with the rest
-of `remote/` (`auth reset`, or an `auth import` that replaces the identity).
-The older build does not read `detail/` or `state/`, so both builds can use one
-workspace. In a workspace that only an older build synced, the first `sync` of
-this build is a full pull, and a `worker` fetches each benchmark on its first
+**Release 2026.08.1 and earlier in the same workspace.** Releases up to
+2026.08.1 keep `<id>.json`, `index.json` and `sync.json` directly in
+`benchmarks/remote/`. They store each definition as they parsed it, so they
+lose a parameter that they do not model: 2026.08.1 reads an 80-image VL
+benchmark back as one image. Later releases do not read those files. They
+delete them only with the rest of `remote/` (`auth reset`, or an `auth import`
+that replaces the identity). Releases up to 2026.08.1 do not read `detail/` or
+`state/`, so both can use one workspace. In a workspace that only such a
+release synced, the first `sync` of a later release is a full pull, and a `worker` fetches each benchmark on its first
 claim. Until then, `show` or `run` of an id reports the id as unknown.
 
 ```bash
@@ -875,7 +871,7 @@ envs = ["CUDA_DEVICE_ORDER=PCI_BUS_ID", "CUDA_VISIBLE_DEVICES=1", "VLLM_WORKER_M
 - `runtime_type`: the same vocabulary a plan's `runtime_type` uses. The types
   this client runs: `llamacpp_cli_stock_tools`, `mlx_macos_pipette`,
   `docker_vllm`, `docker_sglang`, `uv_vllm`, `uv_sglang`, `uv_openvino`,
-  `uv_onnx_genai`, `ovms`, `trt_edgellm`.
+  `uv_onnx_genai`, `ovms`.
 - `envs`: `NAME=VALUE` entries, the same notation as a cell's `envs`, set on
   every process a run of that runtime spawns (server, bench tool, driver,
   tokenizer, calibration helper, crash-restarted server). They land *first*, so

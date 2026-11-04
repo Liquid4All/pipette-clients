@@ -3,7 +3,7 @@
 Reads a benchmarked program's memory from the parent. Three parts:
 
 - **`Sampler`**: one process's memory, read by pid, one implementation per OS.
-  The llama.cpp, MLX, OVMS, OpenVINO, ONNX GenAI, Core AI and TRT Edge-LLM
+  The llama.cpp, MLX, OVMS, OpenVINO, ONNX GenAI and Core AI
   engines use it.
 - **`cgroup::Sampler`** (Linux only): a cgroup's memory, for a server that runs
   as several processes, such as vLLM in a container or a uv venv. torch-oai

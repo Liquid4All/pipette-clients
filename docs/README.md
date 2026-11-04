@@ -11,7 +11,7 @@ as needed; other files keep descriptive names.
 ## Two kinds of client
 
 - **Host-native CLI** (`pipette`) installs and invokes external runtimes:
-  llama.cpp, MLX, Core AI, OpenVINO, OVMS, ONNX GenAI, TensorRT Edge-LLM, vLLM
+  llama.cpp, MLX, Core AI, OpenVINO, OVMS, ONNX GenAI, vLLM
   and SGLang. One workflow covers all of them (init → register → install a
   runtime → run → sync); see
   [pipette-cli usage](pipette-cli/usage.md).
@@ -35,7 +35,6 @@ as needed; other files keep descriptive names.
 - [OpenVINO IR](openvino-ir.md): IR layout, precision identification, and NPU constraints
 - [OpenVINO measurement](openvino-measurement.md): timing, compile, and cache behavior
 - [OVMS](ovms.md): OpenVINO Model Server cells, and how their memory is measured
-- [TensorRT Edge-LLM](pipette-cli/trt-edgellm.md): the Jetson runtime, its engine build step and its VL cells
 - [ONNX GenAI measurement](onnx-genai-measurement.md): provider validation, token timing, and host memory
 - [Fleet perf troubleshooting](fleet-perf-troubleshooting/gmktec-evo-x2.md): diagnosing speed differences between identical benchmark boxes, per box type
 - [GMKtec GPU idle residency](fleet-perf-troubleshooting/gmktec-evo-x2-gpu-idle.md): why the first request after a few idle seconds is slow on that box type, and the keepalive that removes it

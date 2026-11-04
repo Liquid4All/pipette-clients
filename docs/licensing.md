@@ -156,7 +156,6 @@ bundle their license texts:
 Engines the `pipette` CLI drives as external processes are downloaded at
 runtime, not linked or redistributed, so they are outside both gates: upstream
 `llama.cpp` release binaries (MIT), OpenVINO Model Server release archives
-(Apache-2.0), the TensorRT Edge-LLM archive that a runtime URI names by URL
 (Apache-2.0), and in managed `uv` venvs `mlx-lm` (MIT), OpenVINO GenAI
 (Apache-2.0), ONNX Runtime GenAI (MIT) and vLLM/SGLang (Apache-2.0, also
 runnable as Docker images). The Core AI runtime is a Swift sidecar that

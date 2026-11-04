@@ -1,8 +1,8 @@
 # Eval Checkpoint & Resume
 
 Applies to **eval** benchmarks on the `pipette` CLI's llama.cpp, MLX and
-torch-oai backends. The other CLI backends (OpenVINO, OVMS, ONNX GenAI,
-TRT Edge-LLM and Core AI) do not implement eval, so they write no checkpoint.
+torch-oai backends. The other CLI backends (OpenVINO, OVMS, ONNX GenAI
+and Core AI) do not implement eval, so they write no checkpoint.
 `vlm_eval` and `asr_eval` keep their checkpoints in the same directory and
 format, with the extra rules in
 [vlm_eval and asr_eval](#vlm_eval-and-asr_eval).
@@ -214,8 +214,8 @@ In the table, *rotate* means the run starts a new file from sample 0.
 
 A sample that fails on its own (it crashed the server alone, timed out,
 or was refused) gets a failed row in the checkpoint and the cell goes
-on. The case that called for it (#103): on Windows, certain Qwen3.5,
-gemma and LFM2 prompts crash `llama-server` with
+on. The case that called for it (#103): on Windows, some prompts crash
+`llama-server` with
 `STATUS_STACK_OVERFLOW` from `std::regex` backtracking in its
 tokenizer. When and how each engine decides that a sample failed, rather than
 was lost with the others in flight, is in

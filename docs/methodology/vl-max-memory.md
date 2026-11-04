@@ -265,15 +265,6 @@ so only flavors with a matching probe run:
   GPU run; the Linux Snapdragon build (`linux-arm64-snapdragon`), whose Adreno
   and Hexagon memory nothing reads on Linux; and custom flavors, whose devices
   pipette does not know.
-- **TensorRT Edge-LLM** (`trt_edgellm`, a Jetson) runs this runner's
-  protocol, warm-up server included, against its own server under the GPU
-  watch, which on a Tegra board reads `VmHWM` alone: the iGPU's CUDA buffers
-  live in the server's RSS ([peak memory: Linux](peak-memory-linux.md)). Its
-  engines are built before the first server, outside the observation. Its KV
-  cache and activation memory are fixed when the engines are built, so no
-  context is sized and the peak does not move with the cell's prompt length
-  the way llama.cpp's does. The row carries the server's engine stack in
-  `client_extras.trt_edgellm` ([TensorRT Edge-LLM](../pipette-cli/trt-edgellm.md)).
 - **iOS** measures in process and **MLX** through `mlx_vlm.server`, both below.
   The Android app does not run this cell.
 
