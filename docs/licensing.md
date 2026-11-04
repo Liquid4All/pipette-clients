@@ -144,8 +144,14 @@ Two things to know about the output:
 ## Vendored native code
 
 Source trees compiled into the mobile apps are listed with their licenses in
-[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md#vendored-source); their
-licenses are checked at submodule bump.
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md#vendored-source). The apps
+bundle their license texts:
+
+- Android: the Android CI job regenerates the attribution file from the
+  vendored license files and fails if the committed copy is stale
+  (`ci/android-attribution.py --check`).
+- iOS: after a submodule bump, run `ios/generate-third-party-licenses.py` and
+  commit the result. No CI job checks it.
 
 Engines the `pipette` CLI drives as external processes are downloaded at
 runtime, not linked or redistributed, so they are outside both gates: upstream

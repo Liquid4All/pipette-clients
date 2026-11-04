@@ -235,8 +235,9 @@ From `android/Pipette/`:
 
 Formatting failures are fixed with `./gradlew :app:ktfmtFormat`. Detekt findings
 must be fixed, or (rarely) baselined with `./gradlew :app:detektBaseline`.
-`ktfmtCheck`/`detekt` need only the JDK and Android SDK, so they are quick; the
-assemble tasks pull in the NDK, Rust and the vendored native build.
+`ktfmtCheck`/`detekt` need only the JDK and Android SDK, so they are quick. The
+assemble tasks also pull in the NDK and the vendored native build (CMake). The
+`kotlinEngine` flavor needs no Rust.
 
 ## Three common causes of a red CI run
 

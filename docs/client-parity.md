@@ -622,8 +622,10 @@ feedback.
 
 # Running the pass again
 
-1. `git log --oneline <last-pass-sha>..origin/main` (the last full pass was at
-   `181ab74f`; verb counts were re-checked since) and read every commit that touches `crates/pipette-ops`, `android/native/`,
+1. `git log --oneline <last-pass-sha>..origin/main` (the last full pass was
+   before the sync that [#27](https://github.com/Liquid4All/pipette-clients/pull/27)
+   merged, so use that merge commit; the verb counts
+   were re-checked at the sync) and read every commit that touches `crates/pipette-ops`, `android/native/`,
    `ios/`, or `android/`. CI-only and plan-only commits can be skipped, but say
    so rather than assuming.
 2. For each crate-level change, check whether `ios/Pipette/Pipette/Ops/` got the
