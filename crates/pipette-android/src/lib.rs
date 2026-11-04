@@ -3,39 +3,37 @@ mod error;
 mod llama;
 mod loader;
 
-// The benchmark measurement kernel lives in the repo-root `native/` directory
-// (alongside the shared `llama_shim`) and is textually included here via
-// `#[path]`. It refers to this crate's `error::PipetteError`, `llama`, and
-// callback types through `crate::`-relative paths. (The iOS client shared this
-// kernel until iOS moved to a native-Swift llama.cpp engine.)
-#[path = "../../../native/benchmarks.rs"]
+// The measurement kernel lives beside the shim in `android/native/`; it reaches
+// this crate's types through `crate::` paths.
+#[path = "../../../android/native/benchmarks.rs"]
 mod benchmarks;
+
+// Owned by `build.rs`; included here only so its tests run.
+#[cfg(test)]
+#[path = "../tag.rs"]
+mod tag;
 
 pub use engine::LlamaEngine;
 pub use error::PipetteError;
 
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "android")]
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{JClass, JObject, JString};
 use jni::refs::Global;
 use jni::strings::JNIString;
-use jni::sys::{jboolean, jint, jlong, jstring};
-use jni::{jni_sig, jni_str, Env, EnvUnowned, JValue, JavaVM};
+use jni::sys::{jint, jlong, jstring};
+use jni::{Env, EnvUnowned, JValue, JavaVM, jni_sig, jni_str};
 
-use pipette_plan_types::thermal::{AndroidTemperatureSensor, AndroidThermalStatus};
+use pipette_plan_types::{AndroidTemperatureSensor, AndroidThermalStatus};
 
-/// Route the crate's `log::*` records to logcat under the `pipette-native`
-/// tag. Idempotent (`init_once` guards against re-init), so it's cheap to call
-/// at the top of every JNI entry point — whichever lands first wins and the
-/// rest are no-ops. Without this the in-kernel instrumentation (e.g. the
-/// per-rep `end_to_end_latency: measurement run i/5` lines, decode timings, and
-/// readiness verdicts) is emitted into a process with no registered logger and
-/// silently dropped, leaving on-device runs un-observable.
+/// Route `log` records (and pipette-ops/pipette-device `tracing` events) to
+/// logcat. Idempotent, so each JNI entry point calls it; without a logger the
+/// kernel's instrumentation is silently dropped.
 #[cfg(target_os = "android")]
 fn init_native_logging() {
     android_logger::init_once(
@@ -48,13 +46,10 @@ fn init_native_logging() {
 #[cfg(not(target_os = "android"))]
 fn init_native_logging() {}
 
-// Native crash capture (sentry-native inproc + disk transport), implemented in
-// the C++ bridge (native/crash_reporter.cpp). Rust only forwards the JVM-side
-// strings; all Sentry state lives in C so no JVM Sentry SDK is loaded here.
-// Android-only — the bridge is only built there; host `cargo check`/tooling uses
-// the no-op branch in nativeInit, matching the extern gating in llama.rs.
+// Native crash capture lives in android/native/crash_reporter.cpp, which owns all
+// Sentry state; Rust only forwards the JVM-side strings.
 #[cfg(target_os = "android")]
-extern "C" {
+unsafe extern "C" {
     fn ee_crash_reporter_init(
         dsn: *const std::ffi::c_char,
         environment: *const std::ffi::c_char,
@@ -69,19 +64,16 @@ pub struct ModelHandle {
     pub ptr: u64,
 }
 
+fn saturating_jint(n: u32) -> jint {
+    jint::try_from(n).unwrap_or(jint::MAX)
+}
+
 pub trait ProgressCallback: Send + Sync {
     fn on_progress(&self, completed: u32, total: u32, message: String) -> bool;
 }
 
-/// Mirrors the iOS-shared kernel's `ReadinessOutcome` (the shared
-/// `benchmarks.rs` is reused via `#[path]` and refers to this name), and the
-/// Kotlin `ReadinessOutcome` the JNI boundary carries an encoding of.
-///
-/// All three variants are produced here. `TimedOut` was previously unreachable
-/// on Android. The Kotlin gate returned `Unit` and its callers reported a bare
-/// "not cancelled" boolean, which meant a device that never cooled reported
-/// "proceed" and its throttled numbers were recorded as an ordinary result
-/// (PIP-143).
+/// Mirrors the Kotlin `ReadinessOutcome`, which crosses JNI encoded (see
+/// [`CANCELLED_PREFIX`]).
 pub enum ReadinessOutcome {
     Ready,
     Cancelled,
@@ -92,27 +84,20 @@ pub trait ReadinessCallback: Send + Sync {
     fn wait_until_ready(&self) -> ReadinessOutcome;
 }
 
-/// Samples device thermal telemetry for per-rep benchmark cells. `headroom` and
-/// `status` come from the app-SDK `PowerManager` (Kotlin-side, no permission);
-/// `sensors` is read natively from `dumpsys` (privileged, see below). Unlike
-/// [`ReadinessCallback`], a sampling failure is never fatal — each method yields
-/// `None` for that rep, so telemetry can't abort a benchmark.
+/// Per-rep thermal telemetry. Unlike [`ReadinessCallback`], a failure is never
+/// fatal: the method yields `None` for that rep.
 pub trait ThermalSampler: Send + Sync {
-    /// Current thermal headroom (0.0 cool → 1.0 at the severe-throttle
-    /// threshold, may exceed 1.0), or `None` when unavailable (unsupported API,
-    /// not yet sampled, or a read failure).
+    /// Thermal headroom (0.0 cool, 1.0 at the severe-throttle threshold, may
+    /// exceed 1.0).
     fn headroom(&self) -> Option<f32>;
 
-    /// Current device-level thermal status
-    /// (`PowerManager.getCurrentThermalStatus()`), or `None` when unavailable.
-    /// Always returns a value on a supported device, so its all-or-nothing
-    /// [`pipette_plan_types::thermal::ThermalTelemetry`] scalar series reliably populates.
+    /// `PowerManager.getCurrentThermalStatus()`. Always present on a supported
+    /// device, so its all-or-nothing
+    /// [`pipette_plan_types::ThermalTelemetry`] series reliably populates.
     fn status(&self) -> Option<AndroidThermalStatus>;
 
-    /// Per-sensor thermal-HAL temperatures for this snapshot, or `None` when the
-    /// privileged read is unavailable (no `DUMP` grant, exec denied, or no
-    /// sensor reported). Best-effort: the sensor series flattens whatever reps
-    /// report, so `None` here simply omits the family.
+    /// Thermal-HAL temperatures from the privileged `dumpsys` read; `None`
+    /// omits the sensor family for this rep.
     fn sensors(&self) -> Option<Vec<AndroidTemperatureSensor>>;
 }
 
@@ -132,8 +117,8 @@ impl ProgressCallback for JavaProgressCallback {
                     jni_str!("onProgress"),
                     jni_sig!("(IILjava/lang/String;)Z"),
                     &[
-                        JValue::Int(completed as jint),
-                        JValue::Int(total as jint),
+                        JValue::Int(saturating_jint(completed)),
+                        JValue::Int(saturating_jint(total)),
                         JValue::Object(&message),
                     ],
                 )?;
@@ -148,19 +133,14 @@ struct JavaReadinessCallback {
     callback: Global<JObject<'static>>,
 }
 
-/// Tags marking an encoded non-ready [`ReadinessOutcome`] on the wire. Must stay
-/// in step with `ReadinessOutcome.CANCELLED_PREFIX` / `TIMED_OUT_PREFIX` in
-/// `Readiness.kt`, which documents the encoding.
+/// Tags of an encoded non-ready [`ReadinessOutcome`]. Must match
+/// `ReadinessOutcome.CANCELLED_PREFIX` / `TIMED_OUT_PREFIX` in `Readiness.kt`,
+/// which documents the encoding.
 const CANCELLED_PREFIX: &str = "cancelled:";
 const TIMED_OUT_PREFIX: &str = "timedout:";
 
 impl ReadinessCallback for JavaReadinessCallback {
     fn wait_until_ready(&self) -> ReadinessOutcome {
-        // Kotlin `BenchmarkCooldownCallback.waitUntilReady(): String?` returns the
-        // gate's outcome encoded as null (ready) or a tagged string (see
-        // `ReadinessOutcome.encode` in `Readiness.kt`). It was a `Boolean` until
-        // PIP-143, which could not express "gave up while the device was still
-        // hot" and so admitted throttled reps as ordinary ones.
         let encoded =
             self.vm
                 .attach_current_thread(|env: &mut Env| -> jni::errors::Result<Option<String>> {
@@ -183,18 +163,16 @@ impl ReadinessCallback for JavaReadinessCallback {
         match encoded {
             Ok(None) => ReadinessOutcome::Ready,
             Ok(Some(reason)) if reason.starts_with(CANCELLED_PREFIX) => ReadinessOutcome::Cancelled,
-            // An untagged or unknown-tagged string falls here too, deliberately:
-            // if the two sides of this encoding ever drift, the safe reading is
-            // the one that fails the cell rather than the one that admits a rep.
+            // An untagged or unknown tag lands here on purpose: if the two sides
+            // drift, failing the cell is safer than admitting a rep.
             Ok(Some(reason)) => ReadinessOutcome::TimedOut {
                 observed: reason
                     .strip_prefix(TIMED_OUT_PREFIX)
                     .unwrap_or(&reason)
                     .to_string(),
             },
-            // A failed JNI hop, like a cancel, records nothing. That is the safe
-            // direction, and it must not be reported as a thermal verdict this
-            // side never actually observed.
+            // A failed JNI hop records nothing, and must not be reported as a
+            // thermal verdict this side never observed.
             Err(_) => ReadinessOutcome::Cancelled,
         }
     }
@@ -203,24 +181,19 @@ impl ReadinessCallback for JavaReadinessCallback {
 struct JavaThermalSampler {
     vm: JavaVM,
     callback: Global<JObject<'static>>,
-    // Latches once a `sensors()` read comes back empty (no `DUMP` grant, exec
-    // denied, or no HAL block) so the rest of the run stops forking `dumpsys` —
-    // on the common ungranted device we pay at most one failed fork instead of
-    // 2×N. Mirrors `Readiness.kt`'s `nativeUnavailable` short-circuit.
-    // Only read on Android (the sensors path is `#[cfg(target_os = "android")]`);
-    // on host builds the field is constructed but unused.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    // Latches after a failed `sensors()` read so an ungranted device forks
+    // `dumpsys` once per run rather than before and after every rep.
+    #[cfg_attr(
+        not(target_os = "android"),
+        allow(dead_code, reason = "read only by the android sensors path")
+    )]
     sensors_unavailable: AtomicBool,
 }
 
 impl ThermalSampler for JavaThermalSampler {
     fn headroom(&self) -> Option<f32> {
-        // Kotlin `BenchmarkThermalCallback.sampleHeadroom(): Float` returns the
-        // current headroom or `Float.NaN` when unavailable. A JNI failure is
-        // treated as a missing sample (`None`), never a cancellation — the
-        // opposite of `JavaReadinessCallback`: thermal telemetry must never abort
-        // a benchmark. Any non-finite reading (`NaN` or `±inf`) also maps to
-        // `None` via `is_finite()`.
+        // Kotlin returns `Float.NaN` when unavailable. Unlike in
+        // `JavaReadinessCallback`, a JNI failure is a missing sample, not a cancel.
         let value = self
             .vm
             .attach_current_thread(|env: &mut Env| -> jni::errors::Result<f32> {
@@ -237,10 +210,7 @@ impl ThermalSampler for JavaThermalSampler {
     }
 
     fn status(&self) -> Option<AndroidThermalStatus> {
-        // Kotlin `BenchmarkThermalCallback.sampleStatus(): Int` returns the
-        // `PowerManager` `THERMAL_STATUS_*` ordinal (0–6). A JNI failure → `None`,
-        // never a cancellation (like `headroom`); the ordinal→enum map drops any
-        // out-of-range value to `None` as a defensive guard.
+        // A `PowerManager` `THERMAL_STATUS_*` ordinal.
         let code = self
             .vm
             .attach_current_thread(|env: &mut Env| -> jni::errors::Result<i32> {
@@ -257,12 +227,8 @@ impl ThermalSampler for JavaThermalSampler {
     }
 
     fn sensors(&self) -> Option<Vec<AndroidTemperatureSensor>> {
-        // Read natively (no Java hop): the thermal-HAL parser lives in Rust and
-        // the data source is `dumpsys thermalservice`, which needs
-        // `android.permission.DUMP` (grantable on lab devices via
-        // `adb shell pm grant`). Best-effort — `None` when the grant is absent or
-        // the exec is denied. Once a read fails, latch off to avoid re-forking
-        // `dumpsys` for every remaining rep on an ungranted device.
+        // `dumpsys thermalservice` needs `android.permission.DUMP`, granted on lab
+        // devices via `adb shell pm grant`.
         #[cfg(target_os = "android")]
         {
             if self.sensors_unavailable.load(Ordering::Relaxed) {
@@ -283,8 +249,16 @@ impl ThermalSampler for JavaThermalSampler {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeLlamaCppCommit(
+    env: EnvUnowned,
+    class: JClass,
+) -> jstring {
+    Java_ai_liquid_pipette_NativeLib_nativeLlamaCppCommit(env, class)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ai_liquid_pipette_NativeLib_nativeLlamaCppCommit(
     mut env: EnvUnowned,
     _class: JClass,
 ) -> jstring {
@@ -295,13 +269,40 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeLlamaCppCommit(
     .unwrap_or(ptr::null_mut())
 }
 
-/// The active CPU-backend feature descriptor (e.g. `"dotprod,fp16_va,neon"`),
-/// or `null` when no model has been loaded yet (the backend registers lazily)
-/// or no CPU feature list is available. Surfaced into the submission payload as
-/// `runtime_cpu_variant` — Android does runtime CPU-feature dispatch, so this
-/// fingerprints the selected variant.
-#[no_mangle]
+/// The upstream `bNNNN` tag on the vendored llama.cpp pin, or `""` when it has
+/// none. How it is advertised: `Capabilities.flags`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeLlamaCppTag(
+    env: EnvUnowned,
+    class: JClass,
+) -> jstring {
+    Java_ai_liquid_pipette_NativeLib_nativeLlamaCppTag(env, class)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ai_liquid_pipette_NativeLib_nativeLlamaCppTag(
+    mut env: EnvUnowned,
+    _class: JClass,
+) -> jstring {
+    env.with_env(|env| -> jni::errors::Result<Option<jstring>> {
+        Ok(Some(string_result(env, engine::llama_cpp_tag())))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+    .unwrap_or(ptr::null_mut())
+}
+
+/// The active CPU-backend feature descriptor (see
+/// [`llama::cpu_backend_descriptor`]), or `null` before the first model load.
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeCpuBackendDescriptor(
+    env: EnvUnowned,
+    class: JClass,
+) -> jstring {
+    Java_ai_liquid_pipette_NativeLib_nativeCpuBackendDescriptor(env, class)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ai_liquid_pipette_NativeLib_nativeCpuBackendDescriptor(
     mut env: EnvUnowned,
     _class: JClass,
 ) -> jstring {
@@ -317,7 +318,7 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeCpuBackendDescri
 
 /// Load a model and box the resulting [`LlamaEngine`]; the returned `jlong` is
 /// a `*mut LlamaEngine` owned by the Kotlin side until `nativeDestroy`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeCreate(
     mut env: EnvUnowned,
     _class: JClass,
@@ -325,6 +326,7 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeCreate(
     n_gpu_layers: jint,
     context_size: jint,
     n_ubatch: jint,
+    load_mode: jint,
 ) -> jlong {
     init_native_logging();
     env.with_env(|env| -> jni::errors::Result<jlong> {
@@ -332,9 +334,10 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeCreate(
             let path = java_string(env, path)?;
             let engine = LlamaEngine::create(&loader::LoadOptions {
                 model_path: path,
-                n_gpu_layers: n_gpu_layers as u32,
-                context_size: context_size as u32,
-                n_ubatch: n_ubatch as u32,
+                n_gpu_layers: load_count("n_gpu_layers", n_gpu_layers)?,
+                context_size: load_count("context_size", context_size)?,
+                n_ubatch: load_count("n_ubatch", n_ubatch)?,
+                load_mode,
             })?;
             Ok(Box::into_raw(Box::new(engine)) as jlong)
         })();
@@ -350,7 +353,7 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeCreate(
 }
 
 /// Free a boxed [`LlamaEngine`] (and the model it holds, via `Drop`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeDestroy(
     mut env: EnvUnowned,
     _class: JClass,
@@ -359,7 +362,8 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeDestroy(
     env.with_env(|_env| -> jni::errors::Result<()> {
         if engine_ptr != 0 {
             // SAFETY: `engine_ptr` came from `Box::into_raw` in `nativeCreate`
-            // and is destroyed exactly once (the actor nulls its handle after).
+            // and is destroyed exactly once (the actor swaps its state to empty
+            // before destroying).
             drop(unsafe { Box::from_raw(engine_ptr as *mut LlamaEngine) });
         }
         Ok(())
@@ -367,11 +371,9 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeDestroy(
     .resolve::<ThrowRuntimeExAndDefault>();
 }
 
-/// Initialize native crash capture for the `:benchmark` process. Forwards the
-/// JVM-side config (DSN/environment/release from the manifest, plus the
-/// SDK-private db dir and the envelope output dir under `filesDir`) to the C++
-/// bridge, which owns all Sentry state. Idempotent on the native side.
-#[no_mangle]
+/// Initialize native crash capture for the `:benchmark` process. Idempotent on
+/// the native side.
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ai_liquid_pipette_BenchmarkCrashReporter_nativeInit(
     mut env: EnvUnowned,
     _class: JClass,
@@ -394,11 +396,8 @@ pub extern "system" fn Java_ai_liquid_pipette_BenchmarkCrashReporter_nativeInit(
             c(env, db_path),
             c(env, envelope_dir),
         );
-        // These are required; an empty value means the JNI string read failed (or misconfiguration), and the `unwrap_or_default()` above collapses that
-        // to "". Surface it rather than let the native side fail quietly. Independent (not else-if) checks so EVERY empty field is reported — several
-        // can be empty at once (e.g. a broken JNIEnv) and hiding all but the first would obscure the diagnosis. Worded to match the C++ guards: an
-        // empty DSN or envelope_dir DISABLES native capture entirely (ee_crash_reporter_init bails), whereas an empty db_path only degrades
-        // cross-process-death persistence/flush.
+        // Empty means the JNI read failed or config is missing; the native side
+        // would fail quietly. Separate checks so every empty field is reported.
         if c_dsn.as_bytes().is_empty() {
             log::warn!("benchmark crash reporter: empty DSN at native init — native crash capture disabled");
         }
@@ -422,7 +421,7 @@ pub extern "system" fn Java_ai_liquid_pipette_BenchmarkCrashReporter_nativeInit(
                 c_envelope.as_ptr(),
             );
         }
-        // Host stub: the C++ bridge is Android-only, so keep the CStrings "used" for a clean `cargo check` on non-Android targets.
+        // The bridge is Android-only; keeps the host build free of unused warnings.
         #[cfg(not(target_os = "android"))]
         let _ = (&c_dsn, &c_env, &c_release, &c_db, &c_envelope);
         Ok(())
@@ -431,7 +430,7 @@ pub extern "system" fn Java_ai_liquid_pipette_BenchmarkCrashReporter_nativeInit(
 }
 
 /// Run a benchmark against the model held by the boxed engine `engine_ptr`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeRunBenchmark(
     mut env: EnvUnowned,
     _class: JClass,
@@ -460,7 +459,7 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeRunBenchmark(
             let thermal = thermal_sampler_from_java(env, thermal_callback)?;
             engine.run_benchmark(
                 &benchmark_json,
-                n_gpu_layers as u32,
+                load_count("n_gpu_layers", n_gpu_layers)?,
                 mmproj_path.as_deref(),
                 progress,
                 readiness,
@@ -473,9 +472,8 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeRunBenchmark(
     .unwrap_or(ptr::null_mut())
 }
 
-/// Run a benchmark that loads its own model and unloads when done — the
-/// `max_memory_usage` case, where the load is part of the measurement.
-#[no_mangle]
+/// See [`engine::run_fresh`].
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeRunFresh(
     mut env: EnvUnowned,
     _class: JClass,
@@ -484,6 +482,7 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeRunFresh(
     n_gpu_layers: jint,
     context_size: jint,
     n_ubatch: jint,
+    load_mode: jint,
     mmproj_path: JString,
     progress_callback: JObject,
     cooldown_callback: JObject,
@@ -502,9 +501,10 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeRunFresh(
                 &benchmark_json,
                 &loader::LoadOptions {
                     model_path,
-                    n_gpu_layers: n_gpu_layers as u32,
-                    context_size: context_size as u32,
-                    n_ubatch: n_ubatch as u32,
+                    n_gpu_layers: load_count("n_gpu_layers", n_gpu_layers)?,
+                    context_size: load_count("context_size", context_size)?,
+                    n_ubatch: load_count("n_ubatch", n_ubatch)?,
+                    load_mode,
                 },
                 mmproj_path.as_deref(),
                 progress,
@@ -518,54 +518,11 @@ pub extern "system" fn Java_ai_liquid_pipette_LlamaEngine_nativeRunFresh(
     .unwrap_or(ptr::null_mut())
 }
 
-/// Block until the device is thermally/charge ready to run a benchmark,
-/// delegating to the shared `pipette_readiness` gate. Returns Java
-/// `null` once ready, or the readiness error message as a string.
-///
-/// `skip_thermal` carries the app's waiver (PIP-434). It waives only the
-/// thermal criterion; the load criterion still applies, so a skipped call is
-/// still a real gate rather than a no-op. That is why the Kotlin caller keeps
-/// taking this probe under the waiver instead of returning early.
-#[no_mangle]
-pub extern "system" fn Java_ai_liquid_pipette_Readiness_nativeWaitUntilReady(
-    mut env: EnvUnowned,
-    _class: JClass,
-    max_wait_millis: jlong,
-    skip_thermal: jboolean,
-) -> jstring {
-    env.with_env(|env| -> jni::errors::Result<Option<jstring>> {
-        let max_wait =
-            (max_wait_millis > 0).then(|| std::time::Duration::from_millis(max_wait_millis as u64));
-        // `Unset` rather than `Enforce` when the app doesn't waive: an app that
-        // left the toggle off has expressed no opinion, not an objection, so
-        // `PIPETTE_READINESS_SKIP_THERMAL` must still decide. That env var is
-        // how an `adb shell` invocation waives the criterion, and `Enforce`
-        // would override it. `Skip` is an opinion and does override it, which
-        // is the point of the toggle.
-        let gate = if skip_thermal {
-            pipette_readiness::ThermalGate::Skip
-        } else {
-            pipette_readiness::ThermalGate::Unset
-        };
-        let resolved = pipette_readiness::resolve_readiness(max_wait, gate);
-        let result = pipette_readiness::wait_until_ready(&resolved);
-        // Discriminate so the Kotlin driver can fall back to a coarser signal
-        // (PowerManager thermal status) when the fine-grained probes aren't
-        // readable in this process — the app sandbox denies dumpsys (DUMP
-        // permission), /sys/class/thermal, and /proc/stat. `TimedOut` means the
-        // probes WERE readable but the device stayed hot (keep waiting on the
-        // real signal); any other error means the probes themselves failed
-        // (fall back to the OS thermal status).
-        Ok(match result {
-            Ok(()) => None,
-            Err(e @ pipette_readiness::ReadinessError::TimedOut { .. }) => {
-                Some(string_result(env, format!("notready:{e}")))
-            }
-            Err(e) => Some(string_result(env, format!("unavailable:{e}"))),
-        })
+/// A JNI `int` load option as `u32`; a negative one is refused rather than wrapped.
+fn load_count(name: &str, value: jint) -> Result<u32, PipetteError> {
+    u32::try_from(value).map_err(|_| PipetteError::ModelLoad {
+        msg: format!("{name} must be non-negative, got {value}"),
     })
-    .resolve::<ThrowRuntimeExAndDefault>()
-    .unwrap_or(std::ptr::null_mut())
 }
 
 fn java_string(env: &mut Env, value: JString) -> Result<String, PipetteError> {

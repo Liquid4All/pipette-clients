@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "decode_throughput",
+  "generate_hint": "fast-compile",
+  "model_type": "openvino",
+  "runtime_type": "ovms"
+}

@@ -2,9 +2,10 @@
 
 Backend library: `pipette-coreai`, driven by the unified `pipette` CLI.
 
-Runs **Apple Silicon (macOS 27+)** benchmarks via a bundled Swift sidecar that
-drives Apple's Core AI framework (`LanguageBundle` + `EngineFactory`) over a
-short-lived local HTTP server. Shared operator flow: [usage.md](usage.md).
+The runtime runs benchmarks on **Apple Silicon with macOS 27 or later**. A
+bundled Swift sidecar drives Apple's Core AI framework (`LanguageBundle` +
+`EngineFactory`). The sidecar serves a short-lived local HTTP server. Shared
+operator flow: [usage.md](usage.md).
 Notation: [models-and-runtimes.md](models-and-runtimes.md). Specialization
 cache: [coreai-specialization.md](../methodology/coreai-specialization.md).
 
@@ -12,44 +13,66 @@ cache: [coreai-specialization.md](../methodology/coreai-specialization.md).
 
 | | Core AI | MLX | llama.cpp |
 |---|---------|-----|-----------|
-| Engine | Ships with macOS 27 (Core AI) | Python venv + `mlx-lm` | Upstream release archive |
-| Runtime artifact | Swift sidecar, compiled against an immutable `apple/coreai-models` commit | Python venv + locked `mlx-lm` | GGUF release archive |
-| Install | `runtimes pull` builds the pin-keyed sidecar; `runtimes remove` clears it | `runtimes pull` (fetches a venv) | `runtimes pull` (fetches a release) |
-| Models | `.aimodel` bundle (`metadata.json` + `*.aimodel/` + tokenizer/) | HF repo snapshot | GGUF file(s) |
+| Engine | Ships with macOS 27 (Core AI) | `mlx-lm` (`mlx-vlm` on vision-language rows) in the runtime venv | llama.cpp tools in the release archive |
+| Runtime artifact | Swift sidecar, compiled against an immutable `apple/coreai-models` commit | Python venv with locked `mlx-lm` (and `mlx-vlm` on vision-language rows) | Upstream release archive |
+| Install | `runtimes pull` builds the pin-keyed sidecar; `runtimes remove` clears it | `runtimes pull` fetches a venv, or the first `benchmarks run` installs it | `runtimes pull` fetches a release, or the first `benchmarks run` installs it |
+| Models | `.aimodel` bundle (`metadata.json` + `*.aimodel/` + tokenizer/) | Hugging Face (HF) repo snapshot in the shared `models/` store | GGUF file(s) in the shared `models/` store |
 | Host | Apple Silicon, macOS 27+ only | Apple Silicon only | Cross-platform |
 
 ## Runtime
 
-The Core AI *engine* ships with macOS 27. The URI names the Swift-package pin
-the sidecar is compiled against: official `apple/coreai-models` (`CoreAILM`
-product), pinned at `27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60`. This commit
-contains [Apple PR #227](https://github.com/apple/coreai-models/pull/227), which
-fixes S=1 prefill and logits allocation. The sidecar no longer sets
-`COREAI_CHUNK_THRESHOLD`; the engine uses the bundle descriptors.
+The Core AI *engine* ships with macOS 27. The URI names the
+`apple/coreai-models` commit (`CoreAILM` product):
+`27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60`. The build compiles the sidecar
+against this commit. The commit contains
+[Apple PR #227](https://github.com/apple/coreai-models/pull/227), which fixes
+prefill with a sequence length of 1 and the logits allocation. The engine reads
+chunking from the bundle descriptors.
 
-The resolved stack uses `swift-transformers` 1.2.0, `xgrammar` 0.2.2, and
-`swift-jinja` 2.3.2, matching the Apple commit's lockfile. All four pins are
-part of the runtime identity; this changes the cache key from the zoo stack.
+The Swift stack also holds `swift-transformers` 1.2.0, `xgrammar` 0.2.2, and
+`swift-jinja` 2.3.2. These versions match the lockfile of the Apple commit. All
+four packages are part of the runtime identity.
 
 ```bash
 pipette runtimes pull --runtime 'core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60'
 ```
 
-`runtimes pull` succeeds without writing a store entry, and **builds** the
-sidecar (or reuses the cache, keyed on the full bundled Swift stack, at
-`~/Library/Caches/pipette-coreai/<stack-key>/`). That build needs `swift` on
-`PATH`. `runtimes remove` deletes the cache. A `version=` (URI) or a JSON
-`--runtime` whose Swift stack differs from the bundled pin is rejected: the
-sidecar is compiled against that stack only, so any other pin would record a
-number the running binary did not produce.
+`runtimes pull` writes no store entry. It **builds** the sidecar, or it reuses
+the cached sidecar at `~/Library/Caches/pipette-coreai/<stack-key>/`. The cache
+key covers the full bundled Swift stack. The build needs a Swift toolchain
+(Xcode or the Command Line Tools).
+`runtimes remove` deletes the cache.
+
+Pipette rejects a `version=` value or a JSON `--runtime` with a different Swift
+stack. The sidecar is compiled against the bundled Swift stack only. A result
+for any other Swift stack would name a runtime that did not produce it.
+
+### Capability flags
+
+A worker reports the Core AI flags when the host runs macOS 27 or later and
+can get a sidecar. Each flag names the bundled Swift stack:
+
+| Flag | Pins |
+|------|------|
+| `runtime:core_ai` | any Core AI host |
+| `runtime:core_ai:<coreai-models commit>` | the `coreai-models` commit |
+| `runtime:core_ai:coreai-models=<commit>` | the `coreai-models` commit, named |
+| `runtime:core_ai:swift-transformers=<version>` | the `swift-transformers` version |
+| `runtime:core_ai:xgrammar=<version>` | the `xgrammar` version |
+| `runtime:core_ai:swift-jinja=<version>` | the `swift-jinja` version |
+
+A plan that requires all four package flags runs only on a client with that
+Swift stack.
 
 ### Environment overrides
 
 - `PIPETTE_COREAI_SIDECAR=/path/to/binary`: skip the Swift build and use a
-  prebuilt sidecar. Optional, not a requirement.
-- `PIPETTE_COREAI_SWIFT=/path/to/swift`: point at the crate's `swift/`
-  package directory when the `pipette` binary was shipped away from its
-  build tree (so `CARGO_MANIFEST_DIR` no longer resolves).
+  prebuilt sidecar. Pipette does not check this binary against the bundled
+  Swift stack, so use it for development only. A result records the path of
+  the binary in `executable`.
+- `PIPETTE_COREAI_SWIFT=/path/to/swift`: set the path to the `swift/` package
+  directory of the crate. Use this when the `pipette` binary runs without its
+  build tree, because `CARGO_MANIFEST_DIR` does not resolve there.
 - `PIPETTE_COREAI_CACHE=/path`: override the cache root
   (`~/Library/Caches/pipette-coreai` by default).
 
@@ -60,23 +83,25 @@ number the running binary did not produce.
 pipette models pull --model 'core-ai://repo=…&prefix=…'
 ```
 
-`pipette` materializes the HF snapshot into the shared `models/` store and the
-sidecar loads it with `LanguageBundle(at:)`. Gated repos: `PIPETTE_HF_TOKEN`.
+Pipette downloads the Hugging Face snapshot into the shared `models/` store.
+The sidecar loads it with `LanguageBundle(at:)`. For a gated repository, set
+`PIPETTE_HF_TOKEN`.
 
 ## Benchmarks
 
 Supported: `prefill_throughput`, `decode_throughput`, `end_to_end_latency`,
 `max_memory_usage`.
 
-Not supported (yet): `eval`, `vl_throughput`.
+Pipette refuses every other benchmark type on Core AI.
 
-Each run starts the sidecar on the materialized bundle dir, drives the task over
-HTTP (deterministic token-count prompts, no chat template), then tears it down.
-Specialization happens during sidecar load, before READY. See
+Each run starts the sidecar on the bundle directory. The run then sends the task
+over HTTP with deterministic token-count prompts and no chat template. Last, the
+run stops the sidecar. Specialization occurs while the sidecar loads, before
+the sidecar prints `PIPETTE_COREAI_READY`. See
 [coreai-specialization.md](../methodology/coreai-specialization.md).
 
-`--runtime-flags` is **refused** for Core AI: the runtime has no flag cell, so
-any non-empty object fails (an empty `{}` is accepted).
+Core AI has no runtime flags. Pipette rejects a non-empty `--runtime-flags`
+object. Pipette accepts an empty `{}`.
 
 ## Setup sketch
 

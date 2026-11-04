@@ -9,9 +9,18 @@
       leaves the device. Restoring the ciphertext elsewhere would produce an install
       that reports itself registered while every signed request fails, because
       nothing there can decrypt it.
-   2. The signing key IS the device's identity to the management server. Restoring it
-      onto a second device would give two physical devices one client_id and corrupt
-      the per-device attribution the benchmark results exist to provide.
+   2. The signing key IS the device's identity to the management server. A backup
+      restores onto a device the operator did not choose and cannot see, so it can
+      leave two physical devices holding one client_id, which corrupts the
+      per-device attribution the benchmark results exist to provide.
+
+   Reason 2 is about backup, not about custody. Carrying an identity to replacement
+   hardware IS supported, through the `auth-export` / `auth-import` headless verbs
+   (see docs/pipette-android/architecture.md). That path is deliberately the
+   opposite of a backup in every way that matters here: an operator runs it over
+   adb, one device at a time, naming the destination, and `auth-import` refuses over
+   a signing key that is not the bundle's unless it is forced. So the identity is
+   recoverable by someone who means it, and never by a restore nobody supervised.
 
    registration.json goes with it, and must: it is the other half of the same
    identity. Excluding only the secrets would restore an install that reports itself

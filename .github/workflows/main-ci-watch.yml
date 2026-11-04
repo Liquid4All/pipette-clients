@@ -1,0 +1,105 @@
+name: Main CI Watch
+
+# A red `main` belongs to no pull request, so without this nobody sees it. One
+# open issue per red workflow: filed, commented on repeats, closed when green.
+#
+# `workflow_run` fires only for this file on the default branch, so it cannot be
+# exercised from a pull request.
+on:
+  workflow_run:
+    workflows: [CI, Security, CodeQL]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  # Serialized: two verdicts landing together would each file an issue. Only one
+  # run per group stays pending, so a dropped middle verdict is fixed by the next.
+  group: main-ci-watch-${{ github.event.workflow_run.name }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+  actions: read
+
+jobs:
+  report:
+    # `branches:` above matches the head branch, so it does not exclude PR runs.
+    # `cancelled` is not an alarm: CI, CodeQL and Security cancel an in-flight
+    # push run when the next merge lands.
+    if: >-
+      github.event.workflow_run.event != 'pull_request' &&
+      contains(fromJSON('["failure", "timed_out", "success"]'),
+               github.event.workflow_run.conclusion)
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      LABEL: main-red
+      # The dedupe key for this workflow's one open alarm.
+      TITLE: ${{ github.event.workflow_run.name }} is red on main
+      WORKFLOW: ${{ github.event.workflow_run.name }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      ACTOR: ${{ github.event.workflow_run.actor.login }}
+      # Via env, never interpolated into `run:`: author-controlled text.
+      COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RED: ${{ github.event.workflow_run.conclusion != 'success' }}
+    steps:
+      - name: Ensure the label exists
+        # `gh issue create --label` rejects a missing label.
+        run: |
+          gh label create "$LABEL" --color B60205 \
+            --description "main is red; filed and closed by main-ci-watch" --force
+
+      - name: Find this workflow's open alarm
+        id: find
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --state open --label "$LABEL" --limit 100 \
+            --json number,title \
+            | jq -r --arg t "$TITLE" 'map(select(.title == $t)) | .[0].number // empty')
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      - name: File or update the alarm
+        if: env.RED == 'true'
+        env:
+          NUMBER: ${{ steps.find.outputs.number }}
+        run: |
+          set -euo pipefail
+          # `/runs/<id>/jobs` reports the latest attempt, not the one that failed.
+          failed=$(gh api --paginate \
+            "repos/${GH_REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "- " + .name')
+          subject=$(printf '%s\n' "$COMMIT_MESSAGE" | awk 'NR == 1')
+          {
+            printf '%s finished `%s` on `main`.\n\n' "$WORKFLOW" "$CONCLUSION"
+            printf -- '- Run: %s (attempt %s)\n' "$RUN_URL" "$RUN_ATTEMPT"
+            printf -- '- Commit: %s\n' "$SHA"
+            printf -- '- Subject: %s\n' "$subject"
+            printf -- '- Pushed by: @%s\n' "$ACTOR"
+            if [ -n "$failed" ]; then
+              printf '\nFailed jobs:\n\n%s\n' "$failed"
+            fi
+            printf '\nThis issue closes itself on the next green %s run for `main`.\n' "$WORKFLOW"
+          } > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$NUMBER" ]; then
+            gh issue comment "$NUMBER" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$TITLE" --label "$LABEL" \
+              --body-file "$RUNNER_TEMP/body.md"
+          fi
+
+      - name: Close the alarm now that main is green
+        if: env.RED != 'true' && steps.find.outputs.number != ''
+        env:
+          NUMBER: ${{ steps.find.outputs.number }}
+        run: |
+          set -euo pipefail
+          body=$(printf '%s is green again on `main` at %s.\n\n- Run: %s\n' \
+            "$WORKFLOW" "$SHA" "$RUN_URL")
+          printf '%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
+          gh issue close "$NUMBER" --reason completed --comment "$body"

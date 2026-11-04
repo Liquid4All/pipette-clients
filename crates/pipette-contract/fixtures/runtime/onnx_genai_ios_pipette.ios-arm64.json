@@ -1,0 +1,14 @@
+{
+  "flavor": "ios-arm64",
+  "packages": {
+    "onnxruntime": {
+      "repository_url": "github.com/microsoft/onnxruntime",
+      "repository_version": "v1.23.0"
+    },
+    "onnxruntime_genai": {
+      "repository_url": "github.com/microsoft/onnxruntime-genai",
+      "repository_version": "v0.15.2"
+    }
+  },
+  "type": "onnx_genai_ios_pipette"
+}

@@ -2,12 +2,9 @@ import XCTest
 @testable import Pipette
 
 final class AnalyticsEventsTests: XCTestCase {
-    /// Tripwire pinning the analytics wire contract. The same names are hand-duplicated in the
-    /// Android `AnalyticsEvents`, and both platforms report into one PostHog project, so a rename
-    /// on one side alone doesn't break a build, it silently splits a funnel into two events that
-    /// look unrelated in every query. Like `FeedbackCategoryTests`, this can't enforce true parity
-    /// (each platform pins its own copy); it catches an accidental change here, and makes an
-    /// intentional one the reminder to update Android.
+    /// Android's `AnalyticsEvents` duplicates these names by hand into the same PostHog
+    /// project, so a one-sided rename splits a funnel without breaking a build. This pins only
+    /// iOS's copy: an intentional change here is the reminder to update Android.
     func testEventNamesMatchCrossPlatformContract() {
         XCTAssertEqual(AnalyticsEvents.appLaunched, "app_launched")
         XCTAssertEqual(AnalyticsEvents.deviceRegistered, "device_registered")
@@ -47,10 +44,8 @@ final class AnalyticsEventsTests: XCTestCase {
         XCTAssertEqual(RunSource.planner.rawValue, "planner")
     }
 
-    /// `JobLauncher.rerun` backs both `job run --scope …` and the deep-link resume, and used to
-    /// report a flat `.rerun` for all of them, so `--scope cancelled` filed under a different
-    /// intent than the identical action taken from `JobDetailView`. These are the pairings that
-    /// view's own switch uses; the two mappings have to agree case for case.
+    /// `JobLauncher.rerun` (behind `job run --scope …` and the deep-link resume) must report
+    /// the same intent as `JobDetailView`'s own switch for the same scope.
     func testRunSourceDerivedFromResetTargetMatchesJobDetailView() {
         XCTAssertEqual(RunSource.resettingCells(withStatus: .cancelled), .resume)
         XCTAssertEqual(RunSource.resettingCells(withStatus: .failed), .retryFailed)
@@ -94,31 +89,21 @@ final class AnalyticsEventsTests: XCTestCase {
         XCTAssertFalse(isCompletePostHogConfig("phc_abc123", "http://us.i.posthog.com"))
     }
 
-    /// The Settings opt-out row is drawn from these two properties, and they mean different things:
-    /// ``NoOpAnalytics`` reports opted-out because it collects nothing, which is not a user's
-    /// choice, so the row is hidden on `isAvailable`, not on the opt-out flag. Collapsing the two
-    /// would put a dead toggle in front of every user of an unconfigured build, reading "off" as
-    /// though they had turned analytics off themselves. Android pins the same pair in
-    /// `PostHogConfigurationTest`.
-    ///
-    /// Only the no-op sink is asserted: `PostHogAnalytics` delegates both to the SDK, and
-    /// initializing that in a unit test would create a disk queue.
+    /// ``NoOpAnalytics`` reports opted-out because it collects nothing, not by the user's
+    /// choice, so Settings hides the opt-out row on `isAvailable` rather than showing a dead
+    /// "off" toggle. Android pins the same pair in `PostHogConfigurationTest`. `PostHogAnalytics`
+    /// is not asserted: initializing the SDK in a unit test creates a disk queue.
     func testNoOpSinkReportsUnavailableAndCollectsNothing() {
         let sink = NoOpAnalytics()
         XCTAssertFalse(sink.isAvailable)
         XCTAssertTrue(sink.isOptedOut)
-        // Setting it either way changes nothing: there is no state to change.
         sink.setOptedOut(false)
         XCTAssertTrue(sink.isOptedOut)
     }
 
-    /// The opt-out's persistence contract, the twin of Android's `AnalyticsOptOutStoreTest`.
-    ///
-    /// Worth pinning rather than eyeballing: `Analytics.start()` seeds `PostHogConfig.optOut` from
-    /// this value *before* `setup`, and that seeding is the entire mechanism: the SDK's own restore
-    /// of its persisted copy was measured doing nothing on posthog-android 3.19.0. A regression that
-    /// lost the default here would turn analytics back on for someone who switched them off, and
-    /// only on a real cold start.
+    /// The twin of Android's `AnalyticsOptOutStoreTest`. `Analytics.start()` seeds
+    /// `PostHogConfig.optOut` from this value before `setup` and that is the whole mechanism, so
+    /// a lost default would turn analytics back on for someone who switched them off.
     func testAnalyticsOptOutDefaultsToCollectingAndRoundTrips() {
         let original = LocalStorage.analyticsOptOut
         defer { LocalStorage.analyticsOptOut = original }

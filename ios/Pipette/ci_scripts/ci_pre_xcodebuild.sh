@@ -1,22 +1,12 @@
 #!/usr/bin/env bash
 #
-# Xcode Cloud `ci_pre_xcodebuild` hook — builds the vendored llama.cpp static
-# library + module map into `ios/Pipette/Pipette/Generated/Llama/` BEFORE
-# xcodebuild starts.
+# Xcode Cloud `ci_pre_xcodebuild` hook: builds vendored llama.cpp and ONNX Runtime
+# GenAI before xcodebuild parses the project, so the synchronized root group finds
+# `ios/Pipette/Pipette/Generated/Llama/` (.modulemap, headers) already populated.
+# The in-Xcode `Build llama.cpp` Run Script phase still re-runs; sccache makes
+# that a near no-op.
 #
-# Apple's "Writing custom build scripts" docs call this script out as the
-# canonical place to compile additional dependencies. Pre-building here (rather
-# than relying solely on the in-Xcode `Build llama.cpp` Run Script phase) means
-# that by the time xcodebuild parses the project, the Generated/Llama/ directory
-# already has the .a / .modulemap / headers / LlamaCppBuildInfo.swift that Xcode's
-# synchronized root group expects. The in-Xcode Run Script still re-runs during
-# xcodebuild — that's fine: sccache makes the re-build a near no-op when nothing
-# changed since this step populated everything.
-#
-# Apple constraints (per Xcode Cloud docs):
-#   - $CI_WORKSPACE points at the cloned repo root.
-#   - No `sudo`.
-#   - $HOME is writable.
+# Xcode Cloud: $CI_WORKSPACE is the repo root, no `sudo`, $HOME is writable.
 
 set -euo pipefail
 
@@ -24,10 +14,8 @@ REPO_ROOT="${CI_WORKSPACE:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 
 echo "==> ci_pre_xcodebuild: REPO_ROOT=$REPO_ROOT"
 
-# Xcode Cloud sets $CI_PRODUCT_PLATFORM to one of `iOS`, `iOS Simulator`,
-# `macOS`, etc. Translate to the mode `build-llama.sh` understands. Fail loudly
-# on anything unrecognized so a misconfigured workflow doesn't silently build
-# the wrong slice and confuse xcodebuild downstream.
+# Fail on any other $CI_PRODUCT_PLATFORM so a misconfigured workflow doesn't
+# silently build the wrong slice.
 case "${CI_PRODUCT_PLATFORM:-iOS Simulator}" in
     "iOS")            MODE="device" ;;
     "iOS Simulator")  MODE="sim" ;;
@@ -37,34 +25,43 @@ case "${CI_PRODUCT_PLATFORM:-iOS Simulator}" in
         ;;
 esac
 
+# The vendor/llamacpp-<name> variants (e.g. PrismML's fork) ship only in the
+# internal archive, built by GitHub's ios-archive job; the App Store app carries
+# vendor/llama.cpp alone.
+if [[ -n "${PIPETTE_LLAMA_VARIANT:-}" ]]; then
+    echo "ci_pre_xcodebuild: PIPETTE_LLAMA_VARIANT=$PIPETTE_LLAMA_VARIANT is for internal builds only; unset it in this workflow" >&2
+    exit 1
+fi
+if [[ -n "${PIPETTE_LLAMA_PINS:-}" ]]; then
+    echo "ci_pre_xcodebuild: PIPETTE_LLAMA_PINS=$PIPETTE_LLAMA_PINS is for internal builds only; unset it in this workflow" >&2
+    exit 1
+fi
+
 echo "==> ci_pre_xcodebuild: building llama.cpp ($MODE)"
 
 "$REPO_ROOT/ios/build-llama.sh" "$MODE"
 
-# TestFlight rejects duplicate `CFBundleVersion` (the project's
-# CURRENT_PROJECT_VERSION) within the same MARKETING_VERSION. The project
-# hardcodes `1`, so without bumping every TestFlight upload after the first
-# would fail with "Bundle version already exists". agvtool stamps every
-# Info.plist target to $CI_BUILD_NUMBER, which Xcode Cloud sets to a monotonic
-# per-workflow integer.
+echo "==> ci_pre_xcodebuild: building ONNX Runtime GenAI ($MODE)"
+
+# Ends by regenerating the build info, so there is no separate stamp step here.
+"$REPO_ROOT/ios/build-onnx-genai.sh" "$MODE"
+
+# TestFlight rejects a duplicate `CFBundleVersion` within one MARKETING_VERSION,
+# and the project hardcodes CURRENT_PROJECT_VERSION = 1. $CI_BUILD_NUMBER is
+# Xcode Cloud's monotonic per-workflow counter.
 if [[ -n "${CI_BUILD_NUMBER:-}" ]]; then
     echo "==> ci_pre_xcodebuild: stamping build number = $CI_BUILD_NUMBER"
     (cd "$REPO_ROOT/ios/Pipette" && agvtool new-version -all "$CI_BUILD_NUMBER")
 fi
 
-# The Settings "Debugging" card is compiled in only when `PIPETTE_DEBUG_UI` is a
-# Swift compilation condition. Set `PIPETTE_DEBUG_UI=1` as an environment variable on
-# the Internal Testing workflow (Xcode Cloud → workflow → Environment) and leave it
-# unset on the App Store workflow.
+# The Settings "Debugging" card compiles in only under the `PIPETTE_DEBUG_UI` Swift
+# condition. Set `PIPETTE_DEBUG_UI=1` in the Internal Testing workflow's environment
+# and leave it unset on the App Store workflow.
 #
-# The indirection is required: xcodebuild does not turn shell environment variables
-# into build settings, and Xcode Cloud owns the xcodebuild invocation, so we cannot
-# pass `SWIFT_ACTIVE_COMPILATION_CONDITIONS=...` on its command line the way
-# `ios/build.sh` does locally. Writing an xcconfig that `Release.xcconfig` optionally
-# includes is the one hook that runs early enough to be picked up.
-#
-# Written unconditionally (empty when the flag is off) so a workflow that *unsets* the
-# variable cannot inherit a file a previous run left in a cached checkout.
+# xcodebuild does not turn environment variables into build settings, and Xcode Cloud
+# owns its command line, so the condition goes through an xcconfig that
+# `Release.xcconfig` optionally includes. Written unconditionally so a workflow that
+# unsets the variable cannot inherit a file from a cached checkout.
 GENERATED_XCCONFIG="$REPO_ROOT/ios/Pipette/Config/Distribution.generated.xcconfig"
 if [[ "${PIPETTE_DEBUG_UI:-}" == "1" ]]; then
     echo "==> ci_pre_xcodebuild: PIPETTE_DEBUG_UI=1 — compiling in the Settings debug card"

@@ -1,0 +1,6 @@
+{
+  "flavor": "linux-x64-cpu",
+  "source": "remote_archive",
+  "type": "llamacpp_cli_stock_tools",
+  "url": "https://example.com/llama-b5000-bin-ubuntu-x64.zip"
+}

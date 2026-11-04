@@ -1,98 +1,134 @@
-use anyhow::Context;
-use serde::{Deserialize, Serialize};
+//! Decode throughput over `mlx_lm.server`, through [`measurement::decode()`].
+//!
+//! The server reports no per-phase rates, so the reading is the interval from
+//! the first token to the last of a streamed `/v1/completions`, on the client's
+//! clock. EOS is biased away so the full `max_tokens` comes out.
 
-use pipette_ops::measurement;
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use std::num::NonZeroUsize;
 
-use super::{server, throughput_http};
-use crate::models::require_mlx_model_dir;
-use crate::runtimes::require_mlx_python;
+use pipette_http::HttpClient;
+use pipette_memprobe::{Sampler, SupportedWatch};
+use pipette_ops::measurement::{
+    self, DecodeMeasurementPerPromptReading, DecodeMeasurementReading, MeasurementObserver,
+    MeasurementWarmup,
+};
+use pipette_ops::readiness::ReadinessGate;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::{
+    DecodeThroughputBenchmark, MlxMacosPipetteExtraRuntimeConfiguration, RunResponse,
+};
+use pipette_subprocess::start_process;
 
-const ENDPOINT: &str = "/decode_throughput";
-
-#[derive(Debug, Serialize)]
-struct DecodeThroughputRequest {
-    prompt_tokens: u32,
-    decode_tokens: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct DecodeThroughputResponse {
-    generation_tps: f64,
-    decode_tokens: u32,
-}
+use crate::models::ResolvedMlxModel;
+use crate::runtimes::ResolvedMlxPython;
+use crate::{completions, server, tokenizer};
 
 pub(super) fn run(
-    req: &RunRequest,
+    benchmark: &DecodeThroughputBenchmark,
+    venv_python: &ResolvedMlxPython,
+    model_dir: &ResolvedMlxModel,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: MeasurementObserver<'_>,
+    client_config: Option<&MlxMacosPipetteExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_decode_throughput()
-        .map_err(anyhow::Error::from)?;
-    let prefill_tokens = benchmark.parameter_prefill_tokens;
-    let decode_tokens = benchmark.parameter_decode_tokens;
-    let venv_python = require_mlx_python(req)?;
-    let model_dir = require_mlx_model_dir(req)?;
+    // Before the model loads: the entry refuses a single token only once the
+    // warm-up has run.
+    anyhow::ensure!(
+        benchmark.parameter_decode_tokens.into_inner() >= 2,
+        "parameter_decode_tokens must be at least 2: the first token is the prefill's, so a \
+         decode rate starts at the second; got {}",
+        benchmark.parameter_decode_tokens
+    );
+    let (prompt, eos_ids) = tokenizer::prompt(
+        venv_python,
+        model_dir,
+        benchmark
+            .parameter_prefill_tokens
+            .into_inner()
+            .unsigned_abs(),
+        server::TEXT_TRUSTS_REMOTE_CODE,
+    )?;
+    let request = completions::completion_request(
+        &prompt,
+        benchmark
+            .parameter_decode_tokens
+            .into_inner()
+            .unsigned_abs(),
+        &eos_ids,
+    );
+    let http = HttpClient::loopback("pipette", completions::TIMING_TIMEOUT)?;
 
     readiness_gate()?;
-    let server = server::start_server(&venv_python, &model_dir, None)?;
-
-    log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
-    let warmup: DecodeThroughputResponse = throughput_http::post_json(
-        &server.base_url,
-        ENDPOINT,
-        &DecodeThroughputRequest {
-            prompt_tokens: prefill_tokens,
-            decode_tokens,
-        },
+    let port = pipette_subprocess::pick_server_port()?;
+    let url = server::url(port);
+    let completions_url = completions::url(&url);
+    let mut mlx_server = start_process(
+        server::TEXT_SERVER_MODULE,
+        server::text_command(venv_python, model_dir, port, client_config)?,
+        server::STOP_GRACE,
     )?;
-    if warmup.decode_tokens != decode_tokens {
-        anyhow::bail!(
-            "{ENDPOINT} warmup returned decode_tokens {}, expected {decode_tokens}",
-            warmup.decode_tokens,
-        );
-    }
-
-    let measured = measurement::run(
-        ENDPOINT,
+    let sampler = Sampler::start(mlx_server.pid(), SupportedWatch::OBSERVE)?;
+    mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let result = measurement::decode(
+        benchmark,
+        NonZeroUsize::try_from(measurement::REPS)?,
         readiness_gate,
         observer,
-        // No untimed per-rep setup: the server holds no state a rep resets.
-        |_| Ok(()),
-        |_| {
-            throughput_http::post_json::<_, DecodeThroughputResponse>(
-                &server.base_url,
-                ENDPOINT,
-                &DecodeThroughputRequest {
-                    prompt_tokens: prefill_tokens,
-                    decode_tokens,
-                },
-            )
+        MeasurementWarmup::Once,
+        (),
+        |()| {
+            let generation = pipette_completions::stream(&http, &completions_url, &request)?;
+            let reading = DecodeMeasurementPerPromptReading::from_generation(&generation)?;
+            Ok(DecodeMeasurementReading::PerPrompt(vec![reading]))
         },
-        |idx, rep| {
-            let response = &rep.value;
-            measurement::expect_tokens("decode_tokens", response.decode_tokens, decode_tokens)?;
-            throughput_http::validate_tps("generation_tps", response.generation_tps)
-                .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            throughput_http::time_ms_from_tps(ENDPOINT, decode_tokens, response.generation_tps)
-        },
-    )?;
-    let stats = measured.stats();
-    Ok(RunResponse {
-        executable: Some(server.executable.clone()),
-        command: server.command_preview.clone(),
-        ..RunResponse::new(
-            BenchmarkResultData::DecodeThroughput {
-                decode_time_ms: stats.mean_ms,
-                decode_time_ms_stddev: Some(stats.stddev_ms),
+    );
+    let (memory, _) = sampler.stop();
+    let result_data = result.map_err(|err| err.context(mlx_server.stop_with_tail()))?;
+    Ok(RunResponseBuilder::new(result_data)
+        .process(&mut mlx_server)
+        .memory(memory)
+        .build())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use pipette_plan_types::{BatchSize, BenchmarkId, NonNegativeCount, PositiveCount};
+
+    use super::*;
+    use crate::models::test_support::bound_model;
+    use crate::runtimes::test_support::bound_runtime;
+
+    /// Refused before the gate and the tokenizer, too.
+    #[test]
+    fn a_single_decode_token_is_refused_before_the_model_loads() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let benchmark = DecodeThroughputBenchmark {
+            benchmark_id: BenchmarkId::try_new("decode_throughput_512_1")?,
+            parameter_prefill_tokens: NonNegativeCount::try_new(512)?,
+            parameter_decode_tokens: PositiveCount::try_new(1)?,
+            parameter_batch_size: BatchSize::one(),
+        };
+        let gated = Cell::new(false);
+        let Err(err) = run(
+            &benchmark,
+            &ResolvedMlxPython::try_from(&bound_runtime(tmp.path())?)?,
+            &ResolvedMlxModel::try_from(&bound_model(tmp.path(), false)?)?,
+            &|| {
+                gated.set(true);
+                Ok(())
             },
-            server.stdout(),
-            server.stderr(),
-        )
-    })
+            MeasurementObserver {
+                on_before_rep_start: &|| Ok(()),
+                on_after_rep_end: &|| Ok(()),
+            },
+            None,
+        ) else {
+            anyhow::bail!("a one-token decode cell was measured");
+        };
+        assert!(format!("{err:#}").contains("at least 2"), "{err:#}");
+        assert!(!gated.get(), "refused only after the gate");
+        Ok(())
+    }
 }

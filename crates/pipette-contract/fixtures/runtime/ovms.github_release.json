@@ -1,0 +1,7 @@
+{
+  "flavor": "windows-x64",
+  "repository_url": "github.com/openvinotoolkit/model_server",
+  "repository_version": "v2026.4.1",
+  "source": "github_release",
+  "type": "ovms"
+}

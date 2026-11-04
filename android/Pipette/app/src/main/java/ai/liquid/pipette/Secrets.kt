@@ -64,6 +64,77 @@ class Secrets(context: Context, private val aead: Aead? = defaultAead()) {
     return pair.publicKey.toHex()
   }
 
+  /** What [replacePrivateKeyHex] did. Every value other than [REPLACED] means the promoted slot still holds what it held before the call. */
+  enum class KeyReplacement {
+    /** The promoted slot holds the imported key. */
+    REPLACED,
+
+    /** The promoted slot holds a key the caller never saw, so the device changed identity after the caller decided. */
+    KEY_CHANGED,
+
+    /** The pending slot holds another key, so a registration is in flight. */
+    KEY_STAGED,
+
+    /** The staging write failed. */
+    NOT_STAGED,
+
+    /** The staged key did not promote. */
+    NOT_PROMOTED,
+  }
+
+  /**
+   * Replace the promoted signing key with [hex], in one step no registration can interleave with.
+   *
+   * `auth-import` and [RegistrationService.register] both write the pending slot. The lock each single slot operation takes does not span a
+   * compare-then-write, so an import that reads the promoted key and then stages its own can land inside a registration's window between
+   * [generatePendingSigningKeyPair] and [promotePendingPrivateKey]. Two outcomes follow, and both cost an identity: the registration promotes the
+   * imported key under the client id the server just issued, or it promotes nothing and leaves the server holding a record no device can sign for.
+   * The stale read also defeats `auth-import`'s `force=1` gate, which decides against a key another thread has already replaced.
+   *
+   * This method holds `KEY_LOCK` across the read, the comparison, the staging and the promotion, so neither ordering can interleave. It reports
+   * rather than throws, because the caller words the failure.
+   *
+   * @param expected the promoted key the caller compared against, or null when it found none. The comparison ignores case, because the value is hex.
+   * @param overStagedKey whether to replace a staged key that belongs to something else, rather than report [KeyReplacement.KEY_STAGED]. A killed
+   *   registration strands a staged key that no longer has a registration behind it, and nothing on the headless surface clears that slot, so an
+   *   operator who knows the device is idle needs a way through. The promoted-key comparison is not affected: it guards an identity that exists.
+   * @return [KeyReplacement.REPLACED] on success. Every other value means this call wrote nothing to the promoted slot.
+   */
+  @CheckResult
+  fun replacePrivateKeyHex(hex: String, expected: String?, overStagedKey: Boolean = false): KeyReplacement =
+    synchronized(KEY_LOCK) {
+      val promoted = readPrivateKey(migrate = false)?.toHex()
+      val staged = readSecret(KEY_PENDING_PRIVATE_HEX, migrate = false)
+      when {
+        !promoted.equals(expected, ignoreCase = true) -> KeyReplacement.KEY_CHANGED
+        // A staged copy of the key this call imports is what a half-finished import leaves behind, and a rerun has to complete it. Any other
+        // staged key belongs to a registration, which is either waiting on the server or was killed before it finished.
+        !overStagedKey && staged != null && !staged.equals(hex.trim(), ignoreCase = true) -> KeyReplacement.KEY_STAGED
+        !stagePendingPrivateKeyHex(hex) -> KeyReplacement.NOT_STAGED
+        !promotePendingPrivateKey() -> KeyReplacement.NOT_PROMOTED
+        else -> KeyReplacement.REPLACED
+      }
+    }
+
+  /**
+   * Stage an imported private key for [replacePrivateKeyHex] to promote with [promotePendingPrivateKey]. Returns whether it landed.
+   *
+   * The pending slot rather than the promoted one, so the import goes through the same two steps a registration does and the seal-before-clear
+   * ordering in [promotePendingPrivateKey] stays the only way the promoted slot is ever written. [generatePendingSigningKeyPair] cannot serve: it
+   * mints a fresh keypair, and an import has one in hand.
+   *
+   * [hex] is validated and re-spelled from its bytes, so the slot holds one canonical lowercase form. A value that is not a 32-byte Ed25519 seed is
+   * refused rather than stored, because promotion would then write a key [readPrivateKey] reads back as absent — an identity the device reports as
+   * present and cannot sign for.
+   *
+   * Private, so [replacePrivateKeyHex] stays the only import path. A caller that stages and promotes for itself reopens the race that method closes.
+   */
+  @CheckResult
+  private fun stagePendingPrivateKeyHex(hex: String): Boolean {
+    val seed = hex.trim().hexToBytesOrNull()?.takeIf { it.size == ED25519_PRIVATE_KEY_BYTES } ?: return false
+    return synchronized(KEY_LOCK) { writeSecret(KEY_PENDING_PRIVATE_HEX, seed.toHex()) }
+  }
+
   fun promotePendingPrivateKey(): Boolean =
     synchronized(KEY_LOCK) {
       // Seal before touching storage. Clearing the pending and legacy slots first and failing to write the
@@ -96,6 +167,32 @@ class Secrets(context: Context, private val aead: Aead? = defaultAead()) {
    * key material. Both migrations happen on the signing path, where the key is actually needed.
    */
   fun hasPrivateKey(): Boolean = synchronized(KEY_LOCK) { readPrivateKey(migrate = false) != null }
+
+  /**
+   * Whether the promoted slot holds a key this process cannot decrypt, which is what a Keystore outage looks like from here.
+   *
+   * [exportPrivateKeyHex] answers null for two different states: the slot is empty, or `unseal` failed. `auth-import` has to tell them apart. It
+   * refuses over a key that signs for another client, and an outage that reads as an empty slot turns that refusal off exactly when it matters — the
+   * import then overwrites a key the next successful `unseal` would have returned. `seal` and `unseal` are separate calls on a system service, so a
+   * read that fails now says nothing about the write that follows it.
+   *
+   * One method rather than a presence accessor the caller pairs with [exportPrivateKeyHex], so the two reads cannot straddle a lock boundary and
+   * report a state the slot was never in.
+   *
+   * A pure read, like [hasPrivateKey]. It reports the encrypted and the pre-encryption plaintext spellings of the promoted slot.
+   */
+  fun hasUnreadablePrivateKey(): Boolean = synchronized(KEY_LOCK) { hasSecret(KEY_PRIVATE_HEX) && readPrivateKey(migrate = false) == null }
+
+  /**
+   * The promoted signing key as hex, or null when there is no usable one — the only way key material leaves this class.
+   *
+   * It exists for `auth-export`, which is the sanctioned path off a device for a key the Keystore exports no other way. Keep it the only such
+   * accessor: everything else that needs the key needs a *signature*, which is [sign]'s job.
+   *
+   * A pure read, like [hasPrivateKey]: `readPrivateKey(migrate = false)` recovers a legacy PKCS#8 blob's seed through `legacyPrivateKey()` without
+   * writing anything, so a not-yet-migrated install still exports its identity and printing a bundle cannot mutate key material.
+   */
+  fun exportPrivateKeyHex(): String? = synchronized(KEY_LOCK) { readPrivateKey(migrate = false)?.toHex() }
 
   fun deletePrivateKey() {
     synchronized(KEY_LOCK) { prefs.edit().removeSecret(KEY_PRIVATE_HEX).remove(LEGACY_KEY_PRIVATE_PKCS8).apply() }
@@ -302,7 +399,9 @@ class Secrets(context: Context, private val aead: Aead? = defaultAead()) {
     private const val LEGACY_KEY_PRIVATE_PKCS8 = "private_key_pkcs8"
     private const val LEGACY_KEY_PENDING_PRIVATE_PKCS8 = "pending_private_key_pkcs8"
     private const val KEY_HF_TOKEN = "hf_token"
-    private const val ED25519_PRIVATE_KEY_BYTES = 32
+
+    /** Internal so [IdentityBundle] validates an imported seed against the same length this class stores, rather than a second spelling of 32. */
+    internal const val ED25519_PRIVATE_KEY_BYTES = 32
 
     // Serializes every read and write of the key slots. Several paths write while reading:
     // sign() converts a legacy blob, and any read of a slot still in pre-encryption
@@ -325,6 +424,20 @@ class Secrets(context: Context, private val aead: Aead? = defaultAead()) {
     private const val SEED_OFFSET = 16
     private val ED25519_PKCS8_PREFIX = byteArrayOf(0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20)
   }
+}
+
+/**
+ * A private signing key as hex, wrapped so that no generated string can print it.
+ *
+ * The key has to ride in [IdentityBundle] and in `HeadlessInspect.Facts`, both `data class`es whose generated `toString` a failing assertion prints
+ * and a `Log.d` would emit. A bare `String` there puts the device's whole identity in a log line that nothing else about the code suggests is
+ * sensitive. Mirrors iOS's `PrivateKeyHex`, which is "deliberately neither Codable nor printable".
+ *
+ * Read [value] only where the key itself is the point: sealing it into storage, deriving a public key, or the one line `auth-export` exists to print.
+ */
+@JvmInline
+value class PrivateKeyHex(val value: String) {
+  override fun toString(): String = "PrivateKeyHex(redacted)"
 }
 
 fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

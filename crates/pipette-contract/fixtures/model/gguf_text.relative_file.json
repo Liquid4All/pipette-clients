@@ -1,0 +1,5 @@
+{
+  "path": "blobs/LFM2.5-350M-Q4_0.gguf",
+  "source": "relative_file",
+  "type": "gguf_text"
+}

@@ -7,9 +7,8 @@ struct RunDetailHeaderView: View {
     let benchmarkChips: [String]
     let quantChips: [String]
 
-    // Back and the Rename/Delete menu live in the host's system navigation bar
-    // (see JobDetailView) so the standard back button — and its swipe-back
-    // gesture — work like the rest of the app.
+    // Back and the Rename/Delete menu live in JobDetailView's navigation bar, so
+    // the system back button and swipe-back work like the rest of the app.
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             summaryHeader

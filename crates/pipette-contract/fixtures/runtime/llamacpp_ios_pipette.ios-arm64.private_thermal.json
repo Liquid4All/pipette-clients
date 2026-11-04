@@ -1,0 +1,7 @@
+{
+  "flavor": "ios-arm64",
+  "private_thermal": true,
+  "repository_url": "github.com/ggml-org/llama.cpp",
+  "repository_version": "b10216",
+  "type": "llamacpp_ios_pipette"
+}

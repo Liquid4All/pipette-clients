@@ -4,53 +4,59 @@ mod decode_throughput;
 mod end_to_end_latency;
 mod max_memory_usage;
 mod prefill_throughput;
-pub(crate) mod server;
-mod throughput_http;
 
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
-use pipette_plan_types::Runtime;
+use pipette_ops::measurement::MeasurementObserver;
+use pipette_ops::readiness::ReadinessGate;
+use pipette_plan_types::{BenchmarkDefinition, RunRequest, RunResponse};
+
+use crate::sidecar::require_coreai_sidecar;
 
 /// Top-level Core AI dispatch: route a prepared [`RunRequest`] by kind.
 ///
-/// CLI owns prepare/record; this crate only runs the cell and returns
-/// [`RunResponse`].
+/// Each supported arm resolves the sidecar before its cell runs, so a
+/// first-use `swift build -c release`, which saturates every core for minutes,
+/// finishes before the readiness gate certifies the device as idle.
 pub fn run(
     req: &RunRequest,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: &MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponse> {
-    // Fail closed on a non-bundled pin: the sidecar is built from the bundled
-    // `Package.resolved` only, so running a cell whose runtime records a
-    // different Swift stack would publish a number under a pin the executed
-    // binary does not have. The CLI/URI parse rejects this too, but a plan
-    // deserialized straight into a `RunRequest` reaches here without that gate.
-    if let Runtime::AppleCoreAiMacosPipette(rt) = &req.runtime.bound {
-        if !rt.is_bundled() {
-            anyhow::bail!(
-                "core-ai-macos-pipette runtime pins a Swift stack this client was \
-                 not built against ({}); only the bundled pin is runnable",
-                rt
-            );
+    match &req.benchmark {
+        BenchmarkDefinition::PrefillThroughput(benchmark) => prefill_throughput::run(
+            req,
+            benchmark,
+            require_coreai_sidecar()?,
+            readiness_gate,
+            observer,
+        ),
+        BenchmarkDefinition::DecodeThroughput(benchmark) => decode_throughput::run(
+            req,
+            benchmark,
+            require_coreai_sidecar()?,
+            readiness_gate,
+            observer,
+        ),
+        BenchmarkDefinition::EndToEndLatency(benchmark) => end_to_end_latency::run(
+            req,
+            benchmark,
+            require_coreai_sidecar()?,
+            readiness_gate,
+            observer,
+        ),
+        BenchmarkDefinition::MaxMemoryUsage(benchmark) => {
+            max_memory_usage::run(req, benchmark, require_coreai_sidecar()?)
         }
-    }
-    match req.benchmark.benchmark_type() {
-        pipette_plan_types::BenchmarkType::PrefillThroughput => {
-            prefill_throughput::run(req, readiness_gate, observer)
-        }
-        pipette_plan_types::BenchmarkType::DecodeThroughput => {
-            decode_throughput::run(req, readiness_gate, observer)
-        }
-        pipette_plan_types::BenchmarkType::EndToEndLatency => {
-            end_to_end_latency::run(req, readiness_gate, observer)
-        }
-        pipette_plan_types::BenchmarkType::MaxMemoryUsage => max_memory_usage::run(req),
-        pipette_plan_types::BenchmarkType::Eval => {
+        BenchmarkDefinition::Eval(_) => {
             anyhow::bail!("eval is not yet supported for the Core AI runtime")
         }
-        pipette_plan_types::BenchmarkType::VlThroughput => {
-            anyhow::bail!("VL throughput benchmarks are not yet supported for Core AI")
+        BenchmarkDefinition::VlmEval(_)
+        | BenchmarkDefinition::AsrEval(_)
+        | BenchmarkDefinition::VlThroughput(_)
+        | BenchmarkDefinition::VlMaxMemory(_)
+        | BenchmarkDefinition::VlSpecDecode(_)
+        | BenchmarkDefinition::AsrThroughput(_)
+        | BenchmarkDefinition::AsrMaxMemory(_) => {
+            anyhow::bail!("this benchmark is not yet supported for Core AI")
         }
     }
 }

@@ -1,0 +1,8 @@
+{
+  "custom_label": "acme LFM3 mlx 4bit",
+  "principal_id": "org_01936d",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "source": "vault_archive",
+  "type": "mlx",
+  "url": "/vault/resources/vault_1/content"
+}

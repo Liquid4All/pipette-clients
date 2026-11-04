@@ -3,27 +3,16 @@
 #
 # Usage: ./scripts/slurm/interactive.sh [GPUS [HOURS]]
 #   GPUS  number of GPUs to request (default: 1)
-#   HOURS wall-time limit in hours    (default: 2)
+#   HOURS wall-time limit in hours    (default: 24)
+# Run from the head node; srun's default --export=ALL carries the env below
+# into the compute-node shell.
 #
-# Sources the modules profile, loads slurm + CUDA 12.9 toolkit, redirects
-# scratch dirs off the full /tmp, then srun --pty bash -l.
-#
-# Why each piece:
-#   * cuda12.9 toolkit  — vLLM JIT-compiles some kernels (LFM2/Mamba,
-#     Qwen3 GDN) at server startup; without nvcc / CUDA_HOME the engine
-#     dies with `Could not find nvcc and default cuda_home='/usr/local/cuda'`.
-#   * TMPDIR redirect   — /tmp on compute nodes is ~128 G total with only
-#     ~700 M free; nvcc writes preprocessed .ii files there and the
-#     ninja build fails with "No such file or directory" once tmp fills.
-#     Redirecting to $HOME (NFS, multi-TB free) avoids that.
-#   * UV_CACHE_DIR      — same /tmp pressure for uv venv installs.
-#   * HF_HOME           — keep model snapshots inside the pipette
-#     workspace so `pipette` picks them up via its auto-mount.
-#
-# srun's default `--export=ALL` carries these env vars into the
-# compute-node shell.
-#
-# Run from the head node.
+#   * CUDA toolkit: vLLM JIT-compiles some kernels (LFM2/Mamba, Qwen3 GDN) at
+#     startup and dies with "Could not find nvcc" without it.
+#   * TMPDIR, UV_CACHE_DIR: compute-node /tmp has ~700 M free; nvcc's .ii files
+#     fill it and ninja then fails with "No such file or directory". $HOME (NFS)
+#     has room.
+#   * HF_HOME: keep model snapshots in the pipette workspace's model dir.
 set -euo pipefail
 
 GPUS="${1:-1}"

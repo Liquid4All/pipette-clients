@@ -1,69 +1,34 @@
-# Example plan: OpenVINO IR on the devcloud box — Intel CPU / iGPU / NPU.
-#
-# Target: Intel Core Ultra 7 258V (Lunar Lake), Arc 140V iGPU, Intel AI Boost
-# NPU, Windows 11. The first venv-backed runtime that is not POSIX-hosted, hence
-# `shell = "powershell"` and the `C:/` paths.
+# Example plan: OpenVINO IR on an Intel Lunar Lake box (Core Ultra 7 258V, Arc
+# 140V iGPU, AI Boost NPU, Windows 11), on CPU, iGPU and NPU through both
+# OpenVINO engines at release 2026.4: `uv_openvino` (`openvino-genai` in a uv
+# venv) and `ovms` (OpenVINO Model Server). The two engines are different
+# runtime types, so one variant carries both engines' flag rows. See
+# docs/ovms.md.
 #
 # Models come from the private repo LiquidAI/openvino-experimental, laid out as
-# <Model>/<precision>/ — which is exactly what `prefix` addresses. Set
-# PIPETTE_HF_TOKEN on the runner; it is injected into the tokenless model
-# definition at the run boundary, so no token belongs in this file. (That also
-# means these must stay in structural TOML form: a `openvino://` URI cannot
-# carry a token.)
+# <Model>/<precision>/, which is what `prefix` addresses. Set PIPETTE_HF_TOKEN
+# on the runner; it is injected at the run boundary. These entries must stay in
+# structural form because an `openvino://` URI cannot carry a token.
 #
-# Variants are ordered smallest model first — 230M, 350M, 1.2B, then MoE. Run
-# top-down and stop when something looks wrong rather than queueing the whole
-# matrix blind. For first bring-up, narrow to a single cheap cell with
-# `--type decode-throughput` against the 230M CPU variant before letting the
-# GPU or NPU rows run at all.
+# Variants run smallest model first. For first bring-up pass `--limit` so only
+# the first 230M CPU cells run. 240 cells, 120 per engine.
 #
-# 120 cells at 5 reps each.
+# Precision follows the device: NPU rows take the symmetric exports because
+# `int4-asym-gq128` fails to compile on the NPU and `int8-asym` runs about 8x
+# slower there. `int8-sym` on the NPU returns incoherent output, so read that
+# row as timing only. docs/openvino-ir.md has the measurements.
 #
-# --- Why the precision split ---------------------------------------------
+# The NPU's static-shape settings are derived per cell by each engine's
+# `flags.rs`: `MIN_RESPONSE_LEN` is raised for `end_to_end_latency_512_256`, and
+# `MAX_PROMPT_LEN` stays at 1024, which every 512-token prompt here fits. A
+# cell over it is rejected because raising it costs compile time
+# superlinearly. A cell may still author `max_prompt_len`, `min_response_len`
+# or `generate_hint`. The ovms rows leave `prefix_caching` unset, which
+# resolves to off.
 #
-# Precision follows the device, not preference. The NPU rejects asymmetric
-# weights, so NPU rows take the symmetric ladder (fp16, int8-sym, int4-sym-cw,
-# int4-sym-gq128) while CPU/GPU rows take the asymmetric one (fp16, int8-asym,
-# int4-asym-gq128). That is why every model appears in two variants rather than
-# one: a shared variant would pair NPU with weights it cannot run.
-#
-# `int4-sym-cw` is the canonical NPU recipe; `int4-asym-gq128` is the canonical
-# CPU/GPU one. See docs/openvino-ir.md.
-#
-# --- Nothing here authors runtime flags -----------------------------------
-#
-# The NPU's static-shape knobs are derived from the cell by `pipette-openvino`'s
-# `flags.rs`, so the plan does not need to set them. In particular
-# `MIN_RESPONSE_LEN` is raised automatically for `end_to_end_latency_512_256`
-# (256 response tokens against GenAI's 128 default), which is why the NPU rows
-# run the full four-benchmark suite.
-#
-# `MAX_PROMPT_LEN` stays at the 1024 default and every cell here fits under it
-# (512 prompt). A cell over that bound is rejected rather than the bound raised
-# — raising it costs compile time superlinearly (17.8s -> 26.9s at 2048 ->
-# 62.8s at 4096) and walks into the unresolved single-token behaviour
-# docs/openvino-ir.md records at those larger static shapes.
-#
-# Authorable overrides do exist (`max_prompt_len`, `min_response_len`,
-# `generate_hint` on the four `*UvOpenvinoOpenvino` RuntimeFlags variants) if a
-# future cell needs to accept those costs deliberately.
-#
-# --- MoE has no NPU path --------------------------------------------------
-#
-# LFM2.5-8B-A1B, LFM2-8B-A1B and LFM2-24B-A2B are CPU/GPU only per OpenVINO's
-# support matrix, so they appear in no NPU variant. Preflight also reads
-# `config.json` and rejects a MoE model on NPU, so a mis-declared coordinate
-# cannot slip past this plan's structure.
-#
-# --- The 24B fits, but only just ------------------------------------------
-#
-# LFM2-24B-A2B/int4-asym-gq128 is a 12 GB IR and the box has 31.6 GiB of
-# on-package memory, shared with the iGPU. It fits; it is not comfortable.
-# Expect the GPU rows to be the ones that struggle, and run this variant last
-# (it already is) so a failure there costs nothing else.
-#
-# State written to
-# .pipette-plan/plans/intel-openvino/state.jsonl.
+# The MoE models have no NPU path per OpenVINO's support matrix, so they appear
+# in no NPU variant. LFM2-24B-A2B is a 12 GB IR on 31.6 GiB of memory shared
+# with the iGPU: it fits, but expect its GPU rows to struggle.
 
 plan_id = "intel-openvino"
 benchmarks = [
@@ -74,10 +39,10 @@ benchmarks = [
 ]
 
 [[transports]]
-client_id   = "devcloud"
+client_id   = "intel-node-1"
 type        = "ssh"
 host        = "intel-node-1"
-user        = "yuri"
+user        = "eval"
 binary_path = "C:/pipette/pipette.exe"
 work_dir    = "C:/pipette"
 shell       = "powershell"
@@ -85,99 +50,120 @@ shell       = "powershell"
 [retry]
 max_consecutive_failures = 5
 
-# --------------------------------------------------------------------------
-# LFM2.5-230M — 151 MB int4. Smallest model; start here.
-# --------------------------------------------------------------------------
+# --- LFM2.5-230M (151 MB int4) ---------------------------------------------
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-230M/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-230M/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-230M/int4-sym-cw" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
-
-# --------------------------------------------------------------------------
-# LFM2.5-350M — 211 MB int4. The precision sweep, and the widest block on
-# purpose: 350M is cheap to run and it is the model Intel published perf figures
-# for, so it is the only one producing numbers comparable to an external
-# reference. Those sheets are Panther Lake and devcloud is Lunar Lake, so the
-# comparison is shape-for-shape, not row-for-row.
-# --------------------------------------------------------------------------
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "npu" },
 ]
 
+# --- LFM2.5-350M (211 MB int4): the precision sweep ------------------------
+#
+# The widest block because Intel published perf figures for this model, so it
+# is the only one comparable to an external reference (theirs are Panther Lake,
+# this box is Lunar Lake: shape-for-shape, not row-for-row).
+
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/fp16" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/int8-asym" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/fp16" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/int8-asym" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/fp16" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/int8-sym" },
@@ -185,149 +171,180 @@ models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-350M/int4-sym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
-
-# --------------------------------------------------------------------------
-# The 1.2B dense trio — 633 MB int4 each. LFM2-1.2B is the superseded
-# checkpoint, kept as the generational comparison against LFM2.5-1.2B-Instruct.
-# It was only exported symmetric, so it uses int4-sym-cw on CPU/GPU too.
-# --------------------------------------------------------------------------
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "npu" },
 ]
 
+# --- 1.2B dense (633 MB int4 each) -----------------------------------------
+#
+# LFM2-1.2B is the superseded checkpoint, kept for the generational comparison.
+# It was only exported symmetric, so it uses int4-sym-cw on CPU/GPU too.
+
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-1.2B-Instruct/int4-asym-gq128" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-1.2B-Thinking/int4-asym-gq128" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2-1.2B/int4-sym-cw" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-1.2B-Instruct/int4-asym-gq128" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-1.2B-Thinking/int4-asym-gq128" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2-1.2B/int4-sym-cw" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-1.2B-Instruct/int4-sym-cw" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-1.2B-Thinking/int4-sym-cw" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2-1.2B/int4-sym-cw" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
-
-# --------------------------------------------------------------------------
-# MoE — CPU/GPU only, no NPU path. 4.2-4.3 GB int4. The int8 row on
-# LFM2.5-8B-A1B is the one place the MoE precision step is measurable;
-# LFM2-8B-A1B is the superseded checkpoint, kept for the generational compare.
-# --------------------------------------------------------------------------
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "npu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "npu" },
 ]
 
+# --- MoE (4.2-4.3 GB int4), CPU/GPU only ----------------------------------
+#
+# LFM2.5-8B-A1B's int8 row is the only MoE precision step; LFM2-8B-A1B is the
+# superseded checkpoint, kept for the generational comparison.
+
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-8B-A1B/int4-asym-gq128" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-8B-A1B/int8-asym" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2-8B-A1B/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
-
-# --------------------------------------------------------------------------
-# LFM2-24B-A2B — 12 GB IR, CPU/GPU only. Its own variant so it can be deleted
-# in one edit: see the memory note in the header before running it.
-# --------------------------------------------------------------------------
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-8B-A1B/int4-asym-gq128" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2.5-8B-A1B/int8-asym" },
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2-8B-A1B/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
-
-# --------------------------------------------------------------------------
-# LFM2-24B-A2B — 12 GB IR, CPU/GPU only. Its own variant so it can be deleted
-# in one edit: see the memory note in the header before running it.
-# --------------------------------------------------------------------------
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
 ]
 
+# --- LFM2-24B-A2B (12 GB IR), CPU/GPU only --------------------------------
+#
+# Its own variants, last, so they can be dropped in one edit if memory is tight.
+
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2-24B-A2B/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "cpu" },
 ]
 
 [[variants]]
-clients = ["devcloud"]
+clients = ["intel-node-1"]
 models = [
   { type = "openvino", source = "huggingface", org = "LiquidAI", repo_name = "openvino-experimental", prefix = "LFM2-24B-A2B/int4-asym-gq128" },
 ]
 runtimes = [
-{ type = "uv_openvino", server_version = "2026.2.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.2.1\nopenvino-genai==2026.2.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.2.1.0\n" } },
+  { type = "uv_openvino", server_version = "2026.4.1", python_version = "3.11", source = { type = "pip_requirements_text", contents = "numpy==2.4.6\nopenvino==2026.4.1\nopenvino-genai==2026.4.1.0\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.4.1.0\n" } },
+  { type = "ovms", source = "github_release", repository_url = "github.com/openvinotoolkit/model_server", repository_version = "v2026.4.1", flavor = "windows-x64" },
 ]
 runtime_flags = [
   { benchmark_type = "prefill_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "decode_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "end_to_end_latency", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
   { benchmark_type = "max_memory_usage", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "prefill_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "decode_throughput", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "end_to_end_latency", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "max_memory_usage", runtime_type = "ovms", model_type = "openvino", device = "gpu" },
 ]
-

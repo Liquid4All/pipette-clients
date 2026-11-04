@@ -1,0 +1,6 @@
+{
+  "flavor": "amd_gpu",
+  "image_name": "rocm/vllm",
+  "image_tag": "v0.10.0",
+  "type": "docker_vllm"
+}

@@ -1,0 +1,5 @@
+{
+  "dir": "/var/lib/pipette/models/LFM2.5-350M-MLX-4bit",
+  "source": "absolute_dir",
+  "type": "mlx"
+}

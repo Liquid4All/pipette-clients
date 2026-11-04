@@ -1,0 +1,7 @@
+{
+  "benchmark_id": "end_to_end_latency_512_256_bs4",
+  "benchmark_type": "end_to_end_latency",
+  "parameter_batch_size": 4,
+  "parameter_decode_tokens": 256,
+  "parameter_prefill_tokens": 512
+}

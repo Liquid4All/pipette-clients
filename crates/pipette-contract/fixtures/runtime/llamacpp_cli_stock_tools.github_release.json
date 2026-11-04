@@ -1,0 +1,7 @@
+{
+  "flavor": "macos-arm64",
+  "repository_url": "github.com/ggml-org/llama.cpp",
+  "repository_version": "b5000",
+  "source": "github_release",
+  "type": "llamacpp_cli_stock_tools"
+}

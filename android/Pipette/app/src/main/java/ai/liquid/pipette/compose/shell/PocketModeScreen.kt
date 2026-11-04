@@ -139,6 +139,7 @@ fun PocketModeScreen(pocket: PocketUi, onExit: () -> Unit) {
           currentCellLabel = pocket.currentCellLabel,
           progressText = pocket.progressText,
           coolingSinceMillis = pocket.coolingSinceMillis,
+          coolingMaxMillis = pocket.coolingMaxMillis,
           colors = JobActivityColors(primaryText = Color.White, secondaryText = PocketGray, accent = PocketCoolText),
           modifier = Modifier.padding(top = 8.dp),
         )

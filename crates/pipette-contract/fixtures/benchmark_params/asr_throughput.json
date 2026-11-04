@@ -1,0 +1,8 @@
+{
+  "audio_channels": 1,
+  "audio_duration_ms": 15000,
+  "audio_sample_rate_hz": 16000,
+  "benchmark_type": "asr_throughput",
+  "decode_tokens": 256,
+  "text_tokens": 1024
+}

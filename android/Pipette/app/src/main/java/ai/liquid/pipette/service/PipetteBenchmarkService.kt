@@ -7,8 +7,10 @@ import ai.liquid.pipette.BenchmarkProgressCallback
 import ai.liquid.pipette.BenchmarkThermalCallback
 import ai.liquid.pipette.COOLING_PROGRESS_TOTAL
 import ai.liquid.pipette.CancelFlag
+import ai.liquid.pipette.CellDemotionWatch
 import ai.liquid.pipette.CpuAffinityProbe
 import ai.liquid.pipette.EngineActor
+import ai.liquid.pipette.LlamacppLoadMode
 import ai.liquid.pipette.Readiness
 import ai.liquid.pipette.ReadinessOutcome
 import android.app.Notification
@@ -39,7 +41,12 @@ class PipetteBenchmarkService : Service() {
     // sampler's `before` sees the same warm gate-pass value: cachedHeadroom
     // throttles to ~1 Hz and holds the last good reading, so back-to-back reads
     // (gate release → `before` sample) never rate-limit to NaN.
-    Readiness(thermalProvider::currentStatus, thermalProvider::cachedHeadroom, skipThermal = { skipThermalGate })
+    Readiness(
+      thermalProvider::currentStatus,
+      thermalProvider::cachedHeadroom,
+      skipThermal = { skipThermalGate },
+      maxWaitMillis = { readinessMaxWaitMillis },
+    )
   }
 
   /**
@@ -51,7 +58,30 @@ class PipetteBenchmarkService : Service() {
    */
   @Volatile private var skipThermalGate = false
 
+  /**
+   * The per-rep gate's wait budget, delivered on the start Intent like [skipThermalGate] and for the same reason. Defaults to the shared
+   * [Readiness.COOLDOWN_MAX_MILLIS], which is what an absent `max_wait_secs` means.
+   */
+  @Volatile private var readinessMaxWaitMillis = Readiness.COOLDOWN_MAX_MILLIS
+
   @Volatile private var currentCancelFlag: CancelFlag? = null
+
+  /**
+   * The per-core `scaling_max_freq` table, read once and reused by every poll.
+   *
+   * Hoisted out of the watch because it is the expensive part of a sample, by a wide margin; [CpuAffinityProbe] carries the measured numbers and the
+   * attribution, and they are deliberately not repeated here. Core topology does not change while the process lives, so one read is enough.
+   */
+  private val freqSweep by lazy { CpuAffinityProbe.freqSweep() }
+
+  /**
+   * Watches this process's cpuset for the length of a cell, load included, and holds the verdict the proxy reads back afterwards. There is no way to
+   * hand that verdict through a run's return value: the run may equally have thrown, have returned a partial, or have completed in the window between
+   * the demotion and the cancel taking effect, and all three are invalid measurements.
+   *
+   * The sampler reuses [freqSweep], which is why it is built here and not inside the watch.
+   */
+  private val demotionWatch by lazy { CellDemotionWatch(probe = { CpuAffinityProbe.sample(freqSweep) }) }
 
   @Suppress("TooManyFunctions") // mirrors the IBenchmarkService AIDL surface
   private val binder =
@@ -64,10 +94,20 @@ class PipetteBenchmarkService : Service() {
       // inference actually runs under. Serialized as JSON for the binder hop.
       override fun benchmarkProcessCpuAffinity(): String = engineActor.benchmarkProcessCpuAffinity().toJson()
 
+      /**
+       * The demotion that invalidated the last cell, or null. A **destructive** read: the first caller takes the verdict and clears it, so one
+       * demotion explains at most one cell and cannot leak into the next.
+       */
+      override fun lastRunInterruption(): String? = demotionWatch.consumeVerdict()?.toJson()
+
       override fun isAvailable(): Boolean = engineActor.isAvailable
 
-      override fun loadModel(modelPath: String, nGpuLayers: Int, contextSize: Int, nUbatch: Int): BenchmarkResult = guard {
-        engineActor.loadSync(modelPath, nGpuLayers, contextSize, nUbatch)
+      override fun loadModel(modelPath: String, nGpuLayers: Int, contextSize: Int, nUbatch: Int, loadMode: Int): BenchmarkResult = guard {
+        // A load opens a new cell: it starts the watch (the load is the window a screen-off most often falls in) and clears any previous verdict, so
+        // a resume inside RemoteBenchmarkEngine's idle grace cannot file a load failure as the previous job's demotion. Guarded like every other part
+        // of this guard: failing to arm a diagnostic must not fail the load, which would poison failedModelPaths for the whole model.
+        runCatching { demotionWatch.beginCell { currentCancelFlag?.cancel() } }
+        engineActor.loadSync(modelPath, nGpuLayers, contextSize, nUbatch, LlamacppLoadMode.fromCValue(loadMode))
         BenchmarkResult.loaded(HANDLE)
       }
 
@@ -96,9 +136,13 @@ class PipetteBenchmarkService : Service() {
         nGpuLayers: Int,
         contextSize: Int,
         nUbatch: Int,
+        loadMode: Int,
         mmprojPath: String?,
         callback: IBenchmarkRunCallback,
       ): BenchmarkResult = guard {
+        // Same as loadModel: this call owns the load, so the cell has to open before it rather than inside beginRun, which would leave the load
+        // unguarded and take its baseline after the window it is meant to cover.
+        runCatching { demotionWatch.beginCell { currentCancelFlag?.cancel() } }
         val flag = beginRun()
         try {
           val json =
@@ -108,6 +152,7 @@ class PipetteBenchmarkService : Service() {
               nGpuLayers,
               contextSize,
               nUbatch,
+              LlamacppLoadMode.fromCValue(loadMode),
               mmprojPath,
               progressShim(callback, flag),
               cooldownShim(callback, flag),
@@ -120,8 +165,17 @@ class PipetteBenchmarkService : Service() {
       }
 
       override fun unloadModel(): BenchmarkResult = guard {
+        // Close the cell but KEEP the baseline: an unload is not a job boundary. JobRunner unloads from its per-cell error path as well as after the
+        // loop, and a mid-job unload is followed immediately by the next cell's load. Dropping the baseline here would let that next cell take its
+        // own first sample as normal, so a process already demoted when the previous cell failed would look healthy and be measured on in silence.
+        // [endJob] is the call that clears it.
+        runCatching { demotionWatch.stop() }
         engineActor.unloadSync()
         BenchmarkResult.ok()
+      }
+
+      override fun endJob() {
+        runCatching { demotionWatch.closeJob() }
       }
 
       override fun requestCancel() {
@@ -145,6 +199,8 @@ class PipetteBenchmarkService : Service() {
     // Default to the current value, not to false: a redelivered or extra-less
     // start must not silently re-enforce a gate the running job was waived for.
     skipThermalGate = intent?.getBooleanExtra(EXTRA_SKIP_THERMAL_GATE, skipThermalGate) ?: skipThermalGate
+    // Same "default to the current value" rule as the waiver: an extra-less redelivery must not silently reset a running job's deadline.
+    readinessMaxWaitMillis = intent?.getLongExtra(EXTRA_READINESS_MAX_WAIT_MILLIS, readinessMaxWaitMillis) ?: readinessMaxWaitMillis
     // The proxy starts us with startForegroundService(), so we must call
     // startForeground() promptly or the OS kills the app with "did not then
     // call Service.startForeground()". If the promotion is refused
@@ -184,10 +240,23 @@ class PipetteBenchmarkService : Service() {
   }
 
   private fun beginRun(): CancelFlag {
-    // Diagnostic: log the :benchmark process's cpuset/affinity at run start so a
-    // device run surfaces any OEM demotion via `adb logcat -s pipette-cpuset`.
-    runCatching { Log.i(CPUSET_TAG, "[:benchmark] ${CpuAffinityProbe.snapshot().summary()}") }
-    return CancelFlag().also { currentCancelFlag = it }
+    // Open the cell here only if nothing else already did. loadModel and runBenchmarkFresh own their loads and arm before them; re-arming now would
+    // not lose the baseline (beginCell seeds the new tracker from the old one's best), but it would clear a verdict already recorded during the load
+    // and not yet collected, and it would reset the confirmation streak, restarting the two-poll detection window in the middle of the cell.
+    //
+    // This still has to run for a run whose cell was never opened, which is what a `beginCell` that threw inside `loadModel`'s `runCatching` leaves
+    // behind: arming is best-effort there so a diagnostic cannot fail a load, and this is where that miss is picked up.
+    //
+    // The watch takes its own baseline sample as it opens, which is also the `[:benchmark]` diagnostic line a device run reads back with
+    // `adb logcat -s pipette-cpuset`, so there is no separate probe to log here.
+    if (!demotionWatch.isWatching && demotionWatch.lastDemotion == null) {
+      runCatching { demotionWatch.beginCell { currentCancelFlag?.cancel() } }
+    }
+    val flag = CancelFlag().also { currentCancelFlag = it }
+    // Pre-cancel a run that is starting into an already-demoted process. The watch fires once per cell, so a demotion confirmed during the load has
+    // already spent its callback on a flag this run does not own; without this the run would measure to completion under the demoted cpuset.
+    if (demotionWatch.lastDemotion != null) flag.cancel()
+    return flag
   }
 
   private fun progressShim(callback: IBenchmarkRunCallback, flag: CancelFlag): BenchmarkProgressCallback =
@@ -260,8 +329,10 @@ class PipetteBenchmarkService : Service() {
     /** Boolean start-Intent extra carrying the debug thermal-gate waiver into this process. See [skipThermalGate]. */
     const val EXTRA_SKIP_THERMAL_GATE = "ai.liquid.pipette.extra.SKIP_THERMAL_GATE"
 
+    /** Long start-Intent extra carrying the run's readiness deadline in millis into this process. See [readinessMaxWaitMillis]. */
+    const val EXTRA_READINESS_MAX_WAIT_MILLIS = "ai.liquid.pipette.extra.READINESS_MAX_WAIT_MILLIS"
+
     private const val TAG = "pipetteBenchSvc"
-    private const val CPUSET_TAG = "pipette-cpuset"
     private const val CHANNEL_ID = "pipette_benchmark"
     private const val NOTIFICATION_ID = 0x4243 // 'BC'
     private const val HANDLE = 1L

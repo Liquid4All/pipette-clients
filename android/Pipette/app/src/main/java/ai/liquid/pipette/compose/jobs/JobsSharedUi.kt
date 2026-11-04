@@ -1,6 +1,3 @@
-// Small composables shared between the Jobs screens (list, wizard, detail, cell detail): a brand-logo model chip,
-// the "Show N more properties" toggle, and the contribute-to-Pipette checkbox row. Kept in one file so the
-// screens can be reasoned about individually without cross-file spillover of helpers.
 @file:Suppress("MagicNumber")
 
 package ai.liquid.pipette.compose.jobs
@@ -38,7 +35,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** A model chip: brand logo + (truncated) name inside a hairline capsule. Used by the wizard review and detail chip rows. */
 @Composable
 internal fun JobsModelChip(name: String) {
   val colors = PipetteTheme.colors
@@ -88,7 +84,6 @@ internal fun JobsMorePropertiesToggle(expanded: Boolean, hiddenCount: Int, onCli
   }
 }
 
-/** Left checkbox + multi-line contribute copy (iOS contribution row). Shared by the wizard review and the detail body. */
 @Composable
 internal fun JobsContributeRow(checked: Boolean, enabled: Boolean, onToggle: (Boolean) -> Unit) {
   Row(

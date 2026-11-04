@@ -1,0 +1,6 @@
+{
+  "org": "LiquidAI",
+  "repo_name": "LFM2.5-350M",
+  "source": "huggingface",
+  "type": "torch"
+}

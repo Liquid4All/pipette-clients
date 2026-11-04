@@ -3,7 +3,7 @@
 # Build the Pipette Android app from the command line.
 #
 # Usage:
-#   ./android/build.sh            # assemble the debug APK (:app:assembleDebug)
+#   ./android/build.sh            # assemble the debug APK (:app:assembleKotlinEngineDebug)
 #   ./android/build.sh test       # compile + unit tests + assemble
 #   ./android/build.sh --help     # this message
 #   ./android/build.sh TASKS...   # any other args are forwarded to gradlew
@@ -12,11 +12,11 @@
 # the vendored submodules. This wrapper resolves what it safely can and fails
 # fast with the exact fix for what it can't, so you avoid the usual scavenger
 # hunt. Specifically it:
-#   - finds a JDK (>= 17) to run Gradle and exports JAVA_HOME — it probes the
+#   - finds a JDK (>= 17) to run Gradle and exports JAVA_HOME: it probes the
 #     Homebrew location directly, so a Homebrew JDK works even un-symlinked;
 #   - finds the Android SDK and exports ANDROID_HOME (no local.properties is
-#     written — nothing persists silently);
-#   - initializes any uninitialized vendored submodules;
+#     written: nothing persists silently);
+#   - initializes the vendored submodules the Android app builds from;
 #   - checks for the NDK, cmake, ninja, and cargo, printing the exact install
 #     command for whatever is absent. It never installs anything, runs brew, or
 #     accepts SDK licenses on your behalf.
@@ -49,10 +49,10 @@ die() {
 case "${1:-}" in
     test)
         shift
-        GRADLE_TASKS=(:app:compileDebugKotlin :app:testDebugUnitTest :app:assembleDebug "$@")
+        GRADLE_TASKS=(:app:compileKotlinEngineDebugKotlin :app:testKotlinEngineDebugUnitTest :app:assembleKotlinEngineDebug "$@")
         ;;
     "")
-        GRADLE_TASKS=(:app:assembleDebug)
+        GRADLE_TASKS=(:app:assembleKotlinEngineDebug)
         ;;
     *)
         GRADLE_TASKS=("$@")
@@ -202,11 +202,14 @@ command -v rustup >/dev/null 2>&1 || die \
 # -----------------------------------------------------------------------
 # `git submodule status --recursive` prefixes uninitialized submodules with '-',
 # descending into nested submodules (some vendored submodules have their own).
-# Init them all rather than naming individual ones, so new submodules are picked
-# up automatically. Initialized submodules are left untouched.
-if git -C "$REPO_ROOT" submodule status --recursive | grep -q '^-'; then
+# Only the trees the Android app builds from, the same three CI fetches for it:
+# the rest of vendor/ is iOS-only, and one of the llama.cpp variants there is a
+# private repository not every contributor can read. Initialized submodules are
+# left untouched.
+ANDROID_SUBMODULES=(vendor/llama.cpp vendor/kleidiai vendor/sentry-native)
+if git -C "$REPO_ROOT" submodule status --recursive -- "${ANDROID_SUBMODULES[@]}" | grep -q '^-'; then
     echo "==> Initializing vendored submodules..."
-    git -C "$REPO_ROOT" submodule update --init --recursive
+    git -C "$REPO_ROOT" submodule update --init --recursive -- "${ANDROID_SUBMODULES[@]}"
 fi
 
 # -----------------------------------------------------------------------

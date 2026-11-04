@@ -11,11 +11,11 @@ struct BenchmarkSyncCoordinatorTests {
             try await probe.run(serverUrl: serverUrl, store: store)
         })
         let store = makeTemporaryBenchmarkStore()
-        let key = BenchmarkSyncCoordinator.Key(serverURL: testServerURL.value, storageRoot: "same")
+        let key = BenchmarkSyncCoordinator.Key(serverURL: try testServer().value, storageRoot: "same")
 
         let tasks = (0..<8).map { _ in
             Task {
-                try await coordinator.sync(serverUrl: testServerURL, store: store, key: key)
+                try await coordinator.sync(serverUrl: try testServer(), store: store, key: key)
             }
         }
 
@@ -34,16 +34,16 @@ struct BenchmarkSyncCoordinatorTests {
             try await probe.run(serverUrl: serverUrl, store: store)
         })
         let store = makeTemporaryBenchmarkStore()
-        let key = BenchmarkSyncCoordinator.Key(serverURL: testServerURL.value, storageRoot: "retry")
+        let key = BenchmarkSyncCoordinator.Key(serverURL: try testServer().value, storageRoot: "retry")
 
         do {
-            _ = try await coordinator.sync(serverUrl: testServerURL, store: store, key: key)
+            _ = try await coordinator.sync(serverUrl: try testServer(), store: store, key: key)
             Issue.record("first sync should fail")
         } catch {
             #expect((error as? URLError)?.code == .timedOut)
         }
 
-        let result = try await coordinator.sync(serverUrl: testServerURL, store: store, key: key)
+        let result = try await coordinator.sync(serverUrl: try testServer(), store: store, key: key)
         #expect(result == 5)
         #expect(await probe.callCount() == 2)
     }
@@ -54,11 +54,11 @@ struct BenchmarkSyncCoordinatorTests {
             try await probe.run(serverUrl: serverUrl, store: store)
         })
         let store = makeTemporaryBenchmarkStore()
-        let firstKey = BenchmarkSyncCoordinator.Key(serverURL: testServerURL.value, storageRoot: "first")
-        let secondKey = BenchmarkSyncCoordinator.Key(serverURL: testServerURL.value, storageRoot: "second")
+        let firstKey = BenchmarkSyncCoordinator.Key(serverURL: try testServer().value, storageRoot: "first")
+        let secondKey = BenchmarkSyncCoordinator.Key(serverURL: try testServer().value, storageRoot: "second")
 
-        async let first = coordinator.sync(serverUrl: testServerURL, store: store, key: firstKey)
-        async let second = coordinator.sync(serverUrl: testServerURL, store: store, key: secondKey)
+        async let first = coordinator.sync(serverUrl: try testServer(), store: store, key: firstKey)
+        async let second = coordinator.sync(serverUrl: try testServer(), store: store, key: secondKey)
         let firstResult = try await first
         let secondResult = try await second
 
@@ -73,11 +73,11 @@ struct BenchmarkSyncCoordinatorTests {
             try await probe.run(serverUrl: serverUrl, store: store)
         })
         let store = makeTemporaryBenchmarkStore()
-        let firstKey = BenchmarkSyncCoordinator.Key(serverURL: testServerURL.value, storageRoot: "shared")
-        let secondServerURL = ServerURL("https://other-benchmarks.example")
+        let firstKey = BenchmarkSyncCoordinator.Key(serverURL: try testServer().value, storageRoot: "shared")
+        let secondServerURL = try ServerUrl("https://other-benchmarks.example")
         let secondKey = BenchmarkSyncCoordinator.Key(serverURL: secondServerURL.value, storageRoot: "shared")
 
-        async let first = coordinator.sync(serverUrl: testServerURL, store: store, key: firstKey)
+        async let first = coordinator.sync(serverUrl: try testServer(), store: store, key: firstKey)
         async let second = coordinator.sync(serverUrl: secondServerURL, store: store, key: secondKey)
         let firstResult = try await first
         let secondResult = try await second
@@ -89,29 +89,29 @@ struct BenchmarkSyncCoordinatorTests {
     }
 
     @Test func clearAndSyncWaitsForPriorStorageWork() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
-        let firstServerURL = ServerURL("https://first-benchmarks.example")
-        let secondServerURL = ServerURL("https://second-benchmarks.example")
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let firstServerURL = try ServerUrl("https://first-benchmarks.example")
+        let secondServerURL = try ServerUrl("https://second-benchmarks.example")
         let probe = CacheClearProbe()
         let coordinator = BenchmarkSyncCoordinator(syncRunner: { serverUrl, store in
             if serverUrl.value == firstServerURL.value {
-                try store.putRemoteIndex(Data("stale".utf8))
+                try store.putRemoteIndex(try Coding.decoder.decode([PipetteMgmtClient.BenchmarkSummary].self, from: Data(#"[{"benchmark_id":"stale","benchmark_type":"prefill_throughput"}]"#.utf8)))
                 await probe.markFirstStarted()
                 try await Task.sleep(nanoseconds: 50_000_000)
                 return 1
             }
 
-            await probe.recordSecondSawCleared(store.listRemoteIndex().isEmpty)
+            await probe.recordSecondSawCleared(try store.listRemoteIndex().isEmpty)
             return 2
         })
 
         let firstTask = Task {
-            try await coordinator.sync(serverUrl: firstServerURL, storage: storage)
+            try await coordinator.sync(serverUrl: firstServerURL, ws: ws)
         }
         await probe.waitForFirstStarted()
         let secondTask = Task {
-            try await coordinator.syncAfterClearingCache(serverUrl: secondServerURL, storage: storage)
+            try await coordinator.syncAfterClearingCache(serverUrl: secondServerURL, ws: ws)
         }
 
         #expect(try await firstTask.value == 1)
@@ -120,7 +120,9 @@ struct BenchmarkSyncCoordinatorTests {
     }
 }
 
-private let testServerURL = ServerURL("https://benchmarks.example")
+/// The collector these tests sync from. A function, not a constant: ``ServerUrl``
+/// validates what it is given, and a global cannot throw.
+private func testServer() throws -> ServerUrl { try ServerUrl("https://benchmarks.example") }
 
 private actor CoordinatorProbe {
     enum Mode {
@@ -137,7 +139,7 @@ private actor CoordinatorProbe {
         self.mode = mode
     }
 
-    func run(serverUrl _: ServerURL, store _: BenchmarkStore) async throws -> Int {
+    func run(serverUrl _: ServerUrl, store _: BenchmarkStore) async throws -> Int {
         calls += 1
         activeCalls += 1
         maxActiveCalls = max(maxActiveCalls, activeCalls)

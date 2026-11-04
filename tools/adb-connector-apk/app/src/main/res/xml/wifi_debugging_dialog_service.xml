@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  packageNames is the whole security story here. An accessibility service with no package filter
+  is delivered the content of every window on the device; restricted to SystemUI, this one cannot
+  observe a benchmark run, a browser, or anything typed into another app. It is the narrowest
+  scope the API offers, and the dialog this service exists to answer is SystemUI's.
+
+  typeWindowStateChanged only. The dialog announces itself once with that event, which is all the
+  service needs; subscribing to typeWindowContentChanged as well would multiply the event burst
+  the service has to debounce against for no extra coverage.
+
+  notificationTimeout is 0 on purpose: the platform uses it to coalesce events, and any value
+  above 0 delays the accept for a dialog that is already blocking adb.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="0"
+    android:packageNames="com.android.systemui" />

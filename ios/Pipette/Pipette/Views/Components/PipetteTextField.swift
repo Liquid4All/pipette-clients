@@ -1,25 +1,22 @@
 import SwiftUI
 import UIKit
 
-/// The app's rounded onboarding input: 48pt tall, 8pt corners, a `systemGray5`
-/// hairline and a soft drop shadow. Shared by the sign-in screen and the
-/// registration setup screen so the two consecutive screens match; Android's
-/// `IosTextField` is the port of this same recipe.
+/// The app's rounded onboarding input, shared by the sign-in and setup screens so
+/// they match. Android's `IosTextField` ports the same recipe.
 struct PipetteTextField: View {
     let placeholder: String
     @Binding var text: String
     let keyboardType: UIKeyboardType
-    /// Optional: a secret field (pre-auth key) passes nil to opt out of autofill
-    /// associations so the token isn't offered to the system keychain.
+    /// A secret field passes nil to opt out of autofill, so the token isn't offered
+    /// to the system keychain.
     let textContentType: UITextContentType?
     var capitalization: TextInputAutocapitalization = .never
     var submitLabel: SubmitLabel = .done
     /// Masks the entry, and offers a reveal toggle to go with it.
     var isSecure: Bool = false
 
-    /// Whether the masked text is currently shown. Local, and reset by anything
-    /// that rebuilds the field — a revealed password should not outlive the
-    /// screen it was typed on.
+    /// Local, so anything that rebuilds the field re-masks it: a revealed password
+    /// should not outlive the screen it was typed on.
     @State private var isRevealed = false
     @FocusState private var isFocused: Bool
 

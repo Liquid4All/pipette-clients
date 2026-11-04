@@ -1,35 +1,48 @@
 [package]
 name = "pipette-torch-oai"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
 
+# A docker cell run through `run`, for `tests/docker_pull.rs` to read its stdout.
+[[bin]]
+name = "start_docker_server"
+path = "tests/bin/start_docker_server.rs"
+test = false
+bench = false
+doc = false
+
 [dependencies]
 anyhow.workspace = true
-libc.workspace = true
-pipette-doomloop = { workspace = true, features = ["plan"] }
+# The vlm_eval image-budget check's PNG, sent as a base64 data URL.
+base64.workspace = true
+pipette-completions.workspace = true
 pipette-http.workspace = true
+pipette-memprobe.workspace = true
+pipette-vl-spec-decode-corpus.workspace = true
 pipette-ops.workspace = true
 pipette-subprocess.workspace = true
+pipette-programs.workspace = true
 pipette-venv.workspace = true
 pipette-plan-types = { workspace = true, features = ["clap"] }
-log.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-env_logger.workspace = true
+pipette-memprobe = { workspace = true, features = ["test-support"] }
+pipette-programs = { workspace = true, features = ["test-support"] }
+pipette-completions = { workspace = true, features = ["test-support"] }
+httpmock.workspace = true
+hex.workspace = true
+sha2.workspace = true
 pipette-artifacts.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
-time.workspace = true
-
-[build-dependencies]
-serde = { workspace = true, features = ["derive"] }
-toml.workspace = true
+tracing-subscriber.workspace = true

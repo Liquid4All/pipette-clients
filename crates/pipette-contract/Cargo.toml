@@ -1,0 +1,18 @@
+[package]
+name = "pipette-contract"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+
+[dev-dependencies]
+pipette-plan-types.workspace = true
+rstest.workspace = true

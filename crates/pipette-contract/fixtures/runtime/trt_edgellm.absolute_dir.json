@@ -1,0 +1,6 @@
+{
+  "dir": "/opt/trt-edgellm",
+  "flavor": "JetPack7-Orin",
+  "source": "absolute_dir",
+  "type": "trt_edgellm"
+}

@@ -4,8 +4,7 @@ import SwiftUI
 /// Settings view showing device registration, privacy defaults, and local
 /// device maintenance actions.
 struct SettingsView: View {
-    /// A substitute auth layer, when something wants to supply one. See
-    /// `ClerkAuthGateView` for why this is not resolved to a default here.
+    /// A substitute auth layer. See `ClerkAuthGateView` for why it has no default.
     private let injectedAuth: ClerkAuthenticating?
 
     @Binding var isRegistered: Bool
@@ -16,47 +15,37 @@ struct SettingsView: View {
     }
 
     @Environment(Clerk.self) private var clerk
-    @Environment(\.storage) private var storage
+    @Environment(\.ws) private var ws
     @Environment(\.pillTabBarReservedHeight) private var pillTabBarReservedHeight
-    // Loaded in `.onAppear` from the injected storage.
     @State private var registration: IdentityRegistration?
-    // Opt-out default (matches `LocalStorage.defaultContributeResults`): on unless the
-    // user turns it off. Performance-only payload, never personal/device data.
+    // On unless the user turns it off. The payload is performance data only.
     @AppStorage(LocalStorage.defaultContributeResultsKey) private var defaultContributeResults = true
-    /// Opt-in: pull and run jobs from the management server planner queue.
-    @AppStorage(LocalStorage.plannerWorkerEnabledKey) private var plannerWorkerEnabled = false
-    /// Mirror of the analytics opt-out, inverted so "on" is the permissive setting like every other
-    /// toggle here. Read through the sink rather than `@AppStorage` so there is one accessor for the
-    /// value on both platforms, even though ``LocalStorage/analyticsOptOut`` backs it in
-    /// `UserDefaults` either way. Re-seeded in `.onAppear`, which is enough: nothing outside this
-    /// view changes it while the view is on screen.
+    /// The analytics opt-out, inverted so "on" is permissive like every other toggle here.
+    /// Re-seeded in `.onAppear`; nothing outside this view changes it while it is on screen.
     @State private var shareAnalytics = !Analytics.isOptedOut
     @Environment(JobRunner.self) private var jobRunner
     @Environment(JobStore.self) private var jobStore
     @Environment(ModelStore.self) private var modelStore
     @Environment(DownloadCoordinator.self) private var downloadCoordinator
-    /// Shared `@Observable` worker — reading `statusText` in the body tracks updates.
     private var plannerWorker: PlannerWorker { PlannerWorker.shared }
-    /// Walked on appear (and after a manual sweep) rather than observed — the walk is
-    /// filesystem work, not state the store publishes.
+    /// Walked on appear and after a sweep: it is filesystem work, not published state.
     @State private var storageUsedBytes: Int64 = 0
-    /// State rather than a read-through of the store: the row and the over-limit notice
-    /// have to re-render the instant the limit changes, and this also drops a
-    /// `settings.json` read from every body pass.
+    /// State, not a store read-through, so the row re-renders the instant the limit
+    /// changes and no body pass reads `settings.json`.
     @State private var storageQuotaBytes: Int64 = 0
-    /// Resolved on appear — `defaultStorageQuotaBytes` stats the volume.
+    /// Resolved on appear: `defaultStorageQuotaBytes` stats the volume.
     @State private var defaultQuotaBytes: Int64 = 0
     @State private var showSignOutAlert = false
     /// Results the sign-out is about to delete, counted when the button is tapped.
     @State private var pendingResultsAtSignOut = 0
     @State private var showDeleteAccountAlert = false
+    /// Presents `EmailCodeSignInView` for a device the gate admitted on its local identity.
+    @State private var showSignIn = false
     @State private var showResetDataAlert = false
     @State private var activeAlert: SettingsAlert?
     @State private var showFeedback = false
 
-    /// The one error alert the Settings screen can show at a time, carrying its
-    /// message. Collapses the former `resetDataError`/`signOutError`/`syncError`
-    /// trio of `String?` fields into a single presented value.
+    /// The one error alert the Settings screen can show at a time.
     private enum SettingsAlert: Identifiable {
         case resetFailed(String)
         case signOutFailed(String)
@@ -105,11 +94,20 @@ struct SettingsView: View {
                     accountCard
                         .padding(.top, 16)
 
-                    signOutButton
-                        .padding(.top, 17)
+                    // A device admitted without a session has no Clerk account to delete.
+                    if isSignedIn {
+                        signOutButton
+                            .padding(.top, 17)
 
-                    deleteAccountButton
-                        .padding(.top, 8)
+                        deleteAccountButton
+                            .padding(.top, 8)
+                    } else {
+                        signInButton
+                            .padding(.top, 17)
+
+                        signOutButton
+                            .padding(.top, 8)
+                    }
 
                     if canSubmitResults {
                         contributionDefaultToggle
@@ -119,9 +117,8 @@ struct SettingsView: View {
                             .padding(.top, 24)
                     }
 
-                    // Not gated on `canSubmitResults`: analytics start at launch, before this
-                    // device has registered, so the control that stops them has to be reachable
-                    // then too.
+                    // Not gated on `canSubmitResults`: analytics start at launch, before
+                    // registration, so the control that stops them must be reachable then too.
                     if Analytics.isAvailable {
                         analyticsToggle
                             .padding(.top, canSubmitResults ? 24 : 34)
@@ -148,8 +145,7 @@ struct SettingsView: View {
                     licensesCard
                         .padding(.top, 19)
 
-                    // Shown only when a Sentry DSN is configured (crash reporting active) —
-                    // the iOS analogue of the Android `Sentry.isEnabled()` gate.
+                    // Only when a Sentry DSN is configured, as on Android.
                     if SentryConfiguration.isEnabled {
                         sectionTitle("Feedback")
                             .padding(.top, 46)
@@ -158,17 +154,10 @@ struct SettingsView: View {
                             .padding(.top, 19)
                     }
 
-                    // Internal-only, and compiled out rather than hidden: this card
-                    // carries the Clerk session id, the client id, and the data-root
-                    // path, none of which belong in an App Store build even behind a
-                    // false branch. `DEBUG` covers local work; `PIPETTE_DEBUG_UI` is
-                    // set by the Internal Testing Xcode Cloud workflow (see
-                    // docs/pipette-ios/build.md). An App Store archive defines
-                    // neither, so the section does not exist in that binary.
-                    //
-                    // This is the iOS analogue of Android's `if (state.isDebug)` gate
-                    // in `SettingsScreen.kt`, which is what kept the same block out of
-                    // its release builds.
+                    // Compiled out rather than hidden: the card carries the Clerk session id,
+                    // client id and data-root path, which do not belong in an App Store
+                    // binary. `PIPETTE_DEBUG_UI` is set by the Internal Testing Xcode Cloud
+                    // workflow (docs/pipette-ios/build.md).
                     #if DEBUG || PIPETTE_DEBUG_UI
                     sectionTitle("Debugging")
                         .padding(.top, 46)
@@ -185,24 +174,24 @@ struct SettingsView: View {
             .background(Color(.systemBackground))
             .navigationBarHidden(true)
             .onAppear {
-                registration = storage.identity.getRegistration()
-                storageUsedBytes = storage.storageUsageBytes()
-                storageQuotaBytes = storage.storageQuotaBytes
-                defaultQuotaBytes = storage.defaultStorageQuotaBytes
+                registration = ws.registration.get()
+                storageUsedBytes = ws.storageUsageBytes()
+                storageQuotaBytes = ws.storageQuotaBytes
+                defaultQuotaBytes = ws.defaultStorageQuotaBytes
                 if !canSubmitResults {
                     defaultContributeResults = false
                 }
-                // The `@State` initializer only runs the first time this view appears, and
-                // `Analytics.start()` may not have swapped in the real sink by then. Re-read so the
-                // row shows the SDK's actual state rather than a stale default.
+                // The `@State` initializer may run before `Analytics.start()` swaps in the
+                // real sink.
                 shareAnalytics = !Analytics.isOptedOut
             }
             .refreshable {
                 await syncBenchmarkDefinitions()
             }
-            .alert("Sign Out?", isPresented: $showSignOutAlert) {
+            // A device with no session is not signing out of anything.
+            .alert(isSignedIn ? "Sign Out?" : "Reset Device?", isPresented: $showSignOutAlert) {
                 Button("Cancel", role: .cancel) {}
-                Button("Sign Out", role: .destructive) {
+                Button(isSignedIn ? "Sign Out" : "Reset", role: .destructive) {
                     signOutEverywhere()
                 }
             } message: {
@@ -239,6 +228,16 @@ struct SettingsView: View {
             .sheet(isPresented: $showFeedback) {
                 FeedbackView(defaultEmail: accountEmail)
             }
+            // Sign-in success sets `clerk.user`, which dismisses the sheet; the gate then
+            // links this device's registration to the account.
+            .sheet(isPresented: $showSignIn) {
+                EmailCodeSignInView()
+            }
+            .onChange(of: clerk.user?.id) { _, newValue in
+                if newValue != nil {
+                    showSignIn = false
+                }
+            }
         }
     }
 
@@ -254,16 +253,42 @@ struct SettingsView: View {
         }
     }
 
+    /// Links the existing registration rather than creating one, so the `clientId`, signing
+    /// key and submitted results are kept.
+    private var signInButton: some View {
+        Button {
+            showSignIn = true
+        } label: {
+            HStack(spacing: 13) {
+                Image(systemName: "person.crop.circle.badge.plus")
+                    .font(.system(size: 17, weight: .regular))
+                Text("Sign in")
+                    .font(.system(size: 17, weight: .regular))
+            }
+            .foregroundStyle(Color(.systemBackground))
+            .frame(maxWidth: .infinity)
+            .frame(height: 43)
+            .background(Color.primary, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Sign in")
+    }
+
+    /// `signOutEverywhere` ends the Clerk session when there is one and resets the device
+    /// either way, so the label names the outcome the device actually gets.
     private var signOutButton: some View {
         Button(role: .destructive) {
-            // Counted once, here: see `signOutConfirmMessage`.
-            pendingResultsAtSignOut = storage.results.deletableResultCount(across: jobStore.jobs)
+            // Counted once, here: see `signOutConfirmMessage`. From disk: the store holds
+            // summaries, not cells.
+            pendingResultsAtSignOut = ws.results.deletableResultCount(across: ws.loadAllJobManifests())
             showSignOutAlert = true
         } label: {
             HStack(spacing: 13) {
-                Image(systemName: "rectangle.portrait.and.arrow.right")
+                Image(systemName: isSignedIn
+                    ? "rectangle.portrait.and.arrow.right"
+                    : "arrow.counterclockwise")
                     .font(.system(size: 17, weight: .regular))
-                Text("Sign out")
+                Text(isSignedIn ? "Sign out" : "Reset device")
                     .font(.system(size: 17, weight: .regular))
             }
             .foregroundStyle(.white)
@@ -272,7 +297,7 @@ struct SettingsView: View {
             .background(Color(red: 0.91, green: 0.12, blue: 0.14), in: Capsule())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Sign out")
+        .accessibilityLabel(isSignedIn ? "Sign out" : "Reset device")
     }
 
     @ViewBuilder
@@ -328,21 +353,24 @@ struct SettingsView: View {
     private var plannerWorkerToggle: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 16) {
-                Toggle("", isOn: $plannerWorkerEnabled)
+                // Not saved: the worker never starts on a launch.
+                Toggle("", isOn: Binding(
+                    get: { plannerWorker.isEnabled },
+                    set: { on in
+                        PlannerWorker.shared.setEnabled(
+                            on,
+                            ws: ws,
+                            jobRunner: jobRunner,
+                            jobStore: jobStore
+                        )
+                    }
+                ))
                     .labelsHidden()
                     .tint(.primary)
                     .scaleEffect(0.72, anchor: .leading)
                     .frame(width: 38, height: 24, alignment: .leading)
                     .padding(.top, 1)
                     .accessibilityLabel("Planner worker")
-                    .onChange(of: plannerWorkerEnabled) { _, on in
-                        PlannerWorker.shared.setEnabled(
-                            on,
-                            storage: storage,
-                            jobRunner: jobRunner,
-                            jobStore: jobStore
-                        )
-                    }
 
                 Text(
                     "Planner worker: claim and run jobs from the management server when this device is idle. Requires an approved registration and matching models installed locally."
@@ -352,24 +380,11 @@ struct SettingsView: View {
                 .lineSpacing(6)
                 .fixedSize(horizontal: false, vertical: true)
             }
-            if plannerWorkerEnabled {
-                // Read through the shared `@Observable` instance so status
-                // updates invalidate this view as the claim loop progresses.
+            if plannerWorker.isEnabled {
                 Text(plannerWorker.statusText)
                     .font(.system(size: 13, weight: .regular).monospaced())
                     .foregroundStyle(Color.secondary)
                     .padding(.leading, 54)
-            }
-        }
-        .onAppear {
-            // Re-sync the daemon if the toggle was already on from a prior launch.
-            if plannerWorkerEnabled {
-                PlannerWorker.shared.setEnabled(
-                    true,
-                    storage: storage,
-                    jobRunner: jobRunner,
-                    jobStore: jobStore
-                )
             }
         }
     }
@@ -391,13 +406,10 @@ struct SettingsView: View {
         }
     }
 
-    /// Used / limit, where the row is also the control that sets the limit — one row,
-    /// one number, no duplicate readout.
+    /// Used / limit, where the row is also the control that sets the limit.
     private var storageCard: some View {
         SettingsCard(cornerRadius: 23) {
             Menu {
-                // Inline picker inside the menu: the section header names what is being
-                // chosen, and the current limit gets a checkmark for free.
                 Picker("Model storage limit", selection: limitSelection) {
                     ForEach(limitOptions) { Text($0.title).tag($0.bytes) }
                 }
@@ -407,8 +419,8 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Model storage limit")
-            // The label alone would replace the row's contents for VoiceOver, and this
-            // row is the only place the app reports how much storage models occupy.
+            // The label alone would replace the row's contents for VoiceOver, and this is
+            // the only place the app reports model storage use.
             .accessibilityValue(storageUsageSummary)
 
             if let overLimitNotice {
@@ -418,9 +430,8 @@ struct SettingsView: View {
         }
     }
 
-    /// `settingsRow`'s metrics, plus the menu's affordance. Hand-rolled rather than
-    /// given to `settingsRow`, which stays a static label/value line for its other
-    /// callers (the `licensesCard` precedent).
+    /// `settingsRow`'s metrics plus the menu affordance; `settingsRow` stays a static
+    /// label/value line.
     private var storageRowLabel: some View {
         HStack(spacing: 16) {
             Text("Model storage")
@@ -429,8 +440,8 @@ struct SettingsView: View {
                 .lineLimit(1)
                 .frame(width: 150, alignment: .leading)
 
-            // Both sides in binary units. Mixing `fileSize` here with the binary limit
-            // rendered a store 180 MB *under* a 16 GiB cap as "17 GB / 16 GB".
+            // Both sides in binary units: decimal usage against a binary limit could read
+            // "17 GB / 16 GB" for a store under its cap.
             Text(storageUsageSummary)
                 .font(.system(size: 16.5, weight: .regular))
                 .foregroundStyle(Color(.systemGray))
@@ -465,13 +476,10 @@ struct SettingsView: View {
         .padding(.vertical, 14)
     }
 
-    /// What the row reports, and the string VoiceOver reads as the row's value.
     private var storageUsageSummary: String {
         "\(ByteFormat.storageLimit(storageUsedBytes)) / \(ByteFormat.storageLimit(storageQuotaBytes))"
     }
 
-    /// Pure in its `@State` inputs, so it re-evaluates on the same pass that changes
-    /// them — no disk work to make the disclosure appear or clear.
     private var overLimitNotice: String? {
         StorageLimitOption.overLimitMessage(
             usedBytes: storageUsedBytes, limitBytes: storageQuotaBytes)
@@ -485,32 +493,28 @@ struct SettingsView: View {
         Binding(get: { storageQuotaBytes }, set: { applyLimit($0) })
     }
 
-    /// Sets the limit and nothing else. Enforcement stays at collection time and
-    /// "Free up space" stays the explicit reclaim, so lowering the limit can never
-    /// delete a model out from under the user — it only makes the notice appear.
+    /// Sets the limit and nothing else, so lowering it never deletes a model out from
+    /// under the user: enforcement stays at collection time and "Free up space".
     ///
-    /// Usage is re-walked even though no bytes moved: the *comparison* changed, and the
-    /// snapshot from `.onAppear` goes stale while the screen sits open behind a
-    /// finishing download. Judging a new limit against it can hide a real overage.
+    /// Usage is re-walked because the `.onAppear` snapshot goes stale behind a finishing
+    /// download, and judging a new limit against it can hide a real overage.
     private func applyLimit(_ bytes: Int64) {
         do {
-            try storage.setStorageQuotaBytes(bytes)
+            try ws.setStorageQuotaBytes(bytes)
             storageQuotaBytes = bytes
-            storageUsedBytes = storage.storageUsageBytes()
+            storageUsedBytes = ws.storageUsageBytes()
         } catch {
             // A silent failure would leave the row showing a limit that isn't persisted.
             activeAlert = .limitFailed(error.localizedDescription)
         }
     }
 
-    /// Reclaim now rather than waiting for the next download's sweep. The pin set
-    /// comes from the coordinator, not from job manifests alone: a transfer running
-    /// behind this screen holds an entry and a hub snapshot that job state says
-    /// nothing about, and reclaiming either would destroy a live download.
+    /// Pins come from the coordinator, not job manifests alone: a running transfer holds
+    /// an entry and a hub snapshot that job state says nothing about.
     private var freeUpSpaceButton: some View {
         settingsCapsuleButton(icon: "internaldrive", title: "Free up space") {
-            storage.sweepToQuota(pinning: downloadCoordinator.sweepPins(justInstalled: nil))
-            storageUsedBytes = storage.storageUsageBytes()
+            ws.sweepToQuota(pinning: downloadCoordinator.sweepPins(justInstalled: nil))
+            storageUsedBytes = ws.storageUsageBytes()
             modelStore.reload()
         }
     }
@@ -527,8 +531,7 @@ struct SettingsView: View {
         }
     }
 
-    /// A full-width, hairline-bordered capsule action button (icon + label). Shared by the
-    /// secondary Settings actions so their styling can't drift apart.
+    /// Shared by the secondary Settings actions so their styling can't drift apart.
     private func settingsCapsuleButton(
         icon: String,
         title: String,
@@ -597,22 +600,24 @@ struct SettingsView: View {
         clerk.user?.primaryEmailAddress?.emailAddress
     }
 
-    /// Sign-out confirmation copy. The reset is described unconditionally; the count of
-    /// results about to be lost is appended only when there are any, so a device with
-    /// nothing pending doesn't read a sentence about zero.
-    ///
-    /// Reads `pendingResultsAtSignOut`, captured when the button is tapped, rather than counting here,
-    /// so the figure is settled before the alert appears and cannot change while the user is reading a
-    /// destructive prompt.
-    ///
-    /// What is captured is what the reset *destroys*, not what could still be submitted:
-    /// `resetDeviceData` removes the whole `results/` tree, including the `local/` half the submit
-    /// button rightly ignores.
+    /// The gate admits a device on its registration and signing key alone, so this
+    /// screen is reachable with no session.
+    private var isSignedIn: Bool {
+        clerk.user != nil
+    }
+
+    /// Reads `pendingResultsAtSignOut`, captured on tap, so the figure cannot change while
+    /// the user reads a destructive prompt. It counts what the reset destroys, including the
+    /// `local/` half the submit button ignores.
     private var signOutConfirmMessage: String {
-        let base = "This signs out of Clerk and deletes this device's registration and "
-            + "private key, along with every local job, benchmark result, downloaded "
-            + "model, and your saved Hugging Face token. You will need to sign in and "
-            + "register this device again."
+        let base = isSignedIn
+            ? "This signs out of Clerk and deletes this device's registration and "
+                + "private key, along with every local job, benchmark result, downloaded "
+                + "model, and your saved Hugging Face token. You will need to sign in and "
+                + "register this device again."
+            : "This deletes this device's registration and private key, along with every "
+                + "local job, benchmark result, downloaded model, and your saved Hugging "
+                + "Face token. You will need to sign in and register this device again."
         let pending = pendingResultsAtSignOut
         guard pending > 0 else { return base }
         let noun = pending == 1 ? "result has" : "results have"
@@ -623,28 +628,20 @@ struct SettingsView: View {
         clerkPrimaryEmail ?? registration?.clerkPrimaryEmail ?? registration?.contactEmail
     }
 
-    /// The collector this device actually reports to: the URL captured at
-    /// registration, falling back to the production endpoint when unregistered.
-    private var effectiveServerURL: ServerURL {
-        registration?.serverUrl ?? ServerURL(CollectorEndpoint.productionURL)
+    /// The URL captured at registration, else the production endpoint. Nil only if the
+    /// shipped production literal stopped being a valid ``ServerUrl``.
+    private var effectiveServerUrl: ServerUrl? {
+        CollectorEndpoint.effectiveServerUrl(registered: registration?.serverUrl)
     }
 
-    /// How the effective collector reads on the Settings screen: Liquid's own
-    /// collector by the name the setup picker used to choose it, anything else
-    /// verbatim. `https://collector.pipette.liquid.ai` is an implementation
-    /// detail to everyone who never typed it, and every device that left the
-    /// picker alone reports there — so the URL was the one value on this card
-    /// that named nothing the user had done.
-    ///
-    /// The title comes from `CollectorEndpointOption.production` rather than a
-    /// literal, so this row and the picker cannot drift apart. Matching goes
-    /// through `isSameCollector`, so a stored URL that differs only by trailing
-    /// slash, scheme case, or host case still reads as Liquid AI instead of
-    /// masquerading as a custom deployment.
+    /// Liquid's own collector by its setup-picker name, anything else verbatim.
+    /// `isSameCollector` keeps a URL that differs only by trailing slash or scheme or
+    /// host case from reading as a custom deployment.
     private var effectiveCollectorDescription: String {
-        CollectorEndpoint.isSameCollector(effectiveServerURL.value, as: CollectorEndpoint.productionURL)
+        let current = effectiveServerUrl?.value ?? CollectorEndpoint.productionURL
+        return CollectorEndpoint.isSameCollector(current, as: CollectorEndpoint.productionURL)
             ? CollectorEndpointOption.production.title
-            : effectiveServerURL.value
+            : current
     }
 
     private var registeredDateDescription: String {
@@ -689,9 +686,7 @@ struct SettingsView: View {
         .frame(height: rowHeight)
     }
 
-    /// A stacked field cell: a small uppercased caption label above a
-    /// body-weight value (the Contacts/grouped-list idiom). The value gets the
-    /// full row width, so long values like the collector URL aren't squeezed.
+    /// Caption above value, so long values like the collector URL get the full width.
     private func stackedRow(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title.uppercased())
@@ -731,34 +726,32 @@ struct SettingsView: View {
     private var debugRows: [(title: String, value: String)] {
         [
             ("Client ID", debugDisplayValue(registration?.clientId.value)),
-            // The collector's approval state for this device (`pending` until a
-            // pre-auth key or an operator admits it) — not the Clerk session, which
-            // the "Authentication Status" label on the account card implied. Sits
-            // next to Client ID because that is the pair it describes, and because
-            // Android's debug block orders it exactly here.
+            // The collector's approval state (`pending` until a pre-auth key or an
+            // operator admits it), not the Clerk session.
             ("Status", debugDisplayValue(registration?.status)),
             ("App Version", appVersionDescription),
             ("Thermal", BuildFlavor.thermalDescription),
+            ("Memory", BuildFlavor.memoryDescription),
             ("Build Config", buildConfiguration),
             ("Bundle ID", Bundle.main.bundleIdentifier ?? "Unknown"),
-            ("Device", DeviceProbe.detectDeviceName()),
-            ("Chip", DeviceProbe.detectChipModel()),
-            ("Form Factor", DeviceProbe.detectFormFactor().rawValue),
-            ("OS", "\(DeviceProbe.detectOsName()) \(DeviceProbe.detectOsVersion())"),
-            ("RAM", formattedBytes(Int64(DeviceProbe.detectRamBytes()))),
+            ("Device", detectDeviceName()),
+            ("Chip", detectChipModel()),
+            ("Form Factor", detectFormFactor().rawValue),
+            ("OS", "\(detectOsName()) \(detectOsVersion())"),
+            ("RAM", formattedBytes(Int64(detectRamBytes()))),
             ("Thermal", thermalStateDescription),
             ("Auto-submit", canSubmitResults ? (defaultContributeResults ? "Enabled" : "Disabled") : "Unavailable"),
-            ("Planner worker", plannerWorkerEnabled ? plannerWorker.statusText : "Off"),
-            ("Jobs", "\(storage.loadAllJobManifests().count)"),
-            ("Models", "\(storage.availableModels().count)"),
+            ("Planner worker", plannerWorker.isEnabled ? plannerWorker.statusText : "Off"),
+            ("Jobs", "\(jobStore.jobs.count)"),
+            ("Models", "\(ws.availableModels().count)"),
             ("Storage", storageUsageSummary),
-            ("Job Folders", "\(directoryItemCount(at: storage.jobsDir))"),
-            ("Private Key", storage.identity.getPrivateKey() == nil ? "Missing" : "Present"),
+            ("Job Folders", "\(directoryItemCount(at: ws.jobsDir))"),
+            ("Private Key", ws.registration.getPrivateKey() == nil ? "Missing" : "Present"),
             ("HF Token", KeychainHelper.loadHfToken() == nil ? "Missing" : "Present"),
             ("Clerk User", debugDisplayValue(registration?.clerkUserId)),
             ("Clerk Session", debugDisplayValue(registration?.clerkSessionId)),
             ("Clerk Linked", debugDisplayValue(registration?.clerkLinkedAt)),
-            ("Data Root", storage.dataRoot.path)
+            ("Data Root", ws.root.path)
         ]
     }
 
@@ -828,29 +821,16 @@ struct SettingsView: View {
         return contents?.count ?? 0
     }
 
-    /// Clear the registration, the key that signed submissions under it, and every Hugging Face credential the
-    /// session could spend. Shared by `signOutEverywhere` and `deleteAccount`, which is why the planner worker and
-    /// the credentials are dealt with here rather than in either of them.
+    /// Clear the registration, its signing key, and every Hugging Face credential. Shared by
+    /// `signOutEverywhere` and `deleteAccount`. The worker is stopped here because the sign-out
+    /// that follows tears down this view and its toggle.
     ///
-    /// Switched off, not merely stopped: the flag lives in `UserDefaults`, which `resetDeviceData` does not touch,
-    /// and `PipetteApp` starts the worker on launch and on foreground whenever it is set. Left on, the next account
-    /// to register this device would silently begin claiming and running server jobs it never opted into. The
-    /// toggle's own `onChange` cannot do it, since this view is torn down by the sign-out that follows.
-    ///
-    /// The Hugging Face tokens go with the session that could use them (PIP-459), and the sign-out confirmation says
-    /// so. They are not part of the device identity, but both exits from an account are how a shared device changes
-    /// hands, and gated-repo access under the previous account must not be what the next person inherits. Deleting
-    /// the account is the more final of the two, so it is the odder one to leave them behind on.
-    ///
-    /// Both kinds, because there are two. `deleteHfToken` drops the one the user typed into Settings;
-    /// `deleteAllModelHfTokens` drops the per-model `hf_token:<reference>` entries the planner stashes off a claim
-    /// (`PlannerWorker.stashClaimCredential`), which are just as usable and outnumber it. `AuthCommands.reset` clears
-    /// the per-model ones for the same reason, though not the typed one. Android needs only the first: it has a
-    /// single slot.
+    /// The HF tokens go too (PIP-459): leaving an account is how a shared device changes hands,
+    /// and the next person must not inherit gated-repo access. Both kinds: the one typed into
+    /// Settings, and the per-model ones `PlannerWorker.stashClaimCredential` stashes off a claim.
     private func deleteDeviceIdentity() {
-        LocalStorage.plannerWorkerEnabled = false
-        PlannerWorker.shared.setEnabled(false, storage: storage, jobRunner: jobRunner, jobStore: jobStore)
-        storage.identity.clearRegistrationMaterial()
+        PlannerWorker.shared.setEnabled(false, ws: ws, jobRunner: jobRunner, jobStore: jobStore)
+        ws.registration.clear()
         _ = KeychainHelper.deleteHfToken()
         let clearedModelTokens = KeychainHelper.deleteAllModelHfTokens()
         if clearedModelTokens > 0 {
@@ -862,27 +842,27 @@ struct SettingsView: View {
 
     private func resetDataOnDevice() {
         do {
-            try storage.resetDeviceData()
-            // The reset drops `models/` but keeps `settings.json`, so re-walk: a stale
-            // usage figure would leave the card claiming an over-limit store that is
-            // now empty.
-            storageUsedBytes = storage.storageUsageBytes()
+            try ws.resetDeviceData()
+            // Re-walk, or the card would still report the deleted `models/` as usage.
+            storageUsedBytes = ws.storageUsageBytes()
         } catch {
             activeAlert = .resetFailed(error.localizedDescription)
         }
     }
 
-    /// Pull-to-refresh re-pulls the server benchmark-definition catalog. The
-    /// `GET /benchmarks` endpoints are public (no client id or signature), so this
-    /// works unregistered — it falls back to the production server URL.
-    /// `.refreshable` drives its own progress indicator; a failure surfaces as an
-    /// alert when the continuation resumes on the main actor.
+    /// Pull-to-refresh re-pulls the benchmark catalog. `GET /benchmarks` is public, so
+    /// this works unregistered against the production URL.
     private func syncBenchmarkDefinitions() async {
         AppLog.benchmarkSync.debug("pull-to-refresh requested")
+        guard let effectiveServerUrl else {
+            AppLog.benchmarkSync.error("pull-to-refresh: no usable collector URL")
+            activeAlert = .syncFailed("No collector configured.")
+            return
+        }
         do {
             _ = try await BenchmarkSyncCoordinator.shared.sync(
-                serverUrl: effectiveServerURL,
-                storage: storage
+                serverUrl: effectiveServerUrl,
+                ws: ws
             )
         } catch {
             AppLog.benchmarkSync.error("settings pull-to-refresh failed: \(error)")
@@ -892,28 +872,21 @@ struct SettingsView: View {
         await resendResultsFromOtherCollectors()
     }
 
-    /// After refreshing the catalog, migrate any results submitted to a
-    /// different collector onto the one this device now reports to — restricted
-    /// to benchmarks this collector actually offers, since those are the only
-    /// ones it will accept. Best-effort and quiet: a failure is logged, not
-    /// surfaced, so pull-to-refresh doesn't turn into an error prompt.
-    ///
-    /// Skips the whole-store scan once results are reconciled to the current
-    /// collector, so a stable configuration doesn't re-scan on every refresh.
+    /// Re-send results submitted to a different collector, limited to benchmarks this one
+    /// offers, since it accepts no others. Best-effort: failures are logged, not alerted.
+    /// Skips the whole-store scan once results are reconciled to the current collector.
     private func resendResultsFromOtherCollectors() async {
-        guard canSubmitResults else { return }
-        let current = effectiveServerURL
-        // Same normalized comparison the per-result matching uses, so the skip
-        // can't disagree with it over a trailing slash or host case.
+        guard canSubmitResults, let current = effectiveServerUrl else { return }
+        // The comparison per-result matching uses, so the two cannot disagree.
         guard !CollectorEndpoint.isSameCollector(LocalStorage.lastReconciledCollector, as: current.value)
         else { return }
 
-        let benchmarkIds = Set(BenchmarkSync.storedDefinitions(store: storage.benchmarks).map(\.benchmarkId))
+        let benchmarkIds = Set(storedDefinitions(store: ws.benchmarks)
+            .map(\.benchmarkId.value))
         guard !benchmarkIds.isEmpty else { return }
 
         let outcome = await ResultUploader.shared.resendForCollectorChange(benchmarkIds: benchmarkIds)
-        // Advance the memo only on a clean sweep; leaving it unset on error means
-        // the next refresh retries the results that failed to migrate.
+        // Only on a clean sweep, so the next refresh retries what failed.
         if outcome.errors.isEmpty {
             LocalStorage.lastReconciledCollector = current.value
         }
@@ -926,15 +899,12 @@ struct SettingsView: View {
 
     /// Sign out and reset the device (PIP-459).
     ///
-    /// A failed session call does not abort the reset: the local wipe is what the confirmation promised,
-    /// and refusing it offline would leave the user unable to sign out at all. Android's
-    /// `ShellViewModel.signOutAndResetDevice` makes the same choice.
-    ///
-    /// The session then survives, and there is no local-only way to end it: `Clerk.clearAllKeychainItems()`
-    /// is documented as leaving in-memory state, so `clerk.user` stays set and the wiped device lands on
-    /// `SetupView` as the account it was cleared to leave, until the next launch reads the empty keychain.
-    /// Logged rather than alerted for the same reason `resetLocalDataForSignOut` is: this view is torn down
-    /// as soon as the registration goes.
+    /// A failed session call does not abort the reset (as in Android's
+    /// `ShellViewModel.signOutAndResetDevice`): refusing it offline would leave the user
+    /// unable to sign out at all. The session then survives, and there is no local-only way to
+    /// end it: `Clerk.clearAllKeychainItems()` leaves in-memory state, so `clerk.user` stays set
+    /// and the wiped device lands on `SetupView` as that account. Logged, not alerted: this view
+    /// is torn down as soon as the registration goes.
     private func signOutEverywhere() {
         Task {
             if clerk.user != nil || clerk.session != nil {
@@ -950,35 +920,20 @@ struct SettingsView: View {
         }
     }
 
-    /// Clear what the previous session left on disk: jobs, results, downloaded models, and the synced
-    /// benchmark catalog (PIP-459). `settings.json` stays, as it does for `resetDataOnDevice`. The
-    /// identity is already gone by the time this runs, via `deleteDeviceIdentity`.
+    /// Clear what the previous session left on disk: jobs, results, models, and the synced
+    /// catalog (PIP-459); `settings.json` stays. Runs after `deleteDeviceIdentity`, so a
+    /// failure here cannot leave a signed-out device holding a usable registration.
     ///
-    /// Ordered after the identity so a failure here cannot leave a signed-out device still
-    /// holding a usable registration.
-    ///
-    /// Logged rather than alerted, unlike `resetDataOnDevice`. By this point the Clerk sign-out
-    /// has landed, so `ClerkAuthGateView` has swapped its content for the sign-in view and taken
-    /// this view (and the `@State` an alert would be presented from) with it. An `activeAlert`
-    /// set here would never be seen, and the sign-out cannot be undone to report against.
-    ///
-    /// The store reloads still matter for the same reason the alert does not: `jobStore` and
-    /// `modelStore` outlive this view, so entries left in them would resurface on the next
-    /// sign-in without an app restart. Deferred so they run even when the delete fails, since a
-    /// partial reset is exactly the case that leaves them listing files that are already gone.
+    /// Logged rather than alerted: the gate has already torn down this view, so an alert
+    /// would never be seen. The store reloads are deferred so they run even when the delete
+    /// fails: `jobStore` and `modelStore` outlive this view and would list deleted files.
     private func resetLocalDataForSignOut() async {
-        // Both cancels are requests, not barriers: `JobRunner.cancel()` raises the cancel flag and
-        // `DownloadCoordinator.cancelAll()` issues async task cancels, so a cell or a transfer already in
-        // flight can still write into the tree below. They stop the *next* one, which is what keeps a
-        // multi-hour job or a multi-GB pull from rebuilding what this deletes.
+        // Requests, not barriers: an in-flight cell or transfer can still write below, but
+        // the next one never starts.
         jobRunner.cancel()
         downloadCoordinator.cancelAll()
-        // The Hugging Face credentials are already gone by the time this runs, via `deleteDeviceIdentity`, which is
-        // where they belong: `deleteAccount` needs them cleared too and does not come through here.
-        // The cancel above is the request; this is the part that waits for it to be honored. An
-        // in-flight cell keeps going until it next checks the flag, and deleting `results/` and
-        // `models/` under a live run lets that write land after the wipe, or makes `removeItem` itself
-        // fail partway through. Bounded, so a wedged cell cannot strand the sign-out.
+        // Wait for the runner to honor the cancel: deleting under a live cell lets its write
+        // land after the wipe, or makes `removeItem` fail partway through.
         let deadline = Date().addingTimeInterval(Self.runnerStopTimeout)
         while jobRunner.runningJobId != nil, Date() < deadline {
             try? await Task.sleep(for: .milliseconds(100))
@@ -987,17 +942,16 @@ struct SettingsView: View {
         defer {
             jobStore.reload()
             modelStore.reload()
-            storageUsedBytes = storage.storageUsageBytes()
+            storageUsedBytes = ws.storageUsageBytes()
         }
         do {
-            try storage.resetDeviceData()
+            try ws.resetDeviceData()
         } catch {
             AppLog.storage.error("sign-out reset did not complete: \(error.localizedDescription)")
         }
     }
 
-    /// How long to wait for the runner to park before deleting under it. Bounded so a wedged
-    /// cell cannot strand the user on a sign-out that never completes.
+    /// Bounded so a wedged cell cannot strand the user on a sign-out that never completes.
     private static let runnerStopTimeout: TimeInterval = 10
 
     private func deleteAccount() {
@@ -1043,9 +997,8 @@ private struct SettingsDivider: View {
 #Preview("Settings") {
     SettingsView(isRegistered: .constant(true))
         .environment(Clerk.shared)
-        .environment(ModelStore(storage: FileStorage.production))
-        // "Free up space" reads the coordinator for its pin set, so without this the
-        // preview renders but traps on tap.
+        .environment(ModelStore(ws: PipetteWorkspace.production))
+        // "Free up space" reads the coordinator, so without this the preview traps on tap.
         .environment(DownloadCoordinator.shared)
 }
 #endif

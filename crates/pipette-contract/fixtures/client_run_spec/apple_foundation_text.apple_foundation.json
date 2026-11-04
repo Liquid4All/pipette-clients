@@ -1,0 +1,12 @@
+{
+  "benchmark": "decode_throughput_512_128",
+  "benchmark_flags": null,
+  "model": {
+    "type": "apple_foundation_text"
+  },
+  "model_flags": null,
+  "runtime": {
+    "type": "apple_foundation"
+  },
+  "runtime_flags": null
+}

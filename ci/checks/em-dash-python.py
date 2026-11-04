@@ -1,30 +1,14 @@
 #!/usr/bin/env python3
 """Reject em dashes in Python string literals a person reads.
 
-Companion to `em-dash-docs.py` (Markdown) and `em-dash-clients.py` (Kotlin, Swift,
-Rust). Python in this repo is tooling rather than product, but its `print` output
-and error messages are still text a developer reads, and the house style covers
-them.
+Uses `tokenize`, so comments never reach the check and a quote inside a string
+cannot desync it.
 
-Unlike the client guard, this one needs no hand-rolled scanner: `tokenize` gives
-the exact token stream, so comments never reach the check and a quote inside a
-string can never desync it. That is the same failure `em-dash-clients.py` has to
-defend against by hand, where a `'"'` char literal in Rust flips string state on
-and never off.
+Exempt: comments, docstrings (a bare string opening a module, class, or
+function), and a string that is exactly one em dash (the empty-value glyph).
 
-Exempt:
-
-- **Comments.** `tokenize` reports them as their own token type.
-- **Docstrings**, meaning a bare string expression opening a module, class, or
-  function. Prose for the reader of the source, like a comment.
-- **A string that is exactly one em dash**, the empty-value glyph the clients use.
-
-Every rendering is rejected, not just U+2014, and the needles are built from the
+Every rendering is rejected, not just U+2014. The needles are built from the
 code point so this file does not trip its own check.
-
-Fix by rewriting the sentence. A period, comma, colon, or parentheses almost
-always carries the same clause break; an en dash or `--` is the same tell wearing
-a hat.
 """
 
 import io
@@ -36,18 +20,10 @@ from pathlib import Path
 
 EM_DASH = chr(0x2014)
 
-# A docstring can only be the FIRST statement of a module, class, or function, so
-# just three predecessors are possible: `ENCODING` (module docstring, the file's
-# first token), `INDENT` (the opening statement of a class or function body), and
-# `None` (nothing seen yet).
-#
-# `NEWLINE` and `DEDENT` are deliberately absent even though a real docstring is
-# never preceded by them. Including either exempts an ordinary string EXPRESSION
-# statement that merely follows another statement, which is not a docstring and
-# whose text a reader may well see. `NL` is absent for the same reason: inside a
-# call, a wrapped string argument is preceded by `NL`, and counting that as a
-# statement start exempted every wrapped message (it under-reported 12 real hits
-# as 4).
+# A docstring is the first statement of a module (after `ENCODING`, or `None`
+# when nothing was seen yet) or of a body (after `INDENT`). `NEWLINE`, `DEDENT`
+# and `NL` are excluded: they precede ordinary string statements and wrapped
+# call arguments, which a reader may see.
 DOCSTRING_PREDECESSORS = {
     None,
     tokmod.INDENT,
@@ -93,10 +69,8 @@ QUOTES = ('"""', "'''", '"', "'")
 def literal_body(text: str) -> str:
     """The text inside a string literal's quotes.
 
-    Stripping the quote and prefix characters as a SET is wrong: `str.strip` keeps
-    eating, so a literal holding an em dash then a prefix letter collapses to the
-    bare glyph and wins the exemption below. Take the prefix off the front only,
-    then remove one matching quote run from each end.
+    Not `str.strip` with a character set: that would also eat prefix letters
+    after an em dash and wrongly win the lone-glyph exemption.
     """
     i = 0
     while i < len(text) and text[i] in PREFIX_LETTERS:
@@ -142,8 +116,7 @@ def scan_source(src: str, path: str) -> list[str]:
                     depth += 1
                 elif tok.string in CLOSERS:
                     depth = max(0, depth - 1)
-            # `NL` and comments do not end a statement, so they must not become the
-            # predecessor a docstring is judged against.
+            # `NL` and comments do not end a statement.
             if tok.type not in (tokmod.COMMENT, tokmod.NL):
                 previous = tok.type
     except (tokenize.TokenError, IndentationError, SyntaxError) as exc:
@@ -153,17 +126,12 @@ def scan_source(src: str, path: str) -> list[str]:
 
 
 def selftest() -> list[str]:
-    """Fixtures for the two exemptions, both of which have been wrong before.
+    """Fixtures for the exemptions, run on every invocation.
 
-    Runs on every invocation. It costs microseconds, and it is the only thing
-    standing between a subtle scanner bug and a check that passes while missing
-    real hits.
+    A scanner bug would otherwise pass while missing real hits.
     """
     d = EM_DASH
-    # Every spelling is COMPOSED rather than written out, for the same reason the
-    # needles are: a fixture holding `&mdash;` literally would make this file trip
-    # its own check. Splitting the text across concatenated tokens keeps any single
-    # token clean while the assembled fixture source is what gets scanned.
+    # Composed so no single token in this file trips its own check.
     ent = "&" + "mdash" + ";"
     ent_upper = "&" + "MDASH" + ";"
     num = "&#" + f"{8212};"

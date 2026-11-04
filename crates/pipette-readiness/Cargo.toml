@@ -1,19 +1,27 @@
 [package]
 name = "pipette-readiness"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 description = "Pre-benchmark readiness wait: per-platform thermal and CPU-load probes behind one entry point."
 
 [lints]
 workspace = true
 
 [dependencies]
-log.workspace = true
+# The caller's side of the gate's wait: narration, cancel and sleep.
+pipette-wait.workspace = true
+# `output_within` kills a wedged probe command at `PROBE_TIMEOUT`, so it fails
+# the probe rather than holding the gate. Every crate linking this one already
+# links it.
+pipette-subprocess.workspace = true
+# `ReadinessConfiguration` derives `Deserialize`: the client reads the file.
+serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
-# Mach `host_statistics(HOST_CPU_LOAD_INFO)` for the macOS CPU-load probe,
-# replacing a `top` subprocess per check. See `read_cpu_load` in macos.rs.
+# Mach `host_statistics(HOST_CPU_LOAD_INFO)` for the macOS CPU-load probe, so a
+# check does not spawn `top`.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
 # Die temperature for the thermal criterion. The same reader that records the
@@ -21,6 +29,13 @@ libc.workspace = true
 # machine's temperature was.
 pipette-device.workspace = true
 
+# `GetSystemTimes` for the Windows CPU-load probe: a PDH `Get-Counter` read
+# failed cells. The GPU temperature comes from the per-rep reader, as on macOS.
+[target.'cfg(target_os = "windows")'.dependencies]
+pipette-device.workspace = true
+windows-sys.workspace = true
+
 [dev-dependencies]
 anyhow.workspace = true
 rstest.workspace = true
+toml.workspace = true

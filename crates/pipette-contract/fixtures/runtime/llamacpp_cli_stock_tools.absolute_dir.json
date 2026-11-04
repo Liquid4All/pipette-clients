@@ -1,0 +1,6 @@
+{
+  "dir": "/opt/llama.cpp/b5000",
+  "flavor": "linux-x64-vulkan",
+  "source": "absolute_dir",
+  "type": "llamacpp_cli_stock_tools"
+}

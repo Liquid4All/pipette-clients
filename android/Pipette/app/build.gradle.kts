@@ -173,27 +173,133 @@ val posthogHost = localOrEnv("posthog.host", "POSTHOG_HOST").orEmpty().ifBlank {
 //              it has ever accepted. The base absorbs a run-number reset, which
 //              GitHub triggers by renaming the workflow file; see that
 //              workflow's "Resolve build identity" step for the bump rule.
-//   env (CI):  PIPETTE_BUILD_TAG. Short commit tag (e.g. "g7d2a7f6") appended
+//   env (CI):  PIPETTE_BUILD_TAG. Short commit tag (e.g. "g7d2a7f6"). Appended
 //              to the base version as "1.0+g7d2a7f6", so the user-visible
-//              version names the commit it was cut from.
+//              version names the commit it was cut from, and used as the commit
+//              half of BUILD_VERSION when no release version is injected (see
+//              buildVersion below).
 //   env (CI):  PIPETTE_BUILD_VERSION. The version this build is PUBLISHED as —
-//              ci/version.sh's output, which is also the GitHub release's tag
-//              and name (e.g. "2026.08.1-3-ga1b2c3d4ab"). Surfaces as
+//              build.yml's `release-metadata` output, which is also the GitHub
+//              release's tag and name (e.g. "2026.08.11-640d96e8"). Surfaces as
 //              BuildConfig.BUILD_VERSION and is submitted verbatim as
 //              `client_version`, so a warehouse row maps to a downloadable
 //              release by equality rather than by anyone's parsing rule.
-// Uninjected/local builds fall back to versionCode 1 / versionName "1.0" /
-// BUILD_VERSION "dev".
+// Uninjected/local builds fall back to versionCode 1 / versionName "1.0", and
+// resolve BUILD_VERSION's commit half from git (see gitBuildTag below).
 val baseVersionName = localOrEnv("pipette.versionName", "PIPETTE_VERSION_NAME") ?: "1.0"
 val ciVersionCode = localOrEnv("pipette.versionCode", "PIPETTE_VERSION_CODE")?.toIntOrNull()
 val ciBuildTag = localOrEnv("pipette.buildTag", "PIPETTE_BUILD_TAG")?.takeIf { it.isNotBlank() }
 
+// Resolve the git binary off PATH before anything tries to run it.
+//
+// Catching the failure afterwards is not enough, which is the whole reason this
+// exists. When a value source's process cannot be STARTED, Gradle records a
+// configuration-cache problem and fails the build over it ("failed to compute
+// value with custom source ... ProcessOutputValueSource"), even though the
+// `runCatching` below returns null and the version degrades correctly. Verified
+// by pointing the command at a name that does not exist: the value came out
+// right and the build failed anyway. A checkout with no git (a tarball export, a
+// stripped CI image) has to keep building, so absence is established up front
+// rather than caught after the fact.
+//
+// A non-zero exit is a different matter and needs no such care: the process did
+// start, so `isIgnoreExitValue` turns "not a repository" into a code to inspect
+// and the configuration cache is untroubled by it.
+val gitExecutable: String? by lazy {
+    providers.environmentVariable("PATH").orNull.orEmpty()
+        .split(File.pathSeparator)
+        .asSequence()
+        .filter { it.isNotBlank() }
+        .map { File(it, "git") }
+        .firstOrNull { it.canExecute() }
+        ?.absolutePath
+}
+
+// Run git with the given arguments, returning its exit code and trimmed stdout,
+// or null if git is absent or the process could not be started.
+//
+// `providers.exec` rather than a `ProcessBuilder`: the configuration cache is on
+// (`gradle.properties`), which forbids reading external state directly at
+// configuration time. This form is a recognized input, so a HEAD move correctly
+// invalidates the cached configuration instead of pinning a stale hash into it.
+//
+// The `runCatching` covers only the narrow race where git disappears between the
+// lookup above and this call. The lookup is what keeps a git-less checkout
+// building; the caller then degrades to the bare "dev", which is what shipped
+// before any of this existed. Reporting no commit is fine; failing to build is not.
+fun gitCommand(vararg args: String): Pair<Int, String>? {
+    val git = gitExecutable ?: return null
+    return runCatching {
+        val exec = providers.exec {
+            workingDir = rootProject.projectDir
+            commandLine(git, *args)
+            isIgnoreExitValue = true
+        }
+        exec.result.get().exitValue to exec.standardOutput.asText.get().trim()
+    }.getOrNull()
+}
+
+// The commit tag a build with no injected identity reads for itself, in the exact
+// shape CI injects as PIPETTE_BUILD_TAG ("g" + 7-char hash, per the release
+// workflow's "Resolve build identity" step), so the two are one grammar wherever
+// they meet.
+//
+// Dirty is marked, not hidden: a tree with uncommitted changes produced a binary
+// that corresponds to no commit, and an unmarked hash would claim a provenance the
+// build does not have. Untracked files are deliberately not dirt, since a checkout
+// carries build outputs and `local.properties` and neither changes the code, so
+// this asks `git diff`, as the iOS script does, rather than `git status`.
+val gitBuildTag: String? by lazy {
+    // Ordinary CI runs (push / PR) inject nothing and publish nothing, and a value
+    // that moves with HEAD lands in BuildConfig and would cost those runs their
+    // Gradle build cache on every commit. build.yml gates PIPETTE_BUILD_VERSION to
+    // the release path for that exact reason, so this probe holds the same line:
+    // on CI, nothing injected means no commit tag.
+    if (providers.environmentVariable("CI").isPresent) return@lazy null
+    val (headCode, head) = gitCommand("rev-parse", "--short=7", "HEAD") ?: return@lazy null
+    if (headCode != 0 || head.isBlank()) return@lazy null
+    // `git diff --quiet` reports the answer as its exit code: 0 clean, 1 dirty. A
+    // command that could not run at all leaves the state unknown, which is treated
+    // as dirty rather than clean, so an uncertain build never claims a provenance.
+    val clean = gitCommand("diff", "--quiet", "HEAD")?.first == 0
+    "g$head" + if (clean) "" else "-dirty"
+}
+
+// CI's injected tag wins: it is authoritative for a published build, and it is
+// resolved before the checkout picks up any build-time churn. Reading it first
+// also means the release paths never shell out to git at all.
+val commitTag = ciBuildTag ?: gitBuildTag
+
 // Kept off versionName deliberately. versionName is user-visible and, on the
 // Play path, constrained by what the store will accept; `client_version` wants
 // the release string untouched. Two fields, so neither has to compromise.
-// "dev" matches what the Rust client's build.rs defaults to, so a local build of
-// either reads the same way in the warehouse.
-val buildVersion = localOrEnv("pipette.buildVersion", "PIPETTE_BUILD_VERSION")?.takeIf { it.isNotBlank() } ?: "dev"
+//
+// With no release version injected the build still names its commit, as
+// "dev-g7d2a7f6" (or "dev-g7d2a7f6-dirty" for an uncommitted tree). That closes
+// two holes at once. A local build reported a bare "dev", so results built from
+// different source trees were indistinguishable in the warehouse. And the
+// Play/Firebase path in android-release-distribution.yml injects
+// PIPETTE_BUILD_TAG but no PIPETTE_BUILD_VERSION, so every APK it distributed
+// reported "dev" too, despite being a real published build. iOS closes the same
+// hole for its own local builds in ios/stamp-git-commit.sh.
+//
+// "dev" stays the prefix because the Rust client's build.rs defaults to it, so a
+// local build of either still reads the same way. The commit joins it with "-",
+// not SemVer's "+": this is not a SemVer string, and the release form it sits
+// beside ("2026.08.11-640d96e8") is not one either.
+val releaseVersion =
+    localOrEnv("pipette.buildVersion", "PIPETTE_BUILD_VERSION")?.takeIf { it.isNotBlank() }
+val buildVersion = releaseVersion ?: commitTag?.let { "dev-$it" } ?: "dev"
+
+// Whether buildVersion names a published release, which decides the
+// `client_version:` capability flag (see Capabilities.kt). A boolean rather than
+// a prefix test on BUILD_VERSION: the "dev" prefix is only one of the two ways a
+// build names no release, and the debug build type below appends "-debug" to a
+// real release version, which a prefix test would let through as a release.
+//
+// Derived from the same `releaseVersion` the version string uses, so the flag and
+// the value it names cannot disagree about whether a release exists.
+val hasReleaseVersion = releaseVersion != null
 
 // Real release keystore, if configured (local.properties / env); otherwise null and
 // the release build falls back to the shared debug keystore (see buildTypes.release).
@@ -230,7 +336,7 @@ val buildRustAndroidArm64 by tasks.registering(Exec::class) {
     val repoRoot = rootProject.file("../..")
     inputs.file(rootProject.file("build-rust-android.sh"))
     inputs.dir(File(repoRoot, "crates/pipette-android"))
-    inputs.dir(File(repoRoot, "native"))
+    inputs.dir(File(repoRoot, "android/native"))
     // CMake is the build's source of truth now — track the root project, presets,
     // and the shared cmake/ modules so an edit to any of them re-runs the build.
     inputs.file(File(repoRoot, "CMakeLists.txt"))
@@ -264,6 +370,39 @@ val buildRustAndroidArm64 by tasks.registering(Exec::class) {
     outputs.dir(layout.buildDirectory.dir("generated/rustNativeSymbols/arm64-v8a"))
 }
 
+val buildNativeAndroidArm64 by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Build and copy the C++ llama.cpp bridge into jniLibs for arm64-v8a."
+    commandLine(rootProject.file("build-native-android.sh").absolutePath)
+
+    val repoRoot = rootProject.file("../..")
+    inputs.file(rootProject.file("build-native-android.sh"))
+    inputs.dir(File(repoRoot, "android/native"))
+    inputs.file(File(repoRoot, "CMakeLists.txt"))
+    inputs.file(File(repoRoot, "CMakePresets.json"))
+    inputs.dir(File(repoRoot, "cmake"))
+    inputs.dir(File(repoRoot, "vendor/llama.cpp/ggml"))
+    inputs.dir(File(repoRoot, "vendor/llama.cpp/src"))
+    inputs.dir(File(repoRoot, "vendor/llama.cpp/include"))
+    inputs.dir(File(repoRoot, "vendor/llama.cpp/tools/mtmd"))
+    inputs.dir(File(repoRoot, "vendor/llama.cpp/vendor"))
+    if (crashReportingEnabled) {
+        inputs.dir(File(repoRoot, "vendor/sentry-native/src"))
+        inputs.dir(File(repoRoot, "vendor/sentry-native/include"))
+        inputs.file(File(repoRoot, "vendor/sentry-native/CMakeLists.txt"))
+    }
+    inputs.property("kleidiai", providers.environmentVariable("PIPETTE_ENABLE_KLEIDIAI").orElse(""))
+    inputs.property("crashReporting", crashReportingEnabled)
+    environment("PIPETTE_ENABLE_CRASH_REPORTING", if (crashReportingEnabled) "1" else "0")
+    outputs.dir(layout.buildDirectory.dir("generated/kotlinJniLibs/arm64-v8a"))
+    outputs.dir(layout.buildDirectory.dir("generated/kotlinNativeSymbols/arm64-v8a"))
+}
+
+val copyPromptSeed by tasks.registering(Copy::class) {
+    from(rootProject.file("../../crates/pipette-ops/src/prompt_seed.txt"))
+    into(layout.buildDirectory.dir("generated/resources"))
+}
+
 android {
     namespace = "ai.liquid.pipette"
     compileSdk {
@@ -288,6 +427,11 @@ android {
         // it as-is; debug appends "-debug" below, mirroring versionNameSuffix,
         // so a developer's submissions stay distinguishable from a release's.
         buildConfigField("String", "BUILD_VERSION", "\"$buildVersion\"")
+
+        // Whether BUILD_VERSION names a published release. Capabilities.kt reports
+        // the `client_version:` flag only then, so a build that names no release
+        // advertises nothing in that namespace.
+        buildConfigField("Boolean", "HAS_RELEASE_VERSION", "$hasReleaseVersion")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -345,6 +489,19 @@ android {
         }
     }
 
+    flavorDimensions += "engine"
+    productFlavors {
+        create("kotlinEngine") {
+            dimension = "engine"
+            isDefault = true
+            buildConfigField("String", "ENGINE_FLAVOR", "\"kotlin\"")
+        }
+        create("rustEngine") {
+            dimension = "engine"
+            buildConfigField("String", "ENGINE_FLAVOR", "\"rust\"")
+        }
+    }
+
     buildTypes {
         debug {
             // Distinct applicationId so the debug (dev-Clerk) build installs ALONGSIDE
@@ -359,6 +516,9 @@ android {
             // BUILD_VERSION rather than VERSION_NAME. Without this a debug
             // build of a release commit would submit as that release.
             buildConfigField("String", "BUILD_VERSION", "\"$buildVersion-debug\"")
+            // For the same reason: a debug build of a release commit is not that
+            // release, so it names none and reports no `client_version:` flag.
+            buildConfigField("Boolean", "HAS_RELEASE_VERSION", "false")
             signingConfig = signingConfigs.getByName("debug")
             // Sentry environment (read by io.sentry.environment in the manifest): keep
             // dev/test crashes + feedback out of the production environment. Mirrors the
@@ -413,8 +573,18 @@ android {
     }
     sourceSets {
         getByName("main") {
+            resources.directories.add(
+                layout.buildDirectory.dir("generated/resources").get().asFile.absolutePath,
+            )
+        }
+        getByName("rustEngine") {
             jniLibs.directories.add(
                 layout.buildDirectory.dir("generated/rustJniLibs").get().asFile.absolutePath,
+            )
+        }
+        getByName("kotlinEngine") {
+            jniLibs.directories.add(
+                layout.buildDirectory.dir("generated/kotlinJniLibs").get().asFile.absolutePath,
             )
         }
     }
@@ -428,8 +598,14 @@ android {
 }
 
 tasks.configureEach {
-    if (name.matches(Regex("merge[A-Z].*JniLibFolders"))) {
+    if (name.matches(Regex("mergeRustEngine.*JniLibFolders"))) {
         dependsOn(buildRustAndroidArm64)
+    }
+    if (name.matches(Regex("mergeKotlinEngine.*JniLibFolders"))) {
+        dependsOn(buildNativeAndroidArm64)
+    }
+    if (name.matches(Regex("process.*JavaRes"))) {
+        dependsOn(copyPromptSeed)
     }
 }
 
@@ -580,7 +756,8 @@ val verifyReleaseClerkKey by
     }
 // The two tasks that produce a shippable release artifact: `assembleRelease` (APK, for Firebase App Distribution) and `bundleRelease` (AAB, for Play).
 // Declared once so every release-time hook below wires to the same set; adding a third release task must not silently wire only half of them.
-val releaseArtifactTasks = tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }
+val releaseArtifactTasks =
+    tasks.matching { (it.name.startsWith("assemble") || it.name.startsWith("bundle")) && it.name.endsWith("Release") }
 
 releaseArtifactTasks.configureEach { dependsOn(verifyReleaseClerkKey) }
 
@@ -678,42 +855,64 @@ if (crashReportingEnabled) {
 // The auth token is read by sentry-cli from the ambient environment (CI sets SENTRY_AUTH_TOKEN on the release step) — it is NEVER passed through
 // Gradle, so it can't be serialized into the on-disk configuration cache. Runs after `assembleRelease` and `bundleRelease`, only when the token is
 // present in the env; can be run explicitly with `SENTRY_AUTH_TOKEN` exported (locally, also honors `~/.sentryclirc`).
-val nativeSymbolsDir = layout.buildDirectory.dir("generated/rustNativeSymbols/arm64-v8a")
-val uploadBenchmarkNativeSymbols =
-    tasks.register<Exec>("uploadBenchmarkNativeSymbols") {
+val rustNativeSymbolsDir = layout.buildDirectory.dir("generated/rustNativeSymbols/arm64-v8a")
+val uploadRustEngineBenchmarkNativeSymbols =
+    tasks.register<Exec>("uploadRustEngineBenchmarkNativeSymbols") {
         group = "sentry"
-        description = "Upload :benchmark native debug symbols to Sentry (best-effort; needs SENTRY_AUTH_TOKEN in the env + sentry-cli)."
+        description = "Upload rustEngine :benchmark native debug symbols to Sentry (best-effort; needs SENTRY_AUTH_TOKEN in the env + sentry-cli)."
         dependsOn(buildRustAndroidArm64)
-        inputs.dir(nativeSymbolsDir)
-        // Keep this a Provider<Boolean> (configuration-cache-serializable, unlike a build-script reference) and resolve it INSIDE onlyIf, so the
-        // token-present decision is made at execution time from the current env — never frozen into a reused configuration-cache entry from an earlier
-        // (e.g. no-token) run. require NON-BLANK, since GitHub substitutes an empty string for an unset `${{ secrets.SENTRY_AUTH_TOKEN }}`.
+        inputs.dir(rustNativeSymbolsDir)
         val hasToken = providers.environmentVariable("SENTRY_AUTH_TOKEN").map { it.isNotBlank() }.orElse(false)
-        // Also gated on crash reporting: with it off there are no unstripped sentry-native symbols to upload (the lib was never built), so running
-        // sentry-cli could only warn about an empty dir. Captured into a local so the lambda stays configuration-cache friendly.
         val reportingOn = crashReportingEnabled
         onlyIf { reportingOn && hasToken.get() }
         val cli = localOrEnv("sentry.cli.path", "SENTRY_CLI") ?: "sentry-cli"
-        val symbolsPath = nativeSymbolsDir.get().asFile.absolutePath
-        // A shell wrapper degrades every failure (missing CLI, empty dir, upload error) to a warning + exit 0, so symbol upload can never fail the
-        // release. It also asserts the dir has files, so a staging regression that empties it is visible in the log rather than a silent no-op. $1/$2
-        // are shell positionals (the cli path and symbols dir) — passed as args so no secret and no Kotlin interpolation enters the script.
+        val symbolsPath = rustNativeSymbolsDir.get().asFile.absolutePath
         commandLine(
             "sh",
             "-c",
             """
-            if ! command -v "$1" >/dev/null 2>&1; then echo "warning: sentry-cli ($1) not on PATH — skipping native symbol upload"; exit 0; fi
-            if [ -z "$(ls -A "$2" 2>/dev/null)" ]; then echo "warning: no native symbols in $2 — skipping upload (staging may have produced none)"; exit 0; fi
+            if ! command -v "$1" >/dev/null 2>&1; then echo "warning: sentry-cli ($1) not on PATH: skipping native symbol upload"; exit 0; fi
+            if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then echo "warning: no native symbols in $2: skipping upload (staging may have produced none)"; exit 0; fi
             "$1" debug-files upload --org liquid-ai --project pipette-client-android "$2" || echo "warning: native symbol upload failed (non-fatal)"
             """
                 .trimIndent(),
-            "upload-native-symbols", // $0
-            cli, // $1
-            symbolsPath, // $2
+            "upload-native-symbols",
+            cli,
+            symbolsPath,
         )
     }
 
-// Auto-upload on release assembly OR bundling (best-effort; no-ops without SENTRY_AUTH_TOKEN in the env, so local release builds are unaffected).
-// Covering `bundleRelease` matters because a Play-only CI run builds that task alone: without it, a bundle shipped to Play would carry no uploaded
-// native debug symbols and `:benchmark` native crashes would not symbolicate.
-releaseArtifactTasks.configureEach { finalizedBy(uploadBenchmarkNativeSymbols) }
+val kotlinNativeSymbolsDir = layout.buildDirectory.dir("generated/kotlinNativeSymbols/arm64-v8a")
+val uploadKotlinEngineBenchmarkNativeSymbols =
+    tasks.register<Exec>("uploadKotlinEngineBenchmarkNativeSymbols") {
+        group = "sentry"
+        description = "Upload kotlinEngine :benchmark native debug symbols to Sentry (best-effort; needs SENTRY_AUTH_TOKEN in the env + sentry-cli)."
+        dependsOn(buildNativeAndroidArm64)
+        inputs.dir(kotlinNativeSymbolsDir)
+        val hasToken = providers.environmentVariable("SENTRY_AUTH_TOKEN").map { it.isNotBlank() }.orElse(false)
+        val reportingOn = crashReportingEnabled
+        onlyIf { reportingOn && hasToken.get() }
+        val cli = localOrEnv("sentry.cli.path", "SENTRY_CLI") ?: "sentry-cli"
+        val symbolsPath = kotlinNativeSymbolsDir.get().asFile.absolutePath
+        commandLine(
+            "sh",
+            "-c",
+            """
+            if ! command -v "$1" >/dev/null 2>&1; then echo "warning: sentry-cli ($1) not on PATH: skipping native symbol upload"; exit 0; fi
+            if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then echo "warning: no native symbols in $2: skipping upload (staging may have produced none)"; exit 0; fi
+            "$1" debug-files upload --org liquid-ai --project pipette-client-android "$2" || echo "warning: native symbol upload failed (non-fatal)"
+            """
+                .trimIndent(),
+            "upload-native-symbols",
+            cli,
+            symbolsPath,
+        )
+    }
+
+tasks.matching { it.name.contains("RustEngine") && it.name.endsWith("Release") }.configureEach {
+    finalizedBy(uploadRustEngineBenchmarkNativeSymbols)
+}
+
+tasks.matching { it.name.contains("KotlinEngine") && it.name.endsWith("Release") }.configureEach {
+    finalizedBy(uploadKotlinEngineBenchmarkNativeSymbols)
+}

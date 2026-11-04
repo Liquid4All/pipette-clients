@@ -1,142 +1,168 @@
-//! End-to-end latency: prefill plus the full decode, as one number.
-//!
-//! Reconstructed from the driver's metrics (`ttft + tpot × (n-1)`) rather than
-//! taken from the process wall clock, which would fold in the pipeline compile
-//! — ~1s on CPU and ~18s on NPU against a workload of a similar order. The
-//! compile is a property of the one-shot process model, not of the model's
-//! latency, so it must not land in the number.
-//!
-//! The one cell that measures a *text* prompt. Latency is what a caller waits
-//! for, and a caller sends text, so tokenizing it belongs inside the number —
-//! the same reason llama.cpp, MLX and torch-oai all send a string here and
-//! token ids everywhere else. Sizing that text to an exact token count needs
-//! the model's tokenizer, which those three get from their running server;
-//! this backend has no server, so it opens one tokenizer-only driver per cell
-//! (see [`driver::TokenizeSession`]) and runs the same shared convergence loop
-//! against it.
+//! The reading is one streamed `/v1/completions` on the client's clock, from
+//! the send to its finish chunk.
 
-use anyhow::Context;
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::time::Duration;
 
-use pipette_ops::measurement;
-use pipette_ops::prompt_seed::{self, PROMPT_SEED_TEXT};
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::{RunRequest, RunResponse};
+use pipette_completions::TimingRequest;
+use pipette_http::HttpClient;
+use pipette_memprobe::{Sampler, SupportedWatch};
+use pipette_ops::measurement::{
+    self, EndToEndMeasurementPerPromptReading, EndToEndMeasurementReading, MeasurementObserver,
+    MeasurementWarmup,
+};
+use pipette_ops::readiness::ReadinessGate;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::{
+    BenchmarkResultData, EndToEndLatencyBenchmark, EndToEndLatencyUvOpenvinoOpenvino, RunResponse,
+    RuntimeFlags, UvOpenvinoExtraRuntimeConfiguration,
+};
+use pipette_subprocess::start_process;
 
-use super::driver::{self, DriverRequest, Mode};
-use super::{invoke, take_output, Cell, LastOutput};
+use crate::completions;
+use crate::models::ResolvedOpenvinoModel;
+use crate::response;
+use crate::runtimes::ResolvedOpenvinoPython;
+use crate::server;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub(super) fn run(
-    req: &RunRequest,
-    compile_cache: &std::path::Path,
+    benchmark: &EndToEndLatencyBenchmark,
+    runtime_flags: EndToEndLatencyUvOpenvinoOpenvino,
+    python: &ResolvedOpenvinoPython,
+    model: &ResolvedOpenvinoModel,
+    compile_cache: &Path,
+    timeout: Duration,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: MeasurementObserver<'_>,
+    client_config: Option<&UvOpenvinoExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_end_to_end_latency()
-        .map_err(anyhow::Error::from)?;
-    let prefill_tokens = benchmark.parameter_prefill_tokens;
-    let decode_tokens = benchmark.parameter_decode_tokens;
-    let cell = Cell::bind(req, compile_cache)?;
-    let model_dir = cell.model_dir_str()?.to_owned();
-    let properties = cell.properties();
-
-    // Built once per cell, before the reps: the text is fixed for the whole
-    // series, and the tokenizer that sizes it must not be alive while a
-    // measured rep runs.
-    let prompt = {
-        let mut tokenizer = driver::TokenizeSession::start(&cell.script, &cell.python, &model_dir)?;
-        prompt_seed::build_prompt_text(prefill_tokens, |text| tokenizer.count(text))
-            .context("sizing the end-to-end prompt")?
-    };
-
-    let last = LastOutput::default();
-
-    let measured = measurement::run(
-        "openvino/end_to_end_latency",
-        readiness_gate,
-        observer,
-        |_| Ok(()),
-        |_| {
-            invoke(
-                &cell,
-                &DriverRequest {
-                    model_dir: &model_dir,
-                    device: crate::runtimes::device_property(&cell.device),
-                    mode: Mode::Decode,
-                    prefill_tokens,
-                    decode_tokens,
-                    prompt: Some(&prompt),
-                    warmup: Some(cell.warmup(prefill_tokens, decode_tokens)),
-                    properties: properties.clone(),
-                    prompt_seed: PROMPT_SEED_TEXT,
-                },
-                &last,
-            )
-        },
-        |_, rep| {
-            measurement::expect_tokens("input_tokens", rep.value.input_tokens, prefill_tokens)?;
-            measurement::expect_tokens(
-                "generated_tokens",
-                rep.value.generated_tokens,
-                decode_tokens,
-            )?;
-            total_ms(rep.value.ttft_ms, rep.value.tpot_ms, decode_tokens)
-        },
+    let flags = RuntimeFlags::EndToEndLatencyUvOpenvinoOpenvino(runtime_flags);
+    readiness_gate()?;
+    let script = server::script()?;
+    let port = pipette_subprocess::pick_server_port()?;
+    let url = server::url(port);
+    let mut openvino_server = start_process(
+        server::SCRIPT_FILENAME,
+        server::command(
+            python,
+            model,
+            &flags,
+            compile_cache,
+            script.path(),
+            port,
+            client_config,
+        )?,
+        server::STOP_GRACE,
     )?;
-    let stats = measured.stats();
-    let (stdout, stderr) = take_output(last);
-    Ok(cell.respond(
-        BenchmarkResultData::EndToEndLatency {
-            total_time_ms: stats.mean_ms,
-            total_time_ms_stddev: Some(stats.stddev_ms),
-        },
-        stdout,
-        stderr,
-    ))
+    let sampler = Sampler::start(openvino_server.pid(), SupportedWatch::OBSERVE)?;
+    openvino_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let result = measure(benchmark, &url, timeout, readiness_gate, observer);
+    let (memory, _) = sampler.stop();
+    let result_data = result.map_err(|err| err.context(openvino_server.stop_with_tail()))?;
+    Ok(RunResponseBuilder::new(result_data)
+        .process(&mut openvino_server)
+        .command(response::command(python))
+        .memory(memory)
+        .runtime_flags(flags)
+        .build())
 }
 
-/// `ttft + tpot × (decode_tokens - 1)`.
-///
-/// TTFT already covers prefill *and* the first generated token, so the
-/// remaining `n - 1` tokens are what TPOT accounts for. A single-token cell
-/// therefore needs no TPOT at all, which is also the only case where the driver
-/// omits it.
-fn total_ms(ttft_ms: f64, tpot_ms: Option<f64>, decode_tokens: u32) -> anyhow::Result<f64> {
-    let ttft = measurement::positive_finite("ttft_ms", ttft_ms)?;
-    if decode_tokens <= 1 {
-        return Ok(ttft);
-    }
-    let tpot = tpot_ms.ok_or_else(|| {
-        anyhow::anyhow!("driver reported no tpot_ms for a {decode_tokens}-token cell")
-    })?;
-    Ok(ttft + measurement::positive_finite("tpot_ms", tpot)? * f64::from(decode_tokens - 1))
+fn measure(
+    benchmark: &EndToEndLatencyBenchmark,
+    base_url: &str,
+    timeout: Duration,
+    readiness_gate: ReadinessGate,
+    observer: MeasurementObserver<'_>,
+) -> anyhow::Result<BenchmarkResultData> {
+    let http = HttpClient::loopback("pipette", timeout)?;
+    let prompt = pipette_completions::build_prompt_text(
+        &http,
+        base_url,
+        completions::MODEL,
+        benchmark
+            .parameter_prefill_tokens
+            .into_inner()
+            .unsigned_abs(),
+    )?;
+    let url = completions::url(base_url);
+    let request = TimingRequest::text(
+        Some(completions::MODEL),
+        &prompt,
+        benchmark
+            .parameter_decode_tokens
+            .into_inner()
+            .unsigned_abs(),
+    );
+    measurement::end_to_end(
+        benchmark,
+        NonZeroUsize::try_from(measurement::REPS)?,
+        readiness_gate,
+        observer,
+        MeasurementWarmup::Once,
+        (),
+        |()| {
+            let generation = pipette_completions::stream(&http, &url, &request)?;
+            let reading = EndToEndMeasurementPerPromptReading::from_generation(&generation)?;
+            Ok(EndToEndMeasurementReading::PerPrompt(vec![reading]))
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use httpmock::MockServer;
+
+    use pipette_completions::test_support::stream_at_limit;
+    use pipette_plan_types::{BatchSize, BenchmarkId, NonNegativeCount, PositiveCount};
+
     use super::*;
 
     #[test]
-    fn total_is_ttft_plus_the_remaining_tokens() -> anyhow::Result<()> {
-        // 100ms to the first token, then 99 more at 10ms each.
-        assert_eq!(total_ms(100.0, Some(10.0), 100)?, 100.0 + 990.0);
+    fn every_request_is_streamed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/tokenize");
+            then.status(200)
+                .json_body(serde_json::json!({ "count": 64 }));
+        });
+        let completions = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/completions")
+                .json_body_includes(r#"{"stream":true}"#);
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(stream_at_limit(64, 16));
+        });
+        let benchmark = EndToEndLatencyBenchmark {
+            benchmark_id: BenchmarkId::try_new("end_to_end_latency_64_16".to_owned())?,
+            parameter_prefill_tokens: NonNegativeCount::try_new(64)?,
+            parameter_decode_tokens: PositiveCount::try_new(16)?,
+            parameter_batch_size: BatchSize::one(),
+        };
+        let observer = MeasurementObserver {
+            on_before_rep_start: &|| Ok(()),
+            on_after_rep_end: &|| Ok(()),
+        };
+        let result = measure(
+            &benchmark,
+            &server.base_url(),
+            Duration::from_secs(5),
+            &|| Ok(()),
+            observer,
+        )?;
+        assert!(
+            matches!(
+                result,
+                BenchmarkResultData::EndToEndLatency { total_time_ms, .. } if total_time_ms > 0.0
+            ),
+            "{result:?}"
+        );
+        assert_eq!(completions.calls(), measurement::REPS + 1);
         Ok(())
-    }
-
-    /// The first token is inside TTFT, so a one-token cell is TTFT exactly —
-    /// and needs no TPOT, which is the case the driver omits.
-    #[test]
-    fn a_single_token_cell_is_just_ttft() -> anyhow::Result<()> {
-        assert_eq!(total_ms(100.0, None, 1)?, 100.0);
-        Ok(())
-    }
-
-    #[test]
-    fn a_multi_token_cell_without_tpot_is_an_error() {
-        assert!(total_ms(100.0, None, 100).is_err());
-        assert!(total_ms(100.0, Some(f64::NAN), 100).is_err());
-        assert!(total_ms(0.0, Some(10.0), 100).is_err());
     }
 }

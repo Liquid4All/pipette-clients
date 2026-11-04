@@ -8,3 +8,19 @@
 [submodule "vendor/sentry-native"]
 	path = vendor/sentry-native
 	url = https://github.com/getsentry/sentry-native.git
+[submodule "vendor/onnxruntime"]
+	path = vendor/onnxruntime
+	url = https://github.com/microsoft/onnxruntime.git
+	shallow = true
+[submodule "vendor/onnxruntime-genai"]
+	path = vendor/onnxruntime-genai
+	url = https://github.com/microsoft/onnxruntime-genai.git
+	shallow = true
+[submodule "vendor/llamacpp-prismml"]
+	path = vendor/llamacpp-prismml
+	url = https://github.com/PrismML-Eng/llama.cpp.git
+	shallow = true
+[submodule "vendor/llamacpp-lfm3"]
+	path = vendor/llamacpp-lfm3
+	url = https://github.com/ggml-org/llama.cpp.git
+	shallow = true

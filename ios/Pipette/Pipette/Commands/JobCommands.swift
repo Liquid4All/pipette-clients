@@ -1,14 +1,11 @@
 import Foundation
 
-/// Jobs-tab / job-detail CLI verbs (`jobs`, `job rm|run|export|submit`): thin
-/// handlers over the same `JobStore` / `JobLauncher` / uploader paths the UI
-/// binds. Dispatched from `HeadlessRunner.startIfRequested`.
+/// `jobs` and `job rm|run|export|submit`: thin handlers over the `JobStore`, `JobLauncher`
+/// and uploader paths the UI binds.
 enum JobCommands {
-    /// `jobs`: list every job manifest with the same status/counts the jobs
-    /// list shows. The free-form `title` goes last so the fixed fields stay
-    /// machine-parseable.
-    static func list(storage: Storage) async {
-        let manifests = storage.loadAllJobManifests()
+    /// The free-form `title` goes last so the fixed fields stay machine-parseable.
+    static func list(ws: PipetteWorkspace) async {
+        let manifests = ws.loadAllJobManifests()
         HeadlessRunner.log("jobs count=\(manifests.count)")
         for m in manifests {
             HeadlessRunner.log("job id=\(m.jobId.value) status=\(m.status.rawValue) "
@@ -18,27 +15,23 @@ enum JobCommands {
         }
     }
 
-    /// `job rm`: delete the job and all its results — the UI's delete
-    /// confirmation, via the same `JobStore.delete`.
-    static func remove(jobId: JobId, storage: Storage) async -> Bool {
-        guard let manifest = storage.loadJobManifest(jobId: jobId) else {
+    /// `job rm`: delete the job and all its results, as the UI's delete does.
+    static func remove(jobId: JobId, ws: PipetteWorkspace) async -> Bool {
+        guard let manifest = ws.loadJobManifest(jobId: jobId) else {
             HeadlessRunner.log("job rm ERROR no job with id=\(jobId.value)")
             return false
         }
-        await MainActor.run { JobStore(storage: storage).delete(jobId: jobId) }
+        await MainActor.run { JobStore(ws: ws).delete(jobId: jobId) }
         HeadlessRunner.log("job rm deleted id=\(jobId.value) title=\(manifest.displayTitle)")
         return true
     }
 
-    /// `job run`: flip the scoped terminal cells back to `.pending` and re-run
-    /// the job — exactly `JobDetailView.runCells(scope:)` for the failed
-    /// (retry) and cancelled (resume) scopes, which reset `runStatus` and
-    /// `errorMessage` only; submission records are kept, matching the UI (only
-    /// the UI's per-cell re-run wipes them). Exits by the job's final status.
-    static func run(jobId: JobId, scope: HeadlessCommand.RunScope, storage: Storage) async -> Bool {
+    /// `job run`: re-run the failed (retry) or cancelled (resume) cells, as
+    /// `JobDetailView.runCells(scope:)` does. Submission records are kept, as in the UI.
+    static func run(jobId: JobId, scope: HeadlessCommand.RunScope, ws: PipetteWorkspace) async -> Bool {
         let final: JobManifest? = await withCheckedContinuation { cont in
             Task { @MainActor in
-                guard let manifest = storage.loadJobManifest(jobId: jobId) else {
+                guard let manifest = ws.loadJobManifest(jobId: jobId) else {
                     HeadlessRunner.log("job run ERROR no job with id=\(jobId.value)")
                     cont.resume(returning: nil)
                     return
@@ -47,7 +40,7 @@ enum JobCommands {
                 let flipped = manifest.cells.filter { $0.runStatus == target }.count
                 let launched = JobLauncher.rerun(
                     manifest, resetting: target, jobRunner: JobRunner(),
-                    jobStore: JobStore(storage: storage), storage: storage,
+                    jobStore: JobStore(ws: ws), ws: ws,
                     onFinish: { cont.resume(returning: $0) })
                 guard launched != nil else {
                     HeadlessRunner.log("job run ERROR another job is running")
@@ -63,32 +56,30 @@ enum JobCommands {
         return final.status == .completed
     }
 
-    /// `job export`: print the same CSV the export button saves, raw to stdout
-    /// (between marker lines) so a `--console` capture can extract it — the
-    /// export control minus the file picker.
-    static func export(jobId: JobId, storage: Storage) async -> Bool {
-        guard let manifest = storage.loadJobManifest(jobId: jobId) else {
-            HeadlessRunner.log("job export ERROR no job with id=\(jobId.value)")
+    /// `job export`: the CSV the export button saves. The CSV alone goes to stdout and every
+    /// `[HEADLESS]` line (markers, refusal, `BENCH_DONE`) to stderr, so
+    /// `job export ... > out.csv` is the CSV and nothing else.
+    static func export(jobId: JobId, ws: PipetteWorkspace) async -> Bool {
+        guard let manifest = ws.loadJobManifest(jobId: jobId) else {
+            HeadlessRunner.logDiagnostic("job export ERROR no job with id=\(jobId.value)")
             return false
         }
-        let csv = await MainActor.run { CompletedResultsCSVExporter.csv(for: manifest, storage: storage) }
-        HeadlessRunner.log("job export id=\(jobId.value) BEGIN CSV")
-        print(csv)
-        HeadlessRunner.log("END CSV")
+        let csv = await MainActor.run { CompletedResultsCSVExporter.csv(for: manifest, ws: ws) }
+        HeadlessRunner.logDiagnostic("job export id=\(jobId.value) BEGIN CSV")
+        HeadlessRunner.emitPayload(csv)
+        HeadlessRunner.logDiagnostic("job export id=\(jobId.value) END CSV")
         return true
     }
 
-    /// `job submit`: upload the job's unsubmitted completed results with the
-    /// stored registration — exactly `JobDetailView.submitAll()`: the same
-    /// registration + Keychain-key guard, then a drain through the shared
-    /// uploader so it serializes with any launch/foreground drain.
-    static func submit(jobId: JobId, storage: Storage) async -> Bool {
-        guard storage.loadJobManifest(jobId: jobId) != nil else {
+    /// `job submit`, as `JobDetailView.submitAll()`: the drain goes through the shared
+    /// uploader so it serializes with any launch or foreground drain.
+    static func submit(jobId: JobId, ws: PipetteWorkspace) async -> Bool {
+        guard ws.loadJobManifest(jobId: jobId) != nil else {
             HeadlessRunner.log("job submit ERROR no job with id=\(jobId.value)")
             return false
         }
         let registered = await MainActor.run {
-            storage.identity.signingIdentity() != nil
+            ws.registration.signingIdentity() != nil
         }
         guard registered else {
             HeadlessRunner.log("job submit ERROR Result submission requires registration.")

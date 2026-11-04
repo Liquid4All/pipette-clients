@@ -1,0 +1,24 @@
+[package]
+name = "pipette-programs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "The external programs a pipette client spawns (uv, docker, the GPU vendor CLIs): one list of them, one way to locate one, and one place a missing one is reported."
+
+[lints]
+workspace = true
+
+[features]
+# Test-only constructors, kept out of shipping code; dependent crates enable it
+# from their `[dev-dependencies]`.
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+pipette-subprocess.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

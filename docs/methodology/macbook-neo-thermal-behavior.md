@@ -4,21 +4,21 @@ Every timing benchmark is measured under some thermal condition, and the harness
 tries to hold that condition constant so two runs are comparable. Doing that
 requires knowing what the machine's thermal signals actually mean. On the
 MacBook Neo they do not mean what their names suggest: the operating system's
-thermal-pressure enum is not a temperature reading, and the die temperature that
+thermal-pressure level is not a temperature reading, and the die temperature that
 would replace it is noisier than any of the thresholds one would reach for by
 intuition.
 
 This article records what we measured on that machine, with and without its
 external cooler, and why the benchmark setup around it looks the way it does. It
-is the detailed backing for the macOS row in
-[Device conditions](device-conditions.md#per-device-we-measured).
+is the detailed backing for the thermal-pressure criterion and the deadline in
+[End-to-end latency → macOS](end-to-end-latency.md#macos).
 
-The unit under test is thermally modified. See
+The machine under test is thermally modified. See
 [Measurement rig](#measurement-rig) before quoting any temperature from here.
 
 ## Key findings
 
-**The thermal-pressure enum is not a temperature signal.** Despite its name,
+**The thermal-pressure level is not a temperature signal.** Despite its name,
 `kOSThermalNotificationPressureLevelName` is an integrator with a fixed ~318 s
 hold-off. It released at the identical sample after a 10 s load and a 123 s one,
 and at the identical sample with the die at 34.84 °C and at 38.52 °C. It engaged
@@ -26,45 +26,41 @@ on a die change of 0.10 °C: one quantization step. Nothing thermal moves it.
 This is the finding most likely to mislead, because the name promises otherwise.
 
 **Idle die temperature is noisy enough to rule out intuitive thresholds.**
-With no load at all the Neo's die wanders 3.8 °C peak-to-peak, σ ≈ 0.4 °C, and
-the sensors quantize at 0.10 °C. A gate written as "within 1 °C of idle" is
-asking for resolution the hardware does not have. The noise is also
+With no load at all, the Neo's die wanders 3.8 °C peak-to-peak, with a standard
+deviation (σ) of 0.4–0.8 °C on clean baselines. The sensors quantize at
+0.10 °C. A gate written as "within 1 °C of idle" needs a resolution that the
+hardware does not have. The noise is also
 autocorrelated, so averaging recovers far less than `√N` suggests.
 
-**Heat arrives in seconds and leaves over minutes.** A 3.5 s unit heats the die
-10–12.5 °C; shedding the last degree takes minutes across at least two thermal
+**Heat arrives in seconds and leaves over minutes.** A 3.5 s rep (one timed
+run) heats the die 10–12.5 °C; shedding the last degree takes minutes across at least two thermal
 time constants. Gating on a return to baseline therefore spends nearly all its
 time in the slowest part of the curve.
 
 **An external cooler changes the equilibrium temperature and almost nothing
 else**: not the noise floor, not the cooling rate, not peak temperature, not
-the enum. It is worth having as margin, not as speed. Note that the test unit
-also carries a **passive internal thermal pad in both arms**, so "uncooled" here
-is not a stock machine; see [Measurement rig](#measurement-rig).
+the level. It gives margin, not speed. "Uncooled" here still has the passive
+internal pad; see [Measurement rig](#measurement-rig).
 
 **Across the temperature spread a batch actually produces, results do not
-change.** That is why die temperature is recorded per repetition but not gated
-on.
+change.** The macOS gate's default die criterion (`die < 50 °C`) was calibrated
+on the M5 Max; see
+[MacBook Pro (M5 Max) thermal behavior](macbook-m5-thermal-behavior.md).
 
 ## Measurement rig
 
-The device is a MacBook Neo (A18 Pro), which ships with **no internal fan**. The
-unit under test is **modified in two independent ways**, and every number in
-this article was measured on the modified machine:
-
-1. **A passive thermal pad inside the case**, added to thermally couple the CPU
-   and GPU to the chassis. This is always present (it cannot be toggled between
-   runs), and it gives the SoC a far larger heat sink than it ships with.
-2. **An external active cooling pad** clamped under the case. This is the only
-   variable: **"cooled" and "uncooled" throughout this article mean with and
-   without the *external* pad.** Both arms retain the internal one.
+The device is a MacBook Neo (A18 Pro), which ships with no internal fan. The
+machine is modified with a passive thermal pad inside the case and an external
+active cooling pad under it; the setup is described in
+[Cooling on the MacBook Neo](device-conditions.md#cooling-on-the-macbook-neo).
+Every number in this article was measured on the modified machine. The internal
+pad is present in every run, so **"cooled" and "uncooled" throughout this
+article mean with and without the *external* pad.**
 
 > **There is no stock-Neo data.** Neither arm represents a machine as shipped.
-> The "uncooled" arm is a passively-but-substantially-improved machine, not a
-> stock one, and a genuinely stock Neo would be expected to run hotter than
-> anything reported here: plausibly hot enough to reach a throttling regime
-> that neither arm approaches. Nothing in this article should be read as
-> characterizing the product.
+> A stock Neo would be expected to run hotter than anything reported here,
+> plausibly hot enough to reach a throttling regime that neither arm approaches.
+> Nothing in this article should be read as characterizing the product.
 
 The internal pad is also the most likely explanation for several results below,
 and it is worth holding in mind while reading them. Coupling the die to the
@@ -78,12 +74,13 @@ the shape of the data, not something measured against an unmodified machine.
 All measurements come from `tools/macos-thermal-probe`, which samples three
 signals side by side:
 
-- **`PMU tdie*` die temperature** via private IOKit sensors: the same path the
-  iOS client uses. The Neo exposes 7 such sensors; the reported figure is the
+- **`PMU tdie*` die temperature** via private IOHID sensors: the same reading
+  the macOS readiness gate (`crates/pipette-device/src/die_temp.rs`) and the
+  iOS client take. The Neo exposes 7 such sensors; the reported figure is the
   **maximum** across them.
-- **`kOSThermalNotificationPressureLevelName`** via `notify_get_state`: the enum
-  the readiness gate actually reads.
-- **`ProcessInfo.thermalState`**: the coarser public enum, recorded for
+- **`kOSThermalNotificationPressureLevelName`** via `notify_get_state`: the
+  thermal-pressure level that the readiness gate reads.
+- **`ProcessInfo.thermalState`**: the coarser public thermal state, recorded for
   comparison.
 
 Two properties of the temperature reading matter before any number below can be
@@ -98,23 +95,22 @@ Several findings below are stated as a comparison against a **MacBook Pro
 (M4 Max, 14 cores, internal fans, stock cooling, 20 `PMU tdie` sensors)**. It
 appears throughout as *the contrast host*.
 
-It is there because a single machine cannot tell you which of its properties are
-properties of the *hardware class* and which are properties of *that machine*. A
-threshold that looks sensible on one host is only demonstrably wrong once a
-second host disagrees with it. The two chosen differ about as much as two Macs
-can:
+A single machine cannot show which of its properties belong to the *hardware
+class* and which belong to *that machine*. A threshold that looks correct on one
+host is shown to be wrong only when a second host disagrees with it. The two
+hosts differ as much as two Macs can:
 
 | | MacBook Neo (as tested) | Contrast host (MacBook Pro M4 Max) |
 | --- | --- | --- |
 | Internal cooling | no fan; passive pad added to chassis | fans, stock |
 | `PMU tdie` sensors | 7 | 20 |
-| Idle die noise, σ | ~0.4 °C | 0.26–0.41 °C |
-| Thermal-pressure enum under load | reaches `moderate` | **never leaves `nominal`** |
+| Idle die noise, σ | 0.43–0.80 °C | 0.26–0.41 °C |
+| Thermal-pressure level under load | reaches `moderate` | **never leaves `nominal`** |
 
-That last row is the important one. The same readiness gate is uninformative on
-both machines for **opposite reasons**: on the Neo the enum trips and stays
-tripped, so the gate can never pass; on the contrast host it never trips at all,
-so the gate passes instantly even at 60.4 °C under full load. Any rule derived
+That last row is the important one. The level is uninformative on both machines
+for **opposite reasons**: on the Neo it trips and stays tripped, so the gate can
+never pass; on the contrast host it never trips at all, so a level-only gate
+passes instantly even at 60.4 °C under full load. Any rule derived
 from one alone would look reasonable and be wrong on the other.
 
 ## Idle noise floor
@@ -147,20 +143,21 @@ Three consequences follow.
 
 **No fixed temperature threshold survives.** A gate written as "wait until the
 die is within 1 °C of idle" is asking for a resolution the sensor does not have
-on this machine. The contrast host is quieter (σ 0.26–0.41 °C), so a constant
-tuned on one is wrong on the other, in the direction that silently breaks the
-gate rather than loosening it.
+on this machine. The contrast host is quieter (σ 0.26–0.41 °C). A tolerance
+tuned on the contrast host is too tight for the Neo, so the Neo's gate would
+hold reps until the deadline.
 
 **Averaging helps far less than it appears to.** The noise is autocorrelated:
 lag-1 reached +0.92 at 0.25 s sampling, implying a correlation time of a few
-seconds. For an AR(1) process the variance of a mean inflates by `(1+r)/(1-r)`,
+seconds. For a first-order autoregressive (AR(1)) process, the variance of a
+mean inflates by `(1+r)/(1-r)`,
 so **eight samples taken over two seconds are worth about one independent
 sample**. Sampling faster improves time resolution and nothing else.
 
 **Idle noise is not a stable per-machine constant.** De-trended σ ranges
 0.40–0.93 °C across the four baselines above, on one physical machine. Some of
 that is drift (the two worst-behaved baselines were both flagged as still
-settling), but not all: the cooled and session-A baselines are both clean by
+settling), but not all: the two "Cooled, settled" baselines are both clean by
 that test and still differ twofold. Any calibration measured once should be
 treated as provisional.
 
@@ -175,7 +172,7 @@ two minutes add about as much again, slowly and noisily:
 
 ```mermaid
 xychart-beta
-    title "Die temperature during a 121 s all-core load — MacBook Neo, cooled"
+    title "Die temperature during a 121 s all-core load, MacBook Neo, cooled"
     x-axis "Seconds after load start" 0 --> 118
     y-axis "Die temperature (°C)" 34 --> 62
     line [36.36, 43.29, 46.00, 50.01, 50.66, 50.76, 50.44, 50.66, 53.26, 51.96, 52.39, 52.82, 52.50, 53.91, 53.36, 53.36, 54.77, 55.75, 55.64, 53.91, 54.34, 54.77, 53.91, 56.18, 55.75, 55.10, 57.37, 56.18, 56.29, 56.94, 57.16, 56.18, 57.05, 56.29, 56.29, 57.70, 58.13, 57.37, 56.40, 55.96, 56.83, 59.00, 58.02, 54.45, 56.29, 56.83, 58.02, 57.59, 56.29, 55.31, 57.91, 55.96, 58.13, 58.46, 56.40, 59.00, 59.00, 59.11, 58.13, 58.02]
@@ -189,7 +186,7 @@ xychart-beta
 | 8 s | +14.3 °C |
 | 121 s | +23.1 °C (peak 59.8 °C) |
 
-**A 3.5 s unit heats the die by roughly 10–12.5 °C**: about ten times the idle
+**A 3.5 s rep heats the die by roughly 10–12.5 °C**: about ten times the idle
 noise floor. Thermal variation across an ungated batch is therefore real and
 easily measurable, not an artifact.
 
@@ -198,7 +195,7 @@ every 10 s; upper trace uncooled, lower trace cooled:
 
 ```mermaid
 xychart-beta
-    title "Cooldown after a 120 s load — upper line uncooled, lower line cooled"
+    title "Cooldown after a 120 s load: upper line uncooled, lower line cooled"
     x-axis "Seconds after load stop" 0 --> 300
     y-axis "Die temperature (°C)" 34 --> 62
     line [59.97, 46.32, 43.83, 42.42, 41.34, 41.23, 40.91, 40.69, 40.80, 39.61, 39.82, 39.82, 39.82, 39.82, 39.17, 39.50, 39.17, 39.17, 39.06, 38.85, 38.96, 40.04, 38.96, 39.39, 39.06, 39.39, 38.74, 39.06, 38.63, 38.74, 38.85]
@@ -218,18 +215,20 @@ thermal masses:
 
 A small excursion sheds with τ ≈ 7.5 s; a large one takes minutes to give up its
 last degree. Waiting for a return to *baseline* therefore spends almost all of
-its time in the flattest part of that curve, buying the least temperature per
-second waited.
+its time in the flattest part of that curve, where each second of waiting gives
+the smallest drop in temperature.
 
 Both traces also make the cooler's actual contribution visible: the two curves
 have the **same shape**, offset vertically. The cooler is not draining heat
 faster. It is holding a lower floor.
 
-## Thermal-pressure enum as a timer
+## Thermal-pressure level as a timer
 
-The macOS readiness gate proceeds when
-`notify_get_state(kOSThermalNotificationPressureLevelName)` reads 0 (`nominal`).
-**That enum is not a temperature signal.** It is an integrator with a fixed
+One of the macOS readiness gate's three criteria is that
+`notify_get_state(kOSThermalNotificationPressureLevelName)` reads 0 (`nominal`);
+the others are die temperature and CPU load (see
+[System Readiness Control](end-to-end-latency.md#system-readiness-control)).
+**That level is not a temperature signal.** It is an integrator with a fixed
 hold-off, and three independent lines of evidence establish it.
 
 **It releases at a fixed delay regardless of how much heat went in.** A 10 s
@@ -241,8 +240,8 @@ Identical schedules run with and without the cooling pad:
 
 | | External cooler ON | External cooler OFF |
 | --- | --- | --- |
-| Enum trips | 304 s | 304 s |
-| Enum clears | 738 s (318 s after load stop) | 738 s (318 s after load stop) |
+| Level trips | 304 s | 304 s |
+| Level clears | 738 s (318 s after load stop) | 738 s (318 s after load stop) |
 | **Die temperature when it cleared** | **34.84 °C** | **38.52 °C** |
 
 Not approximately identical: the same sample. Two materially different thermal
@@ -255,41 +254,41 @@ crosses on one least-significant bit.
 
 Two further behaviors matter for the setup:
 
-- **Engagement is fast, release is slow.** The enum trips roughly 2.9–4 s after
+- **Engagement is fast, release is slow.** The level trips roughly 2.9–4 s after
   load start and holds for ~318 s. A single 3.5 s benchmark arms it for over
   five minutes.
-- **Repeated work keeps it armed indefinitely.** Across a 15-repetition batch of
-  3.5 s units with 30 s rests, **99 % of samples read non-nominal** and the enum
-  never returned to `nominal` once. Each repetition re-arms the integrator well
+- **Repeated work keeps it armed indefinitely.** Across a 15-rep batch of
+  3.5 s reps with 30 s rests, **99 % of samples read non-nominal** and the level
+  never returned to `nominal` once. Each rep re-arms the integrator well
   inside its own hold-off.
 
 The practical consequence, **for a load heavy enough to trip it**, is severe: a
-variant consisting of a warm-up plus five units behind six thermal gates trips
-the enum on the first unit, and every gate after that cannot pass at all;
+cell with a warm-up and five reps behind six thermal gates trips the level on
+the first rep, and every gate after that cannot pass at all;
 `nominal` never arrives while the batch is running, so each gate runs out the
 deadline instead.
 
 **Real workloads confirm this, and the two hosts diverge.** The measurements
 above drove a synthetic all-core burn, which is more thermally aggressive than a
-3.5 s inference unit, but a 14-cell soak of the actual benchmark reproduces the
+3.5 s inference rep, but a 14-cell soak of the actual benchmark reproduces the
 same behavior where it matters:
 
-| 14-cell soak | Thermal-pressure enum |
+| 14-cell soak | Thermal-pressure level |
 | --- | --- |
 | MacBook Neo | goes to `moderate` and **stays there** for the rest of the soak |
 | Contrast host (MacBook Pro M4 Max) | **never leaves `nominal`** |
 
 So on the Neo the gate genuinely cannot pass mid-batch under real load, and on
 the contrast host it passes unconditionally. The synthetic burn overstates
-absolute temperatures, but it does not overstate the enum's behavior.
+absolute temperatures, but it does not overstate the level's behavior.
 
 `ProcessInfo.thermalState` moved in lock-step with the notify level in both
 directions in every run, so it is not an alternative signal: only a coarser
 view of the same one.
 
-Levels above `moderate` have never been observed on this hardware, including
-uncooled at 60 °C peak. Four of the five pressure levels remain unexercised
-against real silicon.
+No level above `moderate` appeared on this hardware, also uncooled at a 60 °C
+peak. Three of the five pressure levels (`heavy`, `trapping`, `sleeping`) remain
+unexercised against real silicon.
 
 ## Cooled versus uncooled
 
@@ -300,9 +299,9 @@ pad. The passive internal thermal pad is present in both arms:
 | --- | --- | --- |
 | Idle σ, de-trended | 0.426 °C | **0.404 °C** |
 | Idle baseline drift over 300 s | −0.25 °C | **+1.74 °C** |
-| Peak, 120 s all-core load | 58.2 °C | 60.0 °C |
+| Peak, 120 s all-core load | 58.24 °C | 59.97 °C |
 | Idle equilibrium temperature | **35.0 °C** | **38.4 °C** |
-| Rate of heat shedding | — | **the same** |
+| Rate of heat shedding | **the same** | **the same** |
 | Max pressure level reached | `moderate` | `moderate` |
 | Batch start-temp spread, 15 reps | **0.82 °C** | **3.00 °C** |
 | Rep-to-rep scatter (start / peak) | 0.10 / 0.46 °C | 0.11 / 0.51 °C |
@@ -316,7 +315,7 @@ The cooler changes **less than expected, and not what one would guess**:
 - **Not the rate of cooling.** Measured as excess over each arm's *own* settled
   point, the decay curves nearly overlay (t+20 s: +6.4 vs +5.4 °C; t+120 s:
   +2.1 vs +1.4 °C).
-- **Not the enum**, by even one sample.
+- **Not the level**, by even one sample.
 - **The equilibrium temperature**, by 3.4 °C. That is the whole effect.
 
 One number invites misreading and is worth stating explicitly. Return-to-baseline
@@ -332,29 +331,28 @@ corrupt any statistic derived from them.
 
 ## Batch behavior
 
-The real benchmark duty cycle per variant is a ~2 s I/O-bound load, a 3.5 s
-warm-up, then **five** 3.5 s units, with a ~6 s break between sets and a
-readiness gate before each unit.
+The real benchmark duty cycle per cell is a ~2 s I/O-bound load, a 3.5 s
+warm-up, then **five** 3.5 s reps, with a ~6 s break between sets and a
+readiness gate before each rep.
 
 The runs below deliberately do **not** replicate that. They are a probe
-configuration (**fifteen** repetitions of a 3.5 s unit with **30 s** rests)
+configuration (**fifteen** reps of 3.5 s with **30 s** rests)
 chosen to answer a question the real cycle cannot: *does repeated work reach a
-stable temperature, and if so after how many repetitions?* Five repetitions are
+stable temperature, and if so after how many reps?* Five reps are
 too few to distinguish a plateau from a slow climb, so the count was raised to
 fifteen. The rest was set to 30 s because a 10 s rest was measured to accumulate
-heat without bound, so it could not have shown a plateau at any repetition
-count. Nothing about the real benchmark was changed.
+heat without bound, so it could not have shown a plateau at any rep count. Nothing about the real benchmark was changed.
 
-Fifteen repetitions, 3.5 s unit, 30 s rest:
+Fifteen reps of 3.5 s, 30 s rest:
 
 | | External cooler ON | External cooler OFF |
 | --- | --- | --- |
-| Start temp, first repetition | 36.82 °C | 36.91 °C |
-| Start temp, fifteenth repetition | 37.60 °C | 39.90 °C |
+| Start temp, first rep | 36.82 °C | 36.91 °C |
+| Start temp, fifteenth rep | 37.60 °C | 39.90 °C |
 | Spread across all 15 | 0.82 °C | 3.00 °C |
 | Systematic drift | +0.041 °C/rep | +0.159 °C/rep |
 
-Neither arm reached a provably flat plateau within 15 repetitions, though the
+Neither arm reached a provably flat plateau within 15 reps, though the
 cooled arm is close: its total drift across the batch is around 0.6 °C, against
 3.00 °C spread uncooled.
 
@@ -362,76 +360,123 @@ cooled arm is close: its total drift across the batch is around 0.6 °C, against
 the answer is no.** Across the ~3 °C spread a batch produces, benchmark results
 did not change measurably. A separate 14-cell soak on this host held 0.27 %
 between-cell variation. Rep-to-rep scatter is also essentially identical cooled
-and uncooled, so the cooler does not make individual results more repeatable.
+and uncooled, so the cooler does not make individual results more repeatable;
 it narrows the systematic drift across a batch.
+
+### Settling curve
+
+How long to wait between runs depends on how close to settled the die has to
+be. After a 123 s all-core load (59.76 °C peak, settling to 37.45 °C), the
+smoothed die came within each tolerance of where it settled at these times
+after load stop. The reference is where the die settled, not the pre-load
+baseline.
+
+| Tolerance vs settled | First reaches | Stays within |
+| --- | --- | --- |
+| 4.0 °C | 45 s | 45 s |
+| 3.0 °C | 57 s | 57 s |
+| 2.0 °C | 73 s | 203 s |
+| 1.5 °C | 83 s | 207 s |
+| 1.0 °C | 105 s | 318 s |
+| 0.5 °C | 121 s | never |
+
+The gap between the two columns is noise, not heat. About 60 s buys 3 °C
+reliably; tightening to 1 °C costs a further ~260 s per run. ±1 °C is a hard
+floor, because idle σ was 1.03 °C in that session.
+
+Before you pay for that wait, find out whether start temperature matters. Run the
+batch back to back with no cooldown, record die temperature at each run's
+start, and correlate it against the result. No correlation means stop gating. A
+correlation gives a sensitivity (result change per °C), which is the only
+non-arbitrary way to pick a tolerance. If that sensitivity calls for tighter
+than ±1 °C, thermal gating cannot deliver it, and the answer is more
+reps or randomized ordering.
 
 ## Consequences for benchmark setup
 
-**Die temperature is recorded, not gated on.** It is captured per repetition as
-`device_apple_soc_temp_c_before` / `_after`. It is not used as a gate because no
-constant threshold survives both the Neo's noise floor and the quieter contrast
-hosts, and because the variation it would control has been measured not to
-affect results on this workload. Recording keeps the assumption under continuous
-audit at no cost.
+**Die temperature is recorded per rep**, as
+`device_apple_soc_temp_c_before` / `_after`. A tight threshold such as "within
+1 °C of idle" would not survive the Neo's noise floor, and on this workload the
+variation such a gate would control was measured not to affect results. By
+default the gate does require `die < 50 °C` whenever the die reads, a criterion
+calibrated on the M5 Max (see [MacBook Pro (M5 Max) thermal behavior](macbook-m5-thermal-behavior.md)),
+and that threshold sits far above the Neo's noise. In the cooldown traces above
+the die is back under 50 °C within about 10 s of load stop, so on the Neo the
+level's hold-off is the criterion that sets the wait.
+
+Cooling to an idle die before every rep does not work at plan scale.
+1000 benchmarks × 5 reps at ~3.5 s is ~5 hours of measurement; cooling
+147 s before each would add over 200 hours, to control a variable measured not
+to affect the result.
+
+**If die temperature is gated on, use an absolute threshold, not a trend
+test.** The gate's `die < 50 °C` is a fixed threshold. Measured on the Neo after
+a 123 s load, a "slope is zero" test needs a long window to beat
+the noise: the idle 90th-percentile (p90) |slope| was 2.38–2.80 °C/min over a 60 s window, 0.98–1.55
+over 120 s, and 0.15–0.49 over 180 s. A window cannot report sooner than its own
+length, so an honest 180 s trend test, replayed over that trace, fires 224 s
+after load stop. A 60 s range-only test fired at 97 s while the die was still
+falling at −3.21 °C/min, a false positive. An absolute test (a short smoothed
+mean within a noise-derived distance of a known idle baseline) fired at 147 s.
+Against the level's 318 s, a trend gate recovers ~94 s and an absolute one
+~171 s. "Close to a known value" is a far easier estimate than "the slope is
+zero". The catch is that an absolute test needs a trustworthy baseline:
+settled, not drifting (see [Idle noise floor](#idle-noise-floor)).
 
 The recorded value is rounded to whole °C, so the sub-degree figures on this page
-came from raw readings and cannot be re-derived from the column. That is a
-deliberate trade: the column is 32-bit, and a fractional value read back through
-a 64-bit float arrives as `46.79999923706055`, which reads as precision the
-sensor never had. The effects the column still has to answer for (a batch drifting
-warmer, two runs starting from different temperatures) are degrees, not tenths.
-Re-measuring a tenth-of-a-degree effect means instrumenting the raw
-`die_temp_max_c()` for that experiment.
+came from raw readings and cannot be re-derived from the column. The effects the
+column has to answer for (a batch drifting warmer, two runs starting from
+different temperatures) are degrees, not tenths. Re-measuring a
+tenth-of-a-degree effect means instrumenting the raw `die_temp_max_c()` for that
+experiment.
 
-**The deadline is 7 minutes, not 5.** The enum's ~318 s hold-off exceeds a
-5-minute deadline. At the former deadline the gate did not merely over-wait; it
-failed cells outright.
+**The macOS deadline is 7 minutes (420 s).** That is longer than the level's
+~318 s hold-off. A 5-minute deadline is shorter than the hold-off, and with it
+the gate timed out and failed cells.
 
-**The cooling pad stays, as margin rather than speed.** It buys no throughput (
-nothing in the loop waits on cooling), and does not improve run-to-run
-repeatability. What it buys is a 0.82 °C batch spread instead of 3.00 °C, which
-is fourfold headroom on the very assumption the setup rests on, plus thermal room
-if a workload gets heavier and a much faster route to a trustworthy idle
-baseline.
+**The external cooling pad gives margin, not speed.** It adds no throughput
+(nothing in the loop waits on cooling), and it does not improve run-to-run
+repeatability. It gives a 0.82 °C batch spread instead of 3.00 °C. That is about
+four times more margin on the finding that start temperature does not affect
+results. It also gives thermal room for a heavier workload, and it reaches a
+trustworthy idle baseline much sooner.
 
-**A cell may waive the thermal criterion.** `readiness = { skip_thermal = true }`
-is available where thermal state has been established not to matter for that host
-and workload. The load criterion still applies, and such results are not
-comparable to gated ones.
+**A cell may waive the thermal criterion** (`benchmark_flags.readiness.skip_thermal`, see
+[System Readiness Control](end-to-end-latency.md#system-readiness-control))
+where thermal state has been established not to matter for that host and
+workload. That waives both the level and the die check; the load criterion still
+applies, and such results are not comparable to gated ones.
 
-## Limits of these findings
+## Open questions
 
-- **Workload-specific.** The ~60 °C ceiling is where *this* duty cycle settles,
-  not a property of the machine. A longer or heavier job could reach a throttling
+- **Workload-specific.** The ~60 °C peak is where a 120 s all-core load
+  settles on this rig, not a property of the machine. A longer or heavier job could reach a throttling
   regime this one never approaches, at which point temperature would start to
   matter and the reasoning above would need redoing.
 - **Host-specific, in both directions.** The contrast host never leaves
-  `nominal` even at full load, reaching 60.4 °C with the enum reading zero
-  throughout. The same gate is useless on both machines for opposite reasons,
-  and neither generalizes to the other.
+  `nominal` even at full load, reaching 60.4 °C with the level reading zero
+  throughout. The level is useless on both machines for opposite reasons, and
+  neither generalizes to the other.
 - **`moderate` is not `nominal`.** The Neo sits permanently in a raised pressure
   state while benchmarking. Nothing here establishes that state is harmless:
   only that within it, a 3 °C swing does not move these numbers.
-- **Single unit, and a modified one.** All of this is one physical machine,
-  carrying a passive internal thermal pad in every run. **No measurement of a
-  stock Neo exists**, so the temperature figures here (equilibrium, ceiling,
-  peak, cooling constants) characterize this rig rather than the product. A
-  stock unit would be expected to run hotter, and possibly to reach the
-  throttling regime that makes the "temperature does not matter" finding stop
-  holding. Anyone reasoning about fleet devices, or about a Neo that is not this
-  one, should re-measure rather than inherit these numbers.
-- **What does transfer across all three configurations** (stock aside) is the
-  enum's behavior. It is a fixed timer on both sides of the external-cooler
+- **One machine, and a modified one.** The temperature figures here
+  (equilibrium, peak, cooling constants) describe this rig, not the product
+  (see [Measurement rig](#measurement-rig)). Re-measure them before you apply
+  them to another Neo.
+- **What does transfer across both measured configurations** (with and without
+  the external pad) is the level's behavior. It is a fixed timer on both sides of the external-cooler
   comparison and across a 12× load range, which is a software property rather
   than a thermal one, so it is the one finding not contingent on the rig.
 - **Uncooled data is thinner.** The uncooled arm's baselines were still settling
   in every run, which is itself a finding but limits how precisely its
   steady-state figures can be quoted.
-- **The load was synthetic.** Every heating, enum, and duty-cycle figure here
-  came from an all-core floating-point burn, not from an inference workload of
-  the same duration. It is an upper bound on what a real unit does thermally.
+- **The load was synthetic.** Every heating, level timer and duty-cycle figure
+  here, except the 14-cell soak, came from an all-core floating-point burn, not
+  from an inference workload of the same duration. It is an upper bound on what
+  a real rep does thermally.
   Numbers describing the machine's *response* (noise floor, time constants,
-  equilibrium, enum timer behavior) transfer; numbers describing *how hot a
+  equilibrium, level timer behavior) transfer; numbers describing *how hot a
   benchmark gets* should be re-measured against the real thing.
 
 ## Reproducing these measurements
@@ -444,13 +489,13 @@ constants, and reports the derivation so the numbers can be audited.
 cd tools/macos-thermal-probe
 clang -O0 -framework Foundation -framework IOKit -o thermal-probe thermal-probe.m
 
-# Idle noise floor — the prerequisite for interpreting anything else
+# Idle noise floor: the prerequisite for interpreting anything else
 ./thermal-probe 300 0 60 2 1
 
-# Single load and cooldown — enum timing, cooling curve, settling curve
+# Single load and cooldown: level timing, cooling curve, settling curve
 ./thermal-probe 300 120 60 2 <cores> 900 3600
 
-# Repeated duty cycle — batch drift and convergence
+# Repeated duty cycle: batch drift and convergence
 ./thermal-probe --cycle 15 --load 3.5 --rest 30 --interval 0.1 --baseline 300
 ```
 
@@ -458,16 +503,8 @@ Two cautions when running these. Watch for the `[DRIFT]` warning: a baseline
 taken while the machine is still settling inflates every statistic derived from
 it, and on an uncooled Neo 300 s of idle is not enough. And if using the
 `THERMAL_PROBE_CALIB` cache, use a **separate file per physical configuration**.
-it validates the sampling window but has no way to know the cooling changed.
+It validates the sampling window but has no way to know the cooling changed.
 
-The tool's own README carries the derivation details, the calibration mistakes
-made along the way, and the reasoning behind each statistic it reports.
-
-## Related
-
-- [Device conditions](device-conditions.md): the readiness gate across all
-  platforms, and the rig conditions each is held under.
-- [End-to-end latency → System Readiness Control](end-to-end-latency.md#system-readiness-control):
-  the full gate criteria and rationale.
-- `crates/pipette-readiness/src/macos.rs`: the macOS gate implementation.
-- `tools/macos-thermal-probe/README.md`: measurement tool and its methodology.
+The tool's own [README](../../tools/macos-thermal-probe/README.md) carries the
+derivation details and the reasoning behind each statistic it reports. The gate
+itself is `crates/pipette-readiness/src/macos.rs`.

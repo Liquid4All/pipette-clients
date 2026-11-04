@@ -1,0 +1,31 @@
+{
+  "benchmark_id": "eval_math_500_2026.06.1",
+  "benchmark_type": "eval",
+  "parameter_dataset_name": "2026.06.1",
+  "parameter_eval_id": "math_500",
+  "parameter_max_tokens": 8192,
+  "samples": [
+    {
+      "id": "row-1#0",
+      "messages": [
+        {
+          "content": "What is 2 + 2?",
+          "role": "user"
+        }
+      ]
+    },
+    {
+      "id": "row-1#1",
+      "messages": [
+        {
+          "content": "Answer briefly.",
+          "role": "system"
+        },
+        {
+          "content": "What is 2 + 2?",
+          "role": "user"
+        }
+      ]
+    }
+  ]
+}

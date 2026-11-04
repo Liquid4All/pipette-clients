@@ -1,0 +1,8 @@
+{
+  "draft": "https://example.com/draft-f16.gguf",
+  "draft_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "mmproj": "https://example.com/mmproj-f16.gguf",
+  "model": "https://example.com/target-f16.gguf",
+  "source": "url",
+  "type": "gguf_vision_speculative"
+}

@@ -1,0 +1,9 @@
+{
+  "flavor": "macos-arm64",
+  "source": {
+    "dir": "venv",
+    "type": "relative_preinstalled"
+  },
+  "type": "mlx_macos_pipette",
+  "version": "0.31.3"
+}

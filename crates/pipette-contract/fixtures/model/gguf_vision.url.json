@@ -1,0 +1,8 @@
+{
+  "mmproj": "https://example.com/mmproj-f16.gguf",
+  "mmproj_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "model": "https://example.com/model-Q4_0.gguf",
+  "model_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "source": "url",
+  "type": "gguf_vision"
+}

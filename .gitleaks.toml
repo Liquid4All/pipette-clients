@@ -1,0 +1,123 @@
+# Allow-list for the gitleaks scan in .github/workflows/security.yml, which
+# passes `--config` because gitleaks silently falls back to its built-in rules
+# when it finds no file.
+#
+# Every entry is public by design (it ships in the client binaries) or a test
+# fixture; delete one that stops being either. Never add a leaked credential:
+# that hides it from every later scan. Rotate it and rewrite history instead.
+#
+# Scope entries as narrowly as the value allows. `condition = "AND"` makes a
+# `paths` + `regexes` pair mean "this value, in this file"; the default "OR"
+# allow-lists the whole path.
+
+[extend]
+# The upstream rule set, unmodified; this file only subtracts from it.
+useDefault = true
+
+[[allowlists]]
+description = """
+Clerk publishable keys. Publishable is the whole point of the class: the iOS and
+Android apps embed it and it is readable in any copy of the app, which is why it
+sits in tracked xcconfig files and in the build docs rather than in a secret.
+The Clerk credential that does matter is the secret key (sk_live_/sk_test_),
+which is NOT allow-listed here and must stay out of the tree.
+"""
+regexTarget = "match"
+regexes = ['''pk_(?:test|live)_[A-Za-z0-9+/=_-]{20,}''']
+
+[[allowlists]]
+description = """
+PostHog project API key. Same class: it identifies the project a client sends
+events to and ships in the app. A PostHog personal API key (phx_) is a real
+credential and is deliberately not matched here.
+"""
+regexTarget = "match"
+regexes = ['''phc_[A-Za-z0-9]{30,}''']
+
+[[allowlists]]
+description = """
+The Firebase Android API key in google-services.json. Google documents this one
+as safe to commit — it identifies the project and is enforced by the app's
+package name plus signing certificate, not by being secret. Pinned to that file
+so an AIza... key pasted anywhere else still fails.
+"""
+condition = "AND"
+paths = ['''(^|/)google-services\.json$''']
+regexTarget = "match"
+regexes = ['''AIza[A-Za-z0-9_\-]{35}''']
+
+[[allowlists]]
+description = """
+`SENTRY_CLI_SHA256` in the Android release workflow: the release asset's
+checksum, which is how that job avoids piping a remote installer into bash. The
+`sentry-access-token` rule sees SENTRY_ + 64 hex characters and calls it a
+token. Matched on the line so only this variable is exempt.
+"""
+regexTarget = "line"
+regexes = ['''SENTRY_CLI_SHA256''']
+
+[[allowlists]]
+description = """
+Ed25519 test seeds and the tokens derived from them. Any 32 bytes are a valid
+seed, so the Rust, Swift and Kotlin suites all use the same two visibly-fake
+byte patterns in order to assert that a token one client prints restores on
+another. The first base64 blob is what `IdentityBundle::encode` produces for
+the first of them; the second is that same seed behind a fake client id, the
+`identity_token` in pipette-ios-proxy's example config — the scan sees the
+encoded form, which the hex literal cannot cover. Matched as literals: no real
+key can hide behind these.
+"""
+regexTarget = "match"
+regexes = [
+  '''(?:aa11bb22cc33dd44ee55ff6600778899){2}''',
+  '''1122334455667788990011223344556677889900112233445566778899001122''',
+  '''eyJ2ZXJzaW9uIjoxLCJjbGllbnRfaWQiOiJldjFfYWJj''',
+  '''eyJ2ZXJzaW9uIjoxLCJjbGllbnRfaWQiOiJldjFfMWEyYjNjNGQ1ZTZmN2E4YiIsInNlcnZlcl91cmwiOiJodHRwczovL2NvbGxlY3Rvci5waXBldHRlLmxpcXVpZC5haSIsInByaXZhdGVfa2V5X2hleCI6ImFhMTFiYjIyY2MzM2RkNDRlZTU1ZmY2NjAwNzc4ODk5YWExMWJiMjJjYzMzZGQ0NGVlNTVmZjY2MDA3Nzg4OTkifQ''',
+]
+
+[[allowlists]]
+description = """
+crates/pipette-ctl/src/ssh_keygen.rs. The module writes OpenSSH private keys,
+so its doc comment quotes the PEM header and its unit tests embed generated
+keypairs to check the encoder byte-for-byte; a `private-key` rule cannot tell
+those from the real thing. The whole file, deliberately: a narrower pattern
+would have to be rewritten every time a test grows another fixture. The old
+crates/pipette-plan path stays listed: the scan on main walks every commit,
+and the commits before the rename hold the file there.
+"""
+paths = ['''^crates/pipette-(?:ctl|plan)/src/ssh_keygen\.rs$''']
+
+[[allowlists]]
+description = """
+crates/pipette-ssh: the crate that reads OpenSSH private keys, and the fixtures
+it reads. `fixtures.rs` is two throwaway keypairs from `ssh-keygen -t ed25519`,
+one with a passphrase and one without, which exist so the parser is tested
+against what `ssh-keygen` actually writes rather than against its own encoder;
+`private.rs` quotes the PEM armor in two constants, which the private-key rule
+matches across. Same reasoning as ssh_keygen.rs above, and whole files for the
+same reason: a narrower pattern would have to be rewritten every time a test
+grows another fixture. Neither key is used by anything.
+"""
+paths = [
+  '''^crates/pipette-ssh/src/fixtures\.rs$''',
+  '''^crates/pipette-ssh/src/private\.rs$''',
+]
+
+[[allowlists]]
+description = """
+`private_key_pkcs8` is the NAME of an EncryptedSharedPreferences slot in the
+Android client (Secrets.kt), not anything stored in one — the key material
+itself never reaches the tree. `generic-api-key` matches the
+`SOMETHING_KEY_... = "..."` shape and cannot tell a slot's name from its
+contents. Anchored to the exact literal.
+"""
+regexes = ['''^private_key_pkcs8$''']
+
+[[allowlists]]
+description = """
+The fake `engine_key` in pipette-trt-edgellm's /props tests. The real value is
+the TensorRT Edge-LLM server's engine-cache digest, a hash of the model and the
+device stack, not a credential; `generic-api-key` sees `"..._key": "<hex>"` and
+calls it one. Anchored to the exact literal.
+"""
+regexes = ['''^9c1f0e7a2b3d$''']

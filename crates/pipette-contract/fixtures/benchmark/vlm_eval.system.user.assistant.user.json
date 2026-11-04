@@ -1,0 +1,53 @@
+{
+  "benchmark_id": "vlm_eval_mmstar_2026.07.1",
+  "benchmark_type": "vlm_eval",
+  "parameter_dataset_version": "2026.07.1",
+  "parameter_lmms_task": "mmstar",
+  "parameter_max_tokens": 1024,
+  "parameter_sample_count": 1,
+  "samples": [
+    {
+      "id": "row-1",
+      "messages": [
+        {
+          "content": "Answer with the option's letter.",
+          "role": "system"
+        },
+        {
+          "content": [
+            {
+              "text": "Which option is shown?",
+              "type": "text"
+            },
+            {
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+              },
+              "type": "image_url"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "content": "B",
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "text": "And here?",
+              "type": "text"
+            },
+            {
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+              },
+              "type": "image_url"
+            }
+          ],
+          "role": "user"
+        }
+      ]
+    }
+  ]
+}

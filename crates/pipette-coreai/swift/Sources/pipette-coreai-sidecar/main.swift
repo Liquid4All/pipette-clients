@@ -41,6 +41,7 @@ enum SidecarError: Error, CustomStringConvertible {
     case missingModel
     case badRequest(String)
     case invalidArg(String, String)
+    case invalidBundle(String)
 
     var description: String {
         switch self {
@@ -49,6 +50,7 @@ enum SidecarError: Error, CustomStringConvertible {
         case .unknownArg(let a): return "unknown argument \(a)"
         case .missingModel: return "--model <bundle-dir> is required"
         case .badRequest(let m): return m
+        case .invalidBundle(let m): return "invalid model bundle: \(m)"
         }
     }
 }
@@ -101,6 +103,10 @@ final class CoreAIEngine: @unchecked Sendable {
 
     init(bundleDir: URL, seed: UInt64) async throws {
         let bundle = try LanguageBundle(at: bundleDir)
+        // `randomPrompt` draws token ids modulo the vocabulary size.
+        guard bundle.vocabSize > 0 else {
+            throw SidecarError.invalidBundle("vocabSize is \(bundle.vocabSize)")
+        }
         let modelURL = try bundle.requireModelURL(for: "main")
         let config = ModelConfig(
             name: bundle.name,
@@ -127,24 +133,23 @@ final class CoreAIEngine: @unchecked Sendable {
         var out = [Int32]()
         out.reserveCapacity(count)
         let v = UInt64(vocabSize)
-        for _ in 0..<count {
+        // One SplitMix64 step, reduced into the vocabulary.
+        func nextToken() -> Int32 {
             state = state &+ 0x9E37_79B9_7F4A_7C15
             var z = state
             z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
             z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
             z = z ^ (z >> 31)
-            var token = Int32(z % v)
+            return Int32(z % v)
+        }
+        for _ in 0..<count {
+            var token = nextToken()
             // Skip EOS so a uniform vocab sample cannot plant a stop token in
             // the prompt (MLX's `_suppress_eos` equivalent for this path).
             if !eosTokenIds.isEmpty && v > 1 {
                 var guardCount = 0
                 while eosTokenIds.contains(token) && guardCount < 16 {
-                    state = state &+ 0x9E37_79B9_7F4A_7C15
-                    z = state
-                    z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-                    z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-                    z = z ^ (z >> 31)
-                    token = Int32(z % v)
+                    token = nextToken()
                     guardCount += 1
                 }
                 // Retry budget exhausted (pathological vocab): step
@@ -160,13 +165,9 @@ final class CoreAIEngine: @unchecked Sendable {
         return out
     }
 
-    /// Run one generation. Returns per-phase timing derived like Apple's
-    /// llm-benchmark: promptTps over the prefill span (to first generated
-    /// token), genTps over the decode span (from first token onward).
-    ///
-    /// `prepare()` must be called before this — the settle sleep and KV reset
-    /// are setup, not measurement, and would otherwise land inside an
-    /// end-to-end latency reading.
+    /// Settle the engine and reset its key-value (KV) cache before a
+    /// generation. Call it before `generate`. The settle sleep and the KV reset
+    /// are setup, so they must stay outside the end-to-end latency reading.
     func prepare() async {
         // A short settle between generations. Without it the Core AI engine can
         // still be draining the previous decode when the next rep starts, which
@@ -176,6 +177,10 @@ final class CoreAIEngine: @unchecked Sendable {
         try? await engine.reset()
     }
 
+    /// Run one generation and return the timing of each phase, calculated as
+    /// Apple's llm-benchmark does. `promptTps` covers the prefill span, up to
+    /// the first generated token. `genTps` covers the decode span, from the
+    /// first token on.
     func generate(prompt: [Int32], maxTokens: Int) async throws -> GenResult {
         let options = InferenceOptions(maxTokens: maxTokens, includeLogits: false)
         let sampling = SamplingConfiguration(temperature: 0)
@@ -356,11 +361,12 @@ final class SidecarServer: @unchecked Sendable {
     }
 
     private func requestComplete(_ data: Data) -> Bool {
-        guard let s = String(data: data, encoding: .utf8),
-              let headerEnd = s.range(of: "\r\n\r\n") else {
+        // Byte offsets throughout: Content-Length counts bytes.
+        guard let headerEnd = data.range(of: Data("\r\n\r\n".utf8)),
+              let header = String(data: data[data.startIndex..<headerEnd.lowerBound], encoding: .utf8)
+        else {
             return false
         }
-        let header = s[s.startIndex..<headerEnd.lowerBound]
         // The fixed pipette client sends the whole body in one write, but honor
         // Content-Length anyway so a request whose body arrives in a later TCP
         // segment is still read correctly.
@@ -371,7 +377,7 @@ final class SidecarServer: @unchecked Sendable {
             .flatMap { $0.split(separator: ":").last }
             .flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         guard let length else { return true } // no body expected; headers are enough
-        return data.count >= headerEnd.upperBound.utf16Offset(in: s) + length
+        return data.endIndex - headerEnd.upperBound >= length
     }
 
     private func dispatch(_ raw: Data, to conn: NWConnection) {
@@ -395,7 +401,7 @@ final class SidecarServer: @unchecked Sendable {
             respond(json(["ok": true]), to: conn)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(0) }
         } else if method == "POST" {
-            // Serialise generations: two concurrent POSTs would interleave
+            // Serialize generations: two concurrent POSTs would interleave
             // engine.reset() / generate() on this @unchecked Sendable class.
             chainLock.lock()
             let previous = postChain

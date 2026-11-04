@@ -95,8 +95,8 @@ fun SetupScreen(state: SetupUiState, onIntent: (SetupIntent) -> Unit) {
         customUrl = customCollectorUrl,
         onCustomUrlChange = { customCollectorUrl = it },
       )
-      // Offered for either collector: the management API takes `preauth_key` on any register call, so a key issued
-      // against the production collector has to be usable here too.
+      // Offered for either collector: the management API takes `client_preauth_key` on any register call, so a key
+      // issued against the production collector has to be usable here too.
       IosTextField(
         value = preauthKey,
         onValueChange = { preauthKey = it },

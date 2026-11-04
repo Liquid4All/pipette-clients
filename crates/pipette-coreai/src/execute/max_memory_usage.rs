@@ -1,14 +1,17 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use pipette_memprobe_metal::host;
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use pipette_memprobe::{Sampler, Watch};
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::BenchmarkResultData;
+use pipette_plan_types::MaxMemoryUsageBenchmark;
+use pipette_plan_types::RunRequest;
+use pipette_plan_types::RunResponse;
 
-use super::{server, throughput_http};
+use crate::{server, throughput_http};
 
 const ENDPOINT: &str = "/max_memory_usage";
 const SHUTDOWN_ENDPOINT: &str = "/shutdown";
@@ -27,41 +30,39 @@ struct MaxMemoryUsageResponse {
     completion_tokens: u32,
 }
 
-pub(super) fn run(req: &RunRequest) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_max_memory_usage()
-        .map_err(anyhow::Error::from)?;
-    let prefill_tokens = benchmark.parameter_prefill_tokens;
+pub(super) fn run(
+    req: &RunRequest,
+    benchmark: &MaxMemoryUsageBenchmark,
+    sidecar: PathBuf,
+) -> anyhow::Result<RunResponse> {
+    let prefill_tokens = benchmark
+        .parameter_prefill_tokens
+        .into_inner()
+        .unsigned_abs();
 
-    // Specialization (first load of this `.aimodel` on this OS) happens inside
-    // sidecar construction, *before* READY. The poller starts after READY, so
-    // a cold-cache compile peak is excluded by policy. See
+    // The sampler reports the lifetime peak of the sidecar process, so the
+    // number includes model load. On a cold specialization cache it also
+    // includes the specialization peak; `specialization_cache=hit|miss` on the
+    // READY line in `runtime_stderr` records which case applies. See
     // docs/methodology/coreai-specialization.md.
-    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
-    // gate: a first-use `swift build -c release` saturates every core for
-    // minutes and would sit between the gate certifying the device as thermally
-    // idle and the measurement that certification is for.
-    let sidecar = crate::sidecar::require_coreai_sidecar()?;
-    let mut server = server::start_server(req, Some(sidecar))?;
-    let phys_poller = host::spawn_phys_footprint_poller(server.pid() as i32);
+    let mut server = server::start_server(req, sidecar)?;
+    let phys_poller = Sampler::start(server.process.pid(), Watch::Peak.supported()?)?;
 
-    throughput_http::prepare(&server.base_url)?;
+    throughput_http::prepare(&server)?;
     let response_result: anyhow::Result<MaxMemoryUsageResponse> = throughput_http::post_json(
-        &server.base_url,
+        &server,
         ENDPOINT,
         &MaxMemoryUsageRequest {
             prompt_tokens: prefill_tokens,
             decode_tokens: DECODE_TOKENS,
         },
     );
-    let max_host_bytes = phys_poller
-        .stop_and_join()
-        .context("phys_footprint poller failed; max_host_bytes is unreliable")?;
+    let (_, peak) = phys_poller.stop();
+    let max_host_bytes = peak.context("phys_footprint poller failed")?.host_bytes;
 
     let shutdown_result: anyhow::Result<serde_json::Value> =
-        throughput_http::post_json(&server.base_url, SHUTDOWN_ENDPOINT, &serde_json::json!({}));
-    let exit_result = server.wait_for_exit(SERVER_EXIT_TIMEOUT);
+        throughput_http::post_json(&server, SHUTDOWN_ENDPOINT, &serde_json::json!({}));
+    let exit_result = server.process.wait_success(SERVER_EXIT_TIMEOUT);
 
     let response = response_result?;
     validate_response(&response, prefill_tokens, DECODE_TOKENS)?;
@@ -71,19 +72,15 @@ pub(super) fn run(req: &RunRequest) -> anyhow::Result<RunResponse> {
     // Apple Silicon is unified memory: Metal allocations are billed to
     // phys_footprint, so max_host_bytes subsumes the GPU allocation and there
     // is no separate pool to report (mirrors pipette-mlx).
-    Ok(RunResponse {
-        executable: Some(server.executable.clone()),
-        command: server.command_preview.clone(),
-        ..RunResponse::new(
-            BenchmarkResultData::MaxMemoryUsage {
-                max_host_bytes,
-                max_gpu_bytes: None,
-                max_npu_bytes: None,
-            },
-            server.stdout(),
-            server.stderr(),
-        )
-    })
+    Ok(
+        RunResponseBuilder::new(BenchmarkResultData::MaxMemoryUsage {
+            max_host_bytes,
+            max_gpu_bytes: None,
+            max_npu_bytes: None,
+        })
+        .process(&mut server.process)
+        .build(),
+    )
 }
 
 fn validate_response(

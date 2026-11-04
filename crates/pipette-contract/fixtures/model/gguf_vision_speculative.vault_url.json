@@ -1,0 +1,9 @@
+{
+  "custom_label": "acme LFM2-VL q4 with drafter",
+  "draft": "/vault/resources/vault_1/content",
+  "mmproj": "/vault/resources/vault_1/content",
+  "model": "/vault/resources/vault_1/content",
+  "principal_id": "user_01936d",
+  "source": "vault_url",
+  "type": "gguf_vision_speculative"
+}

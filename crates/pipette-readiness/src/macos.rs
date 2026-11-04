@@ -1,139 +1,64 @@
-//! macOS readiness — waits for the OS thermal-pressure level to read
-//! `nominal` and for Mach CPU tick counters to show the machine idle. Both
-//! before a measurement starts.
+//! macOS readiness: the thermal-pressure level must read `nominal`, the die
+//! must be under [`MAX_DIE_C`], and the machine under [`MAX_BUSY_CORES`].
 //!
-//! ## The thermal criterion is known to be poor, and deliberately kept
+//! ## The pressure level is a poor signal, kept because it is conservative
 //!
-//! `com.apple.system.thermalpressurelevel` (the notification behind
-//! `ProcessInfo.thermalState`) is **not a temperature signal**. Measured with
-//! `tools/macos-thermal-probe` on a MacBook Neo (A18 Pro), it is a fixed
-//! hold-off anchored to the moment the CPU went quiet.
+//! `com.apple.system.thermalpressurelevel` is not a temperature. Measured with
+//! `tools/macos-thermal-probe` on a MacBook Neo (A18 Pro), it engages 3-4 s into
+//! a load and clears a fixed ~318 s after the load stops, whatever the heat
+//! input (10 s or 123 s of load) or cooling. On an M4 Max it never left
+//! `nominal` while the die rose 49 to 60 °C.
 //!
-//! (That Neo is thermally modified — a passive pad inside the case and an
-//! active pad under it — so the *temperatures* below describe the rig, not a
-//! stock machine. The enum's behavior does not depend on any of that, which is
-//! rather the point.)
+//! ## The die criterion
 //!
-//! | load | peak die | die back at baseline | enum cleared |
-//! |-------|---------:|---------------------:|-----------------:|
-//! | 10 s | 51.5 °C | — | 317 s after stop |
-//! | 123 s | 59.8 °C | 147 s after stop | **318 s after stop** |
+//! On the M5 Max the level engages only after minutes of continuous load, and
+//! the gaps between cells reset that clock, so a batch heats underneath it.
+//! Die temperature is hysteretic, but this gate samples only the cooling
+//! branch: it runs between reps on a machine [`MAX_BUSY_CORES`] calls idle.
+//! Measurements: `docs/methodology/macbook-m5-thermal-behavior.md`.
 //!
-//! A 12× difference in heat input moved the clear time by one second. Running
-//! the same schedule with and without an external cooler cleared at the
-//! *identical sample* — die at 34.84 °C in one arm, 38.52 °C in the other. It
-//! engages 3–4 s into a load and releases 318 s after, and one observed
-//! engagement happened on a die change of 0.10 °C, a single sensor
-//! quantization step. It cuts the other way too: on a stock-cooled MacBook Pro
-//! (M4 Max) the die rose 49 → 60 °C under full load while the enum never left
-//! `nominal` at all.
+//! ## Reading the signals
 //!
-//! So this gate cannot pass mid-batch on the Neo and never engages on the
-//! M4 Max — uninformative on both, for opposite reasons. It is kept
-//! because it is conservative and its deadline now accommodates the hold-off,
-//! **not because it is a good signal.**
+//! The level is `OSThermalPressureLevel` (0 nominal ... 4 sleeping), which maps
+//! neither to iOS's numbering nor to `ProcessInfo.thermalState`, so it has no
+//! mapping to the recorded `apple_thermal_state` series. It is read through
+//! notify(3) rather than `swift -e` (~120 ms warm, ~0.7 s cold), which would
+//! itself load the CPU the sibling check measures.
 //!
-//! ## The M5 Max needs a temperature criterion too
-//!
-//! The enum alone cannot deliver a comparable starting state there: it engages
-//! only after minutes of *continuous* load, and the gaps between cells reset
-//! that clock while heat keeps accumulating, so a batch heats underneath it.
-//! [`MAX_DIE_C`] is the criterion added for it.
-//!
-//! Die temperature is hysteretic — the same reading means one thing warming and
-//! another cooling — but this gate only ever samples the cooling branch, where
-//! the relation is monotonic: it runs between repetitions, on an idle machine,
-//! and [`MAX_BUSY_CORES`] rejects a machine something else is loading.
-//!
-//! Measurements, cost and open questions:
-//! `docs/methodology/macbook-m5-thermal-behavior.md`.
-//!
-//! ## Why the deadline is 7 minutes
-//!
-//! [`DEFAULT_MAX_WAIT`] exists because of the 318 s measurement above: the
-//! previous 300 s sat *below* the hold-off, so on the Neo this gate
-//! did not merely over-wait — it timed out and **failed the cell** after any
-//! repetition that warmed the machine. That is the one unambiguous defect the
-//! measurements turned up, and 420 s is the fix.
-//!
-//! ## Reading the level
-//!
-//! Pressure levels are `OSThermalPressureLevel` from
-//! `<libkern/OSThermalNotification.h>`. The macOS numbering (0 nominal,
-//! 1 moderate, 2 heavy, 3 trapping, 4 sleeping) is *not* the iOS numbering
-//! (0/10/20/30/40/50), and neither matches `ProcessInfo.thermalState`'s four
-//! levels — so there is no mapping between this gate and the recorded
-//! `apple_thermal_state` series, which reports `ProcessInfo` unchanged.
-//!
-//! Reading the notification directly rather than shelling out to `swift -e`
-//! for `ProcessInfo.thermalState` costs microseconds instead of ~120 ms warm
-//! (~0.7 s cold) of Swift-compiler spawn. That mattered here beyond speed:
-//! the *other* readiness criterion is "the CPU is quiet", so a probe that
-//! burns CPU was a confound for its own sibling check. The two signals track
-//! in lock-step in both directions, so this is the same criterion read more
-//! cheaply, not a different one.
-//!
-//! ## Reading CPU load
-//!
-//! CPU pressure used to read `vm.loadavg`, but XNU's 1-minute EMA carries
-//! minutes of historical run-queue depth — on a developer Mac with Spotlight /
-//! Time Machine / Slack / browser at rest the normalized load drifts near the
-//! threshold. What replaced it is an instantaneous busy ratio over a
-//! one-second window, which only crosses the threshold when something is
-//! actively eating cores.
-//!
-//! That window is sampled from Mach tick counters
-//! (`host_statistics(HOST_CPU_LOAD_INFO)`), resampled once if the counters did
-//! not advance (see [`read_cpu_load`]).
-//!
-//! The motive is the same one that moved the thermal read off `swift -e`: a
-//! probe that spawns a subprocess is burning CPU inside the window it is
-//! measuring, in service of deciding whether the CPU is quiet. It is also
-//! ~1.88 s per check against ~1.0 s, which across a 1000-cell plan is hours.
+//! CPU load is a busy ratio from Mach tick counters, not `vm.loadavg`, whose
+//! 1-minute EMA sits near the threshold on an idle developer Mac.
 
-use std::ffi::{c_char, c_int, CStr};
-use std::time::{Duration, Instant};
+use std::ffi::{CStr, c_char, c_int};
+use std::time::Duration;
 
-use super::{ReadinessError, ThermalGate};
+use super::wait::{Probe, wait_loop};
+use super::{
+    ReadinessCallbacks, ReadinessConfiguration, ReadinessError, ReadinessPlatform, ThermalGate,
+};
 
 /// `NOTIFY_STATUS_OK` from `<notify.h>`.
 const NOTIFY_STATUS_OK: u32 = 0;
-/// `kOSThermalPressureLevelNominal` — the only level we start a
-/// measurement at.
+/// `kOSThermalPressureLevelNominal`.
 const PRESSURE_NOMINAL: u64 = 0;
 
-// libSystem is always linked on macOS, so these need no `#[link]`
-// attribute and no `libc` dependency.
-extern "C" {
+// libSystem is always linked on macOS, so these need no `#[link]`.
+unsafe extern "C" {
     fn notify_register_check(name: *const c_char, out_token: *mut c_int) -> u32;
     fn notify_get_state(token: c_int, state: *mut u64) -> u32;
     fn notify_cancel(token: c_int) -> u32;
 
-    /// The notify(3) name for the thermal-pressure level, exported by
-    /// `<libkern/OSThermalNotification.h>`. Keeps its C spelling so the
-    /// linker resolves it; see [`thermal_pressure_name`] for why it's
-    /// linked instead of typed as a literal.
-    #[allow(non_upper_case_globals)]
+    /// From `<libkern/OSThermalNotification.h>`; see [`thermal_pressure_name`].
     static kOSThermalNotificationPressureLevelName: *const c_char;
 }
 
-/// The notify(3) name to read the thermal-pressure level from, taken from
-/// Apple's exported symbol rather than spelled out here.
+/// The thermal-pressure notify(3) name, from Apple's exported symbol rather
+/// than a literal.
 ///
-/// This matters more than it looks. `notify_register_check` succeeds for
-/// *any* name — verified, including pure nonsense and near-miss typos —
-/// and `notify_get_state` then reports 0 for it indefinitely. Because 0 is
-/// `nominal`, a mistyped or later-renamed notification would make this
-/// gate silently pass every check rather than error: fail-open, in the one
-/// crate that exists to fail closed. Linking Apple's symbol demotes that
-/// whole class of mistake to a link error at build time.
-///
-/// It also resolves which of the two similar names is correct. There's an
-/// undocumented `com.apple.system.thermalpressure` alongside this
-/// `…thermalpressurelevel`; registering the former proves nothing (see
-/// above), and it stayed at 0 on the Neo throughout a run where the linked
-/// one reached `moderate`. Only this one is the documented pairing for the
-/// `OSThermalPressureLevel` values [`format_pressure_word`] decodes.
+/// `notify_register_check` accepts any name and `notify_get_state` then reads
+/// 0 (`nominal`) forever, so a typo would make the gate fail open; linking the
+/// symbol turns that into a link error. The similar undocumented
+/// `com.apple.system.thermalpressure` stayed 0 on the Neo while this one
+/// reached `moderate`.
 fn thermal_pressure_name() -> &'static CStr {
     // SAFETY: the symbol is a NUL-terminated C string constant with static
     // storage duration in libSystem, so the pointer is valid for the
@@ -141,72 +66,88 @@ fn thermal_pressure_name() -> &'static CStr {
     unsafe { CStr::from_ptr(kOSThermalNotificationPressureLevelName) }
 }
 
-/// Default deadline for the wait, sized so the measured ~318 s hold-off fits
-/// with margin. The previous 300 s sat below it, which is why this gate used
-/// to time out and fail cells on fanless hosts — see the module docs.
-///
-/// **The one platform that overrides [`crate::DEFAULT_MAX_WAIT`]**, and the
-/// reason that constant asks for a measured basis rather than a judgment: the
-/// 318 s figure is a measurement (`tools/macos-thermal-probe/README.md`), and it
-/// lands above the shared 300 s, so this is a case where the shared value
-/// provably does not work. The assertion in this module's tests keeps it above
-/// the hold-off.
+/// The one override of [`crate::DEFAULT_MAX_WAIT`]: the pressure level's
+/// measured ~318 s hold-off (`docs/methodology/macbook-neo-thermal-behavior.md`)
+/// exceeds the shared 300 s, which timed out and failed cells on the fanless Neo.
 pub(super) const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(420);
-/// The CPU budget a machine must stay *under* during [`CPU_SAMPLE_WINDOW`],
-/// expressed in **busy cores** (`busy_ratio × ncpu`) rather than a fraction of
-/// total capacity; a reading equal to it fails, as on every other platform.
+/// Busy cores (`busy_ratio × ncpu`) a machine must stay under.
 ///
-/// A fraction does not survive core count. The previous 0.30 all-core was sized
-/// for smaller machines: on an 18-core M5 Max it takes ~5.4 saturated cores to
-/// trip, so a single competing process passes. One host ran a stray `llama-cli`
-/// pinning a core for five days and read `ok` at 13% all-core throughout,
-/// benchmarking against a competitor the whole time.
-///
-/// One core is the smallest unit of competition that matters, and it clears
-/// idle noise with room to spare: idle on these hosts measures 0.23–0.37 busy
-/// cores, against 2.36 for that pinned-core case.
+/// Not a fraction of capacity: 0.30 all-core on an 18-core M5 Max needs ~5.4
+/// saturated cores to trip, and one host read `ok` at 13 % for five days with a
+/// stray `llama-cli` pinning a core (2.36 busy cores). Idle on these hosts is
+/// 0.23-0.37 busy cores.
 const MAX_BUSY_CORES: f64 = 1.0;
 
-/// Die temperature a machine must be *under* to start a measurement.
+/// Die temperature a machine must be under. 50 °C is where full throughput
+/// returns, measured on three M5 Max hosts.
 ///
-/// 50 °C is where full throughput returns, measured on three M5 Max hosts —
-/// far enough above their idle baseline to clear the sensor noise that rules
-/// out tighter thresholds.
-///
-/// **Calibrated for the M5 Max; it does not transfer.** `die_temp_max_c` is a
-/// max over a per-host sensor count, so the same number means different things
-/// on different hardware; a portable version needs a per-host baseline plus a
-/// delta. See `docs/methodology/macbook-m5-thermal-behavior.md`.
+/// Calibrated for the M5 Max only: `die_temp_max_c` is a max over a per-host
+/// sensor set. Other machine types set `[readiness.macos] die_below_c`.
 const MAX_DIE_C: f64 = 50.0;
 
-/// Whether a die reading clears [`MAX_DIE_C`].
-///
-/// `None` waives the criterion rather than failing: the threshold is calibrated
-/// per machine, so a host whose sensors are unreadable falls back to the enum
-/// alone instead of failing every cell.
-fn die_ok(die_c: Option<f64>) -> bool {
-    die_c.is_none_or(|c| c < MAX_DIE_C)
+/// The gate's own numbers, or the ones the host's `[readiness.macos]` table
+/// sets.
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    die_below_c: f64,
+    /// The host set `die_below_c` itself, so an unreadable die holds the gate.
+    die_set: bool,
+    busy_below_cores: f64,
+}
+
+impl Bounds {
+    fn new(configuration: Option<&ReadinessConfiguration>) -> Self {
+        let config = configuration.and_then(ReadinessConfiguration::macos);
+        let die = config.and_then(|c| c.die_below_c);
+        let cores = config.and_then(|c| c.cpu_busy_below_cores);
+        Self {
+            die_below_c: die.map_or(MAX_DIE_C, |c| f64::from(c.get())),
+            die_set: die.is_some(),
+            busy_below_cores: cores.map_or(MAX_BUSY_CORES, |n| f64::from(n.get())),
+        }
+    }
+
+    /// An unreadable die passes the gate's own [`MAX_DIE_C`] (calibrated for
+    /// one machine type) and holds a bound the host set (its own calibration).
+    fn die_ok(self, die_c: Option<f64>) -> bool {
+        die_c.map_or(!self.die_set, |c| c < self.die_below_c)
+    }
+
+    fn cpu_ok(self, busy_cores: f64) -> bool {
+        busy_cores < self.busy_below_cores
+    }
+
+    fn ready(
+        self,
+        level: Option<u64>,
+        die_c: Option<f64>,
+        busy_cores: f64,
+        thermal: ThermalGate,
+    ) -> bool {
+        let thermal_ok =
+            thermal == ThermalGate::Skip || (level == Some(PRESSURE_NOMINAL) && self.die_ok(die_c));
+        thermal_ok && self.cpu_ok(busy_cores)
+    }
 }
 
 pub(super) fn wait_until_ready(
     max_wait: Duration,
     thermal: ThermalGate,
+    configuration: Option<&ReadinessConfiguration>,
+    callbacks: &ReadinessCallbacks<'_>,
 ) -> Result<(), ReadinessError> {
-    let deadline = Instant::now() + max_wait;
-    loop {
-        let started = Instant::now();
-        // Read the level even when the gate is skipped: it costs microseconds
-        // and it makes the log line say what the machine's thermal state was on
-        // a run that chose not to wait for it. It is *not* the recorded
-        // telemetry — `detect_thermal()` samples that separately once this
-        // returns — so when the gate is skipped a probe failure must not fail
-        // the cell for the sake of a log line.
+    let bounds = Bounds::new(configuration);
+    wait_loop(ReadinessPlatform::MacOs, max_wait, callbacks, || {
+        // Read even when skipped, for the log line. The recorded telemetry is
+        // sampled separately, so a skipped gate's probe failure must not fail
+        // the cell.
         let level = match read_thermal_pressure() {
             Ok(level) => Some(level),
             Err(e) if thermal == ThermalGate::Skip => {
-                log::warn!(
-                    "readiness: macos thermal probe unreadable ({e}); the thermal gate is \
-                     skipped for this wait, so continuing without it"
+                tracing::warn!(
+                    error = %e,
+                    "thermal probe unreadable; the thermal gate is skipped for this wait, so \
+                     continuing without it"
                 );
                 None
             }
@@ -214,46 +155,23 @@ pub(super) fn wait_until_ready(
         };
         let busy_cores = read_busy_cores()?;
         let die_c = pipette_device::die_temp_max_c();
-        let thermal_ok =
-            thermal == ThermalGate::Skip || (level == Some(PRESSURE_NOMINAL) && die_ok(die_c));
-        let cpu_ok = busy_cores < MAX_BUSY_CORES;
-        let summary = format_summary(level, die_c, busy_cores, thermal);
-        if thermal_ok && cpu_ok {
-            log::info!("readiness: macos {summary} → proceeding");
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            log::info!("readiness: macos {summary} → timed out after {max_wait:?}");
-            return Err(ReadinessError::TimedOut {
-                max_wait,
-                observed: summary,
-            });
-        }
-        // `read_cpu_load` already spent ~1 s inside this interval (~2 s if it
-        // had to resample), so top up rather than sleeping a further full
-        // interval on top.
-        let rest = super::SENSOR_POLL_INTERVAL.saturating_sub(started.elapsed());
-        log::info!("readiness: macos {summary} → waiting {rest:?}");
-        std::thread::sleep(rest);
-    }
+        Ok(Probe {
+            ready: bounds.ready(level, die_c, busy_cores, thermal),
+            summary: format_summary(level, die_c, busy_cores, thermal, bounds),
+        })
+    })
 }
 
-/// The log / `TimedOut` summary line. Carries the raw pressure level
-/// alongside its name so a fleet log records exactly what the kernel
-/// reported, not just our interpretation of it — including when the gate was
-/// waived, since a skipped run is not comparable to a gated one and the log
-/// should not be silent about which it was.
-/// `level` is `None` only when the probe was unreadable *and* the gate was
-/// skipped, which the line has to distinguish from a healthy reading — a run
-/// that never learned its thermal state is not the same evidence as one that
-/// read `nominal`.
+/// Carries the raw level beside its name, marks a waived gate, and keeps an
+/// unreadable level (`None`, only when skipped) distinct from `nominal`.
 fn format_summary(
     level: Option<u64>,
     die_c: Option<f64>,
     busy_cores: f64,
     thermal: ThermalGate,
+    bounds: Bounds,
 ) -> String {
-    let cpu_verdict = if busy_cores < MAX_BUSY_CORES {
+    let cpu_verdict = if bounds.cpu_ok(busy_cores) {
         "ok"
     } else {
         "busy"
@@ -268,21 +186,19 @@ fn format_summary(
         None => "pressure:unreadable".to_string(),
     };
     let die_field = match die_c {
-        Some(c) if die_ok(Some(c)) => format!(" die:{c:.0}C(ok)"),
+        Some(c) if bounds.die_ok(Some(c)) => format!(" die:{c:.0}C(ok)"),
         Some(c) => format!(" die:{c:.0}C(hot)"),
-        // Distinct from a healthy reading, for the same reason the pressure
-        // field is: a waived criterion is not a passed one.
-        None => " die:unreadable".to_string(),
+        None if thermal == ThermalGate::Skip || bounds.die_ok(None) => {
+            " die:unreadable".to_string()
+        }
+        None => " die:unreadable(held)".to_string(),
     };
     format!(
         "thermal={thermal_field}{skipped}{die_field} cpu=busy:{busy_cores:.1}cores({cpu_verdict})"
     )
 }
 
-/// `OSThermalPressureLevel` names in the macOS numbering. An
-/// unrecognized value reads as `unknown` rather than being coerced to a
-/// neighbor, so a level added by a future kernel shows up in the logs
-/// instead of silently passing as nominal.
+/// `OSThermalPressureLevel` names in the macOS numbering.
 fn format_pressure_word(level: u64) -> &'static str {
     match level {
         0 => "nominal",
@@ -294,25 +210,20 @@ fn format_pressure_word(level: u64) -> &'static str {
     }
 }
 
-/// Read the current thermal-pressure level, coolest (0) → hottest (4).
+/// The current thermal-pressure level, 0 (coolest) to 4.
 ///
-/// Registers a token, reads, then cancels on every call: the state
-/// belongs to the notify *name* rather than the token, so a fresh token
-/// still reads the live value, and at one call per poll a register /
-/// cancel pair is cheaper than reasoning about a cached token's lifetime.
-///
-/// This is `notify_get_state`, deliberately not `notify_check` —
-/// `notify_check` reports whether the notification has *fired* since the
-/// last check on that token (and always reports "changed" on a token's
-/// first check), which says nothing about the current level.
+/// A fresh token per call still reads the live value, since the state belongs
+/// to the name. `notify_get_state`, not `notify_check`, which reports only
+/// whether the notification fired since the last check.
 fn read_thermal_pressure() -> Result<u64, ReadinessError> {
     let mut token: c_int = 0;
     // SAFETY: the name is a NUL-terminated static C string valid for the
     // call, and `token` is an initialized `c_int` we own.
-    let rc = unsafe { notify_register_check(thermal_pressure_name().as_ptr(), &mut token) };
+    let rc = unsafe { notify_register_check(thermal_pressure_name().as_ptr(), &raw mut token) };
     if rc != NOTIFY_STATUS_OK {
-        log::warn!(
-            "readiness: notify_register_check(thermalpressurelevel) failed with status {rc}"
+        tracing::warn!(
+            notify_status = rc,
+            "notify_register_check(thermalpressurelevel) failed"
         );
         return Err(ReadinessError::Unavailable(
             "notify_register_check(com.apple.system.thermalpressurelevel) failed",
@@ -321,13 +232,15 @@ fn read_thermal_pressure() -> Result<u64, ReadinessError> {
     let mut level: u64 = 0;
     // SAFETY: `token` was registered successfully above, and `level` is
     // an initialized `u64` we own.
-    let rc = unsafe { notify_get_state(token, &mut level) };
-    // Release the token whether or not the read succeeded, so a probe
-    // that starts failing mid-run doesn't leak one per poll.
+    let rc = unsafe { notify_get_state(token, &raw mut level) };
+    // Released even on a failed read, or a failing probe leaks one per poll.
     // SAFETY: `token` was registered successfully above.
     let _ = unsafe { notify_cancel(token) };
     if rc != NOTIFY_STATUS_OK {
-        log::warn!("readiness: notify_get_state(thermalpressurelevel) failed with status {rc}");
+        tracing::warn!(
+            notify_status = rc,
+            "notify_get_state(thermalpressurelevel) failed"
+        );
         return Err(ReadinessError::Unavailable(
             "notify_get_state(com.apple.system.thermalpressurelevel) failed",
         ));
@@ -335,16 +248,11 @@ fn read_thermal_pressure() -> Result<u64, ReadinessError> {
     Ok(level)
 }
 
-/// Width of the CPU sampling window. **Do not shorten below ~800 ms.**
-///
-/// `HOST_CPU_LOAD_INFO` refreshes on a coarse (~1 s) cadence, so a shorter
-/// window frequently spans no update at all and yields a zero tick delta. That
-/// failure is not merely noisy, it is *biased*: the samples that do land on an
-/// update are selected for having had activity in them, so a 200 ms window
-/// measured 42% busy on a machine genuinely at 23% — enough to fail readiness
-/// spuriously against [`CPU_LOAD_THRESHOLD`]. Measured zero-delta rates: 17/30
-/// at 200 ms, 10/30 at 400 ms, 4/30 at 600 ms, 0/30 at 800 ms and above. 1 s
-/// also gave the tightest spread (sd 0.9%).
+/// Do not shorten below ~800 ms: `HOST_CPU_LOAD_INFO` refreshes about once a
+/// second, so a shorter window often sees no tick delta, and the samples that
+/// do are biased high (a 200 ms window read 42 % on a machine at 23 %).
+/// Measured zero-delta rates: 17/30 at 200 ms, 10/30 at 400 ms, 4/30 at 600 ms,
+/// 0/30 at 800 ms and above. 1 s gave the tightest spread (sd 0.9 %).
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_secs(1);
 
 /// One `HOST_CPU_LOAD_INFO` snapshot, or `None` if the call failed.
@@ -352,71 +260,56 @@ fn cpu_ticks() -> Option<libc::host_cpu_load_info> {
     let mut info = libc::host_cpu_load_info {
         cpu_ticks: [0; libc::CPU_STATE_MAX as usize],
     };
-    let mut count = (std::mem::size_of::<libc::host_cpu_load_info>()
-        / std::mem::size_of::<libc::integer_t>())
-        as libc::mach_msg_type_number_t;
-    // SAFETY: `mach_host_self` returns a send right we own and release below.
-    // `host_statistics` writes `count` integers into `info`, and `count` is
-    // derived from `info`'s own size, so the buffer cannot be overrun.
+    let mut count = libc::mach_msg_type_number_t::try_from(
+        std::mem::size_of::<libc::host_cpu_load_info>() / std::mem::size_of::<libc::integer_t>(),
+    )
+    .ok()?;
+    // SAFETY: `mach_host_self` has no preconditions; it returns a send right
+    // we own and release below.
+    let host = unsafe { mach_host_self() };
+    // SAFETY: `host_statistics` writes `count` integers into `info`, and
+    // `count` is derived from `info`'s own size, so the buffer cannot be
+    // overrun.
     let status = unsafe {
-        let host = mach_host_self();
-        let status = libc::host_statistics(
+        libc::host_statistics(
             host,
             libc::HOST_CPU_LOAD_INFO,
             std::ptr::from_mut(&mut info).cast::<libc::integer_t>(),
-            &mut count,
-        );
-        // Release the send right. `mach_host_self` hands out a reference per
-        // call, so skipping this leaks one port right per readiness check —
-        // thousands over a long plan.
-        mach_port_deallocate(mach_task_self_, host);
-        status
+            &raw mut count,
+        )
     };
+    // `mach_host_self` hands out a reference per call; not releasing it leaks
+    // one port right per check.
+    // SAFETY: `mach_task_self_` is initialized by libSystem before `main`
+    // and never written after.
+    let task = unsafe { mach_task_self_ };
+    // SAFETY: `host` is a send right in `task` that we own and do not use
+    // after this.
+    unsafe { mach_port_deallocate(task, host) };
     (status == libc::KERN_SUCCESS).then_some(info)
 }
 
-// Declared here rather than taken from `libc`, which deprecates its Mach
-// wrappers in favor of the `mach2` crate. Three plain libSystem symbols aren't
-// worth a new dependency when this file already hand-declares its notify(3)
-// bindings; `libc` is still used for the types and constants, which are not
-// deprecated.
-extern "C" {
+// Not `libc`'s Mach wrappers, which are deprecated in favor of the `mach2`
+// crate; three symbols are not worth a dependency.
+unsafe extern "C" {
     fn mach_host_self() -> libc::mach_port_t;
     fn mach_port_deallocate(
         task: libc::mach_port_t,
         name: libc::mach_port_t,
     ) -> libc::kern_return_t;
-    /// `mach_task_self()` is a macro over this global in C. Declared immutable
-    /// because nothing mutates it after process start and we only read it.
+    /// The global behind C's `mach_task_self()` macro; never written after
+    /// process start.
     static mach_task_self_: libc::mach_port_t;
 }
 
-/// Busy ratio across all cores over [`CPU_SAMPLE_WINDOW`].
-///
-/// Reads Mach CPU tick counters directly rather than spawning
-/// `top -l 2 -s 1 -n 0`, which cost ~1.88 s per check against ~1.0 s here —
-/// worth ~1.2 h across a 1000-cell plan, and it takes a subprocess spawn out of
-/// a loop whose whole job is deciding whether the machine is quiet.
-///
-/// Resamples once, then reports unready. The only failure mode ever measured is
-/// a window that spanned no counter refresh — transient, and cleared by a second
-/// sample (0/30 at this window, though not 0-in-infinity). A `host_statistics`
-/// call that genuinely fails gets no fallback: it is public, unprivileged Darwin
-/// API, so a host where it breaks is one worth hearing about loudly rather than
-/// quietly measuring anyway.
-/// Busy cores: the all-core busy ratio scaled by the online CPU count, which is
-/// what [`MAX_BUSY_CORES`] is expressed in.
+/// The all-core busy ratio times the online CPU count, the unit of
+/// [`MAX_BUSY_CORES`].
 fn read_busy_cores() -> Result<f64, ReadinessError> {
     Ok(read_cpu_load()? * online_cpus()?)
 }
 
-/// Online logical CPUs.
-///
-/// An unreadable count is an error rather than a default, because every
-/// plausible default is wrong in the unsafe direction: assuming 1 makes
-/// `ratio × 1` at most 1.0, which is *always* under the threshold, so the gate
-/// would silently stop rejecting busy machines. `sysconf` cannot realistically
-/// fail here, so this costs nothing in practice.
+/// An unreadable count is an error, not a default: assuming 1 caps busy cores
+/// at 1.0, so the gate would stop rejecting busy machines.
 fn online_cpus() -> Result<f64, ReadinessError> {
     // SAFETY: `sysconf` takes an integer name and returns a long; no pointers.
     let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
@@ -429,10 +322,16 @@ fn online_cpus() -> Result<f64, ReadinessError> {
     }
 }
 
+/// Busy ratio across all cores over [`CPU_SAMPLE_WINDOW`], from Mach tick
+/// counters rather than `top -l 2` (~1.88 s per check against ~1.0 s).
+///
+/// Resamples once, for a window that spanned no counter refresh. A failing
+/// `host_statistics` gets no fallback: it is public, unprivileged API, so a
+/// host where it breaks should be heard about.
 fn read_cpu_load() -> Result<f64, ReadinessError> {
     mach_cpu_busy()
         .or_else(|| {
-            log::debug!("readiness: macos CPU tick delta was zero; resampling");
+            tracing::debug!("the CPU tick counters did not advance; resampling");
             mach_cpu_busy()
         })
         .ok_or(ReadinessError::Unavailable(
@@ -440,8 +339,7 @@ fn read_cpu_load() -> Result<f64, ReadinessError> {
         ))
 }
 
-/// Busy ratio from two tick snapshots, or `None` if either read failed or the
-/// counters did not advance between them.
+/// `None` if either read failed or the counters did not advance.
 fn mach_cpu_busy() -> Option<f64> {
     let before = cpu_ticks()?;
     std::thread::sleep(CPU_SAMPLE_WINDOW);
@@ -449,23 +347,18 @@ fn mach_cpu_busy() -> Option<f64> {
     busy_from_ticks(&before.cpu_ticks, &after.cpu_ticks)
 }
 
-/// Reduce two tick arrays to a busy ratio. Split out from the sampling so the
-/// arithmetic — including the wrap and zero-delta cases — is testable without
-/// waiting a second on real hardware.
 fn busy_from_ticks(
     before: &[u32; libc::CPU_STATE_MAX as usize],
     after: &[u32; libc::CPU_STATE_MAX as usize],
 ) -> Option<f64> {
-    // `natural_t` is 32-bit and these are monotonic counters, so `wrapping_sub`
-    // is the correct reading across a wrap rather than a panic or a negative.
-    // Indexing is in-bounds by construction: both arrays are `CPU_STATE_MAX`
-    // long and every caller below indexes with a `CPU_STATE_*` constant.
-    let delta = |state: usize| u64::from(after[state].wrapping_sub(before[state]));
-    let total: u64 = (0..libc::CPU_STATE_MAX as usize).map(delta).sum();
+    const IDLE: usize = libc::CPU_STATE_IDLE as usize;
+    // 32-bit monotonic counters: `wrapping_sub` reads a wrap correctly.
+    let delta = |after: &u32, before: &u32| u64::from(after.wrapping_sub(*before));
+    let total: u64 = after.iter().zip(before).map(|(a, b)| delta(a, b)).sum();
     if total == 0 {
         return None; // counters didn't refresh inside the window
     }
-    let idle = delta(libc::CPU_STATE_IDLE as usize);
+    let idle = delta(&after[IDLE], &before[IDLE]);
     Some((1.0 - idle as f64 / total as f64).clamp(0.0, 1.0))
 }
 
@@ -475,23 +368,18 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::configuration::table;
 
-    /// Exercises the FFI end to end — signatures, registration, state
-    /// read, cancel — against the live kernel. No subprocess, so unlike
-    /// the old `swift -e` path this is cheap enough to run unconditionally
-    /// in CI, which only compiles this module on macOS anyway. Asserts
-    /// only that the read succeeds: the level depends on how hot the host
-    /// actually is.
+    /// The FFI end to end against the live kernel; only the read's success is
+    /// asserted, since the level depends on the host.
     #[test]
     fn thermal_pressure_reads_from_kernel() -> anyhow::Result<()> {
         let _level = read_thermal_pressure()?;
         Ok(())
     }
 
-    /// Pins the value behind Apple's exported symbol. Linking it prevents a
-    /// *typo*, but not Apple repointing the constant at a differently
-    /// encoded notification — if that happens this fails loudly instead of
-    /// [`format_pressure_word`] quietly decoding the wrong scale.
+    /// Linking prevents a typo, not Apple repointing the symbol at a
+    /// differently encoded notification.
     #[test]
     fn linked_name_is_the_pressure_level_notification() -> anyhow::Result<()> {
         assert_eq!(
@@ -501,11 +389,8 @@ mod tests {
         Ok(())
     }
 
-    /// Documents the hazard the linked symbol exists to remove: notify
-    /// accepts *any* name and reports `nominal` for it forever, so a
-    /// hand-typed name with a typo would silently make this gate fail open.
-    /// If this test ever starts failing, notify grew name validation and
-    /// the linked symbol became a convenience rather than a safeguard.
+    /// The hazard the linked symbol removes. If this starts failing, notify
+    /// grew name validation.
     #[test]
     fn notify_accepts_a_bogus_name_and_reports_nominal() -> anyhow::Result<()> {
         let mut token: c_int = 0;
@@ -513,13 +398,13 @@ mod tests {
         let rc = unsafe {
             notify_register_check(
                 c"com.example.pipette.no.such.notification".as_ptr(),
-                &mut token,
+                &raw mut token,
             )
         };
         assert_eq!(rc, NOTIFY_STATUS_OK, "notify rejected a bogus name");
         let mut level = u64::MAX;
         // SAFETY: `token` was registered successfully above.
-        let read = unsafe { notify_get_state(token, &mut level) };
+        let read = unsafe { notify_get_state(token, &raw mut level) };
         // SAFETY: `token` was registered successfully above.
         let _ = unsafe { notify_cancel(token) };
         assert_eq!(read, NOTIFY_STATUS_OK, "get_state failed on a bogus name");
@@ -530,10 +415,6 @@ mod tests {
         Ok(())
     }
 
-    /// The deadline has to clear the measured hold-off, or the gate fails
-    /// cells instead of waiting. This is the regression guard on that
-    /// number: 318 s measured on a fanless MacBook Neo, invariant across a
-    /// 12x load range.
     #[test]
     fn deadline_clears_the_measured_hold_off() {
         assert!(
@@ -542,10 +423,7 @@ mod tests {
         );
     }
 
-    /// The bug this threshold replaced: one saturated core on a many-core host
-    /// is a small *fraction* but a full core of competition. Expressed in
-    /// cores it fails on any host; expressed as the old 0.30 all-core ratio it
-    /// passed on everything from 4 cores up.
+    /// Judged in cores: every 18-core reading here is under 0.30 all-core.
     #[rstest]
     #[case(4.0, 1.0, false)]
     #[case(18.0, 1.0, false)]
@@ -557,18 +435,14 @@ mod tests {
         #[case] busy_cores: f64,
         #[case] want_ok: bool,
     ) {
-        assert_eq!(busy_cores < MAX_BUSY_CORES, want_ok);
-        // The same reading as a fraction of capacity, which is what the gate
-        // used to compare: every one of these passed 0.30 on 18 cores.
+        assert_eq!(Bounds::new(None).cpu_ok(busy_cores), want_ok);
         let as_ratio = busy_cores / cores;
         if cores >= 18.0 {
             assert!(as_ratio < 0.30, "{as_ratio} would have passed the old gate");
         }
     }
 
-    /// The failure this criterion exists for: the enum reads `nominal` at every
-    /// one of these temperatures while a batch ratchets the die up underneath
-    /// it. `None` is the waiver for a host whose sensors are unreadable.
+    /// With no table, an unreadable die (`None`) passes.
     #[rstest]
     #[case(Some(35.0), true)]
     #[case(Some(49.0), true)]
@@ -580,7 +454,141 @@ mod tests {
         #[case] die_c: Option<f64>,
         #[case] want_ok: bool,
     ) {
-        assert_eq!(die_ok(die_c), want_ok);
+        assert_eq!(Bounds::new(None).die_ok(die_c), want_ok);
+    }
+
+    /// The host's numbers replace the gate's own in the same strict
+    /// comparison, each key alone; the pressure level stays required.
+    #[rstest]
+    #[case::own_die_holds(None, ThermalGate::Enforce, 0, Some(52.0), 0.4, false)]
+    #[case::empty_table(Some(""), ThermalGate::Enforce, 0, Some(52.0), 0.4, false)]
+    #[case::restated_die(
+        Some("die_below_c = 50\ncpu_busy_below_cores = 1"),
+        ThermalGate::Enforce,
+        0,
+        Some(50.0),
+        0.4,
+        false
+    )]
+    #[case::restated_cores(
+        Some("die_below_c = 50\ncpu_busy_below_cores = 1"),
+        ThermalGate::Enforce,
+        0,
+        Some(40.0),
+        1.0,
+        false
+    )]
+    #[case::die_raised(
+        Some("die_below_c = 60"),
+        ThermalGate::Enforce,
+        0,
+        Some(52.0),
+        0.4,
+        true
+    )]
+    #[case::die_raised_is_strict(
+        Some("die_below_c = 60"),
+        ThermalGate::Enforce,
+        0,
+        Some(60.0),
+        0.4,
+        false
+    )]
+    #[case::die_lowered(
+        Some("die_below_c = 45"),
+        ThermalGate::Enforce,
+        0,
+        Some(47.0),
+        0.4,
+        false
+    )]
+    #[case::die_key_leaves_cores(
+        Some("die_below_c = 60"),
+        ThermalGate::Enforce,
+        0,
+        Some(52.0),
+        1.8,
+        false
+    )]
+    #[case::cores_raised(
+        Some("cpu_busy_below_cores = 4"),
+        ThermalGate::Enforce,
+        0,
+        Some(40.0),
+        1.8,
+        true
+    )]
+    #[case::cores_raised_is_strict(
+        Some("cpu_busy_below_cores = 4"),
+        ThermalGate::Enforce,
+        0,
+        Some(40.0),
+        4.0,
+        false
+    )]
+    #[case::cores_key_leaves_die(
+        Some("cpu_busy_below_cores = 4"),
+        ThermalGate::Enforce,
+        0,
+        Some(52.0),
+        1.8,
+        false
+    )]
+    #[case::pressure_still_required(
+        Some("die_below_c = 60\ncpu_busy_below_cores = 4"),
+        ThermalGate::Enforce,
+        1,
+        Some(40.0),
+        0.4,
+        false
+    )]
+    // An unreadable die waives the gate's own number, and holds the host's.
+    #[case::unread_die_waives_own(None, ThermalGate::Enforce, 0, None, 0.4, true)]
+    #[case::unread_die_holds_a_set_bound(
+        Some("die_below_c = 60"),
+        ThermalGate::Enforce,
+        0,
+        None,
+        0.4,
+        false
+    )]
+    #[case::unread_die_waives_an_empty_table(Some(""), ThermalGate::Enforce, 0, None, 0.4, true)]
+    #[case::unread_die_waives_a_cores_only_table(
+        Some("cpu_busy_below_cores = 4"),
+        ThermalGate::Enforce,
+        0,
+        None,
+        0.4,
+        true
+    )]
+    // Skipping thermal skips the die bound, set or not; cores still apply.
+    #[case::skip_ignores_die(Some("die_below_c = 45"), ThermalGate::Skip, 2, Some(70.0), 0.4, true)]
+    #[case::skip_ignores_unread(Some("die_below_c = 45"), ThermalGate::Skip, 0, None, 0.4, true)]
+    #[case::skip_keeps_cores(
+        Some("cpu_busy_below_cores = 4"),
+        ThermalGate::Skip,
+        0,
+        Some(70.0),
+        4.2,
+        false
+    )]
+    fn the_hosts_table_moves_the_gate(
+        #[case] keys: Option<&str>,
+        #[case] thermal: ThermalGate,
+        #[case] level: u64,
+        #[case] die_c: Option<f64>,
+        #[case] busy_cores: f64,
+        #[case] want_ready: bool,
+    ) -> anyhow::Result<()> {
+        let config = keys
+            .map(|keys| table(ReadinessPlatform::MacOs, keys))
+            .transpose()?;
+        let bounds = Bounds::new(config.as_ref());
+        assert_eq!(
+            bounds.ready(Some(level), die_c, busy_cores, thermal),
+            want_ready
+        );
+        Ok(())
     }
 
     #[rstest]
@@ -594,85 +602,122 @@ mod tests {
         assert_eq!(format_pressure_word(level), want);
     }
 
-    /// The raw kernel level must survive into the summary line — that's
-    /// what makes a fleet log diagnosable when a host times out.
     #[rstest]
-    #[case(
-        0,
+    #[case::nominal(
+        Some(0),
+        Some(40.0),
         0.4,
+        ThermalGate::Enforce,
+        None,
         "thermal=pressure:0(nominal) die:40C(ok) cpu=busy:0.4cores(ok)"
     )]
-    #[case(
-        2,
+    #[case::heavy_and_busy(
+        Some(2),
+        Some(40.0),
         6.2,
+        ThermalGate::Enforce,
+        None,
         "thermal=pressure:2(heavy) die:40C(ok) cpu=busy:6.2cores(busy)"
     )]
-    #[case(
-        9,
+    #[case::unknown_level(
+        Some(9),
+        Some(40.0),
         0.4,
+        ThermalGate::Enforce,
+        None,
         "thermal=pressure:9(unknown) die:40C(ok) cpu=busy:0.4cores(ok)"
     )]
-    fn summary_reports_raw_pressure_level(
-        #[case] level: u64,
+    #[case::skipped(
+        Some(2),
+        Some(40.0),
+        0.4,
+        ThermalGate::Skip,
+        None,
+        "thermal=pressure:2(heavy)[SKIPPED] die:40C(ok) cpu=busy:0.4cores(ok)"
+    )]
+    #[case::unreadable_pressure(
+        None,
+        Some(40.0),
+        0.4,
+        ThermalGate::Skip,
+        None,
+        "thermal=pressure:unreadable[SKIPPED] die:40C(ok) cpu=busy:0.4cores(ok)"
+    )]
+    #[case::unreadable_die_waived(
+        Some(0),
+        None,
+        0.4,
+        ThermalGate::Enforce,
+        None,
+        "thermal=pressure:0(nominal) die:unreadable cpu=busy:0.4cores(ok)"
+    )]
+    #[case::under_the_table(
+        Some(0),
+        Some(52.0),
+        1.8,
+        ThermalGate::Enforce,
+        Some("die_below_c = 60\ncpu_busy_below_cores = 4"),
+        "thermal=pressure:0(nominal) die:52C(ok) cpu=busy:1.8cores(ok)"
+    )]
+    #[case::over_the_table(
+        Some(0),
+        Some(61.0),
+        4.2,
+        ThermalGate::Enforce,
+        Some("die_below_c = 60\ncpu_busy_below_cores = 4"),
+        "thermal=pressure:0(nominal) die:61C(hot) cpu=busy:4.2cores(busy)"
+    )]
+    #[case::unreadable_die_held(
+        Some(0),
+        None,
+        0.4,
+        ThermalGate::Enforce,
+        Some("die_below_c = 60\ncpu_busy_below_cores = 4"),
+        "thermal=pressure:0(nominal) die:unreadable(held) cpu=busy:0.4cores(ok)"
+    )]
+    #[case::unreadable_die_skipped(
+        Some(0),
+        None,
+        0.4,
+        ThermalGate::Skip,
+        Some("die_below_c = 60\ncpu_busy_below_cores = 4"),
+        "thermal=pressure:0(nominal)[SKIPPED] die:unreadable cpu=busy:0.4cores(ok)"
+    )]
+    fn the_summary_line(
+        #[case] level: Option<u64>,
+        #[case] die_c: Option<f64>,
         #[case] busy_cores: f64,
+        #[case] thermal: ThermalGate,
+        #[case] keys: Option<&str>,
         #[case] want: &str,
-    ) {
+    ) -> anyhow::Result<()> {
+        let config = keys
+            .map(|keys| table(ReadinessPlatform::MacOs, keys))
+            .transpose()?;
         assert_eq!(
-            format_summary(Some(level), Some(40.0), busy_cores, ThermalGate::Enforce),
-            want,
+            format_summary(
+                level,
+                die_c,
+                busy_cores,
+                thermal,
+                Bounds::new(config.as_ref())
+            ),
+            want
         );
+        Ok(())
     }
 
-    /// A waived gate must be visible in the log, and it must still report the
-    /// level it declined to wait for — otherwise a skipped run is
-    /// indistinguishable from a gated one after the fact.
-    #[test]
-    fn summary_marks_a_skipped_thermal_gate() {
-        assert_eq!(
-            format_summary(Some(2), Some(40.0), 0.4, ThermalGate::Skip),
-            "thermal=pressure:2(heavy)[SKIPPED] die:40C(ok) cpu=busy:0.4cores(ok)",
-        );
-    }
-
-    /// An unreadable probe is only tolerated when the gate is skipped, and the
-    /// line must not let that pass for a healthy `nominal` — "we never found
-    /// out" and "we checked, it was fine" are different evidence about a run.
-    #[test]
-    fn summary_distinguishes_an_unreadable_probe_from_nominal() {
-        assert_eq!(
-            format_summary(None, Some(40.0), 0.4, ThermalGate::Skip),
-            "thermal=pressure:unreadable[SKIPPED] die:40C(ok) cpu=busy:0.4cores(ok)",
-        );
-        assert_ne!(
-            format_summary(None, Some(40.0), 0.4, ThermalGate::Skip),
-            format_summary(Some(PRESSURE_NOMINAL), Some(40.0), 0.4, ThermalGate::Skip),
-        );
-        // Same rule for the die reading: waived is not passed.
-        assert_eq!(
-            format_summary(Some(PRESSURE_NOMINAL), None, 0.4, ThermalGate::Enforce),
-            "thermal=pressure:0(nominal) die:unreadable cpu=busy:0.4cores(ok)",
-        );
-    }
-
-    /// The tick arithmetic, including the two cases real hardware produced.
-    ///
     /// Order is `[user, system, idle, nice]` per `CPU_STATE_*`.
     #[rstest]
-    // Half idle, half busy.
     #[case([0, 0, 0, 0], [50, 50, 100, 0], Some(0.5))]
-    // Fully idle.
     #[case([0, 0, 0, 0], [0, 0, 100, 0], Some(0.0))]
-    // Fully busy.
     #[case([0, 0, 0, 0], [70, 30, 0, 0], Some(1.0))]
     // Nice time counts as busy, not idle.
     #[case([0, 0, 0, 0], [0, 0, 50, 50], Some(0.5))]
-    // Counters did not refresh inside the window: no answer, so the caller
-    // falls back to `top` rather than reporting a made-up ratio. Observed
-    // 17 times in 30 at a 200 ms window on real hardware.
+    // Counters did not refresh inside the window: no ratio, so the caller
+    // resamples.
     #[case([9, 9, 9, 9], [9, 9, 9, 9], None)]
-    // `natural_t` is 32-bit; a counter that wrapped must read as the small
-    // forward delta it is, not a huge one or a panic.
-    // 3 busy ticks and 6 idle across the wrap => 1/3 busy.
+    // 3 busy ticks and 6 idle across a 32-bit wrap: 1/3 busy.
     #[case([u32::MAX - 1, 0, u32::MAX - 4, 0], [1, 0, 1, 0], Some(1.0 / 3.0))]
     fn busy_from_ticks_handles_deltas_wraps_and_stalls(
         #[case] before: [u32; libc::CPU_STATE_MAX as usize],
@@ -690,10 +735,6 @@ mod tests {
         Ok(())
     }
 
-    /// The window must stay at or above the ~800 ms refresh cadence of
-    /// `HOST_CPU_LOAD_INFO`. Below it, samples frequently see no tick delta,
-    /// and the ones that do land on an update are biased *high* — 42% measured
-    /// on a machine genuinely at 23% — which would fail readiness spuriously.
     #[test]
     fn cpu_sample_window_clears_the_counter_refresh_cadence() {
         assert!(
@@ -702,10 +743,7 @@ mod tests {
         );
     }
 
-    /// The live Mach path must produce a usable ratio on real hardware; the
-    /// synthetic-tick cases above pin the arithmetic, not the syscall. Goes
-    /// through `read_cpu_load` so the resample-on-zero-delta path is covered
-    /// too, rather than only the happy first sample.
+    /// The live Mach path, resample included.
     #[test]
     fn cpu_load_returns_a_plausible_ratio_on_this_host() -> anyhow::Result<()> {
         let busy = read_cpu_load()?;

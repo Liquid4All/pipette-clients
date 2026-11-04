@@ -1,87 +1,140 @@
 import Foundation
 
-/// The `storage` group — `status` and `gc`, as the crate has them.
+/// The `storage` group, the crate's `commands/storage.rs` fields as `key=value`.
+///
+/// `reserved_bytes` is this client's: what admission promises to running transfers.
+/// Without it a refusal is unreadable, since the promised bytes are not yet on disk.
 enum StorageCommands {
-    /// `storage status`: the quota the sweeper enforces, and what is against it.
-    static func status(storage: Storage) async {
-        let used = storage.storageUsageBytes()
-        let limit = storage.storageQuotaBytes
-        let models = await MainActor.run { storage.availableModels().count }
-        // `remaining` clamps at zero: an over-limit store is reported by `over`, and a
-        // negative "remaining" would read as a smaller overage than it is.
-        HeadlessRunner.log("storage usedBytes=\(used) limitBytes=\(limit) "
-            + "remainingBytes=\(max(0, limit - used)) over=\(used > limit ? "yes" : "no") "
-            + "models=\(models)")
+    /// `storage status`: the quota, what is against it, and every entry in the order `gc`
+    /// would reclaim them.
+    @MainActor
+    static func status(ws: PipetteWorkspace) async {
+        // `quota_source` comes from the same resolution as the number, so a refused quota
+        // (zero, or absent) that fell back to the default reads as the default.
+        let quota = ws.storageQuota
+        let survey = ws.survey(pinning: SweepPins())
+        let reserved = await DownloadCoordinator.shared.admission.outstandingBytes
+        for line in statusLines(quota: quota.bytes, quotaSource: quota.source.rawValue,
+                                survey: survey, reservedBytes: reserved) {
+            HeadlessRunner.log(line)
+        }
     }
 
-    /// `storage gc`: reclaim disk — garbage first, then least-recently-used artifacts.
+    /// Split out so the values are assertable without a store or stdout.
     ///
-    /// Where upstream plans against no pins at all ("nothing is in flight during `gc`"),
-    /// this pins what a resident app can have in flight: every cell of a running or paused
-    /// job, and every model a transfer is still writing. A CLI process cannot be mid-run
-    /// while it runs `gc`; this one can, and reclaiming a model out from under a live job
-    /// would turn it into a re-download.
+    /// `free_bytes` clamps at zero; an over-quota store shows through `used_percent`, which
+    /// passes 100. It counts `reserved_bytes` against the quota, as the next admission
+    /// will, so the line does not contradict the refusal a download is about to get.
+    static func statusLines(quota: Int64, quotaSource: String,
+                            survey: StorageSurvey, reservedBytes: Int64 = 0) -> [String] {
+        let committed = survey.usedBytes + reservedBytes
+        return ["storage quota_bytes=\(quota) quota_source=\(quotaSource) "
+            + "used_bytes=\(survey.usedBytes) reserved_bytes=\(reservedBytes) "
+            + "used_percent=\(percentOf(committed, quota)) "
+            + "free_bytes=\(max(0, quota - committed))",
+         "storage count=\(survey.entries.count)"]
+            + survey.entries.map { entryLine($0) }
+    }
+
+    /// `note=` is the garbage reason, last because it is prose; a live model prints no key.
+    static func entryLine(_ entry: StorageEntry) -> String {
+        var line = "storage entry kind=\(kindLabel(entry.kind)) entry=\(entry.label) "
+            + "size_bytes=\(entry.sizeBytes) last_used=\(lastUsedLabel(entry.kind))"
+        if case let .garbage(reason) = entry.kind { line += " note=\(reason)" }
+        return line
+    }
+
+    /// `storage gc`: reclaim garbage first, then least-recently-used artifacts.
     ///
-    /// `pins` is injectable so a test can state them; production reads the coordinator.
+    /// Unlike the crate, this pins what a resident app can have in flight (cells of a
+    /// running or paused job, models a transfer is writing): reclaiming a model from under
+    /// a live job would turn it into a re-download.
     ///
-    /// `freed` counts quota-accounted bytes only. Hub-cache orphans are reclaimed too and
-    /// appear in the per-entry lines, but they sit outside the store root, so adding them
-    /// would inflate a figure measured against the cap.
-    static func gc(dryRun: Bool, storage: Storage, pins injected: SweepPins? = nil) async -> Bool {
+    /// `freed` counts quota-accounted bytes only. Hub-cache orphans are reclaimed and
+    /// listed too, but sit outside the store root, so counting them would inflate a figure
+    /// measured against the cap.
+    static func gc(dryRun: Bool, ws: PipetteWorkspace, pins injected: SweepPins? = nil) async -> Bool {
         let pins = if let injected { injected } else {
             await MainActor.run { DownloadCoordinator.shared.sweepPins(justInstalled: nil) }
         }
-        let limit = storage.storageQuotaBytes
-        // Planned once and, on the reclaiming path, carried out as-is — upstream surveys
-        // once and hands that plan to `apply_sweep`. Re-planning inside the sweep would
-        // execute a different plan than the one reported, and re-walk the store to do it.
-        let plan = storage.sweepPlan(pinning: pins)
+        let quota = ws.storageQuotaBytes
+        // Planned once and carried out as-is: re-planning inside the sweep would execute a
+        // different plan than the one reported.
+        let survey = ws.survey(pinning: pins)
+        let plan = Pipette.plan(survey, quotaBytes: quota, pins: pins)
 
         let freed: Int64
         if dryRun {
             guard !plan.evictions.isEmpty || plan.stillOverByBytes != nil else {
-                return nothingToReclaim(plan.usedBytes, limit)
+                return nothingToReclaim(survey.usedBytes, quota)
             }
-            for entry in plan.evictions { logEntry("would-reclaim", entry) }
+            for entry in plan.evictions { HeadlessRunner.log(evictionLine(entry, dryRun: true)) }
             freed = plan.freedBytes
         } else {
-            // Run even on an empty plan: the plan covers the store root, while hub-cache
-            // orphans sit outside it and are reclaimed by `reclaim` alone. Upstream can
-            // return early here because its survey already covers everything it reclaims;
-            // ours does not, and a store under quota with a stranded pull is the ordinary
-            // case for those bytes.
-            let report = storage.reclaim(plan, pinning: pins)
+            // Run even on an empty plan: hub-cache orphans sit outside the store root the
+            // plan covers, and only `reclaim` removes them.
+            let report = ws.reclaim(plan, pinning: pins)
             guard !report.removed.isEmpty || !report.failed.isEmpty
                     || plan.stillOverByBytes != nil else {
-                return nothingToReclaim(plan.usedBytes, limit)
+                return nothingToReclaim(survey.usedBytes, quota)
             }
-            for entry in report.removed { logEntry("reclaimed", entry) }
+            for entry in report.removed { HeadlessRunner.log(evictionLine(entry, dryRun: false)) }
             for (entry, reason) in report.failed {
-                HeadlessRunner.log(
-                    "storage gc could-not-reclaim path=\(entry.path.path) reason=\(reason)")
+                HeadlessRunner.log("storage gc could_not_reclaim entry=\(entry.label) "
+                    + "path=\(entry.path.path) reason=\(reason)")
             }
             freed = report.freedBytes
         }
 
-        // Against what the sweep left rather than what the plan predicted: a failed unlink
-        // is tolerated, so a plan that expected to fit can still leave the store over —
-        // and `stillOverByBytes` would say nothing about it. On a dry run this is the
-        // projection, which is why it is named apart from `status`'s factual `usedBytes`.
-        let left = max(0, plan.usedBytes - freed)
-        let over = max(0, left - limit)
-        HeadlessRunner.log("storage gc \(dryRun ? "wouldFreeBytes" : "freedBytes")=\(freed) "
-            + "usedBytes=\(plan.usedBytes) limitBytes=\(limit) "
-            + "\(dryRun ? "wouldLeaveBytes" : "remainingBytes")=\(left)"
-            + (over > 0 ? " stillOverBytes=\(over)" : ""))
+        HeadlessRunner.log(
+            gcSummaryLine(freed: freed, used: survey.usedBytes, quota: quota, dryRun: dryRun))
         return true
     }
 
-    private static func nothingToReclaim(_ used: Int64, _ limit: Int64) -> Bool {
-        HeadlessRunner.log("storage gc nothing to reclaim usedBytes=\(used) limitBytes=\(limit)")
+    /// One reported eviction, verb first so no delete is silent.
+    static func evictionLine(_ entry: StorageEntry, dryRun: Bool) -> String {
+        switch entry.kind {
+        case let .garbage(reason):
+            "storage gc \(dryRun ? "would_reclaim" : "reclaimed") kind=garbage "
+                + "entry=\(entry.label) size_bytes=\(entry.sizeBytes) reason=\(reason)"
+        case .model:
+            "storage gc \(dryRun ? "would_evict" : "evicted") kind=\(kindLabel(entry.kind)) "
+                + "entry=\(entry.label) size_bytes=\(entry.sizeBytes) "
+                + "last_used=\(lastUsedLabel(entry.kind))"
+        }
+    }
+
+    /// The dry-run figures are named apart because they are a projection. Measured against
+    /// what the sweep freed, not what the plan predicted: a failed unlink is tolerated, so
+    /// the store can still be over, which `still_over_bytes` reports.
+    static func gcSummaryLine(freed: Int64, used: Int64, quota: Int64, dryRun: Bool) -> String {
+        let left = max(0, used - freed)
+        let over = max(0, left - quota)
+        return "storage gc \(dryRun ? "would_free_bytes" : "freed_bytes")=\(freed) "
+            + "\(dryRun ? "would_leave_bytes" : "used_bytes")=\(left) quota_bytes=\(quota)"
+            + (over > 0 ? " still_over_bytes=\(over)" : "")
+    }
+
+    private static func nothingToReclaim(_ used: Int64, _ quota: Int64) -> Bool {
+        HeadlessRunner.log("storage gc nothing to reclaim used_bytes=\(used) quota_bytes=\(quota)")
         return true
     }
 
-    private static func logEntry(_ verb: String, _ entry: StorageEntry) {
-        HeadlessRunner.log("storage gc \(verb) path=\(entry.path.path) bytes=\(entry.sizeBytes)")
+    /// No runtime kinds: a phone has no runtime store.
+    private static func kindLabel(_ kind: EntryKind) -> String {
+        switch kind {
+        case .garbage: "garbage"
+        case .model: "model"
+        }
+    }
+
+    /// RFC 3339, or `-` for garbage.
+    private static func lastUsedLabel(_ kind: EntryKind) -> String {
+        kind.lastUsedAt.map(JobDateFormat.iso8601.string(from:)) ?? "-"
+    }
+
+    /// Reads past 100 when the store is over, and 100 for a zero quota, as the crate's does.
+    private static func percentOf(_ used: Int64, _ quota: Int64) -> Int64 {
+        quota > 0 ? used.multipliedReportingOverflow(by: 100).partialValue / quota : 100
     }
 }

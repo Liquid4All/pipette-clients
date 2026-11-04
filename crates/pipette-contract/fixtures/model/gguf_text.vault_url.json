@@ -1,0 +1,8 @@
+{
+  "custom_label": "acme LFM3 q4",
+  "principal_id": "org_01936d",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "source": "vault_url",
+  "type": "gguf_text",
+  "url": "/vault/resources/vault_1/content"
+}

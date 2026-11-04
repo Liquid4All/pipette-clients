@@ -2,122 +2,75 @@ import Testing
 import Foundation
 @testable import Pipette
 
-/// Unit tests for the engine-agnostic `BenchmarkMeasurement` core, shared by the
-/// llama and MLX runtimes — the rep loop, the population stats, and the timer.
-/// Tested once here so the methodology can't silently drift between runtimes.
+/// `BenchmarkMeasurement` outside its typed entries, the crate's `measurement/mod.rs`.
 @Suite struct BenchmarkMeasurementTests {
-
-    /// This used to pin the population form, freezing the divergence it should have caught.
-    @Test func statsComputesMeanAndSampleStddev() {
-        let (mean, stddev) = BenchmarkMeasurement.stats([10, 20, 30, 40, 50])
-        #expect(mean == 30)
-        // Σ(x−30)² = 1000, over four degrees of freedom.
-        #expect(abs(stddev - 250.0.squareRoot()) < 1e-9)
+    private func endToEnd(batchSize: UInt32) -> BenchmarkDefinition {
+        .endToEndLatency(EndToEndLatencyBenchmark(
+            benchmarkId: BenchmarkId(validated: "end_to_end_latency_512_256_bs\(batchSize)"),
+            parameterPrefillTokens: 512, parameterDecodeTokens: 256,
+            parameterBatchSize: BatchSize(validated: batchSize)))
     }
 
-    /// A single rep has no spread to estimate.
-    @Test func statsOfOneSampleReportsNoSpread() {
-        let (mean, stddev) = BenchmarkMeasurement.stats([42])
-        #expect(mean == 42)
-        #expect(stddev == 0)
-    }
-
-    @Test func statsEmptyIsZero() {
-        let (mean, stddev) = BenchmarkMeasurement.stats([])
-        #expect(mean == 0)
-        #expect(stddev == 0)
-    }
-
-    @Test func measureDiscardsWarmupThenAveragesReps() async throws {
-        var calls = 0
-        let (mean, _) = try await BenchmarkMeasurement.measure(
-            label: "test", runs: 3,
-            warmup: { calls += 1 },
-            gate: {},
-            observer: .ignore,
-            body: { calls += 1; return Double(calls) })   // reps observe 2, 3, 4
-        #expect(calls == 4)        // 1 warm-up + 3 reps
-        #expect(mean == 3.0)       // (2 + 3 + 4) / 3
-    }
-
-    // Pins the measurement discipline — warm-up first, then a gate before every
-    // measured rep — the invariant that keeps llama and MLX numbers comparable.
-    @Test func measureOrdersWarmupThenGatedReps() async throws {
-        var order: [String] = []
-        _ = try await BenchmarkMeasurement.measure(
-            label: "test", runs: 2,
-            warmup: { order.append("warmup") },
-            gate: { order.append("gate") },
-            observer: .ignore,
-            body: { order.append("body"); return 1 })
-        #expect(order == ["warmup", "gate", "body", "gate", "body"])
-    }
-
-    @Test func measureGateAbortsBeforeBody() async {
-        struct Stop: Error {}
-        var bodyCalls = 0
-        await #expect(throws: Stop.self) {
-            try await BenchmarkMeasurement.measure(
-                label: "test", runs: 5, warmup: {}, gate: { throw Stop() }, observer: .ignore,
-                body: { bodyCalls += 1; return 1 })
+    /// A batch of one passes, as does a kind with no batch; more is refused naming the id.
+    @Test func oneInFlightIsRequiredByName() throws {
+        let engine = "this engine runs one sequence"
+        try BenchmarkMeasurement.requireOneInFlight(endToEnd(batchSize: 1), engine: engine)
+        let error = #expect(throws: RuntimeError.self) {
+            try BenchmarkMeasurement.requireOneInFlight(endToEnd(batchSize: 4), engine: engine)
         }
-        #expect(bodyCalls == 0)    // the gate threw before the first measured body
+        let message = "\(try #require(error))"
+        #expect(message.contains("end_to_end_latency_512_256_bs4"))
+        #expect(message.contains("4 requests in flight"))
+        #expect(message.contains(engine))
+        try BenchmarkMeasurement.requireOneInFlight(
+            .maxMemoryUsage(MaxMemoryUsageBenchmark(
+                benchmarkId: BenchmarkId(validated: "max_memory_usage_512"),
+                parameterPrefillTokens: 512)),
+            engine: engine)
     }
 
-    // Eval runs flat-out (no thermal gate), but stays cancellable: a throwing
-    // `beforeSample` (the cancel-only checkpoint the llama/MLX/AFM eval paths pass)
-    // must abort the whole run — not turn into a `.failed` completion — and stop
-    // before the next sample. This is the guarantee that keeps long evals interruptible.
-    @Test func evalSamplesAbortsWhenBeforeSampleThrows() {
-        struct Cancel: Error {}
-        var completedCount = 0
-        #expect(throws: Cancel.self) {
-            _ = try evalSamples(
-                [EvalSample(id: "a", messages: []), EvalSample(id: "b", messages: [])],
-                beforeSample: { index in if index == 1 { throw Cancel() } },
-                progress: { _ in },
-                complete: { _ in
-                    completedCount += 1
-                    return EvalGeneration(text: "ok", stopReason: .eos, stopDetail: nil, completionTokens: nil)
-                })
+    /// The rep's value is the mean over its prompts, and the reference batch size is that
+    /// single reading unchanged.
+    @Test(arguments: [([12.5], 12.5), ([10.0, 20, 30, 40], 25.0)] as [([Double], Double)])
+    func theRepValueIsThePerRequestMean(_ samples: [Double], _ mean: Double) throws {
+        #expect(abs(try BenchmarkMeasurement.perRequestMean(samples) - mean) < 1e-9)
+    }
+
+    @Test func aRepWithNoReadingsHasNoMean() {
+        #expect(throws: MeasurementError.noReadings) {
+            _ = try BenchmarkMeasurement.perRequestMean([])
         }
-        #expect(completedCount == 1)   // first sample ran; cancel aborted before the second
     }
 
-    @Test func timedReturnsNonNegativeDuration() throws {
-        let elapsed = try BenchmarkMeasurement.timed { _ = (0 ..< 1000).reduce(0, +) }
-        #expect(elapsed >= .zero)
-        #expect(elapsed.milliseconds >= 0)
+    // MARK: - The reduction
+
+    /// What a reader is shown: every sample, in the order it was collected, next to the
+    /// mean it produced. The exact string the crate pins, over the same readings.
+    @Test func reportsTheSamplesBehindTheMean() {
+        let samples: [Double] = [2, 4, 4, 4, 5]
+        let line = BenchmarkMeasurement.reductionLine(
+            label: "prefill_throughput", samples: samples,
+            stats: BenchmarkMeasurement.meanStddev(samples))
+        #expect(line == "prefill_throughput: samples [2.000, 4.000, 4.000, 4.000, 5.000] ms "
+            + "-> mean 3.800 ms stddev 1.095 ms")
     }
 
-    // The observer reports one start/finish per rep, fired after the gate and after the
-    // body respectively — the per-iteration thermal series. The fake sampler reads a phase
-    // the gate/body flip, so the captured tokens prove the two hooks land where they should.
-    @Test func measureReportsEachRepToTheObserver() async throws {
-        let phase = ThermalPhaseBox()
-        let series = ThermalSeries(sample: { AppleThermalState(rawValue: phase.current) })
-        _ = try await BenchmarkMeasurement.measure(
-            label: "test", runs: 2,
-            warmup: {},
-            gate: { phase.current = "nominal" },
-            observer: RepObserver(started: { series.start() }, finished: { series.finish() }),
-            body: { phase.current = "fair"; return 1 })
-        #expect(series.deviceAppleThermalStateBefore == [.nominal, .nominal])  // after each gate
-        #expect(series.deviceAppleThermalStateAfter == [.fair, .fair])         // after each body
+    /// A cell that collected nothing must not read as one that measured zero.
+    @Test func reportsAnEmptySeriesAsEmpty() {
+        let line = BenchmarkMeasurement.reductionLine(
+            label: "decode_throughput", samples: [], stats: BenchmarkMeasurement.meanStddev([]))
+        #expect(line.contains("samples [] ms"), "\(line)")
     }
 
-    @Test func measureWithoutAnObserverIsANoOp() async throws {
-        // `.ignore` → reporting is a silent no-op, so a caller that records no series
-        // neither pays for nor crashes on thermal capture.
-        let (mean, _) = try await BenchmarkMeasurement.measure(
-            label: "test", runs: 2, warmup: {}, gate: {}, observer: .ignore, body: { 1 })
-        #expect(mean == 1.0)
+    /// Bessel-corrected, as the crate's `reduces_samples` cases pin it.
+    @Test(arguments: [
+        ([Double](), 0.0, 0.0),
+        ([42.0], 42.0, 0.0),
+        ([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0], 5.0, 2.138),
+    ])
+    func reducesSamples(_ samples: [Double], _ mean: Double, _ stddev: Double) {
+        let stats = BenchmarkMeasurement.meanStddev(samples)
+        #expect(abs(stats.meanMs - mean) < 1e-9, "mean was \(stats.meanMs)")
+        #expect(abs(stats.stddevMs - stddev) < 0.01, "stddev was \(stats.stddevMs)")
     }
-}
-
-/// Mutable phase a test's gate/body flip so the injected thermal sampler returns
-/// a value that reveals *when* it was read. Reference type: the measurement
-/// closures mutate it through the shared reference.
-private final class ThermalPhaseBox: @unchecked Sendable {
-    var current = "nominal"
 }

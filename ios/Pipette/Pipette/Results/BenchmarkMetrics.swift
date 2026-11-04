@@ -1,11 +1,8 @@
 import Foundation
 
-/// Errors surfaced by the result-payload layer. The parsing helpers return `nil`
-/// for a value that is simply absent (a normal, expected state) and throw one of
-/// these only when data is *present but unusable* — a corrupt result file, or a
-/// field whose JSON value can't be coerced to the type a metric needs. The
-/// distinction lets callers stay silent on the common empty case and log the
-/// genuinely broken one.
+/// The payload helpers return `nil` for an absent value and throw this only when
+/// data is present but unusable, so callers stay silent on the empty case and log
+/// the broken one.
 nonisolated enum PayloadError: Error, CustomStringConvertible {
     case unreadableFile(path: String, underlying: Error)
     case corruptJSON(path: String, underlying: Error)
@@ -28,17 +25,13 @@ nonisolated enum PayloadError: Error, CustomStringConvertible {
 
 /// Reads a result artifact (`payload.json` / `metrics.json`) from disk.
 nonisolated enum ResultPayload {
-    /// Returns the parsed object, or `nil` when the file doesn't exist — a cell
-    /// that hasn't produced this artifact yet, which is not an error. Throws
-    /// `PayloadError` when the file is present but unreadable or not a JSON
-    /// object, so the caller surfaces a corrupt result instead of silently
-    /// treating it as empty.
+    /// `nil` when the file doesn't exist (the cell hasn't produced it yet); throws
+    /// when it exists but is unreadable or not a JSON object.
     static func readObject(at url: URL) throws -> [String: Any]? {
         let data: Data
         do {
             data = try Data(contentsOf: url)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            // No artifact yet (cell not run or not synced) — absence is not an error.
             return nil
         } catch {
             throw PayloadError.unreadableFile(path: url.path, underlying: error)
@@ -61,10 +54,8 @@ nonisolated enum ResultPayload {
 /// `NSNumber`/`String`/`Int` interchangeably for the same field across runs, so
 /// every reader coerces through here rather than casting inline.
 nonisolated enum PayloadScalars {
-    /// Coerces `payload[key]` to `Double`. Returns `nil` when the key is absent;
-    /// throws `PayloadError.malformedField` when the value is present but not a
-    /// number, so a corrupt payload field surfaces rather than masquerading as a
-    /// missing metric.
+    /// `nil` when the key is absent; throws when the value is present but not a
+    /// number, so a corrupt field doesn't masquerade as a missing metric.
     static func double(_ payload: [String: Any], _ key: String) throws -> Double? {
         guard let raw = payload[key], !(raw is NSNull) else { return nil }
         if let value = raw as? Double { return value }
@@ -74,9 +65,8 @@ nonisolated enum PayloadScalars {
         throw PayloadError.malformedField(key: key, value: String(describing: raw))
     }
 
-    /// Coerces a catalog param to `UInt32`, defaulting to `0`. Params come from
-    /// the trusted synced catalog (not the untrusted result payload), so a
-    /// missing or odd value degrades to `0` rather than throwing.
+    /// Defaults to `0` rather than throwing: params come from the trusted synced
+    /// catalog, not the untrusted result payload.
     static func uint(_ payload: [String: Any], _ key: String) -> UInt32 {
         if let value = payload[key] as? UInt32 { return value }
         if let value = payload[key] as? Int, value >= 0 { return UInt32(value) }
@@ -85,9 +75,8 @@ nonisolated enum PayloadScalars {
         return 0
     }
 
-    /// Renders a scalar JSON value for display/CSV. Returns nil for `NSNull` and
-    /// non-scalar values (so callers can skip them). `Bool` is matched before the
-    /// numeric branches because a JSON boolean also casts as `Int`.
+    /// Nil for `NSNull` and non-scalars. `Bool` is matched before the numeric
+    /// branches because a JSON boolean also casts as `Int`.
     static func string(_ value: Any?) -> String? {
         guard let value, !(value is NSNull) else { return nil }
         if let value = value as? String { return value }
@@ -100,9 +89,7 @@ nonisolated enum PayloadScalars {
         return nil
     }
 
-    /// Locale-independent numeric rendering: integral values print without a
-    /// decimal point, fractional values with up to 6 significant digits. Used for
-    /// CSV cells (must stay parseable regardless of device locale) and detail rows.
+    /// Locale-independent so CSV cells stay parseable whatever the device locale.
     static func number(_ value: Double) -> String {
         guard value.isFinite else { return "" }
         if abs(value.rounded() - value) < 0.0001 {
@@ -112,10 +99,8 @@ nonisolated enum PayloadScalars {
     }
 }
 
-/// A benchmark's headline metric, computed once from a result payload plus the
-/// benchmark's catalog params. Formatting-free on purpose: the CSV exporter and
-/// the cell detail view render `numericValue` differently (compact vs. fixed
-/// precision), so display strings stay with the consumer.
+/// A benchmark's headline metric. Formatting-free on purpose: the CSV exporter and
+/// the cell detail view render `numericValue` differently.
 nonisolated struct BenchmarkMetric {
     let name: String
     let unit: String
@@ -124,14 +109,8 @@ nonisolated struct BenchmarkMetric {
 }
 
 nonisolated enum BenchmarkMetrics {
-    /// The single source of truth for turning a result payload into its primary
-    /// metric. Both the CSV exporter and the cell detail view call this, so a
-    /// metric fix lands in both places at once.
-    ///
-    /// Returns `nil` when the payload legitimately carries no metric (the timing
-    /// field is absent or non-positive, or the type is `.eval`). Throws
-    /// `PayloadError` when a required payload field is present but not numeric, so
-    /// a corrupt result reaches the caller instead of rendering as a blank value.
+    /// Shared by the CSV exporter and the cell detail view. `nil` when the payload
+    /// carries no metric; throws when a field it needs is present but not numeric.
     static func compute(
         payload: [String: Any],
         params: [String: Any],
@@ -151,21 +130,48 @@ nonisolated enum BenchmarkMetrics {
         case .endToEndLatency:
             guard let ms = try PayloadScalars.double(payload, "total_time_ms") else { return nil }
             return BenchmarkMetric(name: "E2E latency", unit: "ms", numericValue: ms, higherIsBetter: false)
-        case .maxMemoryUsage:
+        // The media kinds report through the max-memory result, as the crate's do.
+        case .maxMemoryUsage, .vlMaxMemory, .asrMaxMemory:
             guard let bytes = try PayloadScalars.double(payload, "max_ram_bytes") else { return nil }
             return BenchmarkMetric(name: "Max memory", unit: "bytes", numericValue: bytes, higherIsBetter: false)
+        // TTFT (`prompt_ms`, see docs/methodology/vl-throughput.md): the image-dominated
+        // prefill is what a vision cell measures. Decode throughput barely moves with
+        // resolution, so every rung of the VL ladder would read the same.
         case .vlThroughput:
-            guard let promptMs = try PayloadScalars.double(payload, "prompt_ms"),
-                  let predictedMs = try PayloadScalars.double(payload, "predicted_ms"),
-                  promptMs + predictedMs > 0
+            guard let promptMs = try PayloadScalars.double(payload, "prompt_ms"), promptMs > 0
             else { return nil }
-            let promptTokens = try PayloadScalars.double(payload, "prompt_tokens")
-                ?? Double(PayloadScalars.uint(params, "parameter_text_tokens"))
-            let decodeTokens = Double(PayloadScalars.uint(params, "parameter_decode_tokens"))
-            let throughput = (promptTokens + decodeTokens) / ((promptMs + predictedMs) / 1000)
-            return BenchmarkMetric(name: "VL throughput", unit: "tok/s", numericValue: throughput, higherIsBetter: true)
+            return BenchmarkMetric(name: "TTFT", unit: "ms", numericValue: promptMs,
+                                   higherIsBetter: false)
+        // TTFT, as for VL: the clip's encode and prefill is what an ASR cell measures.
+        case .asrThroughput:
+            guard let promptMs = try PayloadScalars.double(payload, "asr_prompt_ms"), promptMs > 0
+            else { return nil }
+            return BenchmarkMetric(name: "TTFT", unit: "ms", numericValue: promptMs,
+                                   higherIsBetter: false)
+        // No speedup: that needs the other run's row, a server-side join. The rate uses the
+        // engine's `predicted_ms`, not the client clock, so the vision prefill and
+        // readiness waits don't smear it.
+        case .vlSpecDecode:
+            guard let generated = try PayloadScalars.double(
+                    payload, "vl_spec_decode_generated_tokens")
+            else { return nil }
+            // Speculation on: accept length, which shows whether the drafter is wired up
+            // and doesn't move with the host. Averaged per turn because the wire's pooled
+            // counters include the prefill and the drafts the stop token discarded.
+            if let sum = try PayloadScalars.double(
+                payload, "vl_spec_decode_turn_accept_length_sum"),
+                let turns = try PayloadScalars.double(payload, "vl_spec_decode_turns"),
+                turns > 0 {
+                return BenchmarkMetric(name: "Accept length", unit: "tok",
+                                       numericValue: sum / turns,
+                                       higherIsBetter: true)
+            }
+            guard let ms = try PayloadScalars.double(payload, "vl_spec_decode_predicted_ms"),
+                  ms > 0
+            else { return nil }
+            return BenchmarkMetric(name: "Decode", unit: "tok/s",
+                                   numericValue: generated / ms * 1000, higherIsBetter: true)
         case .eval:
-            // Eval accuracy isn't a single-cell payload metric.
             return nil
         }
     }

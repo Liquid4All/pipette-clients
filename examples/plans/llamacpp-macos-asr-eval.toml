@@ -1,0 +1,127 @@
+# Example plan: unified pipette client, llama.cpp speech-recognition accuracy
+# evals (docs/methodology/asr-eval.md).
+#
+# asr_eval benchmarks are server-defined: the mgmt catalog names the ESB or
+# FLEURS set, its version and the prompt profile, and pins the samples as an
+# asr-eval-corpus/1 corpus the client downloads from `GET /datasets/{id}` when
+# the job runs (the workspace must be registered, and the device must hold
+# `perform_work`). A plan distributes entry ids and the client resolves them
+# from its synced catalog. The entries are org-private (their datasets'
+# licenses do not allow redistribution), so the plan runs against an
+# organization that holds them.
+#
+# An entry is one benchmark for one model family: it carries that family's
+# recipe (the GGUF repos and projector its settings are for, thinking off, the
+# public sources), and a cell running a model the recipe does not cover is
+# refused at ingestion and by the client, before it downloads anything. The
+# audio model's GGUF and its audio projector ride in the gguf_vision
+# descriptor, as a VL model's do; the client also refuses a projector whose
+# audio encoder is another family's. The models are public GGUFs at pinned
+# revisions.
+#
+# State written to
+# .pipette-plan/plans/llamacpp-macos-asr-eval-example/state.jsonl.
+
+plan_id = "llamacpp-macos-asr-eval-example"
+benchmarks = [
+  "asr_eval_esb_librispeech_test_clean_qwen25_omni",
+  "asr_eval_fleurs_nl_nl_voxtral",
+  "asr_eval_fleurs_nl_nl_minicpm_o_beam3",
+]
+
+# A placeholder transport: point it at the machine that runs the cells.
+[[transports]]
+client_id   = "mac-m4-max"
+type        = "local"
+binary_path = "/Users/pipette/bin/pipette"
+work_dir    = "/Users/pipette/edge-evals"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+# The runtime is pipette's ASR build of llama.cpp, not a ggml-org release (at
+# 362d8dc3e, which carries its beam search and loads OpenBMB's MiniCPM-o audio
+# GGUF): its Voxtral, Qwen2.5-Omni and MiniCPM-o audio fixes are in no
+# ggml-org release, and pipette's asr_eval numbers are measured on it. It
+# publishes no release, so build 362d8dc3e and host the archive once, then
+# point `url` at it:
+#
+#   cmake -B build -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build -j --target llama-server llama-bench
+#   tar -czf llama-asr-build-362d8dc3e-macos-arm64.tar.gz -C build bin
+#
+# The cell starts only llama-server, but the installer takes a llama.cpp
+# archive only when it holds both llama-server and llama-bench, so build both.
+#
+# A stock build runs the Qwen2.5-Omni and Voxtral entries too, but its numbers
+# are not comparable with those; it cannot run MiniCPM-o at all.
+#
+# Thinking is off on every asr_eval cell, and the cell says so in its model
+# flags, as every entry's recipe requires; the server always starts with
+# `--reasoning off`. An unpinned ctx_size is sized per slot from the corpus's
+# longest clip and multiplied by `parallel`.
+[[variants]]
+clients = ["mac-m4-max"]
+benchmarks = ["asr_eval_esb_librispeech_test_clean_qwen25_omni"]
+models = [
+  { type = "gguf_vision", source = "huggingface", org = "ggml-org", repo_name = "Qwen2.5-Omni-3B-GGUF", revision = "75f1b73b657a50f5092502799457ccb4a4a1f9df", model = "Qwen2.5-Omni-3B-Q8_0.gguf", mmproj = "mmproj-Qwen2.5-Omni-3B-f16.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "remote_archive", url = "https://REPLACE_WITH_HOST/llamacpp/llama-asr-build-362d8dc3e-macos-arm64.tar.gz", flavor = "macos-arm64" },
+]
+runtime_flags = [
+  { benchmark_type = "asr_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", threads = 4, flash_attention = "on", parallel = 2 },
+]
+model_flags = [
+  { benchmark_type = "asr_eval", model_type = "gguf_vision", enable_thinking = false },
+]
+# The audio tower runs on thousands of clips back to back, so the cell is
+# thermally gated at its start, as vlm_eval is.
+benchmark_flags = [
+  { benchmark_type = "asr_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600, readiness = { max_wait_secs = 1800 } },
+]
+
+[[variants]]
+clients = ["mac-m4-max"]
+benchmarks = ["asr_eval_fleurs_nl_nl_voxtral"]
+models = [
+  { type = "gguf_vision", source = "huggingface", org = "bartowski", repo_name = "mistralai_Voxtral-Mini-3B-2507-GGUF", revision = "1d0032d997b7f72804d356fc790486e6d697cea5", model = "mistralai_Voxtral-Mini-3B-2507-Q8_0.gguf", mmproj = "mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "remote_archive", url = "https://REPLACE_WITH_HOST/llamacpp/llama-asr-build-362d8dc3e-macos-arm64.tar.gz", flavor = "macos-arm64" },
+]
+runtime_flags = [
+  { benchmark_type = "asr_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", threads = 4, flash_attention = "on", parallel = 2 },
+]
+model_flags = [
+  { benchmark_type = "asr_eval", model_type = "gguf_vision", enable_thinking = false },
+]
+benchmark_flags = [
+  { benchmark_type = "asr_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600, readiness = { max_wait_secs = 1800 } },
+]
+
+# MiniCPM-o 4.5 runs OpenBMB's own GGUFs: the language model and, as the
+# projector, the audio encoder OpenBMB publishes beside it
+# (`audio/MiniCPM-o-4_5-audio-F16.gguf`, a whisper-architecture file that
+# pipette's ASR build of llama.cpp loads as its `minicpmoa` encoder). The entry
+# decodes by beam search, which runs on one slot, so the cell sets no
+# `parallel`.
+[[variants]]
+clients = ["mac-m4-max"]
+benchmarks = ["asr_eval_fleurs_nl_nl_minicpm_o_beam3"]
+models = [
+  { type = "gguf_vision", source = "huggingface", org = "openbmb", repo_name = "MiniCPM-o-4_5-gguf", revision = "db25077c33951fe163b42986fba0132e279872a2", model = "MiniCPM-o-4_5-Q4_K_M.gguf", mmproj = "audio/MiniCPM-o-4_5-audio-F16.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "remote_archive", url = "https://REPLACE_WITH_HOST/llamacpp/llama-asr-build-362d8dc3e-macos-arm64.tar.gz", flavor = "macos-arm64" },
+]
+runtime_flags = [
+  { benchmark_type = "asr_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", threads = 4, flash_attention = "on" },
+]
+model_flags = [
+  { benchmark_type = "asr_eval", model_type = "gguf_vision", enable_thinking = false },
+]
+benchmark_flags = [
+  { benchmark_type = "asr_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600, readiness = { max_wait_secs = 1800 } },
+]

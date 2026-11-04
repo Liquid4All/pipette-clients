@@ -1,15 +1,10 @@
 //! Small serde + filesystem helpers (JSON read-write).
-//!
-//! Not artifact-specific — these stayed here because workspace auth, results,
-//! and benchmark storage use them.
-//!
-//! Write helpers create missing parent directories before writing.
 
 use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::{Error, Result as OpsResult};
 
@@ -23,7 +18,7 @@ pub fn write_json_file<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<(
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Read and deserialize JSON from `path`.
+/// Read and deserialize JSON from `path`, with `anyhow` context.
 pub fn read_json_file<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;

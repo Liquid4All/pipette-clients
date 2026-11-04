@@ -1,6 +1,6 @@
 // Full-screen "Add models" flow (iOS AddModelsView equivalent): model list + Select all + quant pills + download footer.
-// Wired as its own Navigation 3 destination (Route.AddModels) rather than an in-place cover — keeps the backstack honest
-// so predictive back and system back animate through Nav3.
+// The flow is its own Navigation 3 destination, Route.AddModels. The backstack therefore holds an entry for it, and
+// predictive back and system back animate through Nav3.
 @file:Suppress("MagicNumber", "MaxLineLength")
 
 package ai.liquid.pipette.compose.models
@@ -63,8 +63,8 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun AddModelsScreen(state: ModelsUiState, onIntent: (ModelsIntent) -> Unit) {
   val colors = PipetteTheme.colors
-  // System back closes the flow (returns to the Models list) instead of exiting the app. The shell reacts
-  // to the resulting state change and pops the Nav3 entry, so the backstack stays consistent either way.
+  // System back closes the flow and returns to the Models list, instead of exiting the app. The shell reacts
+  // to the state change and pops the Nav3 entry, so the backstack matches the VM flag.
   BackHandler { onIntent(ModelsIntent.CloseAddModels) }
   Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
     // Material 3 top app bar with a back navigation icon — same chrome the Jobs/Models list tabs use.

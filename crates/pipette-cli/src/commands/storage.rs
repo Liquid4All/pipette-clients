@@ -1,11 +1,7 @@
-//! `storage` — what the artifact stores occupy, and reclaiming it.
-//!
-//! Both subcommands read the store roots through [`pipette_artifacts::quota`],
-//! which classifies anything without a readable manifest as garbage. That is
-//! what keeps them usable on a store a version bump stranded: `models list`
-//! errors on such an entry, `storage gc` deletes it.
-//!
-//! Sizes cross the crate boundary as raw byte counts; the formatting is here.
+//! `storage`: what the artifact stores occupy, and reclaiming it.
+//! [`pipette_artifacts::quota`] classifies anything without a readable manifest
+//! as garbage, which keeps both subcommands usable on a store a version bump
+//! stranded: `models list` errors on such an entry, `storage gc` deletes it.
 
 use clap::{Args, Subcommand};
 use tabled::Tabled;
@@ -13,7 +9,8 @@ use time::format_description::well_known::Rfc3339;
 
 use pipette_artifacts::quota::{self, EntryKind, StorageEntry, SweepPins};
 
-use crate::commands::print_table_or;
+use crate::commands::write_table_or;
+use crate::console::Console;
 use crate::workspace::PipetteWorkspace;
 
 /// Inspect and reclaim local artifact disk usage
@@ -31,7 +28,6 @@ pub enum StorageCommand {
     Gc(GcArgs),
 }
 
-/// `storage gc` input.
 #[derive(Args, Debug)]
 pub struct GcArgs {
     /// Report what would be reclaimed without deleting anything
@@ -40,10 +36,10 @@ pub struct GcArgs {
 }
 
 impl StorageArgs {
-    pub fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
+    pub fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
         match self.command {
-            StorageCommand::Status => status(ws),
-            StorageCommand::Gc(args) => args.execute(ws),
+            StorageCommand::Status => status(ws, console),
+            StorageCommand::Gc(args) => args.execute(ws, console),
         }
     }
 }
@@ -77,66 +73,80 @@ impl StorageRow {
                 EntryKind::Runtime {
                     evictable: false, ..
                 } => "image lives in the docker daemon".to_owned(),
-                _ => String::new(),
+                EntryKind::Model { .. } | EntryKind::Runtime { .. } => String::new(),
             },
         }
     }
 }
 
-fn status(ws: &PipetteWorkspace) -> anyhow::Result<()> {
+fn status(ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
     let quota = ws.storage_quota();
     let survey = survey_stores(ws);
-    println!(
+    writeln!(
+        console.out(),
         "quota: {} ({})",
         human_bytes(quota.bytes),
         quota.source.label()
-    );
-    println!(
+    )?;
+    writeln!(
+        console.out(),
         "used:  {} ({}%)",
         human_bytes(survey.used_bytes),
         percent_of(survey.used_bytes, quota.bytes)
-    );
-    println!(
+    )?;
+    writeln!(
+        console.out(),
         "free:  {}",
         human_bytes(quota.bytes.saturating_sub(survey.used_bytes))
-    );
-    println!();
+    )?;
+    writeln!(console.out())?;
 
     let rows: Vec<StorageRow> = survey.entries.iter().map(StorageRow::new).collect();
-    print_table_or(&rows, "Nothing stored.");
+    write_table_or(console.out(), &rows, "Nothing stored.")?;
     Ok(())
 }
 
 impl GcArgs {
-    fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
+    fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
         let quota = ws.storage_quota();
         let survey = survey_stores(ws);
-        // Nothing is in flight during `gc`, so nothing is pinned.
+        // `gc` runs no cell, so nothing is pinned; the sweep skips entries another
+        // process has in use.
         let plan = quota::plan(&survey, quota.bytes, &SweepPins::default());
 
         if plan.evictions.is_empty() && plan.still_over_by_bytes.is_none() {
-            println!(
+            writeln!(
+                console.out(),
                 "Already within quota ({} of {}) with nothing to reclaim.",
                 human_bytes(survey.used_bytes),
                 human_bytes(quota.bytes)
-            );
+            )?;
             return Ok(());
         }
 
         let freed_bytes = if self.dry_run {
             plan.evictions
                 .iter()
-                .for_each(|entry| println!("{}", eviction_line(entry, true)));
+                .try_for_each(|entry| writeln!(console.out(), "{}", eviction_line(entry, true)))?;
             plan.freed_bytes
         } else {
-            let report = quota::apply_sweep(&plan);
+            let (_, report) = quota::sweep(
+                ws.models().models_dir(),
+                ws.runtimes().runtimes_dir(),
+                quota.bytes,
+                SweepPins::default(),
+            );
             report
                 .removed
                 .iter()
-                .for_each(|entry| println!("{}", eviction_line(entry, false)));
-            report.failed.iter().for_each(|(entry, reason)| {
-                println!("could not reclaim {}: {reason}", entry.path.display());
-            });
+                .try_for_each(|entry| writeln!(console.out(), "{}", eviction_line(entry, false)))?;
+            report.failed.iter().try_for_each(|(entry, reason)| {
+                writeln!(
+                    console.out(),
+                    "could not reclaim {}: {reason}",
+                    entry.path.display()
+                )
+            })?;
             report.freed_bytes
         };
 
@@ -146,14 +156,15 @@ impl GcArgs {
             ("freed", "using")
         };
         let remaining_bytes = survey.used_bytes.saturating_sub(freed_bytes);
-        println!(
+        writeln!(
+            console.out(),
             "{freed} {}; {remaining} {} of {}",
             human_bytes(freed_bytes),
             human_bytes(remaining_bytes),
             human_bytes(quota.bytes)
-        );
+        )?;
         if let Some(warning) = still_over_warning(remaining_bytes, quota.bytes) {
-            println!("{warning}");
+            writeln!(console.out(), "{warning}")?;
         }
         Ok(())
     }
@@ -163,18 +174,14 @@ fn survey_stores(ws: &PipetteWorkspace) -> quota::StorageSurvey {
     quota::survey(ws.models().models_dir(), ws.runtimes().runtimes_dir())
 }
 
-/// The warning for a store still over quota after a sweep, or `None` when it
-/// fits. Over quota with no candidate left is a warning, never a failure — `gc`
-/// does not fail over disk bookkeeping any more than a run does.
-///
-/// Takes what the sweep actually left rather than what the plan predicted:
-/// `apply_sweep` tolerates a failed unlink, so a plan that expected to fit can
-/// still leave the store over quota, and `still_over_by_bytes` would say nothing.
+/// The warning for a store still over quota after a sweep: a warning, never a
+/// failure. Takes what the sweep left, not what the plan predicted: the sweep
+/// tolerates a failed unlink, so `still_over_by_bytes` can miss it.
 fn still_over_warning(remaining_bytes: u64, quota_bytes: u64) -> Option<String> {
     let over = remaining_bytes.saturating_sub(quota_bytes);
     (over > 0).then(|| {
         format!(
-            "warning: still {} over quota; removing the remaining entries would free nothing",
+            "warning: still {} over quota; every remaining entry is in use or frees nothing",
             human_bytes(over)
         )
     })
@@ -194,7 +201,7 @@ fn eviction_line(entry: &StorageEntry, dry_run: bool) -> String {
             entry.label,
             human_bytes(entry.size_bytes)
         ),
-        kind => format!(
+        kind @ (EntryKind::Model { .. } | EntryKind::Runtime { .. }) => format!(
             "{} {} {} ({}, last used {})",
             if dry_run { "would evict" } else { "evicted" },
             kind_label(kind),
@@ -236,62 +243,31 @@ fn percent_of(used_bytes: u64, quota_bytes: u64) -> u64 {
 
 /// IEC size with one decimal (`4.1 GiB`). Raw bytes below 1 KiB.
 fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
     if bytes < 1024 {
         return format!("{bytes} B");
     }
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
+    // `bytes >= 1024` here, so the exponent is at least 1; it tops out at TiB.
+    let exp = (bytes.ilog2() / 10).min(4);
+    let unit = match exp {
+        1 => "KiB",
+        2 => "MiB",
+        3 => "GiB",
+        _ => "TiB",
+    };
+    format!("{:.1} {unit}", bytes as f64 / (1u64 << (10 * exp)) as f64)
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
 
     use rstest::rstest;
 
-    use pipette_plan_types::{GgufText, GgufTextSource, HfOrg, HfRepo, HfRepoName, RepoSubpath};
-
     use super::*;
-    use crate::workspace::test_support::TempWorkspace;
+    use crate::test_support::CapturedConsole;
+    use crate::test_support::TempWorkspace;
 
-    /// A stored model, published through the real store so its manifest is one
-    /// this build reads back as a live entry.
-    fn store_model(ws: &PipetteWorkspace, repo_name: &str) -> anyhow::Result<()> {
-        let declared = pipette_plan_types::Model::GgufText(GgufText {
-            source: GgufTextSource::HuggingFace {
-                repo: HfRepo {
-                    org: HfOrg::try_new("meta".to_owned())?,
-                    repo_name: HfRepoName::try_new(repo_name.to_owned())?,
-                    revision: None,
-                    auth_token: None,
-                },
-                path: RepoSubpath::try_new("Q4.gguf")?,
-                sha256: None,
-            },
-        });
-        ws.models().ensure(&declared, |_declared, into| {
-            let pipette_plan_types::Model::GgufText(GgufText {
-                source: GgufTextSource::AbsoluteFile { path },
-            }) = into
-            else {
-                anyhow::bail!("the stub fetch only handles gguf-text");
-            };
-            let path = Path::new(path.as_ref());
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(path, vec![0u8; 4096])?;
-            Ok(())
-        })?;
-        Ok(())
-    }
+    const LLAMA: &str = "gguf-text://repo=meta/llama&path=Q4.gguf";
 
     fn orphan(ws: &PipetteWorkspace) -> anyhow::Result<std::path::PathBuf> {
         let path = ws.models().models_dir().join("no-manifest");
@@ -308,8 +284,24 @@ mod tests {
     #[case(4 * 1024 * 1024, "4.0 MiB")]
     #[case(200 * 1024 * 1024 * 1024, "200.0 GiB")]
     #[case(3 * 1024 * 1024 * 1024 * 1024, "3.0 TiB")]
+    #[case(1 << 50, "1024.0 TiB")]
     fn human_bytes_formats_each_unit(#[case] bytes: u64, #[case] expected: &str) {
         assert_eq!(human_bytes(bytes), expected);
+    }
+
+    /// Over 100 reads as over quota; a zero quota, which nothing lets through,
+    /// reads full instead of dividing by zero.
+    #[rstest]
+    #[case::empty(0, 100, 0)]
+    #[case::half(50, 100, 50)]
+    #[case::over(150, 100, 150)]
+    #[case::zero_quota(10, 0, 100)]
+    fn percent_of_reads_as_a_share_of_the_quota(
+        #[case] used: u64,
+        #[case] quota: u64,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(percent_of(used, quota), expected);
     }
 
     #[test]
@@ -335,7 +327,7 @@ mod tests {
     #[test]
     fn status_rows_read_as_the_eviction_queue() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("storage-status")?;
-        store_model(&tw.ws, "llama")?;
+        tw.store_gguf_model(LLAMA)?;
         orphan(&tw.ws)?;
 
         let survey = survey_stores(&tw.ws);
@@ -352,11 +344,14 @@ mod tests {
     #[test]
     fn gc_dry_run_deletes_nothing() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("storage-gc-dry")?;
-        store_model(&tw.ws, "llama")?;
+        tw.store_gguf_model(LLAMA)?;
         let orphan = orphan(&tw.ws)?;
         let total = survey_stores(&tw.ws).used_bytes;
 
-        GcArgs { dry_run: true }.execute(&tw.reopen_with_quota(total - 1)?)?;
+        GcArgs { dry_run: true }.execute(
+            &tw.reopen_with_quota(total - 1)?,
+            &mut CapturedConsole::default(),
+        )?;
 
         assert!(orphan.exists(), "a dry run reclaims nothing");
         assert_eq!(survey_stores(&tw.ws).used_bytes, total);
@@ -366,11 +361,14 @@ mod tests {
     #[test]
     fn gc_reclaims_garbage_before_a_live_model() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("storage-gc")?;
-        store_model(&tw.ws, "llama")?;
+        tw.store_gguf_model(LLAMA)?;
         let orphan = orphan(&tw.ws)?;
         let total = survey_stores(&tw.ws).used_bytes;
 
-        GcArgs { dry_run: false }.execute(&tw.reopen_with_quota(total - 1)?)?;
+        GcArgs { dry_run: false }.execute(
+            &tw.reopen_with_quota(total - 1)?,
+            &mut CapturedConsole::default(),
+        )?;
 
         assert!(!orphan.exists());
         assert_eq!(
@@ -386,10 +384,13 @@ mod tests {
     #[test]
     fn gc_reclaims_garbage_even_under_quota() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("storage-gc-under")?;
-        store_model(&tw.ws, "llama")?;
+        tw.store_gguf_model(LLAMA)?;
         let orphan = orphan(&tw.ws)?;
 
-        GcArgs { dry_run: false }.execute(&tw.reopen_with_quota(u64::MAX)?)?;
+        GcArgs { dry_run: false }.execute(
+            &tw.reopen_with_quota(u64::MAX)?,
+            &mut CapturedConsole::default(),
+        )?;
 
         assert!(!orphan.exists(), "garbage is free to drop at any usage");
         assert_eq!(
@@ -400,9 +401,66 @@ mod tests {
         Ok(())
     }
 
-    /// Keyed on what the sweep left, not what it planned: a failed unlink leaves
-    /// the store over quota even when the plan expected to fit, and that case has
-    /// to warn.
+    #[test]
+    fn gc_evicts_past_a_model_in_use() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("storage-gc-in-use")?;
+        tw.store_gguf_model(LLAMA)?;
+        tw.store_gguf_model("gguf-text://repo=meta/qwen&path=Q4.gguf")?;
+        let survey = survey_stores(&tw.ws);
+        let [first, second] = &survey.entries[..] else {
+            anyhow::bail!("expected two models, got {:?}", survey.entries);
+        };
+        let models_dir = tw.ws.models().models_dir().to_path_buf();
+        fs::create_dir_all(models_dir.join(".locks"))?;
+        let name = first.path.file_name().unwrap_or_default().to_string_lossy();
+        let in_use = fs::File::create(models_dir.join(format!(".locks/{name}.use")))?;
+        in_use.lock_shared()?;
+
+        GcArgs { dry_run: false }.execute(
+            &tw.reopen_with_quota(survey.used_bytes - 1)?,
+            &mut CapturedConsole::default(),
+        )?;
+
+        assert!(first.path.exists(), "evicted a model in use");
+        assert!(!second.path.exists(), "kept over quota");
+        Ok(())
+    }
+
+    #[test]
+    fn gc_through_the_dispatch_evicts_only_over_quota() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("storage-dispatch")?;
+        tw.store_gguf_model(LLAMA)?;
+        let gc = |ws: &PipetteWorkspace, captured: &mut CapturedConsole| {
+            StorageArgs {
+                command: StorageCommand::Gc(GcArgs { dry_run: false }),
+            }
+            .execute(ws, captured)
+        };
+
+        let mut under = CapturedConsole::default();
+        gc(&tw.reopen_with_quota(u64::MAX)?, &mut under)?;
+        assert!(
+            under.out_text().starts_with("Already within quota"),
+            "got {}",
+            under.out_text()
+        );
+        assert_eq!(
+            tw.ws.models().list()?.len(),
+            1,
+            "nothing to reclaim under quota"
+        );
+
+        let mut over = CapturedConsole::default();
+        gc(&tw.reopen_with_quota(1)?, &mut over)?;
+        assert!(
+            over.out_text().contains("evicted model"),
+            "got {}",
+            over.out_text()
+        );
+        assert!(tw.ws.models().list()?.is_empty());
+        Ok(())
+    }
+
     #[rstest]
     #[case::nothing_freed_still_over(12_000, 10_000, true)]
     #[case::freed_enough_to_fit(9_000, 10_000, false)]

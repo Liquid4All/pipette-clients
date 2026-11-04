@@ -1,0 +1,7 @@
+{
+  "benchmark_id": "decode_throughput_512_128",
+  "benchmark_type": "decode_throughput",
+  "parameter_batch_size": 1,
+  "parameter_decode_tokens": 128,
+  "parameter_prefill_tokens": 512
+}

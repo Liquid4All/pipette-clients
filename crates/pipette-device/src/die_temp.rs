@@ -1,35 +1,24 @@
 //! macOS SoC die temperature, read from the private IOHID thermal sensors.
 //!
-//! macOS exposes no public die-temperature API, and the public signals are too
-//! coarse to gate a benchmark on. `ProcessInfo.thermalState` and the
-//! `com.apple.system.thermalpressurelevel` notification it wraps are, measured
-//! on a fanless MacBook Neo (A18 Pro), a **fixed ~318 s hold-off anchored to
-//! when the CPU went quiet** — invariant across a 30x range of load duration
-//! and 10 C of peak die temperature, and still reading `moderate` at a
-//! temperature it had held for five minutes. They report that work happened
+//! macOS has no public die-temperature API. `ProcessInfo.thermalState` and the
+//! thermal-pressure notification it wraps, measured on a fanless MacBook Neo
+//! (A18 Pro), are a fixed ~318 s hold-off from when the CPU went quiet,
+//! whatever the load length or peak temperature: they say work happened
 //! recently, not that the SoC is hot.
 //!
-//! This reads the hardware instead: the `PMU tdie*` sensors, the same ones the
-//! iOS client's `pipette_soc_temp` uses
-//! (`ios/Pipette/Pipette/Native/PipetteThermal.m`) — matching AppleVendor
-//! temperature services (`PrimaryUsagePage` 0xff00, `PrimaryUsage` 0x0005) and
-//! taking the hottest reading. Sensor names are identical on Apple Silicon
-//! Macs, and no root is required.
+//! This takes the hottest `PMU tdie*` sensor among the AppleVendor temperature
+//! services, as the iOS client does (`ios/Pipette/Pipette/Native/PipetteThermal.m`).
+//! No root needed. The symbols are private, so they are `dlsym`'d: a macOS that
+//! drops them yields `None` instead of failing to launch. Unlike iOS there is no
+//! build flag: `PIPETTE_PRIVATE_THERMAL` exists for App Review.
 //!
-//! Private API, hence `dlsym` rather than linking: a future macOS that drops
-//! these symbols degrades to `None` — the column simply goes unreported —
-//! instead of failing to launch. Unlike iOS there's no build flag
-//! gating it — App Review is what forces `PIPETTE_PRIVATE_THERMAL` there, and
-//! a locally built CLI has no such constraint.
-//!
-//! **Cost: ~26 ms per read** on a Mac with 20 `tdie` sensors, dominated by one
-//! IPC round trip per sensor (~1.3 ms each); the client and service list are
-//! resolved once per thread, which is why it isn't the ~58 ms a stateless read
-//! costs. Cheap enough for a 10 s poll loop and for bracketing a timed rep
-//! from outside the timed window, but not free — don't call it in a hot loop.
+//! Cost: ~26 ms per read with 20 sensors (one ~1.3 ms IPC round trip each),
+//! not the ~58 ms of a stateless read, because the client and services are
+//! resolved once per thread. Fine for a 10 s poll or outside a timed window,
+//! not for a hot loop. The sensor names are the same on every Apple Silicon Mac.
 
 use std::cell::OnceCell;
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
@@ -56,10 +45,8 @@ type ClientRef = *mut c_void;
 type ServiceRef = *mut c_void;
 type EventRef = *mut c_void;
 
-// The signatures the dlsym'd addresses are transmuted to. Spelled out as
-// aliases rather than inline so each `transmute` names its target: for private
-// symbols with no header to check against, a wrong signature is silent UB, and
-// these are the only record of what was assumed.
+// Private symbols have no header, so a wrong signature here is silent UB:
+// these aliases are the only record of what was assumed.
 type FnCreate = unsafe extern "C" fn(*const c_void) -> ClientRef;
 type FnSetMatching = unsafe extern "C" fn(ClientRef, *const c_void);
 type FnCopyServices = unsafe extern "C" fn(ClientRef) -> *const c_void;
@@ -67,8 +54,7 @@ type FnCopyProperty = unsafe extern "C" fn(ServiceRef, CFStringRef) -> CFTypeRef
 type FnCopyEvent = unsafe extern "C" fn(ServiceRef, i64, i32, i64) -> EventRef;
 type FnEventFloat = unsafe extern "C" fn(EventRef, i32) -> f64;
 
-/// The six private entry points, resolved once. Grouped in one struct so a
-/// partial resolution can't leave some usable and some null.
+/// Grouped so a partial resolution can't leave some usable and some null.
 struct Symbols {
     create: FnCreate,
     set_matching: FnSetMatching,
@@ -78,24 +64,13 @@ struct Symbols {
     event_float: FnEventFloat,
 }
 
-/// Make sure IOKit is in the process image before [`symbol`] goes looking.
-///
-/// `RTLD_DEFAULT` searches only images *already loaded*, so every lookup below
-/// depends on something having pulled IOKit in. Today something does — linking
-/// `CoreFoundation` (which the `core-foundation` crate forces) is enough, and a
-/// binary linking only libSystem resolves none of these symbols — but nothing in
-/// this crate's build declares that dependency, and IOKit is not a direct
-/// dependency of CoreFoundation either. It arrives by way of the dyld shared
-/// cache, which is an implementation detail rather than a promise.
-///
-/// Asking for it explicitly costs a `dlopen` of an already-resident framework
-/// (microseconds; the 13 ms cold-load case does not arise once CF has loaded
-/// it), and this runs once per thread. A failure needs no handling: the symbol
-/// lookups then fail and report themselves.
+/// `RTLD_DEFAULT` searches only images already loaded. IOKit arrives today
+/// only by way of CoreFoundation and the dyld shared cache, which nothing
+/// promises, so load it explicitly: microseconds once resident, once per
+/// thread. A failure needs no handling, the lookups then fail and log.
 fn ensure_iokit_loaded() {
-    // SAFETY: a literal, NUL-terminated framework path; the handle is
-    // deliberately not retained — this only guarantees the image is resident,
-    // and unloading IOKit is never wanted.
+    // SAFETY: a literal, NUL-terminated framework path. The handle is
+    // deliberately not retained: unloading IOKit is never wanted.
     unsafe {
         libc::dlopen(
             c"/System/Library/Frameworks/IOKit.framework/IOKit".as_ptr(),
@@ -104,61 +79,46 @@ fn ensure_iokit_loaded() {
     }
 }
 
-/// Look up one symbol in the already-loaded images.
-///
-/// Logs at `warn` when a lookup fails, because this is the failure mode that
-/// would otherwise be invisible: the whole SoC-temperature column disappears
-/// from every macOS result with nothing in the log to explain it. The other
-/// failure points in this file are host conditions; this one means the API
-/// moved, which is worth saying out loud once.
-///
-/// # Safety
-/// The caller must transmute the result to a signature matching the real
-/// symbol; a mismatch is undefined behavior.
-unsafe fn symbol(name: &CStr) -> Option<*mut c_void> {
-    let addr = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
+/// Warns on failure: a missing symbol means the API moved, and otherwise the
+/// SoC-temperature column vanishes from every macOS result unexplained.
+fn symbol(name: &CStr) -> Option<*mut c_void> {
+    // SAFETY: `name` is a NUL-terminated C string, and `RTLD_DEFAULT` searches
+    // the images already loaded; the result is only an address until the
+    // caller transmutes it.
+    let addr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
     if addr.is_null() {
-        log::warn!(
-            "die temp: {name:?} did not resolve; SoC temperature will not be \
-             reported on this host"
+        tracing::warn!(
+            symbol = %name.to_string_lossy(),
+            "IOHID symbol did not resolve; SoC temperature will not be reported on this host"
         );
         return None;
     }
     Some(addr)
 }
 
+macro_rules! resolve {
+    ($name:literal, $ty:ty) => {{
+        let addr = symbol($name)?;
+        // SAFETY: `$ty` is the documented signature of the IOHID entry point
+        // `$name`, and `addr` was checked non-null by `symbol`.
+        unsafe { std::mem::transmute::<*mut c_void, $ty>(addr) }
+    }};
+}
+
 impl Symbols {
     fn load() -> Option<Self> {
         ensure_iokit_loaded();
-        // SAFETY: each transmute target matches the documented signature of
-        // the corresponding IOHID entry point, and every lookup is checked
-        // non-null before use.
-        unsafe {
-            Some(Self {
-                create: std::mem::transmute::<*mut c_void, FnCreate>(symbol(
-                    c"IOHIDEventSystemClientCreate",
-                )?),
-                set_matching: std::mem::transmute::<*mut c_void, FnSetMatching>(symbol(
-                    c"IOHIDEventSystemClientSetMatching",
-                )?),
-                copy_services: std::mem::transmute::<*mut c_void, FnCopyServices>(symbol(
-                    c"IOHIDEventSystemClientCopyServices",
-                )?),
-                copy_property: std::mem::transmute::<*mut c_void, FnCopyProperty>(symbol(
-                    c"IOHIDServiceClientCopyProperty",
-                )?),
-                copy_event: std::mem::transmute::<*mut c_void, FnCopyEvent>(symbol(
-                    c"IOHIDServiceClientCopyEvent",
-                )?),
-                event_float: std::mem::transmute::<*mut c_void, FnEventFloat>(symbol(
-                    c"IOHIDEventGetFloatValue",
-                )?),
-            })
-        }
+        Some(Self {
+            create: resolve!(c"IOHIDEventSystemClientCreate", FnCreate),
+            set_matching: resolve!(c"IOHIDEventSystemClientSetMatching", FnSetMatching),
+            copy_services: resolve!(c"IOHIDEventSystemClientCopyServices", FnCopyServices),
+            copy_property: resolve!(c"IOHIDServiceClientCopyProperty", FnCopyProperty),
+            copy_event: resolve!(c"IOHIDServiceClientCopyEvent", FnCopyEvent),
+            event_float: resolve!(c"IOHIDEventGetFloatValue", FnEventFloat),
+        })
     }
 }
 
-/// A resolved set of die sensors, reusable for the life of the thread.
 struct Sensors {
     syms: Symbols,
     /// Owns the service refs held in `dies`, so it must outlive them. The
@@ -173,7 +133,7 @@ impl Sensors {
         // SAFETY: a null allocator means kCFAllocatorDefault.
         let client = unsafe { (syms.create)(std::ptr::null()) };
         if client.is_null() {
-            log::debug!("die temp: IOHIDEventSystemClientCreate returned null");
+            tracing::debug!("no IOHID client: IOHIDEventSystemClientCreate returned null");
             return None;
         }
         let matching = CFDictionary::from_CFType_pairs(&[
@@ -192,7 +152,7 @@ impl Sensors {
         // SAFETY: `client` is non-null.
         let raw = unsafe { (syms.copy_services)(client) };
         if raw.is_null() {
-            log::debug!("die temp: CopyServices returned null");
+            tracing::debug!("no sensor services: CopyServices returned null");
             return None;
         }
         // SAFETY: CopyServices follows the Create rule, so we own this array
@@ -203,7 +163,7 @@ impl Sensors {
         let product_key = CFString::new("Product");
         let mut dies = Vec::new();
         for service in services.iter() {
-            let service = (*service) as ServiceRef;
+            let service: ServiceRef = (*service).cast_mut();
             if service.is_null() {
                 continue;
             }
@@ -212,34 +172,33 @@ impl Sensors {
             if name.is_null() {
                 continue;
             }
-            // SAFETY: CopyProperty follows the Create rule. Wrapping as a
-            // CFString is only valid if it really is one; when it isn't, we
-            // release the raw ref instead of mistyping it.
-            let is_die = unsafe {
-                if CFGetTypeID(name) == CFString::type_id() {
-                    CFString::wrap_under_create_rule(name.cast())
-                        .to_string()
-                        .starts_with(DIE_SENSOR_PREFIX)
-                } else {
-                    CFRelease(name);
-                    false
-                }
+            // CopyProperty follows the Create rule. Wrapping as a CFString is
+            // only valid if it really is one; when it isn't, we release the raw
+            // ref instead of mistyping it.
+            // SAFETY: `name` is a non-null CF object.
+            let is_string = unsafe { CFGetTypeID(name) } == CFString::type_id();
+            let is_die = if is_string {
+                // SAFETY: `name` is an owned CFString, checked just above.
+                unsafe { CFString::wrap_under_create_rule(name.cast()) }
+                    .to_string()
+                    .starts_with(DIE_SENSOR_PREFIX)
+            } else {
+                // SAFETY: we own `name` and nothing else references it.
+                unsafe { CFRelease(name) };
+                false
             };
             if is_die {
                 dies.push(service);
             }
         }
         if dies.is_empty() {
-            log::debug!(
-                "die temp: no {DIE_SENSOR_PREFIX}* sensors among {} services",
-                services.len()
+            tracing::debug!(
+                services = services.len(),
+                "no die sensors among the matched services"
             );
             return None;
         }
-        log::debug!(
-            "die temp: {} {DIE_SENSOR_PREFIX}* sensors resolved",
-            dies.len()
-        );
+        tracing::debug!(sensors = dies.len(), "die sensors resolved");
         // `client` is intentionally not released: the service refs above
         // borrow from it and are cached for the life of the thread, so the
         // client has to outlive them. One leaked handle per thread.
@@ -263,39 +222,32 @@ impl Sensors {
                 if event.is_null() {
                     return None;
                 }
-                // SAFETY: `event` is non-null and follows the Create rule, so we
-                // read then release it.
-                let celsius = unsafe {
-                    let value = (self.syms.event_float)(event, TEMPERATURE_FIELD);
-                    CFRelease(event);
-                    value
-                };
+                // SAFETY: `event` is non-null.
+                let celsius = unsafe { (self.syms.event_float)(event, TEMPERATURE_FIELD) };
+                // SAFETY: `event` follows the Create rule, so we own it, and
+                // nothing reads it after this.
+                unsafe { CFRelease(event) };
                 PLAUSIBLE_C.contains(&celsius).then_some(celsius)
             })
-            // `total_cmp` rather than `partial_cmp` + a fallback: it is a total
-            // order, so there is no unreachable tie-break branch to justify.
-            // NaN cannot reach it anyway — `PLAUSIBLE_C.contains` rejects it.
+            // NaN never reaches here: `PLAUSIBLE_C.contains` rejects it.
             .max_by(f64::total_cmp)
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     /// Not re-exported by the `core-foundation` wrapper, so declared here.
     fn CFGetTypeID(cf: CFTypeRef) -> usize;
 }
 
 thread_local! {
-    /// Resolved lazily and kept per-thread: the CF/IOHID handles are confined
-    /// to their creating thread rather than shared behind an unsound
-    /// `Send`/`Sync` claim, and resolution costs ~24 ms.
+    /// Per-thread rather than behind an unsound `Send`/`Sync` claim on the
+    /// CF/IOHID handles; resolution costs ~24 ms.
     static SENSORS: OnceCell<Option<Sensors>> = const { OnceCell::new() };
 }
 
-/// Hottest SoC die temperature in C, or `None` when the private sensors are
+/// Hottest SoC die temperature in °C, or `None` when the private sensors are
 /// unreadable (symbols gone, no matching services, every read failed).
-///
-/// `None` is a normal outcome to design around, not an error: callers should
-/// degrade to a coarser signal rather than fail. See the module docs for cost.
+/// `None` is a normal outcome: degrade to a coarser signal rather than fail.
 pub fn die_temp_max_c() -> Option<f64> {
     SENSORS.with(|cell| {
         cell.get_or_init(Sensors::resolve)
@@ -308,11 +260,8 @@ pub fn die_temp_max_c() -> Option<f64> {
 mod tests {
     use super::*;
 
-    /// Exercises the whole FFI path against the live kernel: dlsym, matching,
-    /// service filtering, and an event read. Asserts a *plausible* value
-    /// rather than a specific one, since it depends on how hot the host is.
-    /// Skips rather than fails if the sensors are unavailable — the point is
-    /// that the code degrades, and CI may run where they aren't exposed.
+    /// The whole FFI path against the live kernel. Passes when the sensors are
+    /// unavailable: CI may run where they aren't exposed.
     #[test]
     fn die_temp_reads_a_plausible_value() {
         match die_temp_max_c() {
@@ -320,12 +269,11 @@ mod tests {
                 PLAUSIBLE_C.contains(&celsius),
                 "implausible die temp {celsius}C",
             ),
-            None => log::warn!("die temp unavailable on this host; nothing to assert"),
+            None => tracing::warn!("die temp unavailable on this host; nothing to assert"),
         }
     }
 
-    /// The resolved sensor set is cached, so repeated calls must keep working
-    /// (a double-release or a stale ref would surface here, not on first use).
+    /// A double-release or stale cached ref would surface here, not on first use.
     #[test]
     fn repeated_reads_stay_valid() {
         let readings: Vec<_> = (0..5).filter_map(|_| die_temp_max_c()).collect();

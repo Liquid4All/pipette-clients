@@ -7,6 +7,7 @@ import ai.liquid.pipette.JobManifest
 import ai.liquid.pipette.JobQuantFilter
 import ai.liquid.pipette.ModelFile
 import ai.liquid.pipette.PresetModel
+import ai.liquid.pipette.Readiness
 import ai.liquid.pipette.compose.theme.PipetteTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -141,6 +142,7 @@ data class PocketUi(
   val progressText: String = "",
   // Non-null while the thermal-readiness gate is cooling: anchors the live cooldown timer + wash.
   val coolingSinceMillis: Long? = null,
+  val coolingMaxMillis: Long = Readiness.COOLDOWN_MAX_MILLIS,
 )
 
 /** Case-insensitive match of a model against a free-text query (shared by the Models + Jobs searches). */

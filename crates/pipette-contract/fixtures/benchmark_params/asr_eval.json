@@ -1,0 +1,11 @@
+{
+  "asr_task": "asr_esb_librispeech_test_clean",
+  "beam_length_penalty": 1.0,
+  "beam_repetition_penalty": 1.2,
+  "benchmark_type": "asr_eval",
+  "dataset_version": "2026.10.1",
+  "max_tokens": 128,
+  "num_beams": 3,
+  "prompt_profile": "minicpm_o",
+  "sample_count": 2620
+}

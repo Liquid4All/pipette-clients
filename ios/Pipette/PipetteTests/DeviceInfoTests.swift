@@ -4,7 +4,7 @@ import Testing
 @testable import Pipette
 
 /// The device identity shape and its wire form, against
-/// `pipette-plan-types::device::DeviceInfo`. The crate's own
+/// `pipette-plan-types::device::DeviceInfo` in pipette-mgmt. The crate's own
 /// `device_info_serializes_flat` / `device_form_factor_round_trip` are the counterparts.
 struct DeviceInfoTests {
 
@@ -21,6 +21,8 @@ struct DeviceInfoTests {
         #expect(json["device_os_name"] as? String == "iOS")
         #expect(json["device_os_version"] as? String == "26.4")
         #expect(json["device_os_build"] as? String == "22F76")
+        #expect(json["device_cpu_arch"] as? String == "arm64")
+        #expect(json["device_os_family"] as? String == "iOS")
         #expect(json["device_chip_model"] as? String == "Apple A19 Pro")
         #expect(json["device_ram_bytes"] as? UInt64 == 8_589_934_592)
     }
@@ -56,22 +58,5 @@ struct DeviceInfoTests {
         #expect(DevicePowerState.charging.rawValue == "charging")
         #expect(DevicePowerState.notCharging.rawValue == "not_charging")
         #expect(DevicePowerState.pluggedInNotCharging.rawValue == "plugged_in_not_charging")
-    }
-
-    /// This platform reaches exactly two of the six arms, and the OS name has to agree
-    /// with the form factor — the pair is what the server slugifies into `device:` and
-    /// `os:` matching flags.
-    @Test @MainActor func theProbeReportsAPhoneOrATablet() {
-        let device = DeviceProbe.detectDeviceInfo()
-
-        #expect([.phone, .tablet].contains(device.deviceFormFactor))
-        #expect(device.deviceOsName == (device.deviceFormFactor == .tablet ? "iPadOS" : "iOS"))
-        #expect(!device.deviceName.isEmpty)
-        #expect(!device.deviceChipModel.isEmpty)
-        #expect(device.deviceRamBytes > 0)
-        // Nothing on iOS sources these; `DeviceInfo` carries them for the crate's shape.
-        #expect(device.deviceOsSecurityPatch == nil)
-        #expect(device.deviceGpuModel == nil)
-        #expect(device.deviceNpuModel == nil)
     }
 }

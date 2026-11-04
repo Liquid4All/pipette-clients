@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A LaunchAgent, not a Daemon: `devicectl` needs the logged-in user's pairing
+  records. Install as the fleet user (not sudo); see README.md.
+
+  One agent per config file. A second agent needs its own state directory and
+  log paths.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.liquid.pipette.ios-proxy</string>
+
+    <!-- Absolute paths: launchd gives no useful working directory. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/pipette-ios-proxy</string>
+        <string>run</string>
+        <string>--config</string>
+        <string>/usr/local/etc/pipette-ios-proxy.toml</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on any exit: a 401/403 is fixed elsewhere, and a proxy that
+         stayed down would not notice. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Keeps a crash loop (a config typo) at a readable rate in the log. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/pipette-ios-proxy.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/pipette-ios-proxy.err.log</string>
+
+    <!-- Every device call goes through `xcrun`. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    </dict>
+
+    <!-- Not a wake lock: a fleet Mac also needs `sudo pmset -a sleep 0`, or a
+         sleep drops every lease. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

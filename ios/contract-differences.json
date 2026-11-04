@@ -1,0 +1,8 @@
+{
+  "eval_completion/failure.json": {
+    "/failed": "a failed sample is its own case, so a row without `failed` is a completion, which holds no `failed_reason`",
+    "/failed_reason": "a failed case always holds a reason and writes it as `stop_detail` too, so a missing one is empty in both",
+    "/stop_detail": "a failed case writes its reason as `stop_detail`, so a missing detail is written back from `failed_reason`",
+    "/stop_reason": "a failed case is always a `failure`, so a missing reason is written back as one"
+  }
+}

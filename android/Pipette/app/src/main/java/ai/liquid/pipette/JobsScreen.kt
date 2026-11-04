@@ -111,7 +111,7 @@ class JobsScreen(ctx: ScreenContext) : Screen(ctx) {
     if (!hasVlModelSelected) pruneVlBenchmarks()
     ensureMmprojSelectionInitialized(mmprojs)
     val selectedBenchmarksForPlanning = BenchmarkCatalog.selectable.filter { selectedBenchmarkIds.contains(it.benchmarkId.toString()) }
-    val hasVlBenchmarkSelected = selectedBenchmarksForPlanning.any { it.type == BenchmarkType.VL_THROUGHPUT }
+    val hasVlBenchmarkSelected = selectedBenchmarksForPlanning.any { it.type.requiresVisionProjector }
     val plannedCells =
       JobRunner.planCells(
         models = selectedRunnableBaseModels,
@@ -187,7 +187,7 @@ class JobsScreen(ctx: ScreenContext) : Screen(ctx) {
               .groupBy { it.benchmarkType }
               .toSortedMap(compareBy<String> { BenchmarkCatalog.typeRank(it) })
               .forEach { (type, items) ->
-                val isVlGroupDisabled = type == BenchmarkType.VL_THROUGHPUT.wire && !hasVlModelSelected
+                val isVlGroupDisabled = BenchmarkType.fromWire(type)?.requiresVisionProjector == true && !hasVlModelSelected
                 val enabledItems = if (isVlGroupDisabled) emptyList() else items
                 val allGroupSelected = enabledItems.isNotEmpty() && enabledItems.all { selectedBenchmarkIds.contains(it.benchmarkId.toString()) }
                 addView(label(BenchmarkCatalog.displayName(type)))
@@ -212,7 +212,7 @@ class JobsScreen(ctx: ScreenContext) : Screen(ctx) {
                     addView(
                       CheckBox(activity).apply {
                         text = item.label
-                        val itemDisabled = item.type == BenchmarkType.VL_THROUGHPUT && !hasVlModelSelected
+                        val itemDisabled = item.type.requiresVisionProjector && !hasVlModelSelected
                         isEnabled = !itemDisabled
                         val itemId = item.benchmarkId.toString()
                         isChecked = selectedBenchmarkIds.contains(itemId) && !itemDisabled
@@ -937,9 +937,7 @@ class JobsScreen(ctx: ScreenContext) : Screen(ctx) {
   }
 
   private fun pruneVlBenchmarks() {
-    selectedBenchmarkIds.removeAll(
-      BenchmarkCatalog.selectable.filter { it.type == BenchmarkType.VL_THROUGHPUT }.map { it.benchmarkId.toString() }.toSet()
-    )
+    selectedBenchmarkIds.removeAll(BenchmarkCatalog.selectable.filter { it.type.requiresVisionProjector }.map { it.benchmarkId.toString() }.toSet())
   }
 
   private fun toggleBenchmarkGroup(items: List<BenchmarkDefinition>, allSelected: Boolean) {

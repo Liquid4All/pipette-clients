@@ -1,55 +1,27 @@
-//! Pre-flight repair of eval benchmark submission payloads.
-//!
-//! The management server forwards `completions` straight to
-//! `pipette-scores` `/score`, which rejects requests whose completion ids
-//! are not unique (the server joins completions to dataset samples by id
-//! and refuses to merge silently). Sending a payload with duplicates
-//! results in a 400 that names at most ten offenders, with no per-sample
-//! diagnostics — by the time the failure is visible server-side the run
-//! is lost.
-//!
-//! This module repairs the payload client-side so a misbehaving runner —
-//! or local state that already contains duplicate ids from an earlier bug
-//! — does not lose the run. [`dedupe_completion_ids`] drops duplicate
-//! completion entries in place (last-write-wins, matching the
-//! [`pipette_ops::eval_completions`] append and load semantics) and returns a
-//! report that the caller logs. Apply it to the JSON form of the payload
-//! at the boundary, just before `client.submit_result`.
-//!
-//! Per-eval policy: every supported eval (see [`pipette_plan_types::benchmark::eval_id::KnownEvalId`])
-//! follows the same rule — one completion per dataset sample id, per
-//! submission. The client does
-//! not generate repeats; the eval runner skips ids already in the
-//! checkpoint (see `eval_completions.rs`) so the resulting `completions`
-//! array stays unique by construction. If a duplicate does slip through —
-//! e.g. a previously written `payload.json` from a buggy build — this
-//! repair step is what keeps the submission viable.
+//! Pre-flight repair of eval submission payloads. The scores server rejects
+//! duplicate completion ids with a 400 that names at most ten offenders, so the
+//! run would be lost; the eval runner skips checkpointed ids, so this repair is
+//! for what slips through anyway (a `payload.json` from an older build).
 
 use std::collections::HashSet;
 
 use serde_json::Value;
 use thiserror::Error;
 
-/// Errors raised by [`dedupe_completion_ids`]. Distinct from `anyhow::Error`
-/// so callers (notably `pipette_cli::client::sync::submit_pending_result`)
-/// can `match` on the specific failure rather than string-match on a
-/// formatted message — that's the pattern issue #227 set out to remove.
 #[derive(Debug, Error)]
 pub enum ScoreValidationError {
-    /// A `completions` array entry was missing the string `id` field
-    /// required by the scores server. The id is the join key against the
-    /// dataset; an unkeyed entry can't be safely deduplicated (silent
-    /// removal would mask a real bug in the runner).
-    #[error("benchmark {benchmark_id}: completions entry missing string `id`; refusing to dedupe /score payload")]
+    /// The id is the join key against the dataset, so dropping an unkeyed entry
+    /// would mask a runner bug.
+    #[error(
+        "benchmark {benchmark_id}: completions entry missing string `id`; refusing to dedupe /score payload"
+    )]
     CompletionMissingId { benchmark_id: String },
 }
 
-/// Maximum number of duplicate ids included verbatim in log lines.
+/// Duplicate ids listed verbatim in the log line.
 pub const MAX_LISTED_DUPLICATES: usize = 10;
 
-/// What [`dedupe_completion_ids`] removed from a payload. The caller
-/// logs this; nothing else consumes it. Use [`DedupReport::summary`] for
-/// a paste-friendly one-liner.
+/// What [`dedupe_completion_ids`] removed from a payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DedupReport {
     pub benchmark_id: String,
@@ -85,15 +57,9 @@ impl DedupReport {
     }
 }
 
-/// Repair `payload` so its eval `completions` array has unique ids.
-///
-/// Non-eval payloads (no `completions` array) and already-unique payloads
-/// pass through with `Ok(None)`. When duplicates are removed, the kept
-/// entry for each id is the last one encountered (last-write-wins,
-/// matching eval completion append / collect semantics). Errors
-/// only on malformed entries (missing string `id` field) — the server
-/// cannot key those to a dataset sample so silent removal would mask a
-/// real bug.
+/// Repair `payload` so its eval `completions` array has unique ids, keeping the
+/// last entry for each id (as [`pipette_ops::eval_completions`] loads them).
+/// `Ok(None)` when nothing was removed.
 pub fn dedupe_completion_ids(
     payload: &mut Value,
 ) -> Result<Option<DedupReport>, ScoreValidationError> {
@@ -108,9 +74,6 @@ pub fn dedupe_completion_ids(
     };
 
     let before = completions.len();
-    // Validate ids up front and snapshot them — silent removal of
-    // malformed entries would mask a real bug, since the server can't
-    // key those to a dataset sample.
     let ids: Vec<String> = completions
         .iter()
         .map(|c| {
@@ -123,9 +86,7 @@ pub fn dedupe_completion_ids(
         })
         .collect::<Result<_, _>>()?;
 
-    // Last-wins: walk reversed, keep first occurrence per id (= last in
-    // original order), then flip back. Surviving entries stay in their
-    // original chronological positions.
+    // Last-wins: walk reversed and keep the first occurrence, then flip back.
     let entries: Vec<Value> = std::mem::take(completions);
     let mut seen: HashSet<String> = HashSet::with_capacity(before);
     let mut duplicate_ids: Vec<String> = Vec::new();
@@ -224,7 +185,6 @@ mod tests {
 
     #[test]
     fn payload_without_completions_passes_through() -> anyhow::Result<()> {
-        // Non-eval payload (e.g. prefill_throughput) has no `completions`.
         let mut v = json!({"benchmark_id": "prefill_throughput_512", "prefill_time_ms": 12.3});
         let before = v.clone();
         let report = dedupe_completion_ids(&mut v)?;
@@ -235,13 +195,7 @@ mod tests {
 
     #[test]
     fn keeps_last_occurrence_when_deduping() -> Result<(), Box<dyn std::error::Error>> {
-        // Two entries share id "a"; the second has a distinguishable
-        // completion. After last-wins dedup the surviving completion
-        // must be the later one — matches
-        // `eval_completions::collect_completions` and the append-only
-        // log convention. Surviving entries keep their original
-        // chronological positions, so the order is the input order
-        // with the earlier "a" removed.
+        // Survivors keep their positions: the input order minus the earlier "a".
         let mut v = json!({
             "benchmark_id": "eval_x",
             "completions": [
@@ -268,14 +222,12 @@ mod tests {
         assert!(s.contains("eval_ifstruct_original"), "{s}");
         assert!(s.contains("a"), "{s}");
         assert!(s.contains("b"), "{s}");
-        // 2 distinct duplicates ⇒ no truncation note.
         assert!(!s.contains("(and "), "{s}");
         Ok(())
     }
 
     #[test]
     fn report_truncates_listed_ids_above_ten() -> anyhow::Result<()> {
-        // 12 distinct ids each duplicated once → 12 distinct duplicate ids.
         let mut ids: Vec<String> = (0..12).map(|i| format!("id{i:02}")).collect();
         ids.extend(ids.clone());
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
@@ -289,9 +241,7 @@ mod tests {
 
     #[test]
     fn ifstruct_multi_repeat_payload_is_deduped_to_unique_ids() -> anyhow::Result<()> {
-        // Synthesize the issue #95 production shape: 2000 unique ids each
-        // appearing twice. After repair the payload satisfies the
-        // /score uniqueness invariant.
+        // The production shape: 2000 ids, each twice.
         let ids: Vec<String> = (0..2000).map(|i| format!("sample{i:04}")).collect();
         let mut doubled: Vec<&str> = ids.iter().map(String::as_str).collect();
         doubled.extend(ids.iter().map(String::as_str));
@@ -330,8 +280,6 @@ mod tests {
 
     #[test]
     fn unique_payload_with_two_thousand_samples_is_noop() -> anyhow::Result<()> {
-        // Post-fix happy path: ifstruct/original at full size with one
-        // completion per id passes through unchanged.
         let ids: Vec<String> = (0..2000).map(|i| format!("sample{i:04}")).collect();
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         let mut v = payload("eval_ifstruct_original", &refs);

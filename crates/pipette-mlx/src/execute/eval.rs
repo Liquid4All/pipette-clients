@@ -1,525 +1,825 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::{BufRead, BufReader},
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+//! Eval against `mlx_lm.server`'s `/v1/chat/completions`, through
+//! [`measurement::eval()`]. The server applies the chat template. A failed
+//! sample is a failed row and the cell goes on; a server that went away under
+//! one is started again for the next, until [`LOST_IN_A_ROW`] samples in a row
+//! have lost one.
+
+use std::io::BufReader;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use anyhow::Context;
-use reqwest::blocking::Client;
-use serde_json::{json, Value};
+use serde::Serialize;
 
-use pipette_doomloop::format_trigger_log;
-use pipette_ops::eval_completions::EvalCompletionsStore;
-use pipette_plan_types::benchmark::Temperature;
-use pipette_plan_types::result::{
-    BenchmarkEvalCompletion, BenchmarkEvalCompletionStopReason, BenchmarkResultData,
+use pipette_http::{HttpClient, StreamClient};
+use pipette_ops::eval_cell::{EvalCell, Sampling};
+use pipette_ops::eval_completions::EvalCompletionSession;
+use pipette_ops::measurement::{
+    self, EvalMeasurementInFlight, EvalMeasurementReading, EvalMeasurementSample,
 };
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_ops::sse;
+use pipette_plan_types::{
+    BenchmarkResultData, EvalBenchmark, MinP, MlxMacosPipetteExtraRuntimeConfiguration,
+    RunResponse, TopK, TopP,
+};
+use pipette_subprocess::{Process, start_process};
 
-use super::server;
-use crate::models::require_mlx_model_dir;
-use crate::runtimes::require_mlx_python;
+use crate::models::ResolvedMlxModel;
+use crate::runtimes::ResolvedMlxPython;
+use crate::{completions, server};
 
-const EVAL_ENDPOINT: &str = "/eval";
-const EVAL_ABORT_ENDPOINT: &str = "/eval/abort";
-const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-/// Default SSE idle wait between stream events when the plan omits `http_timeout`.
-const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(1800);
+/// How long a failed request waits for the server to surface as exited: the
+/// connection can drop before the exit is reaped.
+const EXIT_WINDOW: Duration = Duration::from_secs(3);
 
-fn stream_idle_timeout(req: &RunRequest) -> Duration {
-    idle_timeout_from_plan_secs(req.benchmark_flags.as_ref().and_then(|f| f.http_timeout()))
-}
+const FAILURE_TAIL_LINES: usize = 20;
 
-fn idle_timeout_from_plan_secs(secs: Option<u64>) -> Duration {
-    secs.map(|s| Duration::from_secs(s.max(1)))
-        .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT)
-}
+/// Samples in a row that lose their server before the cell ends: past a poison
+/// prompt or two, a server lost that often points at the model or the host.
+const LOST_IN_A_ROW: usize = 3;
+
+/// The server the samples go to, and its URL, which a restart changes.
+type MlxServer = (Process, String);
 
 pub(super) fn run(
-    req: &RunRequest,
-    eval_completions: &EvalCompletionsStore,
+    benchmark: &EvalBenchmark,
+    cell: &EvalCell<'_>,
+    idle_timeout: Duration,
+    checkpoint: EvalCompletionSession,
+    venv_python: &ResolvedMlxPython,
+    model_dir: &ResolvedMlxModel,
+    client_config: Option<&MlxMacosPipetteExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req.benchmark.as_eval().map_err(anyhow::Error::from)?;
-    let samples = benchmark
-        .samples
-        .as_deref()
-        .context("eval benchmark missing samples")?;
-    let max_tokens = benchmark.parameter_max_tokens;
-    let venv_python = require_mlx_python(req)?;
-    let model_dir = require_mlx_model_dir(req)?;
+    let client = HttpClient::streaming("pipette", idle_timeout)?;
+    let start = || start_server(venv_python, model_dir, client_config);
+    let server = Mutex::new(start()?);
+    tracing::info!(timeout = ?idle_timeout, "eval SSE idle timeout");
+    tracing::info!(enable_thinking = cell.enable_thinking, "eval thinking mode");
+    let result = eval(benchmark, cell, &client, checkpoint, &server, &start);
+    let (mut mlx_server, _) = server.into_inner().unwrap_or_else(PoisonError::into_inner);
+    // After a restart this is the replacement: its argv differs only in
+    // `--port`, and its log starts at its own launch. No memory observation:
+    // a replacement would have watched only the tail of the run.
+    let result_data = result.map_err(|err| err.context(mlx_server.stop_with_tail()))?;
+    Ok(RunResponseBuilder::new(result_data)
+        .process(&mut mlx_server)
+        .build())
+}
 
-    // Sampling temperature is a client-side policy keyed on the eval id
-    // (the server does not send one): IFBench/IFStruct sample at 0.6,
-    // everything else stays greedy.
-    let temperature = req.benchmark.eval_temperature()?;
+fn start_server(
+    venv_python: &ResolvedMlxPython,
+    model_dir: &ResolvedMlxModel,
+    client_config: Option<&MlxMacosPipetteExtraRuntimeConfiguration>,
+) -> anyhow::Result<MlxServer> {
+    let port = pipette_subprocess::pick_server_port()?;
+    let url = server::url(port);
+    let mut mlx_server = start_process(
+        server::TEXT_SERVER_MODULE,
+        server::text_command(venv_python, model_dir, port, client_config)?,
+        server::STOP_GRACE,
+    )?;
+    mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    Ok((mlx_server, url))
+}
 
-    let doomloop = pipette_doomloop::plan::pipeline_from_overrides(
-        req.benchmark_flags.as_ref().and_then(|bf| bf.doomloop()),
+/// `start` replaces a server that went away.
+fn eval(
+    benchmark: &EvalBenchmark,
+    cell: &EvalCell<'_>,
+    client: &StreamClient,
+    checkpoint: EvalCompletionSession,
+    server: &Mutex<MlxServer>,
+    start: &(dyn Fn() -> anyhow::Result<MlxServer> + Sync),
+) -> anyhow::Result<BenchmarkResultData> {
+    let lost_in_a_row = AtomicUsize::new(0);
+    measurement::eval(
+        benchmark,
+        // `mlx_lm.server` serves one request at a time.
+        EvalMeasurementInFlight::Parallel(NonZeroUsize::MIN),
+        checkpoint,
+        server,
+        |server, samples, record| {
+            samples.iter().enumerate().try_for_each(|(at, sample)| {
+                let reading = read_sample(
+                    &mut server.lock().unwrap_or_else(PoisonError::into_inner),
+                    start,
+                    cell,
+                    client,
+                    sample,
+                )?;
+                let lost = matches!(reading, EvalMeasurementReading::Lost { .. });
+                record(at, reading)?;
+                let streak = if lost {
+                    lost_in_a_row.fetch_add(1, Ordering::Relaxed) + 1
+                } else {
+                    lost_in_a_row.store(0, Ordering::Relaxed);
+                    0
+                };
+                anyhow::ensure!(
+                    streak < LOST_IN_A_ROW,
+                    "mlx_lm.server went away under {streak} samples in a row"
+                );
+                Ok(())
+            })?;
+            Ok(())
+        },
     )
-    .map_err(|e| anyhow::anyhow!("invalid doom-loop configuration: {e}"))?;
-    let enable_thinking = req.model_flags.as_ref().and_then(|f| f.enable_thinking());
+}
 
-    // Resume keyed by portable RunRequest identity (CLI passes the store).
-    let mut checkpoint = eval_completions.open(req)?;
-    let done_ids_vec: Vec<String> = checkpoint.done_ids().map(str::to_string).collect();
-
-    let request = build_eval_request_json(
-        samples,
-        max_tokens,
-        temperature,
-        &done_ids_vec,
-        enable_thinking,
+/// A server that went away under an earlier sample is started again here,
+/// once that sample's row is on disk.
+fn read_sample(
+    server: &mut MlxServer,
+    start: &(dyn Fn() -> anyhow::Result<MlxServer> + Sync),
+    cell: &EvalCell<'_>,
+    client: &StreamClient,
+    sample: &EvalMeasurementSample<'_>,
+) -> anyhow::Result<EvalMeasurementReading> {
+    if !server.0.is_running() {
+        tracing::info!("restarting mlx_lm.server after it went away");
+        *server = start().context("mlx_lm.server did not come back after it went away")?;
+    }
+    let (mlx_server, url) = server;
+    tracing::info!(
+        sample = sample.position.as_str(),
+        sample_id = %sample.id,
+        "sample started"
     );
+    let request = chat_request(
+        sample.messages.raw()?.clone(),
+        cell.max_tokens,
+        &cell.sampling,
+        sample.id,
+        cell.enable_thinking,
+    );
+    let reply = match chat_stream_lines(client, url, &request)
+        .and_then(|events| sse::read_chat_stream(events, &mut |_| {}))
+    {
+        Ok(reply) => reply,
+        Err(err) => return failure_reading(mlx_server, &err, sample),
+    };
+    let (stop_reason, stop_detail) = reply.stop();
+    tracing::info!(
+        sample = sample.position.as_str(),
+        sample_id = %sample.id,
+        completion = reply.content.as_str(),
+        ?stop_reason,
+        completion_tokens = reply.completion_tokens,
+        stop_detail = stop_detail.as_deref(),
+        "sample completed"
+    );
+    Ok(EvalMeasurementReading::Completed {
+        completion: reply.content,
+        stop_reason,
+        stop_detail,
+        completion_tokens: reply.completion_tokens,
+    })
+}
 
-    // Stream chunks from Python so we can run doom-loop detection on the
-    // live generation. When a detector fires we log a warning and signal
-    // the server to abandon the current sample early; nothing is persisted
-    // about the trigger beyond the log line.
-    let pipeline = &doomloop;
-    let mut buffers: HashMap<String, String> = HashMap::new();
-    let mut flagged: HashSet<String> = HashSet::new();
-    let total_samples = samples.len();
-    let done_set: HashSet<&str> = done_ids_vec.iter().map(String::as_str).collect();
-    let sample_positions: HashMap<&str, usize> = samples
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| s.get("id").and_then(Value::as_str).map(|id| (id, i + 1)))
-        .collect();
-
-    // Emit "skipped, already checkpointed" lines for samples the server
-    // will silently pass over. Matches llamacpp's eval log format.
-    samples
-        .iter()
-        .filter_map(|sample| sample.get("id").and_then(Value::as_str))
-        .filter(|sample_id| done_set.contains(*sample_id))
-        .for_each(|sample_id| {
-            let pos = sample_positions.get(sample_id).copied().unwrap_or(0);
-            log::info!(
-                "eval sample {}/{}: id={} (skipped, already checkpointed)",
-                pos,
-                total_samples,
-                sample_id
-            );
-        });
-
-    let server = server::start_server(&venv_python, &model_dir, None)?;
-    let client = streaming_http_client()?;
-    let idle_timeout = stream_idle_timeout(req);
-    if idle_timeout != DEFAULT_STREAM_IDLE_TIMEOUT {
-        log::info!("eval SSE idle timeout from plan http_timeout: {idle_timeout:?}");
-    }
-    let mut saw_eval_done = false;
-    stream_eval_events(&client, &server.base_url, &request, idle_timeout, |event| {
-        match event.kind() {
-            Some("eval_sample_start") => {
-                let sample_id = event
-                    .0
-                    .get("sample_id")
-                    .and_then(Value::as_str)
-                    .context("eval_sample_start missing sample_id")?;
-                let prompt = event.0.get("prompt").and_then(Value::as_str).unwrap_or("");
-                let pos = sample_positions.get(sample_id).copied().unwrap_or(0);
-                log::info!(
-                    "eval sample {}/{}: id={} prompt={}",
-                    pos,
-                    total_samples,
-                    sample_id,
-                    prompt
-                );
-                Ok(EvalStreamAction::Continue)
-            }
-            Some("eval_sample_chunk") => {
-                let sample_id = event
-                    .0
-                    .get("sample_id")
-                    .and_then(Value::as_str)
-                    .context("eval_sample_chunk missing sample_id")?;
-                let delta = event
-                    .0
-                    .get("delta")
-                    .and_then(Value::as_str)
-                    .context("eval_sample_chunk missing delta")?;
-                let content = buffers.entry(sample_id.to_string()).or_default();
-                content.push_str(delta);
-
-                // Don't re-fire the pipeline once we've already flagged the sample.
-                if !flagged.contains(sample_id) {
-                    if let Some(name) = pipeline.check(content) {
-                        log::warn!("{}", format_trigger_log(name, content.len()));
-                        flagged.insert(sample_id.to_string());
-                        return Ok(EvalStreamAction::AbortSample(sample_id.to_string()));
-                    }
-                }
-                Ok(EvalStreamAction::Continue)
-            }
-            Some("eval_sample_done") => {
-                let sample_id = event
-                    .0
-                    .get("sample_id")
-                    .and_then(Value::as_str)
-                    .context("eval_sample_done missing sample_id")?;
-                let completion = event
-                    .0
-                    .get("completion")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let pos = sample_positions.get(sample_id).copied().unwrap_or(0);
-                log::info!(
-                    "eval sample {}/{}: id={} completion={}",
-                    pos,
-                    total_samples,
-                    sample_id,
-                    completion
-                );
-                checkpoint.append(BenchmarkEvalCompletion {
-                    id: sample_id.to_string(),
-                    completion: completion.to_string(),
-                    failed: false,
-                    failed_reason: None,
-                    // stop_reason capture is llama.cpp-only for now (PIP-274);
-                    // classifying this runtime is a follow-up, so label it
-                    // `unknown` and record why rather than claiming eos/truncated.
-                    stop_reason: BenchmarkEvalCompletionStopReason::Unknown,
-                    stop_detail: Some("stop_reason capture not implemented for MLX".to_string()),
-                    completion_tokens: None,
-                })?;
-                buffers.remove(sample_id);
-                Ok(EvalStreamAction::Continue)
-            }
-            Some("eval_done") => {
-                saw_eval_done = true;
-                Ok(EvalStreamAction::Continue)
-            }
-            Some("eval_error") => {
-                let error = event
-                    .0
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown eval stream error");
-                anyhow::bail!("pipette_mlx_server /eval failed: {error}")
-            }
-            None => Ok(EvalStreamAction::Continue),
-            Some(other) => {
-                log::warn!("unknown eval stream event kind: {other}");
-                Ok(EvalStreamAction::Continue)
-            }
+/// What a failed request comes to. A refusal is the server answering, so the
+/// sample failed on its own. A server that exited, or went silent and is
+/// stopped here, is gone: the sample is `Lost`, and the next one starts another.
+fn failure_reading(
+    mlx_server: &mut Process,
+    err: &anyhow::Error,
+    sample: &EvalMeasurementSample<'_>,
+) -> anyhow::Result<EvalMeasurementReading> {
+    let reading = if refused(err) {
+        EvalMeasurementReading::Failed {
+            reason: format!("mlx_lm.server refused the request: {err:#}"),
         }
-    })?;
-
-    if !saw_eval_done {
-        anyhow::bail!("eval stream ended before eval_done");
-    }
-
-    if checkpoint.completions().len() < samples.len() {
-        anyhow::bail!(
-            "eval incomplete: {} of {} samples persisted in checkpoint at {}",
-            checkpoint.completions().len(),
-            samples.len(),
-            checkpoint.path().display()
+    } else if went_silent(err) {
+        // Up, but no longer generating: its generation thread can die on its
+        // own, and every later request would wait out the bound.
+        mlx_server.stop();
+        EvalMeasurementReading::Lost {
+            reason: format!("mlx_lm.server went silent and was stopped: {err:#}"),
+        }
+    } else if let Some(status) = mlx_server.wait(EXIT_WINDOW)? {
+        EvalMeasurementReading::Lost {
+            reason: format!("mlx_lm.server exited mid-completion ({status}): {err:#}"),
+        }
+    } else {
+        EvalMeasurementReading::Failed {
+            reason: format!("mlx_lm.server stayed up: {err:#}"),
+        }
+    };
+    // The entry logs a lost sample itself.
+    if let EvalMeasurementReading::Failed { reason } = &reading {
+        tracing::warn!(
+            sample = sample.position.as_str(),
+            sample_id = %sample.id,
+            reason = reason.as_str(),
+            "sample failed"
         );
     }
-
-    let completions = checkpoint.finalize()?;
-
-    Ok(RunResponse {
-        executable: Some(server.executable.clone()),
-        command: server.command_preview.clone(),
-        ..RunResponse::new(
-            BenchmarkResultData::Eval { completions },
-            server.stdout(),
-            server.stderr(),
-        )
-    })
-}
-
-/// Build the JSON payload handed to the server's `/eval` endpoint.
-///
-/// `enable_thinking` is intentionally emitted as JSON `null` when the
-/// model_flags field is `None` — the server gates with
-/// `if enable_thinking is not None:` before forwarding into
-/// `tmpl_kwargs`. Switching to `skip_serializing_if = Option::is_none`
-/// (or any shape that drops the key) would silently break that contract.
-/// The test module pins both ends.
-fn build_eval_request_json(
-    samples: &[Value],
-    max_tokens: u32,
-    temperature: Temperature,
-    done_ids: &[String],
-    enable_thinking: Option<bool>,
-) -> Value {
-    json!({
-        "samples": samples,
-        "max_tokens": max_tokens,
-        // Sampling temperature for generation. 0.0 is greedy (the prior
-        // hardcoded behavior); IFBench/IFStruct send 0.6. No seed is
-        // sent, so the server's repeats under temp > 0 are independent.
-        "temperature": temperature.as_f64(),
-        "completions_done_ids": done_ids,
-        // `None` here serializes as JSON null; the server treats
-        // null as "do not pass the kwarg" (which is what we want for
-        // back-compat with prior runs).
-        "enable_thinking": enable_thinking,
-    })
-}
-
-#[derive(Debug, Clone)]
-struct EvalStreamEvent(Value);
-
-impl EvalStreamEvent {
-    fn kind(&self) -> Option<&str> {
-        self.0.get("kind").and_then(Value::as_str)
+    if let Some(stderr) = mlx_server.output().runtime_stderr.filter(|s| !s.is_empty()) {
+        tracing::warn!(
+            stderr_tail = measurement::tail_lines(&stderr, FAILURE_TAIL_LINES).as_str(),
+            "mlx_lm.server stderr tail"
+        );
     }
+    Ok(reading)
 }
 
-enum EvalStreamAction {
-    Continue,
-    AbortSample(String),
-}
-
-fn stream_eval_events<F>(
-    client: &Client,
-    base_url: &str,
-    request: &Value,
-    idle_timeout: Duration,
-    on_event: F,
-) -> anyhow::Result<()>
-where
-    F: FnMut(EvalStreamEvent) -> anyhow::Result<EvalStreamAction>,
-{
-    let response = client
-        .post(format!("{base_url}{EVAL_ENDPOINT}"))
-        .json(request)
-        .send()
-        .context("failed to call pipette_mlx_server /eval")?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().unwrap_or_default();
-        anyhow::bail!("pipette_mlx_server /eval returned HTTP {status}: {body}");
-    }
-
-    read_eval_event_lines_with_idle(
-        BufReader::new(response),
-        idle_timeout,
-        on_event,
-        |sample_id| abort_eval(client, base_url, sample_id),
+fn refused(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<pipette_http::Error>(),
+        Some(pipette_http::Error::Status { .. })
     )
 }
 
-#[cfg(test)]
-fn read_eval_event_lines<R, F, A>(reader: R, mut on_event: F, mut abort: A) -> anyhow::Result<()>
-where
-    R: BufRead,
-    F: FnMut(EvalStreamEvent) -> anyhow::Result<EvalStreamAction>,
-    A: FnMut(&str) -> anyhow::Result<()>,
-{
-    reader.lines().try_for_each(|line| -> anyhow::Result<()> {
-        let line = line.context("failed to read /eval stream line")?;
-        handle_eval_event_line(&line, &mut on_event, &mut abort)
+/// Whether the response or its stream outlived the idle bound
+/// ([`chat_stream_lines`], [`sse::data_lines`]).
+fn went_silent(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut)
     })
 }
 
-enum EvalLineRead {
-    Line(std::io::Result<String>),
-    Eof,
+#[derive(Debug, Serialize)]
+struct ChatRequest {
+    model: String,
+    messages: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    /// The cuts the benchmark pinned. Absent stays absent: `mlx_lm.server`
+    /// falls back to its own defaults only for a field the body omits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_p: Option<f64>,
+    /// The sample's own seed ([`Sampling::seed_for`]); absent unless the entry
+    /// pinned one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<i64>,
+    /// Forwarded to the server's `apply_chat_template`. Absent when unset, so
+    /// the server keeps its tokenizer-derived default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    /// `include_usage` adds the trailer that counts the generated tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
 }
 
-fn read_eval_event_lines_with_idle<R, F, A>(
-    reader: R,
-    idle_timeout: Duration,
-    mut on_event: F,
-    mut abort: A,
-) -> anyhow::Result<()>
-where
-    R: BufRead + Send + 'static,
-    F: FnMut(EvalStreamEvent) -> anyhow::Result<EvalStreamAction>,
-    A: FnMut(&str) -> anyhow::Result<()>,
-{
-    let (tx, rx) = mpsc::channel();
-    let reader_thread = thread::spawn(move || {
-        let read_result = reader.lines().try_for_each(|line| {
-            let failed = line.is_err();
-            tx.send(EvalLineRead::Line(line)).map_err(|_| ())?;
-            if failed {
-                Err(())
-            } else {
-                Ok(())
-            }
-        });
-        if read_result.is_ok() {
-            let _ = tx.send(EvalLineRead::Eof);
-        }
+fn chat_request(
+    messages: serde_json::Value,
+    max_tokens: u32,
+    sampling: &Sampling,
+    sample_id: &str,
+    enable_thinking: Option<bool>,
+) -> ChatRequest {
+    ChatRequest {
+        model: completions::DEFAULT_MODEL.to_string(),
+        messages,
+        max_tokens: Some(max_tokens),
+        temperature: Some(sampling.temperature.as_f64()),
+        top_p: sampling.top_p.map(TopP::as_f64),
+        top_k: sampling.top_k.map(TopK::into_inner),
+        min_p: sampling.min_p.map(MinP::as_f64),
+        seed: sampling.seed_for(sample_id),
+        chat_template_kwargs: enable_thinking
+            .map(|enable| serde_json::json!({ "enable_thinking": enable })),
+        stream: Some(true),
+        stream_options: Some(serde_json::json!({ "include_usage": true })),
+    }
+}
+
+/// One streamed `/v1/chat/completions` call's `data:` payloads. Dropping the
+/// iterator drops the connection, which is the whole cancellation: the server
+/// holds no per-request state worth telling. The idle bound covers the wait
+/// for the response too: `mlx_lm.server` answers once its generation thread
+/// takes the request, which a dead thread never does.
+fn chat_stream_lines(
+    client: &StreamClient,
+    base_url: &str,
+    request: &ChatRequest,
+) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>>> {
+    let post = client
+        .http()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(request);
+    let (sent_tx, sent) = mpsc::channel();
+    // Detached: on a timeout the caller stops the server, which ends the send.
+    std::thread::spawn(move || {
+        let _ = sent_tx.send(pipette_http::send(post));
     });
-
-    loop {
-        match rx.recv_timeout(idle_timeout) {
-            Ok(EvalLineRead::Line(line)) => {
-                let line = line.context("failed to read /eval stream line")?;
-                handle_eval_event_line(&line, &mut on_event, &mut abort)?;
-            }
-            Ok(EvalLineRead::Eof) => {
-                let _ = reader_thread.join();
-                return Ok(());
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                anyhow::bail!("timed out waiting for /eval stream event after {idle_timeout:?}");
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                anyhow::bail!("eval stream reader stopped unexpectedly");
-            }
+    let response = match sent.recv_timeout(client.idle_timeout()) {
+        Ok(response) => response.context("failed to call /v1/chat/completions")?,
+        Err(RecvTimeoutError::Timeout) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "no response to /v1/chat/completions for {:?}",
+                    client.idle_timeout()
+                ),
+            )
+            .into());
         }
-    }
-}
-
-fn handle_eval_event_line<F, A>(line: &str, on_event: &mut F, abort: &mut A) -> anyhow::Result<()>
-where
-    F: FnMut(EvalStreamEvent) -> anyhow::Result<EvalStreamAction>,
-    A: FnMut(&str) -> anyhow::Result<()>,
-{
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(());
-    }
-    let value: Value = serde_json::from_str(trimmed)
-        .with_context(|| format!("parsing /eval stream event: {trimmed}"))?;
-    match on_event(EvalStreamEvent(value))? {
-        EvalStreamAction::Continue => Ok(()),
-        EvalStreamAction::AbortSample(sample_id) => abort(&sample_id),
-    }
-}
-
-fn abort_eval(client: &Client, base_url: &str, sample_id: &str) -> anyhow::Result<()> {
-    let response = client
-        .post(format!("{base_url}{EVAL_ABORT_ENDPOINT}"))
-        .json(&json!({ "sample_id": sample_id }))
-        .send()
-        .with_context(|| {
-            format!("failed to call pipette_mlx_server /eval/abort for {sample_id}")
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().unwrap_or_default();
-        anyhow::bail!("pipette_mlx_server /eval/abort returned HTTP {status}: {body}");
-    }
-    Ok(())
-}
-
-fn streaming_http_client() -> anyhow::Result<Client> {
-    // Long-lived SSE: connect timeout only, no overall body timeout.
-    Ok(pipette_http::HttpClient::builder("pipette")
-        .preconfigured_tls()
-        .connect_timeout(STREAM_CONNECT_TIMEOUT)
-        .no_request_timeout()
-        .build()
-        .context("failed to build MLX eval streaming HTTP client")?
-        .client()
-        .clone())
+        Err(RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("/v1/chat/completions ended without a response")
+        }
+    };
+    Ok(sse::data_lines(
+        BufReader::new(response),
+        client.idle_timeout(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, io::Cursor};
+    use httpmock::{HttpMockResponse, MockServer};
+    use rstest::rstest;
+    use serde_json::{Value, json};
 
+    use pipette_ops::eval_completions::EvalCompletionsStore;
+    use pipette_ops::measurement::EvalMessages;
+    use pipette_plan_types::{
+        BenchmarkDefinition, BenchmarkEvalCompletionStopReason, BenchmarkId, DeclaredBound,
+        EvalBenchmark, Model, PositiveCount, RunRequest, Runtime, SamplingSeed,
+        SamplingTemperature,
+    };
+
+    use self::Answer::{Cuts, Hangs, Refuses, Stops};
     use super::*;
 
-    /// Contract: when `enable_thinking` is `None`, the task JSON must
-    /// still contain the key with value `null` — the server's `if
-    /// enable_thinking is not None:` gate distinguishes "operator
-    /// did not set it" (None → null → skip kwarg) from any present
-    /// boolean (True/False → forward kwarg). A `skip_serializing_if`
-    /// refactor on the Rust side, or a truthy-check refactor on the
-    /// Python side, would silently break this; both ends pin to the
-    /// `null` wire form.
+    /// A fixture body ends at EOF rather than on silence, so the bound a test
+    /// passes is unreachable.
+    const NO_IDLE: Duration = Duration::from_secs(3600);
+
+    /// A `math_500` entry that pins nothing, so its temperature is the eval-id
+    /// policy's `0.6`.
+    fn unpinned() -> anyhow::Result<EvalBenchmark> {
+        Ok(EvalBenchmark {
+            benchmark_id: BenchmarkId::try_new("eval_math_500_2026.06.1".to_owned())?,
+            parameter_eval_id: "math_500".into(),
+            parameter_dataset_name: "2026.06.1".into(),
+            parameter_max_tokens: PositiveCount::try_new(256)?,
+            parameter_max_context: None,
+            parameter_mcq_choices: None,
+            parameter_temperature: None,
+            parameter_top_p: None,
+            parameter_top_k: None,
+            parameter_min_p: None,
+            parameter_seed: None,
+            samples: None,
+        })
+    }
+
+    fn pinned() -> anyhow::Result<EvalBenchmark> {
+        Ok(EvalBenchmark {
+            parameter_temperature: Some(SamplingTemperature::try_new(1.0)?),
+            parameter_top_p: Some(TopP::try_new(0.95)?),
+            parameter_top_k: Some(TopK::try_new(64)?),
+            parameter_min_p: Some(MinP::try_new(0.05)?),
+            parameter_seed: Some(SamplingSeed::try_new(7)?),
+            ..unpinned()?
+        })
+    }
+
+    /// The server keeps its tokenizer-derived default only when the key is
+    /// absent, not null.
     #[test]
-    fn enable_thinking_none_serializes_as_explicit_null() -> anyhow::Result<()> {
-        let done_ids: Vec<String> = Vec::new();
-        let task = build_eval_request_json(&[], 256, Temperature::greedy()?, &done_ids, None);
+    fn enable_thinking_none_omits_chat_template_kwargs() -> anyhow::Result<()> {
+        let benchmark = unpinned()?;
+        let sampling = Sampling::from_benchmark(&benchmark)?;
+        let request = chat_request(serde_json::json!([]), 256, &sampling, "s#0", None);
+        let body = serde_json::to_value(&request)?;
         assert!(
-            task.get("enable_thinking").is_some(),
-            "key must be present, not skipped"
+            body.get("chat_template_kwargs").is_none(),
+            "key must be absent, not null: {body}"
         );
-        assert_eq!(
-            task["temperature"], 0.0,
-            "greedy temperature must be forwarded to the server"
-        );
-        assert!(
-            task["enable_thinking"].is_null(),
-            "value must be null, got: {}",
-            task["enable_thinking"]
-        );
-        assert!(
-            task.get("repo_id").is_none(),
-            "server already knows the loaded model"
-        );
-        assert!(
-            task.get("completions_checkpoint_path").is_none(),
-            "Rust owns checkpoint appends from the event stream"
-        );
+        assert_eq!(body["temperature"], 0.6);
         Ok(())
     }
 
+    #[rstest]
+    #[case::enabled(Some(true), serde_json::Value::Bool(true))]
+    #[case::disabled(Some(false), serde_json::Value::Bool(false))]
+    fn enable_thinking_some_forwards_the_flag(
+        #[case] input: Option<bool>,
+        #[case] expected: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let benchmark = unpinned()?;
+        let sampling = Sampling::from_benchmark(&benchmark)?;
+        let request = chat_request(serde_json::json!([]), 256, &sampling, "s#0", input);
+        let body = serde_json::to_value(&request)?;
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], expected);
+        Ok(())
+    }
+
+    /// What the catalog pins reaches the server and nothing else does: a cut
+    /// this client restated would become the server's default in its place.
+    /// The seed is the sample's own rather than the entry's base.
+    #[rstest]
+    #[case::unpinned(unpinned()?, serde_json::json!({"temperature": 0.6}))]
+    #[case::pinned(
+        pinned()?,
+        serde_json::json!({
+            "temperature": 1.0, "top_p": 0.95, "top_k": 64, "min_p": 0.05, "seed": 9,
+        })
+    )]
+    fn the_request_carries_what_the_entry_pinned(
+        #[case] benchmark: EvalBenchmark,
+        #[case] expected: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let sampling = Sampling::from_benchmark(&benchmark)?;
+        let request = chat_request(serde_json::json!([]), 256, &sampling, "row-3#2", None);
+        let body = serde_json::to_value(&request)?;
+
+        let sent = Value::Object(
+            ["temperature", "top_p", "top_k", "min_p", "seed"]
+                .into_iter()
+                .filter_map(|key| body.get(key).map(|value| (key.to_owned(), value.clone())))
+                .collect(),
+        );
+        assert_eq!(sent, expected, "{body}");
+        Ok(())
+    }
+
+    /// The mobile clients are held to the contract's `sampling.json`, so it must be what
+    /// this server is sent.
     #[test]
-    fn enable_thinking_some_serializes_as_bool() -> anyhow::Result<()> {
-        for (input, expected) in [
-            (Some(true), Value::Bool(true)),
-            (Some(false), Value::Bool(false)),
-        ] {
-            let done_ids: Vec<String> = Vec::new();
-            let task = build_eval_request_json(&[], 256, Temperature::greedy()?, &done_ids, input);
-            assert_eq!(task["enable_thinking"], expected);
+    fn every_contract_sample_is_sent_as_the_contract_records_it() -> anyhow::Result<()> {
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pipette-contract/fixtures");
+        let recorded: std::collections::BTreeMap<String, serde_json::Map<String, Value>> =
+            serde_json::from_str(&std::fs::read_to_string(fixtures.join("sampling.json"))?)?;
+        anyhow::ensure!(!recorded.is_empty(), "sampling.json records no eval");
+        for (example, samples) in recorded {
+            let definition: BenchmarkDefinition =
+                serde_json::from_str(&std::fs::read_to_string(fixtures.join(&example))?)?;
+            let sampling = Sampling::from_benchmark(definition.as_eval()?)?;
+            for (id, drawn) in samples {
+                let request = chat_request(serde_json::json!([]), 256, &sampling, &id, None);
+                let body = serde_json::to_value(&request)?;
+                let sent = Value::Object(
+                    ["temperature", "top_p", "top_k", "min_p", "seed"]
+                        .into_iter()
+                        .filter_map(|key| {
+                            body.get(key).map(|value| (key.to_owned(), value.clone()))
+                        })
+                        .collect(),
+                );
+                assert_eq!(sent, drawn, "{example} {id}");
+            }
         }
         Ok(())
     }
 
+    /// The trailer that carries `completion_tokens` comes only when asked for.
     #[test]
-    fn eval_event_reader_sends_abort_action() -> anyhow::Result<()> {
-        let body = [
-            json!({"kind":"eval_sample_chunk","sample_id":"s1","delta":"x"}).to_string(),
-            json!({"kind":"eval_done"}).to_string(),
-        ]
-        .join("\n")
-            + "\n";
-        let seen = RefCell::new(Vec::<String>::new());
-        let aborted = RefCell::new(Vec::<String>::new());
-
-        read_eval_event_lines(
-            Cursor::new(body),
-            |event| {
-                let kind = event.kind().unwrap_or("?").to_string();
-                seen.borrow_mut().push(kind.clone());
-                if kind == "eval_sample_chunk" {
-                    Ok(EvalStreamAction::AbortSample("s1".to_string()))
-                } else {
-                    Ok(EvalStreamAction::Continue)
-                }
-            },
-            |sample_id| {
-                aborted.borrow_mut().push(sample_id.to_string());
-                Ok(())
-            },
-        )?;
-
-        assert_eq!(seen.into_inner(), ["eval_sample_chunk", "eval_done"]);
-        assert_eq!(aborted.into_inner(), ["s1"]);
+    fn the_request_asks_for_the_usage_trailer() -> anyhow::Result<()> {
+        let benchmark = unpinned()?;
+        let sampling = Sampling::from_benchmark(&benchmark)?;
+        let request = chat_request(json!([]), 256, &sampling, "s#0", None);
+        let body = serde_json::to_value(&request)?;
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"], json!({"include_usage": true}));
         Ok(())
     }
 
-    #[test]
-    fn idle_timeout_from_plan_secs_defaults_and_honors() {
+    /// Captured from `mlx_lm.server` 0.31.3 (LFM2.5-350M-MLX-4bit, greedy,
+    /// `include_usage`), ids and timestamps dropped. The count includes the EOS
+    /// token: "Hello" is one token.
+    const STOPPED_ON_EOS: &str = r#": keepalive 16/16
+
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "Hello"}}]}
+
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "finish_reason": "stop", "delta": {"role": "assistant"}}]}
+
+data: {"object": "chat.completion", "choices": [], "usage": {"prompt_tokens": 16, "completion_tokens": 2, "total_tokens": 18, "prompt_tokens_details": {"cached_tokens": 0}}}
+
+data: [DONE]
+
+"#;
+
+    /// The same server cut at `max_tokens: 4`.
+    const CUT_AT_MAX_TOKENS: &str = r#": keepalive 17/17
+
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "**"}}]}
+
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "Title"}}]}
+
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": ":"}}]}
+
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": " The"}}]}
+
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "finish_reason": "length", "delta": {"role": "assistant"}}]}
+
+data: {"object": "chat.completion", "choices": [], "usage": {"prompt_tokens": 17, "completion_tokens": 4, "total_tokens": 21, "prompt_tokens_details": {"cached_tokens": 0}}}
+
+data: [DONE]
+
+"#;
+
+    /// Captured without `include_usage`: no trailer.
+    const NO_USAGE_TRAILER: &str = "data: {\"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"finish_reason\": null, \"delta\": {\"role\": \"assistant\", \"content\": \"Hi\"}}]}\n\ndata: {\"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"finish_reason\": null, \"delta\": {\"role\": \"assistant\", \"content\": \"!\"}}]}\n\ndata: {\"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"finish_reason\": \"stop\", \"delta\": {\"role\": \"assistant\"}}]}\n\ndata: [DONE]\n\n";
+
+    #[rstest]
+    #[case::stopped_on_eos(STOPPED_ON_EOS, "Hello", Some("stop"), Some(2))]
+    #[case::cut_at_max_tokens(CUT_AT_MAX_TOKENS, "**Title: The", Some("length"), Some(4))]
+    #[case::no_usage_trailer(NO_USAGE_TRAILER, "Hi!", Some("stop"), None)]
+    fn a_chat_stream_says_how_it_ended(
+        #[case] body: &str,
+        #[case] content: &str,
+        #[case] finish_reason: Option<&str>,
+        #[case] completion_tokens: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let reply = sse::read_chat_stream(
+            sse::data_lines(std::io::Cursor::new(body.to_owned()), NO_IDLE),
+            &mut |_| {},
+        )?;
         assert_eq!(
-            idle_timeout_from_plan_secs(None),
-            DEFAULT_STREAM_IDLE_TIMEOUT
+            (
+                reply.content.as_str(),
+                reply.finish_reason.as_deref(),
+                reply.completion_tokens
+            ),
+            (content, finish_reason, completion_tokens)
         );
-        assert_eq!(
-            idle_timeout_from_plan_secs(Some(90)),
-            Duration::from_secs(90)
+        Ok(())
+    }
+
+    /// A stand-in for the server process: `sh`, so the suite needs no Python.
+    fn stand_in(script: &str) -> anyhow::Result<Process> {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        Ok(start_process(
+            server::TEXT_SERVER_MODULE,
+            command,
+            server::STOP_GRACE,
+        )?)
+    }
+
+    /// How the stub answers a sample.
+    enum Answer {
+        Stops,
+        /// A 404, as for a sample the chat template cannot take.
+        Refuses,
+        /// A stream cut before `[DONE]`, and the first server exits.
+        Cuts,
+        /// Nothing, past any idle bound a case passes.
+        Hangs,
+    }
+
+    /// What a restart brings up.
+    enum Restart {
+        Stays,
+        Exits,
+        Fails,
+    }
+
+    /// A failed sample is a row saying why. The cell goes on: on the same server
+    /// past a refusal, on a new one past an exit or a server that never
+    /// answered. It ends when the new one fails to start, or when
+    /// [`LOST_IN_A_ROW`] samples in a row lose their server.
+    #[rstest]
+    #[case::refused(
+        &[Stops, Refuses, Stops],
+        Restart::Stays,
+        NO_IDLE,
+        "refused the request: failed to call /v1/chat/completions: HTTP 404",
+        &[false, true, false],
+        0,
+        None
+    )]
+    #[case::exited_under_it(
+        &[Stops, Cuts, Stops],
+        Restart::Stays,
+        NO_IDLE,
+        "exited mid-completion (exit status: 7)",
+        &[false, true, false],
+        1,
+        None
+    )]
+    #[case::never_answered(
+        &[Stops, Hangs, Stops],
+        Restart::Stays,
+        Duration::from_secs(1),
+        "went silent and was stopped: no response to /v1/chat/completions",
+        &[false, true, false],
+        1,
+        None
+    )]
+    #[case::restart_failed(
+        &[Stops, Cuts, Stops],
+        Restart::Fails,
+        NO_IDLE,
+        "exited mid-completion (exit status: 7)",
+        &[false, true],
+        1,
+        Some("did not come back after it went away: no room")
+    )]
+    #[case::lost_in_a_row(
+        &[Cuts, Cuts, Cuts, Stops],
+        Restart::Exits,
+        NO_IDLE,
+        "exited mid-completion (exit status: 7)",
+        &[true, true, true],
+        2,
+        Some("went away under 3 samples in a row")
+    )]
+    fn a_failed_sample_is_a_row(
+        #[case] answers: &[Answer],
+        #[case] restart: Restart,
+        #[case] idle: Duration,
+        #[case] says: &str,
+        #[case] failed: &[bool],
+        #[case] restarts: usize,
+        #[case] ends: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let exit = dir.path().join("exit");
+        let first = stand_in(&format!(
+            "while [ ! -e '{}' ]; do sleep 0.02; done; exit 7",
+            exit.display()
+        ))?;
+        let ids: Vec<String> = (0..answers.len()).map(|n| format!("s{n}")).collect();
+        let stub = MockServer::start();
+        ids.iter().zip(answers).for_each(|(id, answer)| {
+            let exit = exit.clone();
+            stub.mock(|when, then| {
+                when.path("/v1/chat/completions")
+                    .body_includes(format!(r#""content":"{id}""#));
+                match answer {
+                    Stops => {
+                        then.status(200)
+                            .header("content-type", "text/event-stream")
+                            .body(STOPPED_ON_EOS);
+                    }
+                    Refuses => {
+                        then.status(404)
+                            .body(r#"{"error": "Only 'text' content type is supported."}"#);
+                    }
+                    Cuts => {
+                        then.respond_with(move |_| {
+                            let _ = std::fs::write(&exit, b"");
+                            HttpMockResponse::builder()
+                                .status(200)
+                                .header("content-type", "text/event-stream")
+                                .body(": keepalive 16/16\n\n")
+                                .build()
+                        });
+                    }
+                    Hangs => {
+                        then.delay(Duration::from_secs(60));
+                    }
+                }
+            });
+        });
+        let url = stub.base_url();
+        // The checkpoint keys on the whole request; the runtime it names does
+        // not matter here.
+        let req = RunRequest {
+            runtime: DeclaredBound::already_bound(Runtime::AppleFoundation(Default::default())),
+            model: DeclaredBound::already_bound(Model::AppleFoundationText),
+            runtime_flags: None,
+            model_flags: None,
+            benchmark_flags: None,
+            benchmark: BenchmarkDefinition::Eval(EvalBenchmark {
+                samples: Some(
+                    ids.iter()
+                        .map(|id| json!({"id": id, "messages": [{"role": "user", "content": id}]}))
+                        .collect(),
+                ),
+                ..unpinned()?
+            }),
+        };
+        let benchmark = req.benchmark.as_eval()?;
+        let server = Mutex::new((first, url.clone()));
+        let starts = AtomicUsize::new(0);
+
+        let outcome = eval(
+            benchmark,
+            &EvalCell::new(benchmark, None, None)?,
+            &HttpClient::streaming("pipette", idle)?,
+            EvalCompletionsStore::new(dir.path()).open(&req)?,
+            &server,
+            &|| {
+                starts.fetch_add(1, Ordering::SeqCst);
+                let replacement = match restart {
+                    Restart::Stays => stand_in("exec sleep 60")?,
+                    Restart::Exits => stand_in("exit 7")?,
+                    Restart::Fails => anyhow::bail!("no room"),
+                };
+                Ok((replacement, url.clone()))
+            },
         );
-        assert_eq!(
-            idle_timeout_from_plan_secs(Some(0)),
-            Duration::from_secs(1),
-            "zero clamps to 1s"
-        );
+
+        match (outcome, ends) {
+            (Ok(_), None) => {}
+            (Err(err), Some(ends)) => {
+                anyhow::ensure!(format!("{err:#}").contains(ends), "{err:#}");
+            }
+            (Ok(data), Some(ends)) => anyhow::bail!("expected the cell to end on {ends}: {data:?}"),
+            (Err(err), None) => return Err(err),
+        }
+        // The rows on disk, which a resume would start from; reloaded by id,
+        // so in no particular order.
+        let recorded = EvalCompletionsStore::new(dir.path()).open(&req)?;
+        let completions = recorded.completions();
+        let mut rows: Vec<_> = completions
+            .iter()
+            .map(|row| {
+                let failed = row.failed_reason.as_deref().map(|why| why.contains(says));
+                (
+                    row.id.as_str(),
+                    failed,
+                    row.stop_reason,
+                    row.completion_tokens,
+                )
+            })
+            .collect();
+        rows.sort_by_key(|&(id, ..)| id);
+        let eos = BenchmarkEvalCompletionStopReason::Eos;
+        let failure = BenchmarkEvalCompletionStopReason::Failure;
+        let expected: Vec<_> = ids
+            .iter()
+            .zip(failed)
+            .map(|(id, &failed)| {
+                if failed {
+                    (id.as_str(), Some(true), failure, None)
+                } else {
+                    (id.as_str(), None, eos, Some(2))
+                }
+            })
+            .collect();
+        assert_eq!(rows, expected, "{completions:?}");
+        assert_eq!(starts.into_inner(), restarts);
+        Ok(())
+    }
+
+    fn sample(messages: &Value) -> EvalMeasurementSample<'_> {
+        EvalMeasurementSample {
+            id: "s0",
+            messages: EvalMessages::Raw(messages),
+            chat_template_kwargs: None,
+            position: "eval sample 1/1: id=s0".to_owned(),
+        }
+    }
+
+    /// A stream the idle bound cut: a pipe with a live writer never yields a
+    /// line.
+    fn silent_stream() -> anyhow::Result<anyhow::Error> {
+        let (reader, _writer) = std::io::pipe()?;
+        sse::read_chat_stream(
+            sse::data_lines(BufReader::new(reader), Duration::from_millis(50)),
+            &mut |_| {},
+        )
+        .err()
+        .context("a silent stream was read")
+    }
+
+    /// A stream that ends before `[DONE]`.
+    fn cut_stream() -> anyhow::Result<anyhow::Error> {
+        sse::read_chat_stream(
+            sse::data_lines(std::io::Cursor::new(String::new()), NO_IDLE),
+            &mut |_| {},
+        )
+        .err()
+        .context("an empty body was read")
+    }
+
+    /// A sample is lost only with its server: one that went silent is stopped,
+    /// one that exited is gone. A stream cut while the server stays up is the
+    /// sample's own failure.
+    #[rstest]
+    #[case::went_silent("exec sleep 60", silent_stream()?, true, "no SSE stream event")]
+    #[case::exited("exit 7", cut_stream()?, true, "exit status: 7")]
+    #[case::stayed_up("exec sleep 60", cut_stream()?, false, "stayed up")]
+    fn a_sample_is_lost_only_with_its_server(
+        #[case] script: &str,
+        #[case] err: anyhow::Error,
+        #[case] lost: bool,
+        #[case] says: &str,
+    ) -> anyhow::Result<()> {
+        let mut mlx_server = stand_in(script)?;
+
+        let reading = failure_reading(&mut mlx_server, &err, &sample(&json!([])))?;
+
+        let (was_lost, reason) = match &reading {
+            EvalMeasurementReading::Lost { reason } => (true, reason),
+            EvalMeasurementReading::Failed { reason } => (false, reason),
+            EvalMeasurementReading::Completed { .. } | EvalMeasurementReading::Unfit { .. } => {
+                anyhow::bail!("{reading:?}")
+            }
+        };
+        assert_eq!(was_lost, lost, "{reason}");
+        assert!(reason.contains(says), "{reason}");
+        assert_eq!(mlx_server.is_running(), !lost);
+        Ok(())
     }
 }

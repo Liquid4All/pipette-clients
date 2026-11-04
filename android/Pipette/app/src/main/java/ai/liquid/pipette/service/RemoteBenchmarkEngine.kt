@@ -5,8 +5,12 @@ import ai.liquid.pipette.BenchmarkEngine
 import ai.liquid.pipette.BenchmarkProgressBus
 import ai.liquid.pipette.BenchmarkProgressCallback
 import ai.liquid.pipette.BenchmarkThermalCallback
+import ai.liquid.pipette.CPUSET_TAG
 import ai.liquid.pipette.CpuAffinityProbe
 import ai.liquid.pipette.CpuAffinitySnapshot
+import ai.liquid.pipette.CpusetDemotion
+import ai.liquid.pipette.LlamacppLoadMode
+import ai.liquid.pipette.Readiness
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -42,6 +46,11 @@ class RemoteBenchmarkEngine(
    * gate and cannot read the setting itself (DataStore is single-process), so the Intent that already starts the service carries it.
    */
   private val skipThermalGate: () -> Boolean = { false },
+  /**
+   * The readiness deadline (`benchmark_flags.readiness.max_wait_secs`) to hand that same process, on the same Intent and for the same reason: its
+   * per-rep gate is the one this budget governs, and it cannot read the run's flags itself.
+   */
+  private val readinessMaxWaitMillis: () -> Long = { Readiness.COOLDOWN_MAX_MILLIS },
 ) : BenchmarkEngine {
   private val appContext = context.applicationContext
   private val intent = Intent(appContext, PipetteBenchmarkService::class.java)
@@ -57,13 +66,15 @@ class RemoteBenchmarkEngine(
   // The active CPU backend is constant once the backend registers (first model
   // load), so cache the first non-null read to survive a later :benchmark death.
   @Volatile private var cachedCpuBackend: String? = null
-  // The :benchmark process's cpuset group is fixed for the life of that process
-  // (set by the framework from process state), so cache the first read.
-  @Volatile private var cachedCpuAffinity: CpuAffinitySnapshot? = null
+  // The last cpuset reading written to logcat, so the side-by-side line is emitted
+  // on a change rather than once per cell. Not a cache: nothing reads it back.
+  @Volatile private var lastLoggedCpuAffinity: CpuAffinitySnapshot? = null
   // The waiver the live :benchmark process was started with, or null when none is
   // running. Only the start Intent carries it, so a toggle flipped afterwards
   // cannot reach that process; this is what lets ensureBound notice.
   @Volatile private var deliveredSkipThermalGate: Boolean? = null
+
+  @Volatile private var deliveredReadinessMaxWaitMillis: Long? = null
 
   private val idleTeardown = Runnable { teardownNow("idle after unload") }
   private val hardCancel = Runnable { teardownNow("hard cancel: decode ignored cooperative cancel") }
@@ -138,25 +149,65 @@ class RemoteBenchmarkEngine(
     return runCatching { svc.cpuBackendDescriptor() }.getOrNull()?.also { cachedCpuBackend = it }
   }
 
-  @Suppress("ReturnCount") // cache-hit / not-bound / read early-returns, same shape as cpuBackendDescriptor
+  /**
+   * Deliberately uncached, like [lastRunInterruption] below and unlike [llamaCppCommit] / [cpuBackendDescriptor] above.
+   *
+   * This used to cache the first successful read for the life of the `:benchmark` process, reasoning that the framework fixes a process's cpuset
+   * group when it assigns it. That is wrong, and it is wrong in the exact way this branch is about: the group moves with process state, and a
+   * demotion is that move. The cache made every cell report the first cell's reading, so a cell measured on-device in `/moderate` with both prime
+   * cores gone wrote `/foreground-boost`, `0-7` and `excludes_top_tier=false` to its payload. That is worse than omitting the fields, because it
+   * reads as positive evidence the cell ran clean.
+   *
+   * Read at payload time, which is a fair account of where the cell ran: `JobRunner` throws on [lastRunInterruption] before it reaches this call, so
+   * every payload written is a cell the guard cleared. It earns its keep in the case where the guard fails open (an unbound service, see
+   * [lastRunInterruption]), where this now reports the group the cell ended in rather than one from cells ago.
+   *
+   * Null when nothing is bound; the payload omits the fields rather than guessing.
+   */
   override fun benchmarkProcessCpuAffinity(): CpuAffinitySnapshot? {
-    cachedCpuAffinity?.let {
-      return it
-    }
-    // Read at payload time, after a run, when the service is already up; null
-    // (the diagnostic fields omitted) if we're not bound.
     val svc = service ?: return null
     return runCatching { svc.benchmarkProcessCpuAffinity() }
       .getOrNull()
       ?.let { CpuAffinitySnapshot.fromJson(it) }
-      ?.also {
-        cachedCpuAffinity = it
-        // Log the demotion side-by-side once (the group is fixed per process):
-        // this main/top-app process vs the :benchmark process inference ran in.
-        // `adb logcat -s pipette-cpuset`.
-        Log.i(CPUSET_TAG, "[main] ${CpuAffinityProbe.snapshot().summary()}")
-        Log.i(CPUSET_TAG, "[:benchmark] ${it.summary()}")
+      ?.also { snapshot ->
+        // The side-by-side, this main/top-app process against the :benchmark process inference ran in:
+        // `adb logcat -s pipette-cpuset`. Emitted on a change rather than per cell, so the reading moving
+        // (the thing worth seeing) stands out instead of being buried in one identical line per cell.
+        if (snapshot != lastLoggedCpuAffinity) {
+          lastLoggedCpuAffinity = snapshot
+          Log.i(CPUSET_TAG, "[main] ${CpuAffinityProbe.snapshot().summary()}")
+          Log.i(CPUSET_TAG, "[:benchmark] ${snapshot.summary()}")
+        }
       }
+  }
+
+  /**
+   * Deliberately uncached, for a stronger reason than [benchmarkProcessCpuAffinity] above. That one is uncached because a cached reading would be
+   * stale; this one would be actively harmful cached, since a retained verdict would attribute the cell that was interrupted to every cell after it.
+   * The caches that do exist here ([llamaCppCommit], [cpuBackendDescriptor]) hold values that genuinely cannot change under a live process.
+   *
+   * An unbound service or an unreadable payload returns null, which fails open: the cell is then judged on its own result rather than failed on a
+   * reading we do not have. What keeps that from meaning "one dropped reading and the job silently continues forever" is that `CellDemotionWatch`
+   * carries the best state it has seen into the next cell's baseline, so a demotion that persists is still a demotion against that baseline and the
+   * next cell fires on it. Without that carry this would be a hole, not a safe default.
+   *
+   * The retention is per `:benchmark` process, so it does not survive that process being torn down after a job ends. A job resumed later starts a
+   * fresh baseline, which is sound because a resume happens with the pocket screen coming back to the foreground.
+   */
+  override fun lastRunInterruption(): CpusetDemotion? {
+    val svc = service ?: return null
+    return runCatching { svc.lastRunInterruption() }.getOrNull()?.let { CpusetDemotion.fromJson(it) }
+  }
+
+  /**
+   * Never binds to deliver this. If nothing is bound the process is already gone, and with it the baseline this would have cleared, so binding purely
+   * to say "forget your state" would spawn a process to tell it to forget nothing.
+   */
+  override fun endJob() {
+    val svc = service ?: return
+    // Logged, unlike the other best-effort pushes here, because a persistent failure is silent and consequential: the baseline survives the job
+    // boundary and the next job's first cell fails on a state it never reached. A wrong verdict leaves no other trace to find it by.
+    runCatching { svc.endJob() }.onFailure { Log.w(TAG, "endJob failed; :benchmark may carry a stale cpuset baseline", it) }
   }
 
   // @Volatile: set once on the main thread (AppContainer.init) but read on the
@@ -179,8 +230,8 @@ class RemoteBenchmarkEngine(
     runCatching { svc.updateJobProgress(progress.toJson()) }
   }
 
-  override fun loadSync(modelPath: String, nGpuLayers: Int, contextSize: Int, nUbatch: Int) {
-    val result = ensureBound().loadModel(modelPath, nGpuLayers, contextSize, nUbatch)
+  override fun loadSync(modelPath: String, nGpuLayers: Int, contextSize: Int, nUbatch: Int, loadMode: LlamacppLoadMode) {
+    val result = ensureBound().loadModel(modelPath, nGpuLayers, contextSize, nUbatch, loadMode.cValue)
     check(result.ok) { result.errorMessage ?: "Model load failed in :benchmark" }
   }
 
@@ -214,6 +265,7 @@ class RemoteBenchmarkEngine(
     nGpuLayers: Int,
     contextSize: Int,
     nUbatch: Int,
+    loadMode: LlamacppLoadMode,
     mmprojPath: String?,
     progress: BenchmarkProgressCallback?,
     @Suppress("UNUSED_PARAMETER") cooldown: BenchmarkCooldownCallback?,
@@ -221,7 +273,9 @@ class RemoteBenchmarkEngine(
   ): String {
     val svc = ensureBound()
     try {
-      return resolveOrThrow(svc.runBenchmarkFresh(benchmarkJson, modelPath, nGpuLayers, contextSize, nUbatch, mmprojPath, runCallback(progress)))
+      return resolveOrThrow(
+        svc.runBenchmarkFresh(benchmarkJson, modelPath, nGpuLayers, contextSize, nUbatch, loadMode.cValue, mmprojPath, runCallback(progress))
+      )
     } finally {
       controlHandler.removeCallbacks(hardCancel)
     }
@@ -257,6 +311,11 @@ class RemoteBenchmarkEngine(
     if (service != null && deliveredSkipThermalGate != skipThermalGate()) {
       teardownNow("thermal waiver changed")
     }
+    // Same staleness argument as the waiver above: the Intent configured the process once, and a run whose flags carry a different deadline must not
+    // be measured under the previous run's budget.
+    if (service != null && deliveredReadinessMaxWaitMillis != readinessMaxWaitMillis()) {
+      teardownNow("readiness deadline changed")
+    }
     service?.let {
       return it
     }
@@ -274,6 +333,9 @@ class RemoteBenchmarkEngine(
       val waiver = skipThermalGate()
       intent.putExtra(PipetteBenchmarkService.EXTRA_SKIP_THERMAL_GATE, waiver)
       deliveredSkipThermalGate = waiver
+      val deadline = readinessMaxWaitMillis()
+      intent.putExtra(PipetteBenchmarkService.EXTRA_READINESS_MAX_WAIT_MILLIS, deadline)
+      deliveredReadinessMaxWaitMillis = deadline
       // Best-effort FGS so the run survives backgrounding. If the app isn't in
       // an allowed state (Android 12+ background-start limits) this throws; we
       // still bind, so the run works while the app is foreground (it must be,
@@ -341,13 +403,13 @@ class RemoteBenchmarkEngine(
         bound = false
       }
       service = null
-      // Re-read the cpuset on the next :benchmark instance — unlike the commit /
-      // CPU-backend caches (process-invariant), the scheduling group can differ
-      // across a respawn (e.g. top-app vs /foreground), so a stale cache would
-      // misreport it.
-      cachedCpuAffinity = null
+      // The cpuset is read fresh per cell, so there is no cache to invalidate here.
+      // `lastLoggedCpuAffinity` is deliberately left alone: it only suppresses a repeated
+      // log line, and a respawn into the same group has nothing new to say.
+
       // No process to hold a waiver any more; the next start delivers one afresh.
       deliveredSkipThermalGate = null
+      deliveredReadinessMaxWaitMillis = null
       // Stop the started (foreground) component; with no clients bound the
       // service is destroyed → its onDestroy kills the process.
       runCatching { appContext.stopService(intent) }
@@ -356,7 +418,6 @@ class RemoteBenchmarkEngine(
 
   companion object {
     private const val TAG = "pipetteRemoteEngine"
-    private const val CPUSET_TAG = "pipette-cpuset"
     private const val NATIVE_LIB_NAME = "pipette_android"
     private const val NATIVE_PREFIX = "native-"
     private const val PENDING_COMMIT = "native-pending"

@@ -3,19 +3,10 @@ import Testing
 
 @testable import Pipette
 
-/// The sign-in flow driven end to end through `FakeClerkAuth`.
-///
-/// These are what the seam was introduced for. `EmailAuthFlowTests` covers the
-/// pure transitions and the message builders, which never needed a substitute;
-/// everything here needs one, because it is about the model *calling* the auth
-/// layer and acting on what comes back.
-///
-/// Written to pin behavior that already existed before the refactor, so a
-/// mistake in relocating the attempt or the `sentFactors` bookkeeping shows up
-/// as a failure rather than as new coverage of a new bug.
+/// The sign-in flow driven end to end through `FakeClerkAuth`. The pure transitions and
+/// message builders are in `EmailAuthFlowTests`.
 @MainActor
 struct EmailAuthModelFlowTests {
-    /// A model wired to a fake, plus the fake, since almost every test needs both.
     private func makeModel(
         configure: (FakeClerkAuth) -> Void = { _ in }
     ) -> (EmailAuthModel, FakeClerkAuth) {
@@ -78,8 +69,6 @@ struct EmailAuthModelFlowTests {
             $0.sendEmailCodeResults = [.success]
             $0.verifyCodeResults = [.failure("that code has expired")]
         }
-        // Driven onto the code step first, so the assertion below is about a
-        // failure keeping *that* step rather than about the initial state.
         await model.submitEmail("user@example.test")
 
         await model.submitCode("123456")
@@ -129,8 +118,7 @@ struct EmailAuthModelFlowTests {
         await model.submitPassword(email: "user@example.test", password: "hunter2")
 
         #expect(model.state.chosenSecondFactor == .totp)
-        // TOTP is read off a device the user already holds; there is nothing to
-        // request, and asking would be a wasted round-trip at best.
+        // TOTP is read off a device the user already holds; there is nothing to request.
         #expect(auth.count { $0 == .sendSecondFactorCode(factor: .totp) } == 0)
     }
 
@@ -159,9 +147,8 @@ struct EmailAuthModelFlowTests {
         await model.submitPassword(email: "user@example.test", password: "hunter2")
 
         #expect(model.state.secondFactorReason == .deviceVerification)
-        // The reason is only worth carrying for what it makes the screen say, so
-        // assert that too: a device check must not be headed as two-step
-        // verification, which the account may never have switched on.
+        // A device check must not be headed as two-step verification, which the account
+        // may never have switched on.
         let reason = model.state.secondFactorReason
         #expect(reason.title == "Confirm this device")
         #expect(reason.prompt(SecondFactor.emailCode.prompt).contains("first sign-in on this device"))
@@ -201,17 +188,14 @@ struct EmailAuthModelFlowTests {
         #expect(model.state.error == nil)
     }
 
-    /// The bug this guards against is silent: a resend that never left the device
-    /// must not retire the code sitting in the user's inbox.
+    /// A resend that never left the device must not retire the code in the user's inbox.
     @Test func aFailedResendKeepsTheLiveCodeAnswerable() async {
         let (model, auth) = makeModel {
             $0.signInWithPasswordResults = [.needsSecondFactor([.emailCode], .mfa)]
             // The first send (the automatic one) succeeds; the resend does not.
             $0.sendSecondFactorCodeResults = [.success, .failure("offline")]
-            // A *failed* verify below, deliberately: a success would reset the
-            // screen and the send tail would decline on the step check, so the
-            // assertion would hold even with the guard restoration broken. This
-            // keeps the step up so the tail really is asked.
+            // A *failed* verify, deliberately: a success would reset the screen and the
+            // send tail would decline on the step check, passing even with the guard broken.
             $0.verifySecondFactorResults = [.failure("wrong code")]
         }
         await model.submitPassword(email: "user@example.test", password: "hunter2")
@@ -309,8 +293,6 @@ struct EmailAuthModelFlowTests {
 
         await model.signInWithOAuth(strategy: "oauth_google")
 
-        // The bug this replaced reported a challenged OAuth sign-in as a flat
-        // failure while the other two entry points routed it correctly.
         #expect(model.state.step == .secondFactor)
         #expect(auth.calls.last == .sendSecondFactorCode(factor: .emailCode))
     }
@@ -348,8 +330,8 @@ struct EmailAuthModelFlowTests {
     }
 
     @Test func aPasswordlessAccountReachesTheResetFromTheError() async {
-        // The reported bug, from the user's side: the password step is where they
-        // land, and the reset has to be reachable from it.
+        // A passwordless user lands on the password step, so the reset must be reachable
+        // from it.
         let (model, auth) = makeModel {
             $0.signInWithPasswordResults = [.failure(EmailAuthModel.noPasswordOnAccount)]
             $0.sendPasswordResetCodeResults = [.success]
@@ -399,8 +381,7 @@ struct EmailAuthModelFlowTests {
             $0.verifyPasswordResetCodeResults = [.needsNewPassword]
             $0.resetPasswordResults = [.failure("That password has been found in a breach.")]
         }
-        // Entered the way the flow does, so the reset is recorded as requested and
-        // the step is reached from `.resetCode` rather than from the initial state.
+        // Entered through `.resetCode`, so the reset is recorded as requested.
         await model.startPasswordReset("user@example.test")
         await model.submitResetCode("123456")
         #expect(!model.state.resetWasForced)
@@ -425,9 +406,8 @@ struct EmailAuthModelFlowTests {
 
         await model.submitResetPassword("correct horse battery staple")
 
-        // An account with two-step verification is asked for it after the reset,
-        // and a lone delivered factor has to have its code sent without a tap,
-        // the same dead end every other entry point ends with this call to avoid.
+        // A lone delivered factor has its code sent without a tap, as on every other
+        // entry point.
         #expect(model.state.step == .secondFactor)
         #expect(auth.calls.last == .sendSecondFactorCode(factor: .emailCode))
     }
@@ -456,19 +436,13 @@ struct EmailAuthModelFlowTests {
 
         await model.resendPasswordResetCode()
 
-        // Nothing was sent, so the digits already in the field are still the live
-        // code's and must survive. This is the half of #1201's bug pair that a
-        // generation bumped up front would have reintroduced.
+        // Nothing was sent, so the digits in the field are still the live code's.
         #expect(model.state.resetCodeGeneration == afterFirstSend)
         #expect(model.state.step == .resetCode)
         #expect(model.state.error == "Too many requests. Start the reset again.")
         #expect(!model.state.submitting)
     }
 
-    /// The bug two derivation attempts produced, driven through the model rather
-    /// than the transitions: a requested reset that Clerk interrupts with a
-    /// challenge must still read as requested when it lands on the password, and a
-    /// demanded one must still read as demanded.
     @Test func aResetKeepsTrackOfWhoAskedAcrossAChallenge() async {
         let (requested, _) = makeModel {
             $0.sendPasswordResetCodeResults = [.success]
@@ -496,11 +470,8 @@ struct EmailAuthModelFlowTests {
         #expect(demanded.state.resetWasForced)
     }
 
-    /// A reset the user asked for but never got: the send failed, so they are
-    /// still on the password step. If the request were recorded before the call
-    /// rather than on the send Clerk accepted, the correct password they submit
-    /// next would come back demanding a reset and be worded as one they asked
-    /// for, with no explanation of why their right password was not enough.
+    /// The request is recorded only on a send Clerk accepted. Otherwise a correct password
+    /// that then demands a reset would be worded as a reset the user asked for.
     @Test func aResetThatNeverSentDoesNotCountAsAsking() async {
         let (model, _) = makeModel {
             $0.sendPasswordResetCodeResults = [.failure("Too many requests. Start the reset again.")]
@@ -509,7 +480,6 @@ struct EmailAuthModelFlowTests {
         model.usePassword("user@example.test")
 
         await model.startPasswordReset("user@example.test")
-        // Nothing was sent, so the user is left where they were.
         #expect(model.state.step == .password)
         #expect(!model.state.resetWasRequested)
 

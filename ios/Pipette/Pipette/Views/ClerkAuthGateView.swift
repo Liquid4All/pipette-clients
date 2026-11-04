@@ -1,23 +1,14 @@
 import ClerkKit
 import SwiftUI
 
+/// Renders the screen `reduceAuthGate` picks (`AuthGateScreen.swift`), and owns the Clerk
+/// and identity reads it is given.
 struct ClerkAuthGateView: View {
-    /// A substitute auth layer, when something wants to supply one. Nil in the
-    /// app, where `signOut` builds a `RealClerkAuth` over the environment's
-    /// client at the moment it is needed.
+    /// A substitute auth layer. Nil in the app, where `signOut` builds a `RealClerkAuth`
+    /// over the environment's client at the moment it is needed.
     ///
-    /// This makes sign-out substitutable, which is as far as it goes today: the
-    /// logic acting on a failure is a private method mutating private `@State`,
-    /// so no test can drive it yet. See `FakeClerkAuth.signOutError`.
-    ///
-    /// Deliberately not resolved to a default here. A `RealClerkAuth` built in
-    /// this initializer would read the *shared* client, where `main` read the
-    /// injected environment one at the moment of the call, so a preview or a test
-    /// with its own `Clerk` would silently be talking to a different client.
-    ///
-    /// Constructing one would be harmless in itself: `RealClerkAuth` resolves
-    /// `Clerk.shared` lazily precisely so that it can be built before the SDK is
-    /// configured. It is which client it ends up on that matters here.
+    /// Not defaulted in the initializer: a `RealClerkAuth` built there would use the shared
+    /// client, so a preview or test with its own `Clerk` would talk to a different one.
     private let injectedAuth: ClerkAuthenticating?
 
     @Binding var isRegistered: Bool
@@ -28,21 +19,19 @@ struct ClerkAuthGateView: View {
     }
 
     @Environment(Clerk.self) private var clerk
-    @Environment(\.storage) private var storage
-    // Loaded in `refreshRegistration` (.onAppear) from the injected storage.
+    @Environment(\.ws) private var ws
     @State private var registration: IdentityRegistration?
+    /// Cached so routing does not read the Keychain on every body pass.
+    @State private var hasPrivateKey = false
     @State private var activeAlert: GateAlert?
     @State private var showDeleteIdentityAlert = false
 
-    /// The one error alert this gate can show at a time, carrying its message.
-    /// Collapses the former `linkError`/`signOutError` `String?` pair into a
-    /// single presented value.
+    /// The one error alert this gate can show at a time.
     private enum GateAlert: Identifiable {
         case linkFailed(String)
-        /// The session ended but the device is still pinned to the account it was linked
-        /// to, so signing in with a different one would land back on the mismatch screen.
-        /// Kept apart from `signOutFailed` because the sign-out itself succeeded, and
-        /// telling the user it failed would send them to retry the wrong thing.
+        /// The session ended but the device is still pinned to the old account. Apart from
+        /// `signOutFailed` because the sign-out succeeded, and saying otherwise would send
+        /// the user to retry the wrong thing.
         case unlinkFailed(String)
         case signOutFailed(String)
 
@@ -75,13 +64,31 @@ struct ClerkAuthGateView: View {
     }
 
     var body: some View {
+        // `registration` and `hasPrivateKey` load in `.onAppear`, so the first pass routes as
+        // if the device held no identity. The 1.4-second `SplashView` (`PipetteApp`) hides it.
         Group {
-            if !clerk.isLoaded {
+            switch reduceAuthGate(
+                isHeadless: HeadlessRunner.isHeadless,
+                clerkLoaded: clerk.isLoaded,
+                clerkUserId: clerk.user?.id,
+                hasRegistration: registration != nil,
+                hasPrivateKey: hasPrivateKey,
+                linkedClerkUserId: registration?.clerkUserId
+            ) {
+            case .headless:
+                HeadlessModeView(clientId: registration?.clientId.value)
+            case .loading:
                 ClerkLoadingView()
-            } else if let user = clerk.user {
-                signedInContent(userId: user.id)
-            } else {
+            case .signIn:
                 EmailCodeSignInView()
+            case .setup:
+                setupContent
+            case .keyMissing:
+                keyMissingContent
+            case .mismatch:
+                mismatchContent
+            case .app:
+                appContent
             }
         }
         .onAppear(perform: refreshRegistration)
@@ -113,57 +120,89 @@ struct ClerkAuthGateView: View {
         }
     }
 
+    /// A registration with no signing key. The one action is destructive by necessity:
+    /// clearing the record un-attributes every result submitted under this `client_id`,
+    /// which `ensureEmpty()` refuses to let setup do quietly, so it sits behind a confirmation.
+    ///
+    /// `headlessrun auth import` is the non-destructive repair that keeps the `client_id`,
+    /// but it needs a cable and the exported bundle, so it cannot be the only way out.
     @ViewBuilder
-    private func signedInContent(userId: String) -> some View {
-        let sessionId = clerk.session?.id
-        let primaryEmail = clerk.user?.primaryEmailAddress?.emailAddress
-
-        if let registration,
-           let linkedUserId = registration.clerkUserId,
-           linkedUserId != userId {
-            ClerkAccountMismatchView(
-                linkedEmail: registration.clerkPrimaryEmail,
-                currentEmail: primaryEmail,
-                onSignOut: signOut,
+    private var keyMissingContent: some View {
+        if let registration {
+            SigningKeyMissingView(
+                clientId: registration.clientId.value,
                 onDeleteIdentity: { showDeleteIdentityAlert = true }
             )
-        } else if registration != nil,
-                  storage.identity.getPrivateKey() != nil {
-            // No catalog pull on appear. A sync is something the user asks for — the
-            // Settings refresh, the New Job screen, `headlessrun sync` — as it is on the
-            // CLI, where `commands::sync` is the only caller of `pull_remote_benchmarks`.
-            // Tying it to a view appearing meant a network fetch and a disk write at a
-            // moment nothing chose, including partway through a measured benchmark.
-            MainTabView(isRegistered: $isRegistered)
-                .task(id: userId) {
-                    linkRegistrationIfNeeded(
-                        userId: userId,
-                        sessionId: sessionId,
-                        primaryEmail: primaryEmail
-                    )
-                }
-        } else {
+            .task(id: registration.clientId.value) {
+                // Once per admission, not per body pass. Nothing else records that this
+                // device can no longer submit.
+                AppLog.auth.warning("gate found a registration with no signing key "
+                    + "client_id=\(registration.clientId.value)")
+            }
+        }
+    }
+
+    /// The device is pinned to one account and a different account is signed in.
+    private var mismatchContent: some View {
+        ClerkAccountMismatchView(
+            linkedEmail: registration?.clerkPrimaryEmail,
+            currentEmail: clerk.user?.primaryEmailAddress?.emailAddress,
+            onSignOut: signOut,
+            onDeleteIdentity: { showDeleteIdentityAlert = true }
+        )
+    }
+
+    /// `SetupView` records the Clerk link on the registration it creates. `reduceAuthGate`
+    /// reaches this arm only with a user; the `if let` is how a `ViewBuilder` says so.
+    @ViewBuilder
+    private var setupContent: some View {
+        if let user = clerk.user {
             SetupView(
                 isRegistered: $isRegistered,
-                clerkUserId: userId,
-                clerkSessionId: sessionId,
-                clerkPrimaryEmail: primaryEmail,
+                clerkUserId: user.id,
+                clerkSessionId: clerk.session?.id,
+                clerkPrimaryEmail: user.primaryEmailAddress?.emailAddress,
                 onSignOut: signOut
             )
         }
     }
 
+    /// The task is keyed on the Clerk user id, so signing in from Settings links a device
+    /// the gate admitted without a session.
+    ///
+    /// No catalog pull on appear: as on the CLI, a sync is something the user asks for.
+    /// Tied to a view appearing, it could fetch and write to disk mid-benchmark.
+    private var appContent: some View {
+        MainTabView(isRegistered: $isRegistered)
+            .task(id: clerk.user?.id) {
+                linkRegistrationIfNeeded(
+                    userId: clerk.user?.id,
+                    sessionId: clerk.session?.id,
+                    primaryEmail: clerk.user?.primaryEmailAddress?.emailAddress
+                )
+            }
+    }
+
     private func refreshRegistration() {
-        registration = storage.identity.getRegistration()
+        registration = ws.registration.get()
+        hasPrivateKey = ws.registration.getPrivateKey() != nil
         isRegistered = registration != nil
     }
 
     private func linkRegistrationIfNeeded(
-        userId: String,
+        userId: String?,
         sessionId: String?,
         primaryEmail: String?
     ) {
-        guard let current = storage.identity.getRegistration() else {
+        guard let userId else {
+            // Access granted without a session is worth a record, and this runs once per
+            // admission rather than once per body pass.
+            AppLog.auth.info("gate admitted a device with no Clerk session "
+                + "client_id=\(registration?.clientId.value ?? "none")")
+            return
+        }
+
+        guard let current = ws.registration.get() else {
             refreshRegistration()
             return
         }
@@ -188,9 +227,13 @@ struct ClerkAuthGateView: View {
         )
 
         do {
-            try storage.identity.putRegistration(linked)
+            try ws.registration.put(linked)
             registration = linked
             isRegistered = true
+            // The client id, never the Clerk user id or the email: `AppLog` is `os.Logger`,
+            // which persists to the device log store.
+            AppLog.auth.info("linked the registration to the signed-in Clerk account "
+                + "client_id=\(linked.clientId.value)")
         } catch {
             activeAlert = .linkFailed(error.localizedDescription)
         }
@@ -201,12 +244,10 @@ struct ClerkAuthGateView: View {
             do {
                 try await (injectedAuth ?? RealClerkAuth(auth: clerk.auth)).signOut()
             } catch {
-                // Report and stop. The unlink below is only safe once the session is gone: a device that
-                // dropped its link while still signed in as the old account no longer matches the
-                // mismatch branch, falls through to `MainTabView`, and its `linkRegistrationIfNeeded`
-                // re-links to the very account the user asked to leave. There is no local-only way out
-                // either: `Clerk.clearAllKeychainItems()` is documented as leaving in-memory state, so
-                // `clerk.user` would survive it and reach exactly that re-link.
+                // Report and stop: unlinking while still signed in would fall through to
+                // `MainTabView`, whose `linkRegistrationIfNeeded` re-links the account the user
+                // asked to leave. `Clerk.clearAllKeychainItems()` is no way out either: it is
+                // documented as leaving in-memory state, so `clerk.user` would survive it.
                 activeAlert = .signOutFailed(error.localizedDescription)
                 return
             }
@@ -214,33 +255,21 @@ struct ClerkAuthGateView: View {
         }
     }
 
-    /// Un-pin this device from the account it was linked to, keeping the registration itself
-    /// (and so the `clientId`, the signing key, and every result already submitted under it).
-    /// The counterpart to `linkRegistrationIfNeeded`, and the reason a second account can sign
-    /// in on a device the first one used: without it the link outlives the session, and the
-    /// next user lands on `ClerkAccountMismatchView` whose only exit deletes the identity.
+    /// Un-pin this device from its account, keeping the registration (`clientId`, signing key,
+    /// submitted results). Without it the link outlives the session and the next account lands
+    /// on `ClerkAccountMismatchView`, whose only exit deletes the identity.
     ///
-    /// Ordered *after* the sign-out on purpose. Clearing the link while the session is still
-    /// live would leave a signed-in user with nothing to mismatch against, and the gate would
-    /// flash the app itself on the way out.
+    /// Runs after the sign-out: clearing the link while the session is live would flash the
+    /// app on the way out. A failed write is surfaced, since the sign-out already happened and
+    /// a silent failure would reappear as a mismatch at the next sign-in.
     ///
-    /// A failed write is surfaced rather than swallowed: the sign-out itself already happened,
-    /// so a silent failure here reads as success and reappears as a mismatch at the next
-    /// sign-in, a screen away from the action that caused it.
-    ///
-    /// Stays on the main actor, disk write included, and not for want of noticing. The mismatch
-    /// screen offers this beside "Delete device identity", so the read-modify-write here races
-    /// that delete: interleaved, the load straddles the delete and writes the record back with no
-    /// signing key to go with it, leaving a device that reads as registered and fails every
-    /// submission. Main-actor confinement is what serializes the two, so hopping the I/O to a
-    /// background executor to save a frame would buy that race. Android needs an explicit
-    /// `Mutex` for the same pair (see `ShellViewModel.registrationMutex`) precisely because its
-    /// equivalents already run off the main thread. The cost being avoided is one small atomic
-    /// file write plus a Keychain update, on a transition that has just awaited a network
-    /// sign-out; if this ever does need to move, it needs an actor around the store, not just an
-    /// `await`.
+    /// Stays on the main actor, disk write included. The mismatch screen also offers "Delete
+    /// device identity", and main-actor confinement is what serializes the two: interleaved,
+    /// this read-modify-write would write the record back with no signing key. Android needs
+    /// `ShellViewModel.registrationMutex` because its equivalents run off the main thread.
+    /// Moving this off the main actor needs an actor around the store, not just an `await`.
     private func unlinkRegistration() {
-        guard let current = storage.identity.getRegistration(),
+        guard let current = ws.registration.get(),
               current.clerkUserId != nil
         else {
             refreshRegistration()
@@ -249,7 +278,7 @@ struct ClerkAuthGateView: View {
 
         let unlinked = current.withoutClerkLink()
         do {
-            try storage.identity.putRegistration(unlinked)
+            try ws.registration.put(unlinked)
             registration = unlinked
         } catch {
             activeAlert = .unlinkFailed(error.localizedDescription)
@@ -257,11 +286,65 @@ struct ClerkAuthGateView: View {
     }
 
     private func deleteDeviceIdentity() {
-        storage.identity.clearRegistrationMaterial()
+        ws.registration.clear()
         registration = nil
+        hasPrivateKey = false
         isRegistered = false
     }
 
+}
+
+/// The `client_id`, selectable and monospaced because an operator reads it back or pastes
+/// it when reporting a device. The caller supplies the padding.
+private struct ClientIdReadout: View {
+    let clientId: String
+
+    var body: some View {
+        VStack(spacing: 5) {
+            Text("Client ID")
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(Color(.systemGray))
+
+            Text(clientId)
+                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// The screen a `headlessrun` process shows for the life of the run.
+///
+/// A readout with no controls: an operator drives the device from a terminal, so a tap
+/// would act outside the session they can see, and a stray one could delete the registration.
+private struct HeadlessModeView: View {
+    /// Nil on a device that holds no registration.
+    let clientId: String?
+
+    var body: some View {
+        VStack(spacing: 18) {
+            PipetteLogoMark()
+
+            Text("HEADLESS MODE")
+                .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                .kerning(2)
+                .multilineTextAlignment(.center)
+
+            Text("This device runs from the command line.")
+                .font(.system(size: 16, weight: .regular))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Color(.systemGray))
+                .fixedSize(horizontal: false, vertical: true)
+
+            ClientIdReadout(clientId: clientId ?? "unregistered")
+                .padding(.top, 6)
+        }
+        .padding(.horizontal, 32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
+    }
 }
 
 struct ClerkConfigurationErrorView: View {
@@ -285,15 +368,11 @@ struct ClerkConfigurationErrorView: View {
     }
 }
 
-/// Shown until Clerk has both an environment and a client — and, past a
-/// deadline, instead of forever.
+/// Shown until Clerk has both an environment and a client, with a retry past a deadline.
 ///
-/// ClerkKit's startup fetch is fire-and-forget: it retries three times and then
-/// only logs, leaving `isLoaded` false for the rest of the launch. A first run
-/// with no network is the usual way in, and without this the app is a spinner on
-/// a blank screen with nothing to tap. Android surfaces the same state as
-/// `AuthGate.InitError`; here it also offers the retry, since the SDK won't try
-/// again on its own.
+/// ClerkKit's startup fetch retries three times and then only logs, leaving `isLoaded`
+/// false for the rest of the launch (typically a first run with no network). Android
+/// shows the same state as `AuthGate.InitError`; here the SDK won't retry on its own.
 private struct ClerkLoadingView: View {
     @Environment(Clerk.self) private var clerk
     @State private var failureMessage: String?
@@ -305,8 +384,7 @@ private struct ClerkLoadingView: View {
     private static let unreachable = "Couldn't reach the sign-in service. Check your connection and try again."
 
     #if DEBUG
-    /// `previewFailure` starts the view in its failed state; reaching it for real
-    /// means a device that can't reach Clerk for ten seconds.
+    /// `previewFailure` starts the view in its failed state.
     init(previewFailure: String? = nil) {
         self._failureMessage = State(initialValue: previewFailure)
     }
@@ -345,8 +423,7 @@ private struct ClerkLoadingView: View {
         .task(waitForDeadline)
     }
 
-    /// Give the SDK's own startup attempt its full run before calling it: this
-    /// view is torn down the moment `isLoaded` flips, which cancels the sleep.
+    /// The view is torn down when `isLoaded` flips, which cancels the sleep.
     private func waitForDeadline() async {
         try? await Task.sleep(for: Self.deadline)
         guard !Task.isCancelled, !clerk.isLoaded, failureMessage == nil else { return }
@@ -358,8 +435,7 @@ private struct ClerkLoadingView: View {
         isRetrying = true
         Task {
             do {
-                // Both, because `isLoaded` needs both. Concurrently, so a slow
-                // link doesn't pay for them one after the other.
+                // `isLoaded` needs both; concurrent so a slow link pays once.
                 async let environment = clerk.refreshEnvironment()
                 async let client = clerk.refreshClient()
                 _ = try await environment
@@ -371,6 +447,50 @@ private struct ClerkLoadingView: View {
             }
             isRetrying = false
         }
+    }
+}
+
+/// The screen for a registration with no signing key. Shows the `client_id`: an operator
+/// needs it to repair the device over a cable, and it is lost by the destructive exit.
+private struct SigningKeyMissingView: View {
+    let clientId: String
+    let onDeleteIdentity: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PipetteLogoMark()
+                .padding(.bottom, 14)
+
+            Text("Signing key missing")
+                .font(.serif(26))
+                .multilineTextAlignment(.center)
+                .padding(.bottom, 14)
+
+            Text("This device is registered, but the key that signs its results is gone, so "
+                + "it cannot submit work. To keep this client, restore the key from an "
+                + "identity bundle. To start over, delete the identity and register again.")
+                .font(.system(size: 16, weight: .regular))
+                .foregroundStyle(Color(.systemGray))
+                .multilineTextAlignment(.center)
+                .lineSpacing(5)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 22)
+
+            ClientIdReadout(clientId: clientId)
+                .padding(.bottom, 28)
+
+            Button(role: .destructive, action: onDeleteIdentity) {
+                Text("Delete device identity")
+                    .font(.system(size: 17, weight: .regular))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
     }
 }
 
@@ -445,6 +565,14 @@ private struct ClerkAccountMismatchView: View {
         })
 }
 
+#Preview("Headless Mode") {
+    HeadlessModeView(clientId: "01J8Z5S9QW0000000000000000")
+}
+
+#Preview("Headless Mode · Unregistered") {
+    HeadlessModeView(clientId: nil)
+}
+
 #Preview("Clerk Configuration Error") {
     ClerkConfigurationErrorView()
 }
@@ -461,6 +589,13 @@ private struct ClerkAccountMismatchView: View {
         .environment(Clerk.preview { preview in
             preview.isSignedIn = false
         })
+}
+
+#Preview("Signing Key Missing") {
+    SigningKeyMissingView(
+        clientId: "ev1_74fe0632cf0c3c3453f6b7ab03f3e7977a28207f4418681503d5b8ae88db2861",
+        onDeleteIdentity: {}
+    )
 }
 
 #Preview("Clerk Account Mismatch") {

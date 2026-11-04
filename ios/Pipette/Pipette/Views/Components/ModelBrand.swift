@@ -3,9 +3,8 @@ import UIKit
 
 /// Maps a model family to its vendor brand for the logo shown in selection rows.
 ///
-/// Detection keys off the model name/repo text rather than the HF org, because
-/// redistributors (e.g. `unsloth/gemma-...`) repackage other vendors' models —
-/// the org would mislabel them.
+/// Detection keys off the model name and repo text, not the HF org: redistributors
+/// (e.g. `unsloth/gemma-...`) repackage other vendors' models.
 enum ModelBrand {
     case liquid, google, ibm, qwen, meta, mistral, microsoft, deepseek, unknown
 
@@ -22,8 +21,6 @@ enum ModelBrand {
         return .unknown
     }
 
-    /// Asset-catalog image name for this brand, or nil when there's no logo to
-    /// show (unknown vendor). The matching imageset lives in Assets.xcassets.
     var assetName: String? {
         switch self {
         case .unknown: return nil
@@ -39,9 +36,8 @@ enum ModelBrand {
     }
 }
 
-/// Leading icon for a model row. Renders the brand logo when its asset has been
-/// added to the catalog; otherwise falls back to a neutral SF Symbol so the
-/// row layout stays stable before real logos are dropped in.
+/// Leading icon for a model row: the brand logo, or a neutral SF Symbol when the
+/// brand has no asset.
 struct BrandLogoView: View {
     let brand: ModelBrand
     var size: CGFloat = 28
@@ -61,29 +57,5 @@ struct BrandLogoView: View {
             }
         }
         .frame(width: size, height: size)
-    }
-}
-
-/// Rounded checkbox matching the job wizard mockup: filled with the foreground
-/// color and a white check when on, an outlined empty square when off.
-struct WizardCheckbox: View {
-    let isOn: Bool
-    var isMixed: Bool = false
-    var size: CGFloat = 26
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 6)
-            .fill((isOn || isMixed) ? Color.primary : Color.clear)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder((isOn || isMixed) ? Color.clear : Color(.systemGray3), lineWidth: 1.5)
-            )
-            .overlay(
-                Image(systemName: isMixed ? "minus" : "checkmark")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Color(.systemBackground))
-                    .opacity((isOn || isMixed) ? 1 : 0)
-            )
-            .frame(width: size, height: size)
     }
 }

@@ -1,13 +1,17 @@
+use std::path::PathBuf;
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use pipette_ops::measurement;
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use pipette_ops::measurement::MeasurementObserver;
+use pipette_ops::readiness::ReadinessGate;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::BenchmarkResultData;
+use pipette_plan_types::EndToEndLatencyBenchmark;
+use pipette_plan_types::RunRequest;
+use pipette_plan_types::RunResponse;
 
-use super::{server, throughput_http};
+use crate::{server, throughput_http};
 
 const ENDPOINT: &str = "/end_to_end_latency";
 
@@ -26,39 +30,43 @@ struct EndToEndLatencyResponse {
 
 pub(super) fn run(
     req: &RunRequest,
+    benchmark: &EndToEndLatencyBenchmark,
+    sidecar: PathBuf,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: &MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_end_to_end_latency()
-        .map_err(anyhow::Error::from)?;
-    let prefill_tokens = benchmark.parameter_prefill_tokens;
-    let decode_tokens = benchmark.parameter_decode_tokens;
+    let prefill_tokens = benchmark
+        .parameter_prefill_tokens
+        .into_inner()
+        .unsigned_abs();
+    let decode_tokens = benchmark
+        .parameter_decode_tokens
+        .into_inner()
+        .unsigned_abs();
 
-    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
-    // gate: a first-use `swift build -c release` saturates every core for
-    // minutes and would sit between the gate certifying the device as thermally
-    // idle and the measurement that certification is for.
-    let sidecar = crate::sidecar::require_coreai_sidecar()?;
     readiness_gate()?;
-    let server = server::start_server(req, Some(sidecar))?;
+    let mut server = server::start_server(req, sidecar)?;
 
-    log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
-    throughput_http::prepare(&server.base_url)?;
+    tracing::info!(
+        cell = ENDPOINT,
+        prefill_tokens,
+        decode_tokens,
+        "Core AI end-to-end warm-up"
+    );
+    throughput_http::prepare(&server)?;
     validate_response(
-        &run_latency_request(&server.base_url, prefill_tokens, decode_tokens)?,
+        &run_latency_request(&server, prefill_tokens, decode_tokens)?,
         prefill_tokens,
         decode_tokens,
     )
     .context("invalid /end_to_end_latency warmup")?;
 
-    let measured = measurement::run(
+    let measured = pipette_ops::measurement::run(
         ENDPOINT,
         readiness_gate,
-        observer,
-        |_| throughput_http::prepare(&server.base_url),
-        |_| run_latency_request(&server.base_url, prefill_tokens, decode_tokens),
+        *observer,
+        |_| throughput_http::prepare(&server),
+        |_| run_latency_request(&server, prefill_tokens, decode_tokens),
         |idx, rep| {
             validate_response(&rep.value, prefill_tokens, decode_tokens)
                 .with_context(|| format!("invalid {ENDPOINT} trial {idx}"))?;
@@ -67,27 +75,23 @@ pub(super) fn run(
     )?;
     let stats = measured.stats();
 
-    Ok(RunResponse {
-        executable: Some(server.executable.clone()),
-        command: server.command_preview.clone(),
-        ..RunResponse::new(
-            BenchmarkResultData::EndToEndLatency {
-                total_time_ms: stats.mean_ms,
-                total_time_ms_stddev: Some(stats.stddev_ms),
-            },
-            server.stdout(),
-            server.stderr(),
-        )
-    })
+    Ok(
+        RunResponseBuilder::new(BenchmarkResultData::EndToEndLatency {
+            total_time_ms: stats.mean_ms,
+            total_time_ms_stddev: Some(stats.stddev_ms),
+        })
+        .process(&mut server.process)
+        .build(),
+    )
 }
 
 fn run_latency_request(
-    base_url: &str,
+    server: &server::ServerHandle,
     prefill_tokens: u32,
     decode_tokens: u32,
 ) -> anyhow::Result<EndToEndLatencyResponse> {
     throughput_http::post_json(
-        base_url,
+        server,
         ENDPOINT,
         &EndToEndLatencyRequest {
             prompt_tokens: prefill_tokens,
@@ -101,13 +105,13 @@ fn validate_response(
     expected_prompt_tokens: u32,
     expected_completion_tokens: u32,
 ) -> anyhow::Result<()> {
-    measurement::positive_finite("total_ms", response.total_ms)?;
-    measurement::expect_tokens(
+    pipette_ops::measurement::positive_finite("total_ms", response.total_ms)?;
+    pipette_ops::measurement::expect_tokens(
         "prompt_tokens",
         response.prompt_tokens,
         expected_prompt_tokens,
     )?;
-    measurement::expect_tokens(
+    pipette_ops::measurement::expect_tokens(
         "completion_tokens",
         response.completion_tokens,
         expected_completion_tokens,

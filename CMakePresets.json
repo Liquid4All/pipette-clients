@@ -29,9 +29,29 @@
         "CMAKE_SHARED_LINKER_FLAGS": "-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384",
         "CMAKE_MODULE_LINKER_FLAGS": "-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
       }
+    },
+    {
+      "name": "android-arm64-v8a-rust",
+      "displayName": "Android arm64-v8a (Rust Backend)",
+      "inherits": "android-arm64-v8a",
+      "binaryDir": "${sourceDir}/target/cmake-android-arm64-v8a-rust",
+      "cacheVariables": {
+        "PIPETTE_ENGINE_BACKEND": "rust"
+      }
+    },
+    {
+      "name": "android-arm64-v8a-cpp",
+      "displayName": "Android arm64-v8a (C++ Backend)",
+      "inherits": "android-arm64-v8a",
+      "binaryDir": "${sourceDir}/target/cmake-android-arm64-v8a-cpp",
+      "cacheVariables": {
+        "PIPETTE_ENGINE_BACKEND": "cpp"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "android-arm64-v8a", "configurePreset": "android-arm64-v8a" }
+    { "name": "android-arm64-v8a", "configurePreset": "android-arm64-v8a" },
+    { "name": "android-arm64-v8a-rust", "configurePreset": "android-arm64-v8a-rust" },
+    { "name": "android-arm64-v8a-cpp", "configurePreset": "android-arm64-v8a-cpp" }
   ]
 }

@@ -1,71 +1,55 @@
 import Foundation
 
-/// The per-repetition thermal series a run collects — the crate's `ThermalSeries`
-/// (`pipette-ops/src/thermal_series.rs`): one reading as each rep starts, one as it
-/// finishes, paired positionally.
+/// The readings a run takes as each rep starts and finishes, stored as pairs: the crate's
+/// `ThermalSeries` (`pipette-ops/src/thermal_series.rs`). Pairs, because two separate
+/// `before`/`after` arrays drift silently once one rep contributes to one and not the other.
+/// Owned by `RunCell.dispatchRun`; engines see only the `MeasurementObserver` over it.
 ///
-/// Owned by `RunCell.dispatch`, which hands the engines a `RepObserver` closing over it;
-/// nothing below that sees this type, so an engine carries no telemetry vocabulary.
-///
-/// Where upstream takes each reading as an argument (`start(reading)`), this samples its
-/// own: the probe is two Apple-specific reads that no other caller assembles, so passing
-/// them in would only move the same code up a layer. The `sample` closure stays injectable
-/// so tests can feed a deterministic sequence instead of the live device state.
-///
-/// `@unchecked Sendable`: an instance is written only from the observer hooks, which fire
-/// inside `measure`'s sequential single-task rep loop, and read only after that run
-/// completes (the owner `await`s the run before reading), so there is no concurrent access.
-nonisolated final class ThermalSeries: @unchecked Sendable {
-    private let sample: () -> AppleThermalState?
-    private(set) var deviceAppleThermalStateBefore: [AppleThermalState] = []
-    private(set) var deviceAppleThermalStateAfter: [AppleThermalState] = []
-    /// SoC die temperature in whole °C, one reading per rep in iteration order.
-    /// Collected only on a `PIPETTE_PRIVATE_THERMAL` build (the appends below are
-    /// compiled out otherwise, leaving these empty); a `nil` marks a rep whose
-    /// read failed. The wire fold and the not-aligned-with-the-state-series
-    /// contract live on `BenchmarkSubmissionPayload.deviceAppleSocTempC*`.
-    private(set) var deviceAppleSocTempCBefore: [Float?] = []
-    private(set) var deviceAppleSocTempCAfter: [Float?] = []
+/// `@unchecked Sendable`: written only from the observer hooks inside the sequential rep
+/// loop, and read only after the run completes.
+nonisolated final class ThermalSeries<R: Sendable>: @unchecked Sendable {
+    /// `(start, end)` per finished rep, in rep order.
+    private var finishedReps: [(start: R, end: R)] = []
+    /// The start of the rep in flight; `nil` between reps.
+    private var openRepStart: R?
 
-    init(sample: @escaping () -> AppleThermalState? = {
-        AppleThermalState(ProcessInfo.processInfo.thermalState)
-    }) {
-        self.sample = sample
+    /// Opening a second rep before closing the first would pair the wrong readings, so it
+    /// throws.
+    func start(_ reading: R) throws {
+        guard openRepStart == nil else { throw ThermalSeriesError.startedWhileOpen }
+        openRepStart = reading
     }
 
-    /// The collected series as the shape a run answers with. The collector keeps parallel
-    /// arrays because the SoC one is compiled out on a public build; this pairs them.
-    var runThermal: RunThermal {
-        RunThermal(
-            before: RunThermal.series(states: deviceAppleThermalStateBefore,
-                                      socTemps: deviceAppleSocTempCBefore),
-            after: RunThermal.series(states: deviceAppleThermalStateAfter,
-                                     socTemps: deviceAppleSocTempCAfter))
+    func finish(_ reading: R) throws {
+        guard let start = openRepStart else { throw ThermalSeriesError.endedWithoutStart }
+        openRepStart = nil
+        finishedReps.append((start, reading))
     }
 
-    /// A repetition has begun — record its entry condition.
-    func start() {
-        if let value = sample() { deviceAppleThermalStateBefore.append(value) }
-        appendSocTemp(to: &deviceAppleSocTempCBefore)
+    /// The collected pairs, leaving the collector empty. A rep still open here has a start
+    /// and no end, the one misreporting `start` and `finish` cannot see.
+    func take() throws -> [(start: R, end: R)] {
+        guard openRepStart == nil else { throw ThermalSeriesError.finishedWithOpenRep }
+        defer { finishedReps = [] }
+        return finishedReps
     }
+}
 
-    /// The repetition's timed work is done — record the condition it ended in.
-    func finish() {
-        if let value = sample() { deviceAppleThermalStateAfter.append(value) }
-        appendSocTemp(to: &deviceAppleSocTempCAfter)
-    }
+/// A rep sequence that cannot be paired: the crate's `ThermalSeries` ensures, with their
+/// messages. Array position is the iteration index, so a misaligned sequence is refused.
+nonisolated enum ThermalSeriesError: Error, Equatable, LocalizedError {
+    case startedWhileOpen
+    case endedWithoutStart
+    case finishedWithOpenRep
 
-    /// Appends the current SoC die temp (°C) to `series`, or nothing on a build
-    /// without the private read. A failed read (`socTemp() <= 0`) maps to `nil`,
-    /// keeping the `-1` sentinel off the wire.
-    ///
-    /// Rounded to whole °C, matching the Rust reader's `macos_thermal` — the two
-    /// populate one column and must round alike. `socTemp()` itself stays raw, so
-    /// the readiness gate keeps its sub-degree reading.
-    private func appendSocTemp(to series: inout [Float?]) {
-        #if PIPETTE_PRIVATE_THERMAL
-        let t = socTemp()
-        series.append(t > 0 ? Float(t.rounded()) : nil)
-        #endif
+    var errorDescription: String? {
+        switch self {
+        case .startedWhileOpen:
+            "a repetition was started while the previous one was still open"
+        case .endedWithoutStart:
+            "a repetition ended that was never started"
+        case .finishedWithOpenRep:
+            "the run finished with a repetition still open"
+        }
     }
 }

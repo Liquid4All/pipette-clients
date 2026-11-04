@@ -172,8 +172,11 @@ class LocalStorage(private val context: Context) : JobStore {
     val filePath = file.canonicalPath
     require(filePath == rootPath || filePath.startsWith("$rootPath${File.separator}")) { "Model file is outside app model storage" }
     if (file.exists()) file.delete()
-    pruneEmptyModelParents(file.parentFile)
+    // Invalidated before the prune, not after it. The prune walks parents and calls `canonicalPath`, which is IO and can throw; with the order
+    // reversed, a throw there would leave [modelStore] still listing a file that is gone, so every later read of the cache in this process would
+    // count bytes the disk no longer holds. Tidying empty directories is the lesser job of the two and should not be able to skip the greater one.
     modelStore.invalidate()
+    pruneEmptyModelParents(file.parentFile)
   }
 
   /**
@@ -197,8 +200,7 @@ class LocalStorage(private val context: Context) : JobStore {
     modelName: String,
     modelPath: String,
     mmprojPath: String?,
-    nGpuLayers: Int,
-    contextSize: Int,
+    runtimeFlags: RuntimeFlagRef,
     runtimeVersion: String,
     runtimeCpuBackend: String?,
     benchmarkType: BenchmarkType,
@@ -211,16 +213,16 @@ class LocalStorage(private val context: Context) : JobStore {
     json.put("model_quant", parseQuant(modelFile.name) ?: "unknown")
     // model_descriptor / runtime_descriptor: the lossless typed descriptors the server stores opaquely (mmproj_quant was retired server-side).
     // model_descriptor is elided for a source-less cell (imported file with no HF slug); runtime_descriptor is the engine identity, runtime_flags the
-    // load knobs as the CLI-flag string (matching iOS).
+    // load knobs as this cell resolved them (matching iOS's typed submission value).
     putModelIdentity(json, modelName, modelFile.name, mmprojPath?.let { File(it).name }, benchmarkType)
     json.put("submitted_at", DateFormats.isoNow())
-    // This app build — the harness, not the engine it drove (runtime_version).
+    // This app build: the harness, not the engine it drove (runtime_version).
     // The server stores it opaquely as a grouping key, so a shift in the numbers
     // can be attributed to an app change rather than to the device.
     //
     // BUILD_VERSION, not VERSION_NAME: this is the version the APK was PUBLISHED
-    // as (ci/version.sh, e.g. "2026.08.1-3-ga1b2c3d4ab"), which is also the
-    // GitHub release's tag — so a row maps to a downloadable artifact by
+    // as (build.yml's `release-metadata`, e.g. "2026.08.11-640d96e8"), which is
+    // also the GitHub release's tag, so a row maps to a downloadable artifact by
     // equality. VERSION_NAME is the user-visible app version and is constrained
     // by what Play accepts; it cannot also be this. "dev" on a local build,
     // "<version>-debug" on a debug build. See app/build.gradle.kts.
@@ -228,7 +230,7 @@ class LocalStorage(private val context: Context) : JobStore {
     json.put("runtime_name", "llamacpp_apk_pipette")
     json.put("runtime_version", runtimeVersion)
     json.put("runtime_descriptor", SubmissionRef.runtime(runtimeVersion))
-    json.put("runtime_flags", SubmissionRef.runtimeFlags(nGpuLayers, contextSize))
+    json.put("runtime_flags", SubmissionRef.runtimeFlags(runtimeFlags))
     // What the harness ran under, next to the engine's load knobs above: the
     // readiness policy this cell was gated by. Omitted (not null) for a cell the
     // flag schema reports no readiness for. See SubmissionRef.benchmarkFlagsOrNull.
@@ -239,12 +241,14 @@ class LocalStorage(private val context: Context) : JobStore {
     runtimeCpuBackend?.let { json.put("runtime_cpu_variant", it) }
     json.put("device_name", DeviceInfo.modelName())
     json.put("device_form_factor", DeviceInfo.formFactor(context))
-    json.put("device_os_name", "Android")
+    json.put("device_os_name", DeviceInfo.OS_NAME)
     json.put("device_os_version", DeviceInfo.osVersion())
     // Finer-grained OS identity; omitted (not null) when the platform reports
     // nothing, matching the optional device fields below.
     DeviceInfo.osBuild()?.let { json.put("device_os_build", it) }
     DeviceInfo.osSecurityPatch()?.let { json.put("device_os_security_patch", it) }
+    DeviceInfo.cpuArch?.let { json.put("device_cpu_arch", it) }
+    json.put("device_os_family", DeviceInfo.OS_FAMILY)
     json.put("device_chip_model", DeviceInfo.chipModel())
     json.put("device_ram_bytes", DeviceInfo.ramBytes(context))
     // Run-environment power state (captured at completion ≈ during the run),
@@ -258,7 +262,7 @@ class LocalStorage(private val context: Context) : JobStore {
     // service process off the prime cores). Omitted when unreadable / the
     // service wasn't bound. These keys ride the submission payload but pipette-
     // mgmt has no typed field for them yet, so the server currently drops them
-    // on ingest — the CSV export is the only consumer until mgmt adds them (see
+    // on ingest. The CSV export is the only consumer until mgmt adds them (see
     // PIP follow-up). Forward-compatible: harmless once the server fields land.
     benchmarkCpuAffinity?.let { affinity ->
       affinity.cpusetPath?.let { json.put("device_android_cpuset", it) }
@@ -322,6 +326,16 @@ class LocalStorage(private val context: Context) : JobStore {
       val stem = filename.replace(Regex("\\.gguf$", RegexOption.IGNORE_CASE), "")
       return stem.split("-").asReversed().firstOrNull { isQuantToken(it) }
     }
+
+    /**
+     * Strip a trailing `-GGUF` repo suffix, preserving original case: `Bonsai-8B-gguf` → `Bonsai-8B`. Case-insensitive because publishers disagree on
+     * it (`prism-ml` lowercases where most uppercase), and the layout is the same either way.
+     *
+     * Takes a repo *leaf*, not an `org/repo` slug and not a filename: the caller splits first, so this stays one string rule with one place to
+     * change. The GGUF filename a repo publishes is derived from this stem, and so is the label shown when a model has no catalog row to be named
+     * from, which is why both paths share it.
+     */
+    fun repoStem(repoName: String): String = if (repoName.endsWith("-GGUF", ignoreCase = true)) repoName.dropLast("-GGUF".length) else repoName
 
     fun modelStem(filename: String): String {
       val stem = filename.replace(Regex("\\.gguf$", RegexOption.IGNORE_CASE), "")

@@ -11,9 +11,8 @@ struct CompletedRunResultValue: Identifiable {
     let displayValue: String?
     let intensity: Double
     let cell: JobCell?
-    /// A coordinate with no metric whose cell failed — rendered distinctly and
-    /// kept tappable/selectable. Derived once here so the view never re-infers
-    /// "did this cell fail?" from the nested optional.
+    /// No metric because the cell failed. Derived once so the view never re-infers
+    /// it from the nested optional.
     let isFailed: Bool
     let isCancelled: Bool
 
@@ -74,8 +73,7 @@ struct CompletedRunDetailPage: View {
     @State private var collapsedModelIds = Set<String>()
     @State private var isSelecting = false
 
-    /// Page-level horizontal inset. Kept as a constant so the results table can
-    /// negate it and scroll edge to edge (see `resultsSection`).
+    /// Page inset, which the results table negates to scroll edge to edge.
     private static let horizontalInset: CGFloat = 24
 
     private let firstColumnWidth: CGFloat = 130
@@ -149,30 +147,34 @@ struct CompletedRunDetailPage: View {
                     .background(Color(.systemBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .cardBorder(cornerRadius: 12)
-                    // Resting inset that keeps the card aligned with the padded
-                    // header; the negative padding below lets it scroll past.
+                    // Aligns the card with the header at rest; the negative padding
+                    // below lets it scroll past.
                     .padding(.horizontal, Self.horizontalInset)
                 }
-                // Cancel the page's horizontal inset so the scroll viewport spans
-                // edge to edge — the table now scrolls into the screen edges
+                // Cancels the page inset so the table scrolls to the screen edges
                 // instead of clipping short of them.
                 .padding(.horizontal, -Self.horizontalInset)
 
                 if hasSubmittedResults {
-                    submittedLegend
+                    legend("checkmark.icloud.fill", Self.submittedColor, "Already submitted")
+                }
+
+                if let note = MemoryFreshness.tableNote(cells: manifest.cells) {
+                    legend("exclamationmark.triangle.fill", .orange, note)
                 }
             }
         }
     }
 
-    private var submittedLegend: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "checkmark.icloud.fill")
+    private func legend(_ systemImage: String, _ color: Color, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: systemImage)
                 .font(.system(size: 13))
-                .foregroundStyle(Self.submittedColor)
-            Text("Already submitted")
+                .foregroundStyle(color)
+            Text(text)
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 4)
         .accessibilityElement(children: .combine)
@@ -382,6 +384,15 @@ struct CompletedRunDetailPage: View {
                         .accessibilityLabel("Submitted")
                 }
             }
+            .overlay(alignment: .topLeading) {
+                if let cell = value.cell, MemoryFreshness.flagsResult(cell) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                        .padding(3)
+                        .accessibilityLabel("Can read high")
+                }
+            }
             .overlay(alignment: .trailing) {
                 Divider()
                     .background(Color.black.opacity(0.05))
@@ -547,8 +558,7 @@ struct CompletedRunDetailPage: View {
         .disabled(isSubmitting || isRetrying)
     }
 
-    /// Accent green shared by the heatmap fill and the "submitted" badge so a
-    /// submitted cell reads as part of the same visual family.
+    /// Shared by the heatmap fill and the "submitted" badge.
     static let submittedColor = Color(red: 0.06, green: 0.72, blue: 0.50)
 
     private func resultCellColor(_ intensity: Double) -> Color {

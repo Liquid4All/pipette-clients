@@ -1,460 +1,208 @@
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufReader, Write},
+    num::NonZeroUsize,
+    path::Path,
+    sync::{Mutex, PoisonError},
     time::Duration,
 };
 
 use anyhow::Context;
-use reqwest::blocking::Client;
+use reqwest::Method;
+use reqwest::header::CONNECTION;
 use serde::Deserialize;
-use serde_json::{json, Value};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
+use serde_json::{Value, json};
 
-use pipette_doomloop::{format_trigger_log, DoomloopPipeline};
-use pipette_http::HttpClient;
-use pipette_ops::eval_completions::{EvalCompletionSession, EvalCompletionsStore};
-use pipette_plan_types::benchmark::Temperature;
-use pipette_plan_types::reserved_flags::llamacpp_cli_stock_tools as reserved;
-use pipette_plan_types::result::{
-    BenchmarkEvalCompletion, BenchmarkEvalCompletionStopReason, BenchmarkResultData,
+use pipette_http::{HttpClient, StreamClient};
+use pipette_ops::eval_cell::{EvalCell, Sampling};
+use pipette_ops::eval_completions::EvalCompletionSession;
+use pipette_ops::measurement::{
+    self, EvalMeasurementInFlight, EvalMeasurementReading, EvalMeasurementSample,
 };
-use pipette_plan_types::run::RunRequest;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_ops::sse::{self, Delta};
+use pipette_plan_types::{
+    BenchmarkEvalCompletionStopReason, BenchmarkFlagRef, EvalBenchmark,
+    EvalLlamacppCliStockToolsGgufText, LlamacppCliStockToolsExtraRuntimeConfiguration, ModelFlags,
+    ReasoningEffort,
+};
 
-use super::RunResponse;
-use crate::models::require_gguf_text;
-use crate::runtime_flags::{self, MmapPolicy};
-use crate::runtimes::require_llama_server;
-use crate::server;
+use crate::eval_pool::{
+    Server, ServerSlot, SlotNeed, check_slot_context, mcq_grammar, read_sample, slot_server,
+    spawn_server,
+};
+use crate::models::ResolvedGgufTextModel;
+use crate::runtimes::ResolvedLlamaServer;
+use crate::server::{self, LoggingMarker, ServerCommandBuilder};
 
-/// Default HTTP timeout when `benchmark_flags.http_timeout` is unset.
-const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 120;
-
-/// Logged-progress step size for the eval loop. Clamps to `[1, 20]`
-/// so the log doesn't spam for tiny benchmark sets or fall silent
-/// for huge ones.
-fn eval_progress_step(total_samples: usize) -> usize {
-    total_samples.clamp(1, 20)
-}
-
-/// Eval sample loop for a prepared [`RunRequest`] (`benchmark` must be eval).
-///
-/// Resume identity hashes the portable [`RunRequest`].
-pub fn run_eval(
-    req: &RunRequest,
-    eval_completions: &EvalCompletionsStore,
-) -> anyhow::Result<RunResponse> {
-    let benchmark = req.benchmark.as_eval().map_err(anyhow::Error::from)?;
-    let llama_server = require_llama_server(req)?;
-    let model_path = require_gguf_text(req)?;
-    let flags = runtime_flags::for_server(
-        req,
-        8192u32.saturating_add(benchmark.parameter_max_tokens),
-        // Eval runs are long enough to amortize page-ins; leave llama.cpp's
-        // mmap-on default alone.
-        MmapPolicy::AsAuthored,
-    )?;
-    let extra_flags = server::args_for(&flags).build(reserved::SERVER, "eval")?;
-
-    let doomloop = pipette_doomloop::plan::pipeline_from_overrides(
-        req.benchmark_flags.as_ref().and_then(|bf| bf.doomloop()),
-    )
-    .map_err(|e| anyhow::anyhow!("invalid doom-loop configuration: {e}"))?;
-    let enable_thinking = req.model_flags.as_ref().and_then(|f| f.enable_thinking());
-
-    let benchmark_id = benchmark.benchmark_id.as_str();
-    let samples = benchmark
-        .samples
-        .as_deref()
-        .context("eval benchmark missing samples")?;
-    let max_tokens = u64::from(benchmark.parameter_max_tokens);
-    let mcq_choices = benchmark
-        .parameter_mcq_choices
-        .clone()
-        .filter(|items| !items.is_empty());
-    // Sampling temperature is a client-side policy keyed on the eval id
-    // (the server does not send one): IFBench/IFStruct sample at 0.6,
-    // everything else stays greedy.
-    let temperature = benchmark.sampling_temperature()?;
-    let total_samples = samples.len();
-    let progress_every = eval_progress_step(total_samples);
-    let request_timeout = request_timeout_from_req(req);
-
-    let server = start_and_wait_ready(&llama_server, &model_path, &extra_flags, request_timeout)?;
-    let apply_template_client = HttpClient::blocking_with_timeout("pipette", request_timeout)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let completion_mode = CompletionMode::pick(
-        mcq_choices.as_deref(),
-        max_tokens,
-        temperature,
-        &doomloop,
-        request_timeout,
-    )?;
-
-    // Resume keyed by portable RunRequest identity (EvalCompletionsStore).
-    let checkpoint = eval_completions.open(req)?;
-
-    // Thread (checkpoint, server) through each sample. Every arm of
-    // every iteration returns a fresh `(checkpoint, server)` pair —
-    // the server is replaced after a crash but kept on transport
-    // errors; the checkpoint is replaced after each append. The state
-    // is owned, not captured by reference, so the closure has no
-    // `&mut` upvars.
-    let (checkpoint, server) = samples.iter().enumerate().try_fold(
-        (checkpoint, server),
-        |(checkpoint, mut server), (index, sample)| -> anyhow::Result<(_, _)> {
-            let sample_id = sample
-                .get("id")
-                .and_then(Value::as_str)
-                .context("eval sample missing id")?;
-            // `eval_completions.open` already logs the resume-count summary; a
-            // per-sample skip log was scrollback noise at scale.
-            if checkpoint.contains(sample_id) {
-                return Ok((checkpoint, server));
-            }
-            let messages = sample
-                .get("messages")
-                .cloned()
-                .context("eval sample missing messages")?;
-            let position = format!("eval sample {}/{total_samples}: id={sample_id}", index + 1);
-
-            match completion_mode.run_sample(
-                &apply_template_client,
-                &server.base_url,
-                &messages,
-                &position,
-                enable_thinking,
-            ) {
-                Ok(outcome) => {
-                    let checkpoint = checkpoint.with_append(BenchmarkEvalCompletion {
-                        id: sample_id.to_string(),
-                        completion: outcome.content,
-                        failed: false,
-                        failed_reason: None,
-                        stop_reason: outcome.stop_reason,
-                        stop_detail: outcome.stop_detail,
-                        completion_tokens: outcome.completion_tokens,
-                    })?;
-                    log_progress_tick(benchmark_id, &checkpoint, total_samples, progress_every);
-                    Ok((checkpoint, server))
-                }
-                Err(err) => {
-                    // Two recovery paths, both record `failed: true`
-                    // and continue with the next sample:
-                    //
-                    //   * child exited → server is gone; spawn a fresh
-                    //     one before the next sample.
-                    //   * child still alive → transport / HTTP error
-                    //     against a live server; keep the same server
-                    //     and just skip the sample.
-                    //
-                    // llama.cpp is known to crash on some prompts; we
-                    // want correct per-sample reporting rather than a
-                    // whole-cell abort.
-                    //
-                    // Ordering is load-bearing: append the failed
-                    // entry to the checkpoint *before* attempting a
-                    // restart. If `start_and_wait_ready` fails (port
-                    // collision, OOM, model gone) we still want the
-                    // poison sample recorded so a retry skips it
-                    // rather than re-crashing in a loop.
-                    let exit_status =
-                        server::poll_child_exit(&mut server.child, CRASH_OBSERVATION_WINDOW)?;
-                    let (live_server, reason, stderr_tail) = match exit_status {
-                        Some(status) => {
-                            // Crash path: drain the dead server's
-                            // stderr; we'll spawn a fresh one after
-                            // appending the failed entry.
-                            let stderr = server.shutdown_collect_stderr();
-                            (None, build_crash_reason(status, &err), stderr)
-                        }
-                        None => {
-                            // Transport error against a live server.
-                            // Snapshot recent stderr (non-consuming)
-                            // so operators see anything llama-server
-                            // logged before dropping the connection
-                            // (OOM, tokenizer warnings, etc.). Don't
-                            // touch the server itself; the next sample
-                            // will hit the same process.
-                            let stderr = server.stderr_snapshot();
-                            (Some(server), build_transport_failure_reason(&err), stderr)
-                        }
-                    };
-                    log_sample_failure(&position, &reason, &messages, &err, &stderr_tail);
-                    let checkpoint = checkpoint.with_append(BenchmarkEvalCompletion {
-                        id: sample_id.to_string(),
-                        completion: String::new(),
-                        failed: true,
-                        failed_reason: Some(reason.clone()),
-                        // The client is the source of truth for `stop_reason`:
-                        // a sample that never produced a completion is a
-                        // `failure`, with the crash/transport detail in
-                        // `stop_detail`. `failed` / `failed_reason` are
-                        // dual-written for legacy consumers until PIP-323
-                        // retires them.
-                        stop_reason: BenchmarkEvalCompletionStopReason::Failure,
-                        stop_detail: Some(reason),
-                        completion_tokens: None,
-                    })?;
-                    let server = match live_server {
-                        Some(s) => s,
-                        None => {
-                            log::info!("restarting llama-server after crash");
-                            start_and_wait_ready(
-                                &llama_server,
-                                &model_path,
-                                &extra_flags,
-                                request_timeout,
-                            )
-                            .context("llama-server failed to come back after restart")?
-                        }
-                    };
-                    Ok((checkpoint, server))
-                }
-            }
+/// Eval through [`measurement::eval()`], resuming `checkpoint`. The dispatch
+/// records the cell's flags as authored.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the checkpoint opened on its identity"
+)]
+pub fn run(
+    benchmark: &EvalBenchmark,
+    runtime_flags: EvalLlamacppCliStockToolsGgufText,
+    model_flags: Option<&ModelFlags>,
+    benchmark_flags: &BenchmarkFlagRef,
+    program: &ResolvedLlamaServer,
+    model: &ResolvedGgufTextModel,
+    checkpoint: EvalCompletionSession,
+    client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
+) -> anyhow::Result<RunResponseBuilder> {
+    // `parallel` is the slot count llama-server is started with *and* the
+    // number of samples kept in flight. A raw slot flag reaches llama-server
+    // without this loop knowing to fill the slots; it is read only so the
+    // context check sees the divisor argv will carry.
+    let parallel = runtime_flags.parallel;
+    let slots = parallel.map_or(1, |n| n.into_inner().unsigned_abs());
+    let per_cell_ctx =
+        8192u32.saturating_add(benchmark.parameter_max_tokens.into_inner().unsigned_abs());
+    check_slot_context(
+        LoggingMarker::Eval,
+        slots,
+        server::raw_parallel(&runtime_flags.raw).and_then(|(_, count)| count),
+        runtime_flags.ctx_size,
+        per_cell_ctx,
+        SlotNeed::Generation {
+            max_tokens: benchmark.parameter_max_tokens.into_inner().unsigned_abs(),
         },
     )?;
+    // The context spans the slots unless the cell pinned a total. The weights
+    // keep llama.cpp's mmap default: an eval runs long enough to amortize the
+    // page faults.
+    let runtime_flags = EvalLlamacppCliStockToolsGgufText {
+        ctx_size: Some(match runtime_flags.ctx_size {
+            Some(total) => total,
+            None => server::ctx_across_slots(per_cell_ctx, slots)?,
+        }),
+        ..runtime_flags
+    };
+    let launch = launch(&runtime_flags, program, model, client_config);
+    let argv = launch.args()?;
 
-    // Capture the FAILED-block signal before `finalize` consumes the
-    // session. See `EvalCompletionSession::finalize` and
-    // `docs/pipette-cli/eval-checkpoint.md` for the on-disk and wire contracts.
-    let failed_signal = failed_signal_message(benchmark_id, &checkpoint);
-    log_eval_summary(benchmark_id, &checkpoint);
-    let completions = checkpoint.finalize()?;
-    Ok(RunResponse {
-        executable: Some(llama_server.display().to_string()),
-        // After a mid-run restart this argv differs from the original
-        // only in `--port`.
-        command: server.command_preview.clone(),
-        runtime_flags: Some(flags.clone()),
-        ..RunResponse::new(
-            BenchmarkResultData::Eval { completions },
-            String::new(),
-            failed_signal,
-        )
+    let cell = EvalCell::new(benchmark, model_flags, parallel)?;
+    let request_timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
+
+    // The first start and every restart, with the same argv: a server that
+    // came back configured differently from the one that crashed would
+    // silently change what the rest of the cell measures.
+    let start = || spawn_server(&launch, request_timeout);
+    let first = start()?;
+    let http = HttpClient::loopback("pipette", request_timeout)?;
+    let enable_thinking = cell.enable_thinking;
+    let slot = Mutex::new(ServerSlot {
+        server: Server::Up(first),
+        generation: 0,
+    });
+    let completion_mode = CompletionMode::pick(
+        cell.mcq_choices,
+        u64::from(cell.max_tokens),
+        cell.sampling,
+        measurement::stream_idle_timeout_for(benchmark_flags.http_timeout_seconds),
+        // The tee holds the stderr lock for a whole generation, which would
+        // serialise a pool. A terminal only: in a log the raw tokens would split
+        // the one-event-per-line stream, and the debug `sample completion text`
+        // carries it.
+        cell.workers <= 1 && std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )?;
+
+    let result_data = measurement::eval(
+        benchmark,
+        EvalMeasurementInFlight::Parallel(
+            NonZeroUsize::new(cell.workers).unwrap_or(NonZeroUsize::MIN),
+        ),
+        checkpoint,
+        &slot,
+        |slot, samples, record| {
+            samples.iter().enumerate().try_for_each(|(at, sample)| {
+                let messages = sample.messages.raw()?;
+                let Some((base_url, generation)) = slot_server(slot, &start)? else {
+                    return record(
+                        at,
+                        EvalMeasurementReading::Lost {
+                            reason: "llama-server did not come back after a crash".to_owned(),
+                        },
+                    );
+                };
+                let reading = read_sample(slot, generation, sample, &argv, "/completion", || {
+                    completion_mode.run_sample(
+                        &http,
+                        &base_url,
+                        sample,
+                        messages,
+                        enable_thinking,
+                        cell.reasoning_effort,
+                    )
+                })?;
+                record(at, reading)
+            })?;
+            Ok(())
+        },
+    )?;
+    // The latest server's argv and log: after a mid-run restart the argv
+    // differs only in `--port`. No memory observation, deliberately: a server
+    // started after a crash would have watched only the tail of the run.
+    let ServerSlot { server, .. } = slot.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let response = RunResponseBuilder::new(result_data);
+    Ok(match server {
+        Server::Up((mut llama_server, _)) | Server::Down(mut llama_server) => {
+            response.process(&mut llama_server)
+        }
+        Server::RestartFailed => response,
     })
 }
 
-/// POST `/apply-template` with the sample's messages; return the
-/// rendered prompt string. Runtime-agnostic; the MCQ-vs-streaming
-/// dispatch lives on `CompletionMode::run_sample` below.
-///
-/// `enable_thinking` is forwarded as `chat_template_kwargs.enable_thinking`
-/// when set; the field is honored by `/apply-template` on b9119+
-/// regardless of whether the server was started with `--jinja`. Omit
-/// the kwarg entirely when unset so the request body stays
-/// byte-identical to pre-flag callers.
 fn fetch_prompt(
-    client: &Client,
+    http: &HttpClient,
     base_url: &str,
     messages: &Value,
     enable_thinking: Option<bool>,
+    reasoning_effort: Option<ReasoningEffort>,
 ) -> anyhow::Result<String> {
+    server::apply_template(
+        http,
+        base_url,
+        apply_template_body(messages, enable_thinking, reasoning_effort),
+    )
+}
+
+/// The `/apply-template` body for `messages` under the cell's model flags,
+/// each set only when the flag is, so a cell that sets neither renders the
+/// prompt from `messages` alone.
+///
+/// - `enable_thinking` goes in `chat_template_kwargs`, which `/apply-template`
+///   honours on b9119+ whether or not the server was started with `--jinja`.
+/// - `reasoning_effort` goes in `chat_template_kwargs` too, which every build
+///   this client runs hands the template as a variable: gpt-oss renders it as
+///   its `Reasoning:` line. It also goes top-level, the OpenAI spelling. b11349
+///   writes that into the same variable; the LFM3 fork (e749ac1) reads it only
+///   for `none`, which the flag cannot say, so there the kwarg alone carries it.
+fn apply_template_body(
+    messages: &Value,
+    enable_thinking: Option<bool>,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Value {
+    let mut kwargs = serde_json::Map::new();
+    if let Some(enable_thinking) = enable_thinking {
+        kwargs.insert("enable_thinking".to_string(), json!(enable_thinking));
+    }
+    if let Some(reasoning_effort) = reasoning_effort {
+        kwargs.insert("reasoning_effort".to_string(), json!(reasoning_effort));
+    }
     let mut body = serde_json::Map::new();
     body.insert("messages".to_string(), messages.clone());
-    if let Some(enable_thinking) = enable_thinking {
-        body.insert(
-            "chat_template_kwargs".to_string(),
-            json!({ "enable_thinking": enable_thinking }),
-        );
+    if !kwargs.is_empty() {
+        body.insert("chat_template_kwargs".to_string(), Value::Object(kwargs));
     }
-    let apply: Value = client
-        .post(format!("{base_url}/apply-template"))
-        .json(&Value::Object(body))
-        .send()
-        .context("failed to call /apply-template")?
-        .error_for_status()
-        .context("/apply-template failed")?
-        .json()
-        .context("failed to parse /apply-template response")?;
-    apply
-        .get("prompt")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .context("/apply-template response missing prompt")
-}
-
-/// How long to wait for `llama-server` to surface as exited after a
-/// `/completion` failure before deciding the server is still alive.
-/// See `server::poll_child_exit` for why this is multi-
-/// second rather than a bare `try_wait`.
-const CRASH_OBSERVATION_WINDOW: Duration = Duration::from_secs(3);
-
-/// Root cause string from an `anyhow::Error` chain — the deepest
-/// `source()`, falling back to the top-level display if the chain is
-/// single-link. Used to surface transport/HTTP causes (e.g.
-/// `connection error: forcibly closed (os error 10054)`) in the
-/// checkpoint's `failed_reason` and downstream mgmt rows.
-fn root_cause(err: &anyhow::Error) -> String {
-    err.chain()
-        .last()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| err.to_string())
-}
-
-/// Build the `failed_reason` for the *child-exited* path. The
-/// `[<rfc3339>]` prefix folds the observed-at timestamp into the wire
-/// format without a dedicated field (see
-/// `BenchmarkEvalCompletion::failed_reason`). The transport-error
-/// chain root is appended so mgmt rows carry both the exit status
-/// *and* what the client saw.
-fn build_crash_reason(exit_status: std::process::ExitStatus, err: &anyhow::Error) -> String {
-    let observed_at = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "unknown".to_string());
-    format!(
-        "[{observed_at}] llama-server crashed mid-completion: exit {exit_status}; client saw: {}",
-        root_cause(err),
-    )
-}
-
-/// Build the `failed_reason` for the *server-still-alive* path: a
-/// `/completion` call returned an HTTP / transport error but the
-/// child process is still running. We keep the existing server and
-/// only the sample is recorded as failed.
-fn build_transport_failure_reason(err: &anyhow::Error) -> String {
-    let observed_at = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "unknown".to_string());
-    format!(
-        "[{observed_at}] llama-server /completion failed (server still alive): {}",
-        root_cause(err),
-    )
-}
-
-/// Emit the operator-visible WARN line for a per-sample failure, plus
-/// a stderr-tail line when the server left something useful behind.
-/// `stderr` comes from `shutdown_collect_stderr` on the crash path
-/// and from `stderr_snapshot` on the live-server path; it may be
-/// empty if the server hadn't logged anything yet. `position` is the
-/// shared "eval sample N/M: id=X" prefix.
-fn log_sample_failure(
-    position: &str,
-    reason: &str,
-    messages: &Value,
-    err: &anyhow::Error,
-    stderr: &str,
-) {
-    let prompt_preview = messages
-        .as_array()
-        .and_then(|m| m.last())
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .map(|s| s.chars().take(80).collect::<String>())
-        .unwrap_or_default();
-    log::warn!(
-        "{position} FAILED ({reason}); prompt~={prompt_preview:?}; underlying error: {err:#}"
-    );
-    if !stderr.is_empty() {
-        log::warn!("llama-server stderr tail:\n{}", tail_lines(stderr, 20));
+    if let Some(reasoning_effort) = reasoning_effort {
+        body.insert("reasoning_effort".to_string(), json!(reasoning_effort));
     }
+    Value::Object(body)
 }
 
-/// Per-sample progress log. `processed` counts both completed and
-/// failed so the end-of-cell tick still fires when samples crashed;
-/// the displayed `completed` stays success-only.
-fn log_progress_tick(
-    benchmark_id: &str,
-    checkpoint: &EvalCompletionSession,
-    total_samples: usize,
-    progress_every: usize,
-) {
-    let processed = checkpoint.completions().len();
-    if processed == 1 || processed == total_samples || processed.is_multiple_of(progress_every) {
-        let completed = processed - checkpoint.failed_count();
-        log::info!("eval progress: benchmark={benchmark_id} completed={completed}/{total_samples}");
-    }
-}
-
-/// Spawn `llama-server` and block until `/health` is ready. On failure,
-/// drains the server's stderr into the returned error so the operator
-/// sees what went wrong without digging through scrollback. The
-/// original error's anyhow chain is preserved via `.context(...)`
-/// (vs. `bail!("{e}")`, which would flatten causes into a string).
-/// Used for both the initial startup and the post-crash restart.
-fn start_and_wait_ready(
-    llama_server: &std::path::Path,
-    model_path: &std::path::Path,
-    extra_flags: &[String],
-    request_timeout: Duration,
-) -> anyhow::Result<server::RunningLlamaServer> {
-    let mut server = server::start(llama_server, model_path, None, extra_flags)?;
-    if let Err(e) = server::wait_until_ready(&server.base_url, &mut server.child, request_timeout) {
-        let stderr = server::shutdown_and_collect_stderr(&mut server);
-        return if stderr.is_empty() {
-            Err(e)
-        } else {
-            Err(e.context(format!("server stderr:\n{stderr}")))
-        };
-    }
-    Ok(server)
-}
-
-/// Return at most the last `n` lines of `text`, rejoined with `\n`. Used
-/// to keep crash logs readable when the runtime emitted thousands of
-/// lines before dying.
-fn tail_lines(text: &str, n: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
-}
-
-/// Final summary line for an eval cell. Mirrors the per-cell view operators
-/// look for in the log: how many samples landed in the result payload vs.
-/// how many were skipped as failed, with the offending ids inlined.
-fn log_eval_summary(benchmark_id: &str, checkpoint: &EvalCompletionSession) {
-    let failed_count = checkpoint.failed_count();
-    let completed = checkpoint.completions().len() - failed_count;
-    if failed_count == 0 {
-        log::info!("eval finished: benchmark={benchmark_id} completed={completed} failed=0");
-    } else {
-        let ids: Vec<&str> = checkpoint.failed_ids().collect();
-        log::warn!(
-            "eval finished: benchmark={benchmark_id} completed={completed} \
-             failed={failed_count} ids={ids:?}"
-        );
-    }
-}
-
-/// Build the FAILED block written to `RunResponse.stderr` — lands
-/// in `result_extras_path` so operators can grep historical failures
-/// without keeping log scrollback. Empty string when no failed entries.
-fn failed_signal_message(benchmark_id: &str, checkpoint: &EvalCompletionSession) -> String {
-    use std::fmt::Write;
-
-    let failed = checkpoint.failed_count();
-    if failed == 0 {
-        return String::new();
-    }
-    let total = checkpoint.completions().len();
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "FAILED: benchmark={benchmark_id} failed={failed} of {total}"
-    );
-    for entry in checkpoint.completions().iter().filter(|c| c.failed) {
-        let reason = entry.failed_reason.as_deref().unwrap_or("(no reason)");
-        let _ = writeln!(out, "  id={} reason={}", entry.id, reason);
-    }
-    out
-}
-
-/// A single sample's completion plus the stop metadata captured at
-/// generation. `stop_reason` is always classified (the MCQ arm and an
-/// unclassifiable stream fall back to `unknown`); `stop_detail` carries the
-/// raw why behind a non-clean stop; `completion_tokens` is `None` when the
-/// runtime didn't report a count.
-struct SampleOutcome {
-    content: String,
-    stop_reason: BenchmarkEvalCompletionStopReason,
-    stop_detail: Option<String>,
-    completion_tokens: Option<u64>,
-}
-
-/// Fields llama-server emits on the final streaming chunk (`stop: true`),
-/// mirroring the completion-response shape parsed by `end_to_end_latency`
-/// / `vl_throughput`. `predicted_n` is the generated-token count. Both the
-/// boolean flags (older builds) and the `stop_type` string (newer builds)
-/// are parsed so classification doesn't depend on which the server sends.
+/// llama-server's final streaming chunk (`stop: true`). Both the boolean flags
+/// (older builds) and `stop_type` (newer builds) are read.
 #[derive(Debug, Default, Deserialize)]
 struct StreamTermination {
     #[serde(default)]
@@ -473,20 +221,13 @@ struct StreamTimings {
     predicted_n: Option<u64>,
 }
 
-/// Outcome of reading the SSE stream: the accumulated text, the doom-loop
-/// trigger detail (`Some` iff the detector aborted generation), and the
-/// terminal event's stop metadata (absent if the stream ended without a
-/// `stop: true` event).
 struct SseOutcome {
     content: String,
-    doom_loop: Option<String>,
     termination: Option<StreamTermination>,
 }
 
-/// The classification of a finished stream: the canonical `reason`, the
-/// generated-token `completion_tokens` (when the terminal event reported
-/// them), and a free-form `detail` recording the raw why for a non-clean
-/// stop (so an `unknown` is never a dead end when debugging).
+/// `detail` records the raw why of a non-clean stop, so an `unknown` is never a
+/// dead end when debugging.
 #[derive(Debug, PartialEq, Eq)]
 struct StopClassification {
     reason: BenchmarkEvalCompletionStopReason,
@@ -494,25 +235,16 @@ struct StopClassification {
     detail: Option<String>,
 }
 
-/// Classify a finished stream. A doom-loop abort wins — it's the only source
-/// of `doom_loop`. Otherwise the terminal event's flags decide: `limit` ⇒
-/// `truncated` (hit the output-token cap), `eos` ⇒ `eos` (model emitted
-/// EOS). Anything else — an unrecognized `stop_type` (e.g. `"word"`), or no
-/// terminal event at all (a dropped stream) — is `unknown` rather than a
-/// guessed `eos`.
+/// Anything but `limit` or `eos`, such as `stop_type: "word"`, is `unknown`
+/// rather than a guessed `eos`.
 fn classify_stop(sse: &SseOutcome) -> StopClassification {
-    if let Some(detail) = &sse.doom_loop {
-        return StopClassification {
-            reason: BenchmarkEvalCompletionStopReason::DoomLoop,
-            completion_tokens: None,
-            detail: Some(detail.clone()),
-        };
-    }
+    // A stream that ends before its stop chunk fails the read, so the only
+    // way here is a stop chunk whose shape did not deserialize.
     let Some(term) = &sse.termination else {
         return StopClassification {
             reason: BenchmarkEvalCompletionStopReason::Unknown,
             completion_tokens: None,
-            detail: Some("stream ended without a terminal stop event".to_string()),
+            detail: Some("terminal stop event did not carry readable stop metadata".to_string()),
         };
     };
     let tokens = term.timings.predicted_n;
@@ -541,30 +273,41 @@ fn classify_stop(sse: &SseOutcome) -> StopClassification {
     }
 }
 
-/// How a single sample's `/completion` is fetched. MCQ and streaming
-/// differ on three coupled axes — HTTP client, request body, response
-/// parser — and a mismatch (e.g. bounded client + SSE body) would
-/// silently break. Bundling them into one enum co-locates the
-/// decision: `pick` chooses the variant once at run start, and every
-/// per-sample call goes through `run_sample`.
+/// Control tokens every `/completion` asks to have rendered as text, which
+/// `llama-server` otherwise drops. North-Mini-Code (Cohere) brackets its
+/// reasoning and its answer with them, and the GGUF converter makes every
+/// `<|…|>` token a control token, so without them the scorer gets reasoning
+/// and answer with no boundary between. vLLM already keeps them, since the HF
+/// tokenizer marks them non-special, so the text matches across runtimes. A
+/// string that is not one token of the model's vocabulary is skipped, so every
+/// model can carry the list: it changes what is rendered, not what is sampled
+/// or where generation stops.
+const PRESERVED_TOKENS: [&str; 4] = [
+    "<|START_THINKING|>",
+    "<|END_THINKING|>",
+    "<|START_TEXT|>",
+    "<|END_TEXT|>",
+];
+
+/// How a sample's `/completion` is fetched. MCQ and streaming differ in client,
+/// body and parser together, and a mismatch (a bounded client with an SSE body)
+/// would silently break, so one enum holds each set.
 enum CompletionMode<'a> {
-    /// Grammar-constrained single-token request, returned as a single
-    /// JSON response. Uses a bounded-timeout client; an SSE-shaped
-    /// client would risk hanging on a wedged server.
+    /// A grammar-constrained single token, as one JSON response on the bounded
+    /// client: a streaming client could hang on a wedged server.
     Mcq {
-        client: Client,
         grammar: String,
-        temperature: Temperature,
+        sampling: Sampling<'a>,
     },
-    /// Streaming free-form generation. Uses a connect-only-timeout
-    /// client so the long-lived SSE response isn't killed mid-stream
-    /// by the overall HTTP timeout. Borrows the doom-loop pipeline
-    /// from the eval setup because only this path consumes it.
+    /// The [`StreamClient`] has a connect-only HTTP timeout, so the long-lived
+    /// response is not killed mid-stream, and the idle bound the reader fails on.
     Streaming {
-        client: Client,
+        client: StreamClient,
         max_tokens: u64,
-        temperature: Temperature,
-        doomloop: &'a DoomloopPipeline,
+        sampling: Sampling<'a>,
+        /// Mirror tokens to stderr as they arrive. Off for a concurrent pool:
+        /// the tee holds the stderr lock for a whole generation.
+        tee_stderr: bool,
     },
 }
 
@@ -572,84 +315,67 @@ impl<'a> CompletionMode<'a> {
     fn pick(
         mcq_choices: Option<&[String]>,
         max_tokens: u64,
-        temperature: Temperature,
-        doomloop: &'a DoomloopPipeline,
-        request_timeout: Duration,
+        sampling: Sampling<'a>,
+        idle_timeout: Duration,
+        tee_stderr: bool,
     ) -> anyhow::Result<Self> {
         match mcq_choices {
             Some(choices) => Ok(Self::Mcq {
-                client: HttpClient::blocking_with_timeout("pipette", request_timeout)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?,
                 grammar: mcq_grammar(choices),
-                temperature,
+                sampling,
             }),
             None => Ok(Self::Streaming {
-                client: streaming_http_client(request_timeout)?,
+                client: streaming_http_client(idle_timeout)?,
                 max_tokens,
-                temperature,
-                doomloop,
+                sampling,
+                tee_stderr,
             }),
         }
     }
 
-    /// Apply the chat template, then fetch a completion (single-shot
-    /// JSON for MCQ, streaming SSE for free-form). `position` is the
-    /// shared "eval sample N/M: id=X" prefix used by the prompt and
-    /// completion info logs. `enable_thinking` is the operator's declared
-    /// value, `None` when unset — see `fetch_prompt` for the
-    /// `chat_template_kwargs` contract.
     fn run_sample(
         &self,
-        apply_template_client: &Client,
+        http: &HttpClient,
         base_url: &str,
+        sample: &EvalMeasurementSample<'_>,
         messages: &Value,
-        position: &str,
         enable_thinking: Option<bool>,
-    ) -> anyhow::Result<SampleOutcome> {
-        let prompt = fetch_prompt(apply_template_client, base_url, messages, enable_thinking)?;
-        log::info!("{position} prompt={prompt}");
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> anyhow::Result<EvalMeasurementReading> {
+        let prompt = fetch_prompt(http, base_url, messages, enable_thinking, reasoning_effort)?;
+        // The texts are in the eval checkpoint and the result already; at info
+        // they made up nearly all of a pool job's log.
+        tracing::debug!(
+            sample = sample.position.as_str(),
+            sample_id = %sample.id,
+            prompt_text = prompt.as_str(),
+            "rendered prompt"
+        );
         let url = format!("{base_url}/completion");
-        let outcome = match self {
-            Self::Mcq {
-                client,
-                grammar,
-                temperature,
-            } => {
-                // No `seed` is sent: under temperature > 0 each `#k`
-                // repeat must be an independent draw (see PIP-180). A
-                // pinned seed would make all repeats identical and
-                // collapse pass@1 to the single-shot number.
-                let body = json!({
+        let reading = match self {
+            Self::Mcq { grammar, sampling } => {
+                // The seed is the sample's own, off the `#k` repeat index: the
+                // base seed on every repeat would collapse pass@1 to one shot.
+                let mut body = json!({
                     "prompt": prompt,
-                    "temperature": temperature.as_f64(),
                     "n_predict": 1,
                     "grammar": grammar,
+                    "preserved_tokens": PRESERVED_TOKENS,
                 });
-                let completion: Value = client
-                    .post(&url)
-                    .json(&body)
-                    .send()
-                    .context("failed to call /completion")?
-                    .error_for_status()
-                    .context("/completion failed")?
-                    .json()
-                    .context("failed to parse /completion response")?;
-                // MCQ uses `n_predict: 1` + grammar — the server must
-                // emit one token from the grammar alternatives, so a
-                // missing or non-string `content` field signals a
-                // server bug. Bail loudly instead of substituting an
-                // empty string (which would score as a wrong answer
-                // and bury the real problem).
+                sampling.apply(&mut body, sample.id)?;
+                let completion: Value = http
+                    .json_request(Method::POST, &url, None, Some(body))
+                    .context("POST /completion")?;
+                // The grammar forces one token, so a missing `content` is a
+                // server bug: an empty string would score as a wrong answer.
                 let content = completion
                     .get("content")
                     .and_then(Value::as_str)
                     .context("/completion response missing string `content` field")?
                     .to_string();
-                // MCQ (`n_predict: 1` + grammar) is out of scope for
-                // stop_reason capture — no current eval uses it — so it can't
-                // give a meaningful eos/truncated: label it `unknown` and say why.
-                SampleOutcome {
-                    content,
+                // One forced token has no meaningful eos or truncated.
+                EvalMeasurementReading::Completed {
+                    completion: content,
                     stop_reason: BenchmarkEvalCompletionStopReason::Unknown,
                     stop_detail: Some("mcq arm (n_predict:1, grammar-constrained)".to_string()),
                     completion_tokens: None,
@@ -658,72 +384,81 @@ impl<'a> CompletionMode<'a> {
             Self::Streaming {
                 client,
                 max_tokens,
-                temperature,
-                doomloop,
+                sampling,
+                tee_stderr,
             } => {
-                // No `seed` is sent here either — see the MCQ arm above.
-                let body = json!({
+                let mut body = json!({
                     "prompt": prompt,
-                    "temperature": temperature.as_f64(),
                     "n_predict": max_tokens,
                     "stream": true,
+                    "preserved_tokens": PRESERVED_TOKENS,
                 });
-                let sse = stream_completion(client, &url, &body, doomloop)?;
+                sampling.apply(&mut body, sample.id)?;
+                let sse = stream_completion(client, &url, &body, *tee_stderr)?;
                 let stop = classify_stop(&sse);
-                SampleOutcome {
-                    content: sse.content,
+                EvalMeasurementReading::Completed {
+                    completion: sse.content,
                     stop_reason: stop.reason,
                     stop_detail: stop.detail,
                     completion_tokens: stop.completion_tokens,
                 }
             }
         };
-        log::info!(
-            "{position} completion={} stop_reason={:?} completion_tokens={:?} stop_detail={:?}",
-            outcome.content,
-            outcome.stop_reason,
-            outcome.completion_tokens,
-            outcome.stop_detail
-        );
-        Ok(outcome)
+        if let EvalMeasurementReading::Completed {
+            completion,
+            stop_reason,
+            stop_detail,
+            completion_tokens,
+        } = &reading
+        {
+            tracing::info!(
+                sample = sample.position.as_str(),
+                sample_id = %sample.id,
+                completion_chars = completion.chars().count(),
+                ?stop_reason,
+                completion_tokens,
+                stop_detail = stop_detail.as_deref(),
+                "sample completed"
+            );
+            tracing::debug!(
+                sample_id = %sample.id,
+                completion = completion.as_str(),
+                "sample completion text"
+            );
+        }
+        Ok(reading)
     }
 }
 
-/// HTTP client for streaming: connect timeout only, no overall response
-/// timeout that would kill the long-lived SSE connection. The server is
-/// local and managed by us — if it hangs, the `RunningLlamaServer`
-/// `Drop` will kill it and unblock the reader.
-fn streaming_http_client(connect_timeout: Duration) -> anyhow::Result<Client> {
-    Ok(pipette_http::HttpClient::builder("pipette")
-        .preconfigured_tls()
-        .connect_timeout(connect_timeout)
-        .no_request_timeout()
-        .build()
-        .context("failed to build streaming HTTP client")?
-        .client()
-        .clone())
+/// No overall response timeout, which would kill the long-lived SSE connection:
+/// a wedged server is caught by the reader's idle bound.
+fn streaming_http_client(idle_timeout: Duration) -> anyhow::Result<StreamClient> {
+    HttpClient::streaming("pipette", idle_timeout).context("failed to build streaming HTTP client")
 }
 
-/// Send a streaming completion request and read SSE events, printing content
-/// to stderr as it arrives. Returns the fully accumulated completion text.
-/// If a doom-loop detector fires, generation is stopped early and a
-/// `log::warn!` line is emitted.
+/// The stderr lock is a LEAF and must stay one: it is held for the whole
+/// generation, and it blocks across threads, so anything that acquired a
+/// pool lock first would stall every worker for the length of a completion.
 fn stream_completion(
-    client: &Client,
+    client: &StreamClient,
     url: &str,
     body: &Value,
-    doomloop: &DoomloopPipeline,
+    tee_stderr: bool,
 ) -> anyhow::Result<SseOutcome> {
-    let response = client
+    let request = client
+        .http()
         .post(url)
-        .json(body)
-        .send()
-        .context("failed to call /completion")?
-        .error_for_status()
-        .context("/completion failed")?;
-    let reader = BufReader::new(response);
+        // llama-server closes a streamed reply's connection although its headers keep it alive.
+        .header(CONNECTION, "close")
+        .json(body);
+    let response = pipette_http::send(request).context("failed to call /completion")?;
+    let events = sse::data_lines(BufReader::new(response), client.idle_timeout());
+    if !tee_stderr {
+        // Taking the lock lazily inside the closure would bring back the hold.
+        return read_sse_chunks(events, |_| {});
+    }
     let mut stderr = std::io::stderr().lock();
-    let outcome = read_sse_chunks(reader, doomloop, |pending| {
+    let outcome = read_sse_chunks(events, |pending| {
         let _ = write!(stderr, "{pending}");
         let _ = stderr.flush();
     })?;
@@ -732,104 +467,64 @@ fn stream_completion(
     Ok(outcome)
 }
 
-/// Parse SSE events from `reader`, accumulate the `"content"` field, and call
-/// `on_flush` every 10 chunks with the pending text.  Returns the full
-/// accumulated content.
-///
-/// If the model enters a doom loop (same substring repeating), generation
-/// is stopped early and the content accumulated so far is returned.
-///
-/// The caller is responsible for ensuring the reader does not block
-/// indefinitely (e.g. by killing the server process that feeds it).
+fn completion_delta(event: &Value) -> Delta<'_> {
+    Delta {
+        text: event.get("content").and_then(Value::as_str).unwrap_or(""),
+        terminal: event.get("stop").and_then(Value::as_bool) == Some(true),
+    }
+}
+
+/// A terminal chunk that does not deserialize is logged and leaves the stop
+/// unclassified rather than failing the sample.
 fn read_sse_chunks(
-    reader: impl BufRead,
-    pipeline: &DoomloopPipeline,
+    events: impl IntoIterator<Item = anyhow::Result<String>>,
     mut on_flush: impl FnMut(&str),
 ) -> anyhow::Result<SseOutcome> {
-    let mut content = String::new();
-    let mut chunks: u64 = 0;
-    let mut pending = String::new();
-    let mut doom_loop: Option<String> = None;
-    let mut termination: Option<StreamTermination> = None;
-    let events = reader
-        .lines()
-        .map(|line| line.context("failed to read SSE line"))
-        .filter_map(|line| match line {
-            Err(e) => Some(Err(e)),
-            Ok(line) => line
-                .strip_prefix("data: ")
-                .map(str::to_owned)
-                .or_else(|| {
-                    line.strip_prefix("data:")
-                        .map(|d| d.trim_start().to_owned())
-                })
-                .map(Ok),
-        })
-        .map(|data| {
-            let data = data?;
-            serde_json::from_str::<Value>(&data)
-                .with_context(|| format!("failed to parse SSE data: {data}"))
-        });
-    for event in events {
-        let event = event?;
-        if let Some(chunk) = event.get("content").and_then(Value::as_str) {
-            if !chunk.is_empty() {
-                content.push_str(chunk);
-                pending.push_str(chunk);
-            }
-        }
-        chunks += 1;
-        if chunks.is_multiple_of(10) && !pending.is_empty() {
-            on_flush(&pending);
-            pending.clear();
-        }
-        if chunks.is_multiple_of(50) {
-            if let Some(name) = pipeline.check(&content) {
-                if !pending.is_empty() {
-                    on_flush(&pending);
-                    pending.clear();
-                }
-                let detail = format_trigger_log(name, content.len());
-                log::warn!("{detail}");
-                doom_loop = Some(detail);
-                break;
-            }
-        }
-        if event.get("stop").and_then(Value::as_bool) == Some(true) {
-            // Terminal chunk carries the stop metadata (stop_type /
-            // stopped_limit / timings). Parse it best-effort; a shape we
-            // can't deserialize just leaves the stop unclassified.
-            termination = serde_json::from_value(event).ok();
-            break;
-        }
-    }
-    if !pending.is_empty() {
-        on_flush(&pending);
-    }
+    let stream = sse::read_text_stream(events, &completion_delta, &mut on_flush)?;
     Ok(SseOutcome {
-        content,
-        doom_loop,
-        termination,
+        content: stream.content,
+        termination: stream.terminal.and_then(|event| {
+            serde_json::from_value(event)
+                .inspect_err(
+                    |err| tracing::warn!(error = %err, "terminal chunk did not deserialize"),
+                )
+                .ok()
+        }),
     })
 }
 
-/// HTTP client / readiness wait from plan `benchmark_flags`, else default.
-fn request_timeout_from_req(req: &RunRequest) -> Duration {
-    Duration::from_secs(
-        req.benchmark_flags
-            .as_ref()
-            .and_then(|f| f.http_timeout())
-            .unwrap_or(DEFAULT_HTTP_TIMEOUT_SECS),
-    )
-}
-
-pub(crate) fn mcq_grammar(choices: &[String]) -> String {
-    let alts = choices
-        .iter()
-        .map(|choice| format!("{choice:?}"))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    format!("root ::= {alts}")
+/// The cell's server, every field named: a flag plan-types adds fails to compile
+/// here until this cell renders it or sets it aside.
+fn launch(
+    flags: &EvalLlamacppCliStockToolsGgufText,
+    program: &ResolvedLlamaServer,
+    model: &Path,
+    client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
+) -> ServerCommandBuilder {
+    let EvalLlamacppCliStockToolsGgufText {
+        threads,
+        number_gpu_layers,
+        mmap,
+        load_mode,
+        flash_attention,
+        ctx_size,
+        no_cache,
+        parallel,
+        envs,
+        raw,
+    } = flags.clone();
+    ServerCommandBuilder::new(program.clone(), model, LoggingMarker::Eval)
+        .threads(threads)
+        .number_gpu_layers(number_gpu_layers)
+        .mmap(mmap)
+        .load_mode(load_mode)
+        .flash_attention(flash_attention)
+        .raw(raw)
+        .ctx_size(ctx_size)
+        .no_cache(no_cache)
+        .slots(parallel.map(|n| n.into_inner().unsigned_abs()))
+        .envs(envs)
+        .client_config(client_config.cloned())
 }
 
 #[cfg(test)]
@@ -838,109 +533,78 @@ mod tests {
 
     use rstest::rstest;
 
+    use pipette_plan_types::{
+        BenchmarkId, LlamacppFlashAttention, LlamacppLoadMode, PositiveCount, PositiveSeconds,
+        RunRequest,
+    };
+    use pipette_subprocess::start_process;
+
     use super::*;
+    use crate::eval_pool::{
+        CRASH_OBSERVATION_WINDOW, LlamaServer, allocation_failure_error, is_allocation_failure,
+        is_dropped_connection, poll_until_arbitrated,
+    };
+    use crate::runtimes::test_llama_server;
 
-    fn sse_line(content: &str, stop: bool) -> String {
-        let event = json!({"content": content, "stop": stop});
-        format!("data: {event}\n\n")
+    fn server_args(
+        flags: &EvalLlamacppCliStockToolsGgufText,
+    ) -> Result<Vec<String>, server::ServerArgsError> {
+        launch(flags, &test_llama_server(), Path::new("model.gguf"), None).args()
+    }
+
+    /// Every knob set to its own value, so a knob that lands on another's flag shows.
+    fn every_knob_set() -> anyhow::Result<EvalLlamacppCliStockToolsGgufText> {
+        Ok(EvalLlamacppCliStockToolsGgufText {
+            threads: Some(3),
+            number_gpu_layers: Some(7),
+            mmap: None,
+            load_mode: Some(LlamacppLoadMode::DirectIo),
+            flash_attention: Some(LlamacppFlashAttention::On),
+            ctx_size: Some(4096),
+            no_cache: Some(true),
+            parallel: Some(PositiveCount::try_from(2)?),
+            envs: Vec::new(),
+            raw: vec!["--poll".to_owned(), "0".to_owned()],
+        })
     }
 
     #[test]
-    fn read_sse_chunks_accumulates_content() -> anyhow::Result<()> {
-        let input = format!("{}{}", sse_line("hello ", false), sse_line("world", true));
-        let reader = Cursor::new(input);
-        let content = read_sse_chunks(reader, &DoomloopPipeline::disabled(), |_| {})?.content;
-        assert_eq!(content, "hello world");
-        Ok(())
-    }
-
-    #[test]
-    fn read_sse_chunks_handles_data_without_space() -> anyhow::Result<()> {
-        let input = "data:{\"content\":\"hi\",\"stop\":true}\n\n".to_string();
-        let reader = Cursor::new(input);
-        let content = read_sse_chunks(reader, &DoomloopPipeline::disabled(), |_| {})?.content;
-        assert_eq!(content, "hi");
-        Ok(())
-    }
-
-    #[test]
-    fn read_sse_chunks_skips_non_data_lines() -> anyhow::Result<()> {
-        let input = format!(": keepalive\nretry: 100\n{}", sse_line("ok", true));
-        let reader = Cursor::new(input);
-        let content = read_sse_chunks(reader, &DoomloopPipeline::disabled(), |_| {})?.content;
-        assert_eq!(content, "ok");
-        Ok(())
-    }
-
-    #[test]
-    fn read_sse_chunks_flushes_every_10_chunks() -> anyhow::Result<()> {
-        let input: String = (0..15)
-            .map(|i| sse_line(&format!("{i}"), i == 14))
-            .collect();
-        let reader = Cursor::new(input);
-        let mut flush_count = 0;
-        let _ = read_sse_chunks(reader, &DoomloopPipeline::disabled(), |_| flush_count += 1)?;
-        assert_eq!(flush_count, 2); // at chunk 10 and remaining 5
-        Ok(())
-    }
-
-    #[test]
-    fn read_sse_chunks_handles_unicode() -> anyhow::Result<()> {
-        let input = format!(
-            "{}{}{}",
-            sse_line("こんにちは", false),
-            sse_line("🌍", false),
-            sse_line("", true)
+    fn the_server_takes_every_knob_and_the_slots() -> anyhow::Result<()> {
+        assert_eq!(
+            server_args(&every_knob_set()?)?.join(" "),
+            "--ctx-checkpoints 0 --ctx-size 4096 --flash-attn on --load-mode dio --n-gpu-layers 7 --no-cache-prompt --no-warmup --parallel 2 --poll 0 --threads 3"
         );
-        let reader = Cursor::new(input);
-        let content = read_sse_chunks(reader, &DoomloopPipeline::disabled(), |_| {})?.content;
-        assert_eq!(content, "こんにちは🌍");
         Ok(())
+    }
+
+    #[rstest]
+    #[case::allocation_assert(
+        "ggml/src/ggml-backend.cpp:348: GGML_ASSERT(tensor->data != NULL && \"tensor not allocated\") failed",
+        true
+    )]
+    #[case::ordinary_crash(
+        "terminate called after throwing an instance of 'std::runtime_error'",
+        false
+    )]
+    #[case::quiet_exit("", false)]
+    fn allocation_failures_are_told_apart_from_ordinary_crashes(
+        #[case] stderr: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_allocation_failure(stderr), expected);
     }
 
     #[test]
-    fn read_sse_chunks_empty_stream() -> anyhow::Result<()> {
-        let input = sse_line("", true);
-        let reader = Cursor::new(input);
-        let content = read_sse_chunks(reader, &DoomloopPipeline::disabled(), |_| {})?.content;
-        assert_eq!(content, "");
+    fn allocation_failure_error_names_the_knobs_and_the_flags() -> anyhow::Result<()> {
+        let flags = vec!["--ctx-size".to_string(), "1048576".to_string()];
+        let msg = allocation_failure_error(&flags, "…tensor not allocated…").to_string();
+        let missing = ["parallel", "ctx_size", "--ctx-size 1048576"]
+            .into_iter()
+            .find(|needle| !msg.contains(needle));
+        anyhow::ensure!(missing.is_none(), "{missing:?} missing from: {msg}");
         Ok(())
     }
 
-    #[test]
-    fn read_sse_chunks_stops_on_repetition_loop() -> anyhow::Result<()> {
-        // Generate 200 chunks of the same repeating block — well beyond the
-        // 50-chunk check interval and the min_chars threshold.
-        let block = "the same text repeated over and over again. ";
-        let mut input: String = (0..200).map(|_| sse_line(block, false)).collect();
-        input.push_str(&sse_line("", true));
-        let reader = Cursor::new(input);
-        let pipeline = DoomloopPipeline {
-            detectors: vec![Box::new(pipette_doomloop::ExactRepeat {
-                min_chars: 100,
-                window: 512,
-                min_period: 32,
-                required: 3,
-            })],
-        };
-        let outcome = read_sse_chunks(reader, &pipeline, |_| {})?;
-        // Should have stopped before consuming all 200 chunks, and flagged
-        // the abort as a doom-loop (the only source of `doom_loop`).
-        let full_len = block.len() * 200;
-        assert!(
-            outcome.content.len() < full_len,
-            "expected early stop but got full output ({} chars)",
-            outcome.content.len()
-        );
-        assert!(
-            outcome.doom_loop.is_some(),
-            "expected doom_loop to be flagged"
-        );
-        assert!(outcome.termination.is_none());
-        Ok(())
-    }
-
-    /// Terminal SSE chunk carrying llama-server's stop metadata.
     fn sse_terminal(content: &str, stop_type: &str, predicted_n: u64) -> String {
         let stopped_limit = stop_type == "limit";
         let event = json!({
@@ -953,11 +617,13 @@ mod tests {
         format!("data: {event}\n\n")
     }
 
-    /// The terminal SSE chunk parses into `termination` and classifies end-to-end.
     #[test]
     fn read_sse_chunks_parses_terminal_metadata() -> anyhow::Result<()> {
         let input = sse_terminal("hi", "limit", 8192);
-        let outcome = read_sse_chunks(Cursor::new(input), &DoomloopPipeline::disabled(), |_| {})?;
+        let outcome = read_sse_chunks(
+            sse::data_lines(Cursor::new(input), Duration::from_secs(60)),
+            |_| {},
+        )?;
         let Some(term) = &outcome.termination else {
             anyhow::bail!("expected terminal metadata");
         };
@@ -975,9 +641,6 @@ mod tests {
         Ok(())
     }
 
-    /// Classification matrix over the terminal event's flags. `limit` (bool or
-    /// `stop_type`) ⇒ truncated; `eos` (bool or `stop_type`) ⇒ eos; an
-    /// unrecognized `stop_type` or no signal ⇒ unknown (never a guessed eos).
     #[rstest]
     #[case(true, false, None, BenchmarkEvalCompletionStopReason::Truncated, None)]
     #[case(
@@ -1018,7 +681,6 @@ mod tests {
     ) {
         let sse = SseOutcome {
             content: String::new(),
-            doom_loop: None,
             termination: Some(StreamTermination {
                 stopped_limit,
                 stopped_eos,
@@ -1039,27 +701,9 @@ mod tests {
     }
 
     #[test]
-    fn doom_loop_abort_classifies_as_doom_loop() {
-        let sse = SseOutcome {
-            content: "loop".to_string(),
-            doom_loop: Some("ExactRepeat fired".to_string()),
-            termination: None,
-        };
-        assert_eq!(
-            classify_stop(&sse),
-            StopClassification {
-                reason: BenchmarkEvalCompletionStopReason::DoomLoop,
-                completion_tokens: None,
-                detail: Some("ExactRepeat fired".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn stream_without_terminal_event_falls_back_to_unknown() {
+    fn unreadable_terminal_event_falls_back_to_unknown() {
         let sse = SseOutcome {
             content: "partial".to_string(),
-            doom_loop: None,
             termination: None,
         };
         assert_eq!(
@@ -1067,7 +711,9 @@ mod tests {
             StopClassification {
                 reason: BenchmarkEvalCompletionStopReason::Unknown,
                 completion_tokens: None,
-                detail: Some("stream ended without a terminal stop event".to_string()),
+                detail: Some(
+                    "terminal stop event did not carry readable stop metadata".to_string()
+                ),
             }
         );
     }
@@ -1084,20 +730,62 @@ mod tests {
         assert_eq!(grammar, r#"root ::= "A" | "B" | "C""#);
     }
 
+    #[rstest]
+    #[case::no_flags(None, None, json!({"messages": [{"role": "user", "content": "q"}]}))]
+    #[case::thinking_alone(
+        Some(false),
+        None,
+        json!({
+            "messages": [{"role": "user", "content": "q"}],
+            "chat_template_kwargs": {"enable_thinking": false},
+        })
+    )]
+    #[case::effort_alone(
+        None,
+        Some(ReasoningEffort::Low),
+        json!({
+            "messages": [{"role": "user", "content": "q"}],
+            "chat_template_kwargs": {"reasoning_effort": "low"},
+            "reasoning_effort": "low",
+        })
+    )]
+    #[case::both(
+        Some(true),
+        Some(ReasoningEffort::High),
+        json!({
+            "messages": [{"role": "user", "content": "q"}],
+            "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "high"},
+            "reasoning_effort": "high",
+        })
+    )]
+    fn the_template_body_carries_each_flag_set(
+        #[case] enable_thinking: Option<bool>,
+        #[case] reasoning_effort: Option<ReasoningEffort>,
+        #[case] expected: Value,
+    ) {
+        let messages = json!([{"role": "user", "content": "q"}]);
+        assert_eq!(
+            apply_template_body(&messages, enable_thinking, reasoning_effort),
+            expected
+        );
+    }
+
     #[test]
     fn request_timeout_from_req_uses_benchmark_flags_or_default() -> anyhow::Result<()> {
         let mut req = fixture_run_request()?;
         assert_eq!(
-            request_timeout_from_req(&req),
-            Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS)
+            pipette_ops::measurement::http_timeout(&req, 1),
+            Duration::from_secs(pipette_ops::measurement::DEFAULT_HTTP_TIMEOUT_SECS)
         );
         req.benchmark_flags = Some(
             pipette_plan_types::BenchmarkFlags::EvalLlamacppCliStockToolsGgufText {
-                http_timeout_seconds: Some(120),
-                doomloop: Default::default(),
+                http_timeout_seconds: Some(PositiveSeconds::try_new(120)?),
             },
         );
-        assert_eq!(request_timeout_from_req(&req), Duration::from_secs(120));
+        assert_eq!(
+            pipette_ops::measurement::http_timeout(&req, 1),
+            Duration::from_secs(120)
+        );
         Ok(())
     }
 
@@ -1121,13 +809,13 @@ mod tests {
             Ok(())
         });
 
-        let client = HttpClient::blocking_with_timeout("pipette", Duration::from_millis(200))
-            .context("failed to build test client")?;
+        let client = HttpClient::loopback("pipette", Duration::from_millis(200))
+            .context("failed to build test client")?
+            .client()
+            .clone();
         let url = format!("http://127.0.0.1:{port}/health");
         let started = Instant::now();
-        let _err = client
-            .get(url)
-            .send()
+        let _err = pipette_http::send(client.get(url))
             .err()
             .context("request unexpectedly succeeded")?;
 
@@ -1137,22 +825,78 @@ mod tests {
         Ok(())
     }
 
-    // Session helpers live on EvalCompletionsStore; digest identity is covered
-    // in pipette-ops::eval_completions tests (RunRequest portable fields).
+    /// What the test server does with the one request it reads.
+    enum Peer {
+        Closes,
+        Answers500,
+        Hangs,
+        Absent,
+    }
+
+    #[rstest]
+    #[case::closed_with_no_response(Peer::Closes, true)]
+    #[case::an_http_error(Peer::Answers500, false)]
+    #[case::a_timeout(Peer::Hangs, false)]
+    #[case::a_refused_connect(Peer::Absent, false)]
+    fn only_a_dropped_connection_is_resent(
+        #[case] peer: Peer,
+        #[case] resent: bool,
+    ) -> anyhow::Result<()> {
+        use std::{io::Read, net::TcpListener, thread};
+
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).context("failed to bind test listener")?;
+        let url = format!("http://{}/completion", listener.local_addr()?);
+        let server = match peer {
+            Peer::Absent => {
+                drop(listener);
+                None
+            }
+            peer @ (Peer::Closes | Peer::Answers500 | Peer::Hangs) => {
+                Some(thread::spawn(move || -> std::io::Result<()> {
+                    let (mut stream, _) = listener.accept()?;
+                    let _ = stream.read(&mut [0; 4096]);
+                    match peer {
+                        Peer::Answers500 => stream.write_all(
+                            b"HTTP/1.1 500 Internal Server Error\r\n\
+                              Content-Length: 0\r\nConnection: close\r\n\r\n",
+                        ),
+                        Peer::Hangs => {
+                            thread::sleep(Duration::from_secs(1));
+                            Ok(())
+                        }
+                        Peer::Closes | Peer::Absent => Ok(()),
+                    }
+                }))
+            }
+        };
+
+        let err = HttpClient::loopback("pipette", Duration::from_millis(200))?
+            .json_request::<Value>(Method::POST, &url, None, Some(json!({})))
+            .context("POST /completion")
+            .err()
+            .context("request unexpectedly succeeded")?;
+        if let Some(server) = server {
+            let _ = server.join();
+        }
+
+        anyhow::ensure!(is_dropped_connection(&err) == resent, "{err:#}");
+        Ok(())
+    }
 
     fn fixture_run_request() -> anyhow::Result<RunRequest> {
-        use pipette_plan_types::benchmark::{BenchmarkDefinition, EvalBenchmark};
-        use pipette_plan_types::run::DeclaredBound;
         use pipette_plan_types::{
-            GgufText, GgufTextSource, HfOrg, HfRepo, HfRepoName, LlamaCppFlavor,
+            BenchmarkDefinition, DeclaredBound, EvalBenchmark, GgufText, GgufTextSource, HfOrg,
+            HfRepo, HfRepoName, LlamaCppFlavor, LlamacppCliStockToolsRelease,
             LlamacppCliStockToolsSource, Model, NonEmptyString, RepoSubpath, RepositoryUrl,
-            Runtime, SourceRepository,
+            Runtime,
         };
 
         let rt = Runtime::LlamacppCliStockTools(pipette_plan_types::LlamacppCliStockTools {
-            source: LlamacppCliStockToolsSource::GithubRelease(SourceRepository {
+            source: LlamacppCliStockToolsSource::GithubRelease(LlamacppCliStockToolsRelease {
                 repository_url: RepositoryUrl::new("github.com/ggml-org/llama.cpp"),
                 repository_version: NonEmptyString::try_new("b1234".to_owned())?,
+                asset: None,
             }),
             flavor: LlamaCppFlavor::MacosArm64,
         });
@@ -1175,66 +919,97 @@ mod tests {
             model_flags: None,
             benchmark_flags: None,
             benchmark: BenchmarkDefinition::Eval(EvalBenchmark {
-                benchmark_id: "bench".into(),
+                benchmark_id: BenchmarkId::try_new("bench".to_owned())?,
                 parameter_eval_id: "math_500".into(),
                 parameter_dataset_name: "ds".into(),
-                parameter_max_tokens: 256,
+                parameter_max_tokens: PositiveCount::try_new(256)?,
+                parameter_max_context: None,
                 parameter_mcq_choices: None,
+                parameter_temperature: None,
+                parameter_top_p: None,
+                parameter_top_k: None,
+                parameter_min_p: None,
+                parameter_seed: None,
                 samples: Some(vec![json!({"id": "a", "messages": []})]),
             }),
         })
     }
 
-    #[test]
-    fn failed_and_completion_entries_coexist_in_session() -> anyhow::Result<()> {
-        let root = tempfile::tempdir()?;
-        let evals = EvalCompletionsStore::new(root.path());
-        let req = fixture_run_request()?;
-        {
-            let mut ckpt = evals.open(&req)?;
-            ckpt.append(BenchmarkEvalCompletion {
-                id: "done-1".into(),
-                completion: "ok".into(),
-                ..Default::default()
-            })?;
-            ckpt.append(BenchmarkEvalCompletion {
-                id: "failed-1".into(),
-                completion: String::new(),
-                failed: true,
-                failed_reason: Some("test crash".into()),
-                ..Default::default()
-            })?;
-        }
-        let ckpt = evals.open(&req)?;
-        assert!(ckpt.contains("done-1"));
-        assert!(ckpt.contains("failed-1"));
-        assert_eq!(ckpt.failed_count(), 1);
-        assert_eq!(ckpt.failed_ids().collect::<Vec<_>>(), vec!["failed-1"]);
+    /// The first pass that can answer ends the window, a fatal one ends it where
+    /// it failed, and each pass that cannot answer yet costs one poll interval.
+    #[rstest]
+    #[case::answered_on_the_first_pass(1, true, 0)]
+    // The Windows case the window exists for: the exit takes a few hundred
+    // milliseconds to surface to the parent.
+    #[case::the_exit_surfaces_on_the_fourth_pass(4, true, 3)]
+    // Another pass would bury the allocation error behind whatever that one decided.
+    #[case::a_fatal_pass_ends_it(1, false, 0)]
+    fn the_crash_window(
+        #[case] passes: usize,
+        #[case] answers: bool,
+        #[case] want_sleeps: usize,
+    ) -> anyhow::Result<()> {
+        // Not `CRASH_POLL_INTERVAL`: a test that hands the loop the same
+        // constant it would read cannot tell an injected interval from an
+        // ignored one.
+        const INTERVAL: Duration = Duration::from_millis(7);
+        let slept = std::cell::RefCell::new(Vec::new());
+        let sleep = |d: Duration| slept.borrow_mut().push(d);
+        let mut deadlines = Vec::new();
+
+        let outcome =
+            poll_until_arbitrated(CRASH_OBSERVATION_WINDOW, INTERVAL, &sleep, |deadline| {
+                deadlines.push(deadline);
+                anyhow::ensure!(answers, "llama-server could not allocate");
+                Ok((deadlines.len() >= passes).then_some("answered"))
+            });
+
+        anyhow::ensure!(outcome.is_ok() == answers, "{outcome:?}");
+        anyhow::ensure!(deadlines.len() == passes, "{} passes", deadlines.len());
+        anyhow::ensure!(
+            *slept.borrow() == vec![INTERVAL; want_sleeps],
+            "slept {:?}",
+            slept.borrow(),
+        );
+        anyhow::ensure!(
+            deadlines.windows(2).all(|pair| pair[0] == pair[1]),
+            "the window moved between passes: {deadlines:?}",
+        );
         Ok(())
     }
 
+    /// The samples queued behind it get `None` instead of each starting a server
+    /// and waiting out its readiness.
     #[test]
-    fn finalize_returns_both_completed_and_failed_entries() -> anyhow::Result<()> {
-        let root = tempfile::tempdir()?;
-        let evals = EvalCompletionsStore::new(root.path());
-        let req = fixture_run_request()?;
-        let mut ckpt = evals.open(&req)?;
-        ckpt.append(BenchmarkEvalCompletion {
-            id: "done-1".into(),
-            completion: "ok".into(),
-            ..Default::default()
-        })?;
-        ckpt.append(BenchmarkEvalCompletion {
-            id: "failed-1".into(),
-            completion: String::new(),
-            failed: true,
-            failed_reason: Some("boom".into()),
-            ..Default::default()
-        })?;
-        let submitted = ckpt.finalize()?;
-        assert_eq!(submitted.len(), 2);
-        assert!(submitted.iter().any(|c| c.id == "done-1" && !c.failed));
-        assert!(submitted.iter().any(|c| c.id == "failed-1" && c.failed));
+    fn a_failed_restart_is_tried_once() -> anyhow::Result<()> {
+        let mut command = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        command.args(if cfg!(windows) {
+            ["/C", "exit 0"]
+        } else {
+            ["-c", "exit 0"]
+        });
+        let mut exited = start_process("llama-server", command, Duration::ZERO)?;
+        exited.wait(Duration::from_secs(10))?;
+        let slot = Mutex::new(ServerSlot {
+            server: Server::Down(exited),
+            generation: 1,
+        });
+        let starts = std::cell::Cell::new(0);
+        let start = || -> anyhow::Result<LlamaServer> {
+            starts.set(starts.get() + 1);
+            anyhow::bail!("llama-server exited during load")
+        };
+
+        let got: Vec<_> = (0..4)
+            .map(|_| slot_server(&slot, &start).map(|server| server.is_some()))
+            .collect();
+
+        anyhow::ensure!(starts.get() == 1, "{} starts: {got:?}", starts.get());
+        anyhow::ensure!(got.first().is_some_and(Result::is_err), "{got:?}");
+        anyhow::ensure!(
+            got.iter().skip(1).all(|got| matches!(got, Ok(false))),
+            "{got:?}"
+        );
         Ok(())
     }
 }

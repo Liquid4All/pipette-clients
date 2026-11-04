@@ -1,0 +1,5 @@
+{
+  "dir": "blobs/LFM2.5-350M-MLX-4bit",
+  "source": "relative_dir",
+  "type": "mlx"
+}

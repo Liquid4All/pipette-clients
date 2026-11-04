@@ -154,6 +154,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // Best-effort: a failure here is advisory and must never block the UI or the auth gate.
     viewModelScope.launch {
       withContext(Dispatchers.IO) { runCatching { container.profileRefreshService.refresh() } }
+        // The refresh records the server's `status` on the registration, and `refreshRegistration` below has already read the old one by the time it
+        // lands. Re-reading here is what makes Settings show an approval on the launch after it happens rather than the launch after that.
+        .onSuccess { refreshRegistration() }
         .onFailure { Log.w("MainViewModel", "device profile refresh failed", it) }
     }
 

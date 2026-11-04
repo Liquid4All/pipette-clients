@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "eval",
+  "enable_thinking": false,
+  "model_type": "gguf_vision"
+}

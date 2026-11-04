@@ -4,22 +4,17 @@
 Resolves a Gradle configuration, reads each resolved artifact's declared
 license from its POM, and fails on anything outside the allow-list below.
 
-    ./ci/android-licenses.py                     # gate releaseRuntimeClasspath
+    ./ci/android-licenses.py                     # gate the release runtime classpath
     ./ci/android-licenses.py --list              # print the graph, gate nothing
-    ./ci/android-licenses.py --configuration debugRuntimeClasspath
+    ./ci/android-licenses.py --configuration kotlinEngineDebugRuntimeClasspath
 
-It runs as a step in the `android-app` job, where Gradle, a JDK and the Android
-SDK are on hand (ci/checks/* runs in `conventions`, which carries no toolchain —
-see ci/README.md). It reads the graph by parsing `gradle dependencies`, which
-leaves the build untouched: fetching POMs from inside a Gradle task needs
-`ArtifactResolutionQuery`, and that is incompatible with the configuration cache
-this project enables.
+Runs in the `android-app` job, which has Gradle and the Android SDK (the
+`conventions` job that runs ci/checks/ has no toolchain). It parses
+`gradle dependencies` output because resolving POMs inside a Gradle task needs
+`ArtifactResolutionQuery`, which is incompatible with the configuration cache.
 
-Scope: `releaseRuntimeClasspath`, which is what lands in the APK/AAB. Build-time
-and test-only configurations are out of scope by design. They carry copyleft
-artifacts — detekt pulls LGPL-2.1 trove4j, lint pulls dual-licensed JNA, JUnit is
-EPL-1.0 — that are never distributed and so impose no obligation, and a gate that
-fails on dependencies which do not matter is one people learn to bypass.
+Only the release runtime classpath is gated: build-time and test configurations
+carry copyleft artifacts (trove4j, JNA, JUnit) that are never distributed.
 """
 
 from __future__ import annotations
@@ -43,8 +38,7 @@ REPO_ROOT = subprocess.run(
 GRADLE_PROJECT = os.path.join(REPO_ROOT, "android", "Pipette")
 GRADLE_CACHE = os.path.expanduser("~/.gradle/caches/modules-2/files-2.1")
 
-# Maven repositories to fall back to when a POM is not in the local Gradle
-# cache. Order matters only for speed. These mirror the repositories declared in
+# Fallbacks when a POM is not in the local Gradle cache; they mirror
 # android/Pipette/settings.gradle.kts.
 REPOS = (
     "https://repo1.maven.org/maven2",
@@ -58,27 +52,17 @@ POM_NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 # Policy
 # ---------------------------------------------------------------------------
 #
-# POM license strings are free text, not SPDX ids: this graph alone spells
-# Apache-2.0 four different ways. So each declared string is normalized and
-# matched against the patterns below to reach a canonical id, and only canonical
-# ids are allowed. An unrecognized string is a FAILURE, not a pass — that is
-# what makes a newly introduced copyleft dependency turn CI red instead of
-# sliding through under a spelling nobody predicted.
+# POM license strings are free text, so an unrecognized one FAILS: a new
+# copyleft dependency must not slide through under an unpredicted spelling.
 #
-# Patterns are matched against the license name lowercased with runs of
-# non-alphanumerics collapsed to single spaces. Note what that means for version
-# numbers and parentheses: "Apache-2.0", "Apache 2.0" and "The Apache Software
-# License, Version 2.0" all normalize with "2 0" (the dot becomes a space), and
-# "The MIT License (MIT)" normalizes to "the mit license mit". Write patterns
-# against the normalized form, and run `--selftest` after editing them.
+# Patterns match the normalized name (see normalize()): "Apache-2.0" becomes
+# "apache 2 0", "The MIT License (MIT)" becomes "the mit license mit". Run
+# `--selftest` after editing them.
 
-# Checked FIRST, and never allowed. Listed explicitly rather than relying on
-# "unrecognized fails", so a copyleft license can never be mistaken for a
-# permissive one by a loose pattern below (e.g. "LGPL, version 2.1 / Apache
-# License v2.0" must not match on the Apache half).
+# Checked first, so "LGPL, version 2.1 / Apache License v2.0" cannot match on
+# its Apache half below.
 COPYLEFT = (
-    # `\bl?gpl\b` alone misses the version-suffixed spellings ("GPLv2",
-    # "LGPL2.1") because the digit leaves no word boundary after "gpl".
+    # `\bl?gpl\b` alone misses "GPLv2" and "LGPL2.1": no word boundary before the digit.
     (
         r"\bl?gpl\b|\bl?gpl ?v? ?\d|general public license|gnu (lesser|library)",
         "GPL/LGPL",
@@ -91,11 +75,8 @@ COPYLEFT = (
     (r"common public license|\bcpl\b", "CPL"),
 )
 
-# Permissive licenses, allowed to ship. Keep in sync with the Rust workspace's
-# allow-list in //deny.toml — those two are the whole policy.
+# Keep in sync with the Rust allow-list in deny.toml.
 ALLOWED = (
-    # "apache 2", "apache 2 0", "apache license 2 0", "apache license v2 0",
-    # "the apache software license version 2 0", …
     (
         r"^(the )?apache( software)?( licen[cs]e)?,? ?(version |v ?)?2( 0)?$",
         "Apache-2.0",
@@ -107,8 +88,7 @@ ALLOWED = (
         "BSD",
     ),
     (r"^isc( licen[cs]e)?$", "ISC"),
-    # Eclipse *Distribution* License is BSD-style — unrelated to the Eclipse
-    # Public License, which COPYLEFT catches above and which is checked first.
+    # Eclipse Distribution License is BSD-style, unlike the Eclipse Public License.
     (r"^eclipse distribution license( v ?1( 0)?)?$|^edl 1 0$", "EDL-1.0 (BSD-style)"),
     (r"^bouncy castle licen[cs]e$", "Bouncy Castle (MIT-style)"),
     (
@@ -123,15 +103,11 @@ ALLOWED = (
     ),
 )
 
-# Non-OSS vendor terms that ship knowingly. These are NOT open-source licenses;
-# they are accepted because using the vendor's SDK is a deliberate product
-# decision, and they impose no source-disclosure obligation. Every entry here is
-# a choice someone made, so each one names what pulls it in.
+# Non-OSS vendor terms accepted as a product decision; they impose no
+# source-disclosure obligation.
 VENDOR_TERMS = (
-    # All 12 arrive transitively through com.clerk:clerk-android-api — the
-    # play-services-* set via androidx.credentials:credentials-play-services-auth
-    # (passkeys/FIDO), plus Play Integrity and googleid. Nothing in this repo
-    # depends on Play Services directly.
+    # All arrive transitively through com.clerk:clerk-android-api (Play Services
+    # via credentials-play-services-auth, Play Integrity, googleid).
     (
         r"^android software development kit licen[cs]e( agreement)?$",
         "Google: Android SDK Terms",
@@ -144,13 +120,9 @@ VENDOR_TERMS = (
 )
 
 
-# Every license string this graph actually declares, plus copyleft strings that
-# MUST be rejected. Guards the patterns above against a subtle failure mode: an
-# over-tight pattern silently reclassifies a permissive license as "unknown"
-# (noisy but safe), while an over-loose one can classify a copyleft license as
-# permissive (quietly wrong). Run with --selftest; CI runs it before the gate.
+# Strings this graph declares, plus copyleft strings that must be rejected, so
+# a loosened pattern cannot quietly allow copyleft. CI runs --selftest first.
 SELFTEST = (
-    # (declared string, expected verdict, expected canonical)
     ("The Apache Software License, Version 2.0", "allow", "Apache-2.0"),
     ("The Apache License, Version 2.0", "allow", "Apache-2.0"),
     ("Apache License, Version 2.0", "allow", "Apache-2.0"),
@@ -177,7 +149,6 @@ SELFTEST = (
         "allow",
         "JDOM (Apache-style)",
     ),
-    # Vendor terms — allowed to ship, but must NOT be mistaken for open source.
     ("Android Software Development Kit License", "vendor", "Google: Android SDK Terms"),
     (
         "Android Software Development Kit License Agreement",
@@ -190,9 +161,7 @@ SELFTEST = (
         "Google: Play Core Terms",
     ),
     ("Play Integrity API Terms of Service", "vendor", "Google: Play Integrity Terms"),
-    # Copyleft — every one of these must be rejected. The dual-licensed and
-    # spelled-out forms are the ones a naive pattern gets wrong: the JNA strings
-    # contain "Apache License v2.0", and trove4j never writes "LGPL".
+    # The JNA strings contain "Apache License v2.0", and trove4j never writes "LGPL".
     ("GNU LESSER GENERAL PUBLIC LICENSE 2.1", "copyleft", "GPL/LGPL"),
     ("LGPL, version 2.1", "copyleft", "GPL/LGPL"),
     ("LGPL, version 2.1 / Apache License v2.0", "copyleft", "GPL/LGPL"),
@@ -207,7 +176,6 @@ SELFTEST = (
     ("Eclipse Public License 1.0", "copyleft", "EPL"),
     ("Eclipse Public License - v 2.0", "copyleft", "EPL"),
     ("Common Development and Distribution License", "copyleft", "CDDL"),
-    # Genuinely unclassified must stay a failure, not fall through to allow.
     ("Some Proprietary Vendor Agreement", "unknown", None),
 )
 
@@ -237,10 +205,7 @@ def normalize(name: str) -> str:
 
 
 def classify(name: str) -> tuple[str, str]:
-    """Return (verdict, canonical).
-
-    verdict is one of: allow | vendor | copyleft | unknown.
-    """
+    """Return (verdict, canonical); verdict is allow | vendor | copyleft | unknown."""
     n = normalize(name)
     for pattern, canonical in COPYLEFT:
         if re.search(pattern, n):
@@ -258,7 +223,7 @@ def classify(name: str) -> tuple[str, str]:
 # Resolution
 # ---------------------------------------------------------------------------
 
-# Matches a coordinate in `gradle dependencies` tree output, e.g.
+# Matches `gradle dependencies` tree lines such as:
 #   +--- androidx.core:core-ktx:1.17.0
 #   |    \--- androidx.core:core:1.5.0 -> 1.18.0 (*)
 #   +--- com.squareup.okhttp3:okhttp:{strictly 5.3.2} -> 5.3.2 (c)
@@ -273,17 +238,9 @@ COORD_RE = re.compile(
 def resolve_configuration(configuration: str) -> list[tuple[str, str, str]]:
     """Run `gradle dependencies` and return the resolved coordinates.
 
-    Resolves the CANONICAL shipping graph, not whatever this machine happens to
-    be configured for. Sentry's dependencies are conditional on a DSN being
-    configured (see app/build.gradle.kts), so without pinning this the resolved
-    set would differ between a maintainer with a DSN in local.properties, CI with
-    the secret, and a fork with neither. The committed attribution asset could
-    then only ever match one of them, and the other two would fail the freshness
-    check on a file they cannot legitimately change.
-
-    PIPETTE_ENABLE_CRASH_REPORTING=1 forces Sentry to be wired in regardless of
-    the DSN, so the graph is the one we distribute. It does not make anything
-    report: the manifest DSN stays empty, so the SDK never initializes.
+    Sentry's dependencies depend on whether a DSN is configured, so
+    PIPETTE_ENABLE_CRASH_REPORTING=1 forces them in: the graph is then the one we
+    distribute, whatever this machine has configured.
     """
     env = {**os.environ, "PIPETTE_ENABLE_CRASH_REPORTING": "1"}
     proc = subprocess.run(
@@ -313,17 +270,13 @@ def resolve_configuration(configuration: str) -> list[tuple[str, str, str]]:
         m = COORD_RE.search(line)
         if not m:
             continue
-        # A line may state a requested version and the version conflict
-        # resolution actually picked ("1.5.0 -> 1.18.0"); the latter is what
-        # ships, so it wins.
+        # "1.5.0 -> 1.18.0": the resolved version is what ships.
         version = m.group("resolved") or m.group("version")
         if not version:
             continue  # BOM-managed entry with no version on this line
         version = version.strip("{}").replace("strictly ", "").strip()
         if not re.match(r"^[0-9]", version):
-            # A version this parser cannot read must never be dropped silently:
-            # everything else here fails closed, and an artifact skipped at this
-            # point would ship completely ungated. Collect and fail instead.
+            # Fail closed: a skipped artifact would ship ungated.
             unparsed.add(f"{m.group('group')}:{m.group('artifact')} -> {version!r}")
             continue
         found.add((m.group("group"), m.group("artifact"), version))
@@ -444,7 +397,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--configuration",
-        default="releaseRuntimeClasspath",
+        default="kotlinEngineReleaseRuntimeClasspath",
         help="Gradle configuration to gate (default: %(default)s)",
     )
     ap.add_argument(
@@ -495,8 +448,6 @@ def main() -> int:
     for canonical, count in summary.most_common():
         print(f"  {count:4}  {canonical}")
 
-    # --list is an inventory mode, so it reports and stops. Falling through to
-    # the gate would exit 1 on a graph someone asked only to look at.
     if args.list:
         return 0
 

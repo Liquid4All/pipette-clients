@@ -1,26 +1,28 @@
-//! In-process server lifecycle for `benchmarks run` (docker + shared types).
-//!
-//! Docker spawn/stop: [`docker`]. UV spawn: [`uv`] — the real setsid/PGID
-//! implementation on Linux, an erroring stub elsewhere. Shared types and
-//! readiness polling live here.
+//! The server a cell runs against: vLLM or SGLang, in a container
+//! ([`docker`]) or from a uv venv ([`uv`]), started on the
+//! `pipette_subprocess` primitives, which keep its output, tear it down on ^C
+//! and stop it when it is dropped.
 
 use std::{
-    fmt,
-    net::TcpListener,
     path::{Path, PathBuf},
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Context;
 
-use pipette_plan_types::VllmFlavor;
+use pipette_plan_types::{Runtime, RuntimeFlags, RuntimeOutput, TorchOaiExtraRuntimeConfiguration};
+use pipette_programs::ExternalPrograms;
+use pipette_subprocess::{DockerProcess, NotReadyError, Process, Stopped};
+use pipette_venv::require_bound_venv;
+
+use crate::launch::{self, Drafter};
+use crate::memprobe::ServerCgroup;
+use crate::{cell_flags, cleanup};
 
 pub mod docker;
 
-// Only one of these ever compiles, so a macOS or Windows build type-checks the
-// stub and never the real module. Verify changes to either arm against a Linux
-// target before pushing — `cargo check` on a Mac cannot see a break in `uv.rs`.
+// Only one of these compiles, so `cargo check` on a Mac never sees a break in
+// `uv.rs`: check changes to either against a Linux target.
 #[cfg(target_os = "linux")]
 pub mod uv;
 
@@ -28,15 +30,109 @@ pub mod uv;
 #[path = "uv_stub.rs"]
 pub mod uv;
 
-pub use docker::{
-    container_liveness, resolve_docker, start, stop, tail_logs, ContainerId, ContainerLiveness,
-};
-
 pub const DEFAULT_SHM_SIZE: &str = "16g";
 pub const DEFAULT_GPUS: &str = "all";
 
-/// vLLM vs SGLang — ports, model flags, and entrypoints key off this.
-/// Orthogonal to docker vs uv transport.
+/// How long a start waits for the server to answer: the plan runner has no
+/// readiness-timeout setting. Long enough for a cold start from a slow shared
+/// store: vLLM 0.31 on a Nebius B300 node, its venv on a virtiofs mount, took
+/// 800 s, about thirteen minutes, to answer (SLURM job 168989, 2026-10-11). A
+/// server that exits ends the wait at once, so only a start that hangs waits
+/// this long.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Answers with a success once either server can take requests.
+const READY_PATH: &str = "/v1/models";
+/// Cap on one readiness request: the wait checks its own timeout only
+/// between requests.
+const READY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a stop waits for the server to exit before killing it.
+const STOP_GRACE: Duration = Duration::from_secs(30);
+
+/// Starts the server, after removing the containers a crashed run of this
+/// workspace left behind; [`Server::wait_ready`] waits until it serves.
+pub fn launch(
+    runtime: &Runtime,
+    server_args: &[String],
+    flags: &RuntimeFlags,
+    model_dir: &Path,
+    drafter: Option<&Drafter>,
+    client_config: Option<&TorchOaiExtraRuntimeConfiguration>,
+    programs: &ExternalPrograms,
+) -> anyhow::Result<Server> {
+    let workspace_label = cleanup::workspace_label_from_store_path(model_dir)?;
+
+    // Taken once, so the reap and `docker run` see the same binary. Only a
+    // docker run requires it: the reap is workspace-scoped, so a uv run still
+    // clears containers a crashed docker run left, when it can.
+    let docker_bin = match programs.docker.path() {
+        Ok(docker) => Some(docker.to_path_buf()),
+        Err(err) if cell_flags::is_docker(runtime) => return Err(err),
+        Err(err) => {
+            tracing::debug!(
+                error = %format_args!("{err:#}"),
+                "skipping docker orphan reap"
+            );
+            None
+        }
+    };
+    // The uv server spawns from the venv's own shims; this only asserts the
+    // host can still manage that venv, before the server comes up rather than
+    // mid-benchmark.
+    if cell_flags::is_uv(runtime) {
+        programs.uv.path()?;
+    }
+    if let Some(docker) = &docker_bin {
+        // Before this launch, so a container this process owns is a leftover.
+        cleanup::reap_workspace_orphans(docker, &workspace_label)?;
+    }
+
+    match runtime {
+        Runtime::DockerVllm(_) | Runtime::DockerSglang(_) => docker::launch(
+            docker_bin
+                .as_deref()
+                .context("docker runtime reached the launch without a resolved docker binary")?,
+            runtime,
+            flags,
+            server_args,
+            &launch::mounts(model_dir, drafter),
+            &workspace_label,
+            client_config,
+        ),
+        Runtime::UvVllm(rt) => uv::launch(
+            &require_bound_venv(&rt.source)?,
+            ServerKind::Vllm,
+            model_dir,
+            server_args,
+            flags,
+            client_config,
+        ),
+        Runtime::UvSglang(rt) => uv::launch(
+            &require_bound_venv(&rt.source)?,
+            ServerKind::Sglang,
+            model_dir,
+            server_args,
+            flags,
+            client_config,
+        ),
+        other @ (Runtime::LlamacppCliStockTools(_)
+        | Runtime::LlamacppApkPipette(_)
+        | Runtime::LlamacppIosPipette(_)
+        | Runtime::MlxMacosPipette(_)
+        | Runtime::MlxIosPipette(_)
+        | Runtime::OnnxGenaiIosPipette(_)
+        | Runtime::UvOpenvino(_)
+        | Runtime::UvOnnxGenai(_)
+        | Runtime::Ovms(_)
+        | Runtime::TrtEdgellm(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
+        | Runtime::AppleFoundation(_)) => Err(cell_flags::unsupported_runtime(other)),
+    }
+    .context("failed to start server for benchmark")
+}
+
+/// vLLM or SGLang: ports, model flags and entrypoints key off this, whether
+/// docker or uv hosts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerKind {
     Vllm,
@@ -44,6 +140,28 @@ pub enum ServerKind {
 }
 
 impl ServerKind {
+    pub fn of(runtime: &Runtime) -> anyhow::Result<Self> {
+        match runtime {
+            Runtime::DockerVllm(_) | Runtime::UvVllm(_) => Ok(Self::Vllm),
+            Runtime::DockerSglang(_) | Runtime::UvSglang(_) => Ok(Self::Sglang),
+            other @ (Runtime::LlamacppCliStockTools(_)
+            | Runtime::LlamacppApkPipette(_)
+            | Runtime::LlamacppIosPipette(_)
+            | Runtime::MlxMacosPipette(_)
+            | Runtime::MlxIosPipette(_)
+            | Runtime::OnnxGenaiIosPipette(_)
+            | Runtime::UvOpenvino(_)
+            | Runtime::UvOnnxGenai(_)
+            | Runtime::Ovms(_)
+            | Runtime::TrtEdgellm(_)
+            | Runtime::AppleCoreAiMacosPipette(_)
+            | Runtime::AppleFoundation(_)) => anyhow::bail!(
+                "runtime `{}` is not a torch-oai (docker/uv vLLM/SGLang) runtime",
+                other.headless_token()
+            ),
+        }
+    }
+
     pub fn default_port(self) -> u16 {
         match self {
             Self::Vllm => 8000,
@@ -51,342 +169,461 @@ impl ServerKind {
         }
     }
 
-    /// Server CLI model flag: vLLM `--model`, SGLang `--model-path`.
+    /// vLLM's image enters at `vllm serve` and binds every interface. SGLang's
+    /// enters at a wrapper that execs its arguments, or at none, and the server
+    /// binds 127.0.0.1, out of reach of the published port.
+    pub fn container_command(self) -> &'static [&'static str] {
+        match self {
+            Self::Vllm => &[],
+            Self::Sglang => &["python3", "-m", "sglang.launch_server", "--host", "0.0.0.0"],
+        }
+    }
+
     pub fn model_arg_flag(self) -> &'static str {
         match self {
             Self::Vllm => "--model",
             Self::Sglang => "--model-path",
         }
     }
+
+    /// What logs and errors call a uv server: `sglang`, not the `python`
+    /// running it.
+    #[cfg(target_os = "linux")]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Vllm => "vllm",
+            Self::Sglang => "sglang",
+        }
+    }
 }
 
-/// Running server handle: transport (docker container vs uv process group)
-/// plus [`ServerKind`].
-///
-/// [`base_url`](Self::base_url) is always loopback — `pipette-torch-oai`
-/// drives the server for measurement, not for outside consumers, so there
-/// is no publish-host setting.
-///
-/// `Uv` carries the leader's PID + PGID (equal because the leader `setsid`s
-/// before exec); the optional `log_tail` owns the JoinHandle for the
-/// background stdout/stderr tail and is drained by `uv::stop`.
-///
-/// Not `Clone` — uv holds a JoinHandle which is move-only.
-#[derive(Debug)]
-pub enum ServerState {
-    Docker {
-        kind: ServerKind,
-        container_id: ContainerId,
-        /// `docker` binary this container was launched with. Carried here so
-        /// asking the daemon about the container needs nothing but the state.
-        docker_bin: PathBuf,
-        port: u16,
-    },
-    Uv {
-        kind: ServerKind,
-        /// The binary this server was launched with — the venv's `python`.
-        /// Carried for the same reason `Docker` carries `docker_bin`: a stored
-        /// result should name what produced it.
-        executable: PathBuf,
-        /// Leader PID (`setsid` in pre_exec ⇒ also the session id).
-        pid: u32,
-        /// Process group id — equal to `pid` after `setsid`.
-        pgid: u32,
-        port: u16,
-        /// Background stdout/stderr tail; joined on stop.
-        log_tail: Option<JoinHandle<()>>,
-    },
+/// What a cell reads off a running server. Always loopback: pipette-torch-oai
+/// drives the server for measurement, not for outside consumers.
+#[derive(Debug, Clone)]
+pub struct ServerState {
+    pub kind: ServerKind,
+    pub port: u16,
+    /// What launched it, `docker` or the venv's server entrypoint, so a stored
+    /// result names what produced it.
+    pub executable: PathBuf,
 }
 
 impl ServerState {
-    /// Default HTTP path polled to detect readiness.
-    pub fn default_ready_path(&self) -> &'static str {
-        "/v1/models"
-    }
-
-    pub fn port(&self) -> u16 {
-        match self {
-            Self::Docker { port, .. } | Self::Uv { port, .. } => *port,
-        }
-    }
-
-    /// The binary that launched this server, for the result's provenance.
-    pub fn executable(&self) -> &Path {
-        match self {
-            Self::Docker { docker_bin, .. } => docker_bin,
-            Self::Uv { executable, .. } => executable,
-        }
-    }
-
-    pub fn kind(&self) -> ServerKind {
-        match self {
-            Self::Docker { kind, .. } | Self::Uv { kind, .. } => *kind,
-        }
-    }
-
-    /// Docker container id, when this is a docker server.
-    pub fn container_id(&self) -> Option<&ContainerId> {
-        match self {
-            Self::Docker { container_id, .. } => Some(container_id),
-            Self::Uv { .. } => None,
-        }
-    }
-
-    /// Leader PID for a uv server tree.
-    pub fn pid(&self) -> Option<u32> {
-        match self {
-            Self::Uv { pid, .. } => Some(*pid),
-            Self::Docker { .. } => None,
-        }
-    }
-
-    /// Process group id for a uv server tree.
-    pub fn pgid(&self) -> Option<u32> {
-        match self {
-            Self::Uv { pgid, .. } => Some(*pgid),
-            Self::Docker { .. } => None,
-        }
-    }
-
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port())
-    }
-
-    pub fn ready_url(&self) -> String {
-        format!("{}{}", self.base_url(), self.default_ready_path(),)
+        format!("http://127.0.0.1:{}", self.port)
     }
 }
 
-/// Launch argv bags: docker vs uv transport, plus [`ServerKind`].
-///
-/// `gpus` is flavor-conditional at build (`None` for AmdGpu/Cpu); AMD
-/// device flags are emitted by `docker::gpu_access_args` at argv time.
-#[derive(Debug, Clone)]
-pub enum LaunchSpec {
-    Docker {
-        kind: ServerKind,
-        envs: Vec<(String, String)>,
-        gpus: Option<String>,
-        shm_size: Option<String>,
-        ipc: Option<String>,
-        mounts: Vec<(PathBuf, PathBuf)>,
-        server_args: Vec<String>,
-        command_args: Vec<String>,
-    },
-    Uv {
-        kind: ServerKind,
-        /// Operator `--env K[=V]`; bare `K` inherits from the parent env.
-        envs: Vec<(String, String)>,
-        server_args: Vec<String>,
-        command_args: Vec<String>,
-    },
+/// A running server. Dropping it stops it.
+pub struct Server {
+    state: ServerState,
+    transport: Transport,
 }
 
-impl LaunchSpec {
-    pub fn kind(&self) -> ServerKind {
-        match self {
-            Self::Docker { kind, .. } | Self::Uv { kind, .. } => *kind,
+enum Transport {
+    Docker(DockerProcess),
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "only the Linux uv module starts one")
+    )]
+    Uv(Process),
+}
+
+impl Server {
+    pub fn state(&self) -> &ServerState {
+        &self.state
+    }
+
+    /// Waits up to `timeout` until it serves; a server that exits first, or
+    /// is still not serving then, is stopped.
+    pub fn wait_ready(&mut self, timeout: Duration) -> anyhow::Result<()> {
+        let ready = serving(&self.state)?;
+        match &mut self.transport {
+            Transport::Docker(process) => process.wait_ready(timeout, ready),
+            Transport::Uv(process) => process.wait_ready(timeout, ready),
+        }
+        .context("failed to start server for benchmark")
+    }
+
+    /// Where its cgroup is, for the memory probe: the container's, or for a
+    /// uv server pipette's own, which it shares.
+    pub(crate) fn cgroup(&self) -> ServerCgroup {
+        match &self.transport {
+            Transport::Docker(process) => ServerCgroup::Container {
+                docker: self.state.executable.clone(),
+                name: process.container().to_owned(),
+            },
+            Transport::Uv(process) => ServerCgroup::Shared { pid: process.pid() },
         }
     }
 
-    /// Concatenates `server_args ++ command_args` for the launch site.
-    /// Model flag lives on `DockerLaunchEnv` / `UvLaunchEnv`, not here.
-    /// Eval-checkpoint digest folds this via `execute::eval::eval_extras`.
-    pub fn assembled_args(&self) -> Vec<String> {
-        let (server_args, command_args) = match self {
-            Self::Docker {
-                server_args,
-                command_args,
-                ..
+    /// The `docker run` or server command line, without the environment.
+    pub fn command(&self) -> &[String] {
+        match &self.transport {
+            Transport::Docker(process) => process.command(),
+            Transport::Uv(process) => process.command(),
+        }
+    }
+
+    /// What it has printed, the newest 256 KiB of each stream; final once
+    /// stopped.
+    pub fn output(&self) -> RuntimeOutput {
+        match &self.transport {
+            Transport::Docker(process) => process.output(),
+            Transport::Uv(process) => process.output(),
+        }
+    }
+
+    /// `docker stop`, or SIGTERM to its process group, then a kill of its
+    /// session once [`STOP_GRACE`] has passed.
+    pub fn stop(&mut self) {
+        match &mut self.transport {
+            Transport::Docker(process) => process.stop(),
+            Transport::Uv(process) => process.stop(),
+        }
+    }
+
+    /// [`Self::stop`] it over a failure, and say whether it had exited and the
+    /// end of what it printed, which otherwise logs only at debug: context for
+    /// that failure.
+    pub fn stop_with_tail(&mut self) -> Stopped {
+        match &mut self.transport {
+            Transport::Docker(process) => process.stop_with_tail(),
+            Transport::Uv(process) => process.stop_with_tail(),
+        }
+    }
+}
+
+/// The readiness check: `GET /v1/models` answers 2xx. Until then it is not
+/// ready yet, and says why: a refused connection is a server still binding, an
+/// error status one still loading.
+fn serving(
+    state: &ServerState,
+) -> anyhow::Result<impl Fn(&RuntimeOutput) -> Result<(), NotReadyError>> {
+    let url = format!("{}{READY_PATH}", state.base_url());
+    let client = pipette_http::HttpClient::loopback("pipette", READY_REQUEST_TIMEOUT)
+        .context("failed to build readiness HTTP client")?
+        .client()
+        .clone();
+    Ok(move |_: &RuntimeOutput| {
+        pipette_http::send(client.get(&url))
+            .with_context(|| format!("GET {READY_PATH}"))
+            .map_err(NotReadyError::yet)?;
+        Ok(())
+    })
+}
+
+/// Stand-ins for a server: the `docker` that starts it, and its network side.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::{net::TcpListener, path::PathBuf, thread::JoinHandle};
+
+    #[cfg(unix)]
+    use anyhow::Context;
+
+    use pipette_memprobe::cgroup;
+
+    /// Read one request and answer it: `status` on `GET /v1/models`, 404 on
+    /// any other route.
+    pub(crate) fn respond(mut stream: TcpStream, status: u16) -> std::io::Result<()> {
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line)?;
+        // The rest of the head, so the close does not reset the connection
+        // under a request the client is still sending.
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                break;
             }
-            | Self::Uv {
-                server_args,
-                command_args,
-                ..
-            } => (server_args, command_args),
+        }
+        let status = if request_line.starts_with("GET /v1/models ") {
+            status
+        } else {
+            404
         };
-        let mut out = Vec::with_capacity(server_args.len() + command_args.len());
-        out.extend(server_args.iter().cloned());
-        out.extend(command_args.iter().cloned());
-        out
+        write!(
+            stream,
+            "HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
     }
 
-    pub fn default_port(&self) -> u16 {
-        self.kind().default_port()
+    /// The port a `docker run` publishes: `-p 127.0.0.1:<port>:<container>`.
+    #[cfg(unix)]
+    pub(crate) fn published_port(argv: &[&str]) -> Option<u16> {
+        let flag = argv.iter().position(|word| *word == "-p")?;
+        argv.get(flag + 1)?.split(':').nth(1)?.parse().ok()
     }
 
-    pub fn model_arg_flag(&self) -> &'static str {
-        self.kind().model_arg_flag()
+    /// The network side of a fake server binary, which serves nothing itself.
+    /// `argv` is made a fifo the fake writes its arguments to; a thread reads
+    /// them, binds the port `port_of` finds there and hands the listener to
+    /// `serve`. The thread returns the arguments.
+    #[cfg(unix)]
+    pub(crate) fn serve_fake(
+        argv: &Path,
+        port_of: fn(&[&str]) -> Option<u16>,
+        serve: impl FnOnce(TcpListener) -> anyhow::Result<()> + Send + 'static,
+    ) -> anyhow::Result<JoinHandle<anyhow::Result<String>>> {
+        #[expect(clippy::disallowed_methods, reason = "`mkfifo` prints nothing")]
+        let made = std::process::Command::new("mkfifo").arg(argv).status()?;
+        anyhow::ensure!(made.success(), "mkfifo {} failed", argv.display());
+        let argv = argv.to_path_buf();
+        Ok(std::thread::spawn(move || {
+            let argv = std::fs::read_to_string(&argv)?;
+            let words: Vec<&str> = argv.split_whitespace().collect();
+            let port = port_of(&words).context("no port in the fake's arguments")?;
+            serve(TcpListener::bind(("127.0.0.1", port))?)?;
+            Ok(argv)
+        }))
     }
 
-    pub fn server_args(&self) -> &[String] {
-        match self {
-            Self::Docker { server_args, .. } | Self::Uv { server_args, .. } => server_args,
-        }
+    #[cfg(unix)]
+    pub(crate) fn ready_once(listener: TcpListener) -> anyhow::Result<()> {
+        Ok(respond(listener.accept()?.0, 200)?)
     }
-}
 
-/// Inputs the launch site needs that don't fit cleanly on `LaunchSpec`
-/// because they're either workspace-global (label) or runtime-derived
-/// (image ref, flavor, hf_home).
-///
-/// Nothing about the network binding is configurable: the host port is a free
-/// ephemeral picked pre-spawn, the bind host is always `127.0.0.1`, the
-/// container port comes from `LaunchSpec` kind, the container name is
-/// generated, and the ready path is `ServerState::default_ready_path()`.
-#[derive(Debug, Clone)]
-pub struct DockerLaunchEnv {
-    /// `<repo>:<tag>` string handed to `docker run`.
-    pub image_ref: String,
-    /// Workspace label value (absolute path of the workspace root). Set as
-    /// the value of the `pipette-torch-oai.workspace` docker label so a
-    /// subsequent run from this workspace can reap containers our process
-    /// orphaned (Ctrl-C / SIGKILL / panic=abort).
-    pub workspace_label: String,
-    /// Host directory to bind-mount as `/root/.cache/huggingface`.
-    pub hf_home: Option<PathBuf>,
-    /// HF slug or in-container model path. `start` emits it via the
-    /// server's native model flag (`--model` for vLLM, `--model-path`
-    /// for SGLang) between the image ref and `assembled_args()` so the
-    /// wire order is model flag, then runtime flags, then trailing args
-    /// (model → `server_args` → trailing `--` args). Mirrors
-    /// `UvLaunchEnv::model` on the uv engine path so `command_args`
-    /// stays a pure carrier of trailing `--` args on both engines.
-    pub model: String,
-    /// GPU vendor flavor (canonicalized as [`VllmFlavor`]) for `docker run`
-    /// device flags. Sourced from plan `DockerVllm`/`DockerSglang`.
-    pub flavor: VllmFlavor,
-}
-
-/// Pick a free loopback port pre-spawn, shared by the docker and uv launch
-/// sites so both allocate host ports the same way. There's a TOCTOU window
-/// between this listener closing and the server binding the port — small
-/// enough to be acceptable for a benchmark tool, and it matches the "client
-/// picks a free ephemeral port" contract.
-pub fn pick_free_port() -> anyhow::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .context("failed to bind 127.0.0.1:0 for free-port discovery")?;
-    let port = listener
-        .local_addr()
-        .context("failed to read assigned port")?
-        .port();
-    drop(listener);
-    Ok(port)
-}
-
-/// How a server process ended, as reported by its transport's own liveness
-/// primitive. Docker and uv answer different questions — see [`server_exited`]
-/// — so each carries what its answer actually contains.
-#[derive(Debug)]
-enum ServerDeath {
-    /// The leader was our direct child, so `waitpid` yields a decoded status.
-    UvProcess { pid: u32, status: String },
-    /// The daemon no longer lists the container as running.
-    DockerContainer { container_id: ContainerId },
-}
-
-impl fmt::Display for ServerDeath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UvProcess { pid, status } => write!(
-                f,
-                "uv server pid {pid} is gone ({status}); anything it printed is \
-                 above, prefixed `[uv-server pid={pid}]`"
-            ),
-            // `docker run --rm` means dockerd removed the container the moment
-            // it exited, taking its exit code and `docker logs` buffer along —
-            // all that survives is what `docker logs -f` already streamed.
-            Self::DockerContainer { container_id } => write!(
-                f,
-                "container {container_id} is no longer running; it was started \
-                 with --rm, so its exit code is gone with it and anything it \
-                 printed is above"
-            ),
-        }
+    /// Written by a child: a write fd held here would pass to any child another
+    /// test thread forks meanwhile, and exec'ing the script then fails with
+    /// ETXTBSY.
+    #[cfg(unix)]
+    pub(crate) fn write_executable(path: &Path, script: &str) -> anyhow::Result<PathBuf> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "`cat` writes into the file, and nothing to stdout"
+        )]
+        let mut writer = std::process::Command::new("sh")
+            .args(["-c", r#"cat > "$0" && chmod 755 "$0""#])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        writer
+            .stdin
+            .take()
+            .context("the writer has no stdin")?
+            .write_all(script.as_bytes())?;
+        anyhow::ensure!(
+            writer.wait()?.success(),
+            "writing {} failed",
+            path.display()
+        );
+        Ok(path.to_path_buf())
     }
-}
 
-/// `Some(_)` once the server process is gone, `None` while it is still up.
-///
-/// A probe with no answer to give reports `None`: a `docker inspect` that never
-/// reached the daemon is no evidence the container died, and the readiness
-/// deadline still bounds the wait either way.
-fn server_exited(state: &ServerState) -> Option<ServerDeath> {
-    match state {
-        ServerState::Docker {
-            container_id,
-            docker_bin,
-            ..
-        } => match docker::container_liveness(docker_bin, container_id.as_str()) {
-            Ok(ContainerLiveness::Running) => None,
-            Ok(ContainerLiveness::NotRunning) => Some(ServerDeath::DockerContainer {
-                container_id: container_id.clone(),
-            }),
-            Ok(ContainerLiveness::Unknown) => {
-                log::debug!("liveness probe for container {container_id}: inspect gave no answer");
-                None
-            }
-            Err(err) => {
-                log::debug!("liveness probe for container {container_id}: {err:#}");
-                None
-            }
-        },
-        ServerState::Uv { pid, .. } => {
-            uv::exit_status(*pid).map(|status| ServerDeath::UvProcess { pid: *pid, status })
-        }
+    /// The pid [`fake_docker`]'s `container inspect` prints for the
+    /// container's main process, which [`fake_host`] places in it.
+    pub(crate) const FAKE_PID: u32 = 4242;
+
+    /// The id [`fake_docker`]'s `container inspect` prints.
+    pub(crate) const FAKE_CONTAINER_ID: &str =
+        "3f7c9a1b2d4e6f8a3f7c9a1b2d4e6f8a3f7c9a1b2d4e6f8a3f7c9a1b2d4e6f8a";
+
+    /// The container's `memory.stat` in [`fake_host`]'s tree.
+    pub(crate) const FAKE_MEMORY_STAT: &str =
+        "anon 1000\nfile 2000\nkernel 300\nkernel_stack 20\nshmem 40\n";
+
+    /// `anon + shmem + kernel` of [`FAKE_MEMORY_STAT`].
+    #[cfg(unix)]
+    pub(crate) const FAKE_OWN_BYTES: u64 = 1_340;
+
+    /// The container's `memory.peak` in [`fake_host`]'s tree.
+    pub(crate) const FAKE_MEMORY_PEAK: u64 = 123_456_789;
+
+    /// The container's `memory.swap.peak` in [`fake_host`]'s tree.
+    pub(crate) const FAKE_SWAP_BYTES: u64 = 4_096;
+
+    /// The container's cgroup in [`fake_host`]'s tree in `dir`: its systemd
+    /// scope.
+    #[cfg(unix)]
+    pub(crate) fn fake_scope(dir: &Path) -> PathBuf {
+        dir.join("cgroup")
+            .join("system.slice")
+            .join(format!("docker-{FAKE_CONTAINER_ID}.scope"))
     }
-}
 
-/// Poll the server's ready URL until it answers, it dies, or `timeout` elapses.
-///
-/// Liveness is checked only after a failed HTTP probe, so a server that comes
-/// up and answers never pays for it. A server that dies during startup fails in
-/// seconds rather than holding the caller for the whole timeout.
-pub fn wait_ready(state: &ServerState, timeout: Duration) -> anyhow::Result<()> {
-    let ready_url = state.ready_url();
-    let client = pipette_http::HttpClient::blocking_with_timeout("pipette", Duration::from_secs(5))
-        .context("failed to build readiness HTTP client")?;
-    let start = Instant::now();
-    let deadline = start + timeout;
-    let mut attempt: u32 = 0;
-    loop {
-        attempt += 1;
-        match client.get(&ready_url).send() {
-            Ok(resp) if resp.status().is_success() => return Ok(()),
-            Ok(resp) => {
-                log::debug!("readiness probe {attempt}: HTTP {}", resp.status());
-            }
-            Err(err) => {
-                log::debug!("readiness probe {attempt}: {err}");
-            }
+    /// A stand-in host in `dir`: `dir/proc` in `/proc`'s place, and a cgroup
+    /// v2 tree at `dir/cgroup` that counts memory and holds no cgroup yet.
+    pub(crate) fn fake_tree(dir: &Path) -> anyhow::Result<cgroup::Tree> {
+        let root = dir.join("cgroup");
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join("cgroup.controllers"), "cpu io memory pids\n")?;
+        Ok(cgroup::Tree::at(dir.join("proc"), root)?)
+    }
+
+    /// Writes `memory.stat`, `memory.peak` and `memory.swap.peak` holding
+    /// the values above in `cgroup`, a directory of [`fake_tree`]'s.
+    pub(crate) fn fill_cgroup(cgroup: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(cgroup)?;
+        std::fs::write(cgroup.join("memory.stat"), FAKE_MEMORY_STAT)?;
+        std::fs::write(cgroup.join("memory.peak"), format!("{FAKE_MEMORY_PEAK}\n"))?;
+        std::fs::write(
+            cgroup.join("memory.swap.peak"),
+            format!("{FAKE_SWAP_BYTES}\n"),
+        )?;
+        Ok(())
+    }
+
+    /// A stand-in docker host in `dir` for the container [`fake_docker`]
+    /// names: [`FAKE_PID`] in its scope in [`fake_tree`]'s tree, which
+    /// [`fill_cgroup`] fills.
+    #[cfg(unix)]
+    pub(crate) fn fake_host(dir: &Path) -> anyhow::Result<cgroup::Tree> {
+        let pid = dir.join("proc").join(FAKE_PID.to_string());
+        std::fs::create_dir_all(&pid)?;
+        std::fs::write(
+            pid.join("cgroup"),
+            format!("0::/system.slice/docker-{FAKE_CONTAINER_ID}.scope\n"),
+        )?;
+        fill_cgroup(&fake_scope(dir))?;
+        fake_tree(dir)
+    }
+
+    /// A stand-in `docker` in `dir`. `run` runs `greeting`, writes its argv to
+    /// the `argv` fifo and serves until `stop` SIGTERMs it. Once `die` appears
+    /// it crashes instead, as a container `--rm` then removes: a traceback, a
+    /// write to the `crashed` fifo, and a `stop` that finds no container.
+    /// `stop`, `kill` and `container inspect` are logged to `calls`. Once
+    /// `no-container` appears, `container inspect` finds none, as before `run`
+    /// creates it; once `not-started` does, it shows no process, as before
+    /// `run` starts it; once `hang` does, it takes 5 s, as on a stalled
+    /// daemon.
+    #[cfg(unix)]
+    pub(crate) fn fake_docker(dir: &Path, greeting: &str) -> anyhow::Result<PathBuf> {
+        let script = format!(
+            r#"#!/bin/sh
+DIR='{}'
+case "$1" in
+  run)
+    echo $$ > "$DIR/cli"
+    trap 'echo stopped; exit 143' TERM
+    {greeting}
+    echo "$@" > "$DIR/argv"
+    while [ ! -e "$DIR/die" ]; do sleep 0.05; done
+    echo 'RuntimeError: CUDA error: out of memory' >&2
+    touch "$DIR/gone"
+    echo > "$DIR/crashed"
+    exit 1 ;;
+  container)
+    if [ -e "$DIR/hang" ]; then exec sleep 5; fi
+    echo "$@" >> "$DIR/calls"
+    if [ -e "$DIR/no-container" ]; then
+      echo "Error response from daemon: No such container: $5" >&2
+      exit 1
+    fi
+    if [ -e "$DIR/not-started" ]; then echo "{FAKE_CONTAINER_ID} 0"; exit 0; fi
+    echo "{FAKE_CONTAINER_ID} {FAKE_PID}" ;;
+  stop|kill)
+    echo "$@" >> "$DIR/calls"
+    if [ -e "$DIR/gone" ]; then
+      echo 'Error response from daemon: No such container' >&2
+      exit 1
+    fi
+    kill -TERM "$(cat "$DIR/cli")" ;;
+esac
+"#,
+            dir.display()
+        );
+        write_executable(&dir.join("docker"), &script)
+    }
+
+    /// pipette's own cgroup in [`fake_session`]'s tree: a login session's.
+    pub(crate) const FAKE_SESSION: &str = "/user.slice/user-1000.slice/session-7.scope";
+
+    /// The session's `memory.stat` in [`fake_session`]'s tree.
+    pub(crate) const FAKE_SESSION_MEMORY_STAT: &str =
+        "anon 3000000\nfile 2000\nkernel 300000\nkernel_stack 20\nshmem 40000\n";
+
+    /// What [`fake_session`] gives pipette of its own: `RssAnon` 1000 kB.
+    #[cfg(target_os = "linux")]
+    pub(crate) const FAKE_PIPETTE_BYTES: u64 = 1_024_000;
+
+    /// The session's own memory less pipette's: what a uv server's probe in
+    /// [`fake_session`] reads.
+    #[cfg(target_os = "linux")]
+    pub(crate) const FAKE_SERVER_BYTES: u64 = 3_340_000 - FAKE_PIPETTE_BYTES;
+
+    /// A process in [`FAKE_SESSION`] that is not the server's, which NVML
+    /// lists beside it.
+    pub(crate) const FAKE_OTHER_PID: u32 = 41;
+
+    /// pipette's host in `dir`: it runs in [`FAKE_SESSION`] with 1000 kB of
+    /// its own and no swap, beside [`FAKE_OTHER_PID`], and the session swaps
+    /// [`FAKE_SWAP_BYTES`]; without `counted` the session has no
+    /// `memory.current`, as the host root has none.
+    pub(crate) fn fake_session(dir: &Path, counted: bool) -> anyhow::Result<cgroup::Tree> {
+        let tree = fake_tree(dir)?;
+        let session = dir
+            .join("cgroup")
+            .join(FAKE_SESSION.trim_start_matches('/'));
+        fill_cgroup(&session)?;
+        std::fs::write(session.join("memory.stat"), FAKE_SESSION_MEMORY_STAT)?;
+        std::fs::write(
+            session.join("memory.swap.current"),
+            format!("{FAKE_SWAP_BYTES}\n"),
+        )?;
+        if counted {
+            std::fs::write(session.join("memory.current"), "3340000\n")?;
         }
-        if let Some(death) = server_exited(state) {
-            anyhow::bail!(
-                "server exited before becoming ready at {ready_url} after {:.1}s: {death}",
-                start.elapsed().as_secs_f64()
-            );
+        let own = std::process::id();
+        std::fs::write(
+            session.join("cgroup.procs"),
+            format!("{own}\n{FAKE_OTHER_PID}\n"),
+        )?;
+        let proc = dir.join("proc");
+        [
+            ("self".to_owned(), 1000),
+            (own.to_string(), 1000),
+            (FAKE_OTHER_PID.to_string(), 0),
+        ]
+        .into_iter()
+        .try_for_each(|(pid, rss_anon_kib)| -> anyhow::Result<()> {
+            let pid_dir = proc.join(&pid);
+            std::fs::create_dir_all(&pid_dir)?;
+            std::fs::write(pid_dir.join("cgroup"), format!("0::{FAKE_SESSION}\n"))?;
+            std::fs::write(
+                pid_dir.join("status"),
+                format!("RssAnon:\t{rss_anon_kib} kB\nRssShmem:\t0 kB\n"),
+            )?;
+            Ok(())
+        })?;
+        std::fs::write(
+            proc.join(FAKE_OTHER_PID.to_string()).join("stat"),
+            format!("{FAKE_OTHER_PID} (sh) S 1 {FAKE_OTHER_PID} {FAKE_OTHER_PID} 0\n"),
+        )?;
+        Ok(tree)
+    }
+
+    /// Crash the `fake_docker` in `dir`, returning once it has.
+    #[expect(clippy::disallowed_methods, reason = "`mkfifo` prints nothing")]
+    pub(crate) fn crash_fake_docker(dir: &std::path::Path) -> std::io::Result<()> {
+        let crashed = dir.join("crashed");
+        if !std::process::Command::new("mkfifo")
+            .arg(&crashed)
+            .status()?
+            .success()
+        {
+            return Err(std::io::Error::other(format!(
+                "mkfifo {} failed",
+                crashed.display()
+            )));
         }
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "server did not become ready at {ready_url} within {}s",
-                timeout.as_secs()
-            );
-        }
-        thread::sleep(Duration::from_secs(2));
+        std::fs::write(dir.join("die"), "")?;
+        std::fs::read(&crashed).map(drop)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
     use rstest::rstest;
 
+    use super::test_support::respond;
     use super::*;
-
-    #[test]
-    fn pick_free_port_returns_a_non_privileged_port() -> anyhow::Result<()> {
-        assert!(pick_free_port()? >= 1024);
-        Ok(())
-    }
 
     // The launch sites pass this straight to the server argv, so the exact
     // spelling is a wire contract with vLLM / SGLang.
@@ -395,178 +632,51 @@ mod tests {
     #[case::sglang(ServerKind::Sglang, "--model-path")]
     fn model_arg_flag_cases(#[case] kind: ServerKind, #[case] expected: &str) {
         assert_eq!(kind.model_arg_flag(), expected);
-        assert_eq!(docker_spec(kind, &[], &[]).model_arg_flag(), expected);
-    }
-
-    /// A path no host can execute, so a state built with it never reaches a
-    /// real docker daemon — including on a dev box that has one running.
-    const UNRUNNABLE_DOCKER: &str = "/nonexistent/pipette-not-a-docker-binary";
-
-    fn docker_state(kind: ServerKind, container_id: &str, port: u16) -> ServerState {
-        ServerState::Docker {
-            kind,
-            container_id: ContainerId(container_id.to_string()),
-            docker_bin: PathBuf::from(UNRUNNABLE_DOCKER),
-            port,
-        }
     }
 
     #[test]
     fn server_state_base_url_is_loopback() {
-        let state = docker_state(ServerKind::Vllm, "abc", 41873);
-        assert_eq!(state.base_url(), "http://127.0.0.1:41873");
-        assert_eq!(state.ready_url(), "http://127.0.0.1:41873/v1/models");
-        assert!(matches!(state, ServerState::Docker { .. }));
-    }
-
-    #[test]
-    fn server_state_sglang_variant_carries_port() {
-        let state = docker_state(ServerKind::Sglang, "xyz", 30000);
-        assert_eq!(state.kind(), ServerKind::Sglang);
-        assert_eq!(state.port(), 30000);
-    }
-
-    #[rstest]
-    #[case::uv(
-        ServerDeath::UvProcess {
-            pid: 4242,
-            status: "exit status 1".to_string(),
-        },
-        &["pid 4242", "exit status 1", "[uv-server pid=4242]"]
-    )]
-    #[case::docker(
-        ServerDeath::DockerContainer {
-            container_id: ContainerId("abcdef0123456789feedface".to_string()),
-        },
-        // Short id, and the --rm caveat: there is no exit code to report.
-        &["container abcdef012345", "no longer running", "--rm"]
-    )]
-    fn server_death_message_cases(#[case] death: ServerDeath, #[case] expected: &[&str]) {
-        let msg = death.to_string();
-        for want in expected {
-            assert!(msg.contains(want), "{msg:?} is missing {want:?}");
-        }
-    }
-
-    /// A `docker` binary we can't execute is not evidence the container died,
-    /// so the wait falls through to the deadline instead of reporting an exit.
-    #[test]
-    fn wait_ready_times_out_when_the_liveness_probe_cannot_run() -> anyhow::Result<()> {
-        let state = docker_state(ServerKind::Vllm, "abc", pick_free_port()?);
-        let err = wait_ready(&state, Duration::ZERO)
-            .err()
-            .context("expected a readiness error")?;
-        let msg = format!("{err:#}");
-        assert!(msg.contains("did not become ready"), "got {msg}");
-        Ok(())
-    }
-
-    /// Write a stand-in `docker` that exits 1 with `stderr`, so the liveness
-    /// path sees a CLI that ran and failed rather than one it couldn't spawn.
-    /// Owned by the caller's tempdir and never on `PATH`, so the test doesn't
-    /// depend on what the host image ships.
-    #[cfg(unix)]
-    fn failing_docker(dir: &std::path::Path, stderr: &str) -> anyhow::Result<PathBuf> {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = dir.join("docker");
-        std::fs::write(&path, format!("#!/bin/sh\necho \"{stderr}\" >&2\nexit 1\n"))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-        Ok(path)
-    }
-
-    #[cfg(unix)]
-    fn docker_state_with_bin(docker_bin: PathBuf, port: u16) -> ServerState {
-        ServerState::Docker {
+        let state = ServerState {
             kind: ServerKind::Vllm,
-            container_id: ContainerId("abc".to_string()),
-            docker_bin,
-            port,
-        }
-    }
-
-    /// The point of the liveness check: a dead server ends the wait in
-    /// milliseconds rather than after the (here, 10-minute) readiness timeout.
-    #[cfg(unix)]
-    #[test]
-    fn wait_ready_fails_as_soon_as_the_server_is_gone() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let docker = failing_docker(dir.path(), "Error: No such object: abc")?;
-        let state = docker_state_with_bin(docker, pick_free_port()?);
-        let start = Instant::now();
-        let err = wait_ready(&state, Duration::from_secs(600))
-            .err()
-            .context("expected a readiness error")?;
-        let msg = format!("{err:#}");
-        assert!(msg.contains("exited before becoming ready"), "got {msg}");
-        assert!(msg.contains("no longer running"), "got {msg}");
-        assert!(start.elapsed() < Duration::from_secs(30), "waited too long");
-        Ok(())
-    }
-
-    /// An inspect that failed without saying the container is gone — a daemon
-    /// restart mid-startup — must not abort a server that is still coming up.
-    #[cfg(unix)]
-    #[test]
-    fn wait_ready_keeps_waiting_when_inspect_cannot_reach_the_daemon() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let docker = failing_docker(dir.path(), "Cannot connect to the Docker daemon")?;
-        let state = docker_state_with_bin(docker, pick_free_port()?);
-        let err = wait_ready(&state, Duration::ZERO)
-            .err()
-            .context("expected a readiness error")?;
-        let msg = format!("{err:#}");
-        assert!(msg.contains("did not become ready"), "got {msg}");
-        Ok(())
-    }
-
-    fn docker_spec(kind: ServerKind, server_args: &[&str], command_args: &[&str]) -> LaunchSpec {
-        LaunchSpec::Docker {
-            kind,
-            envs: vec![],
-            gpus: None,
-            shm_size: None,
-            ipc: None,
-            mounts: vec![],
-            server_args: server_args.iter().map(|s| s.to_string()).collect(),
-            command_args: command_args.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
-    /// The uv variant assembles the same way. It lives here rather than with
-    /// the uv integration test, which is `#![cfg(target_os = "linux")]` — a
-    /// field renamed out from under a shape check should fail on the author's
-    /// host, not three CI jobs later.
-    #[test]
-    fn launch_spec_uv_assembled_args() {
-        let spec = LaunchSpec::Uv {
-            kind: ServerKind::Vllm,
-            envs: vec![("HF_TOKEN".to_string(), String::new())],
-            server_args: vec!["--max-model-len".to_string(), "4096".to_string()],
-            command_args: vec!["--extra".to_string()],
+            port: 41873,
+            executable: PathBuf::from("docker"),
         };
-        assert_eq!(
-            spec.assembled_args(),
-            ["--max-model-len", "4096", "--extra"]
-        );
+        assert_eq!(state.base_url(), "http://127.0.0.1:41873");
     }
 
-    // Model flag is emitted by the launch site from `LaunchEnv`, never spliced
-    // in here — so the assembled view is exactly `server_args ++ command_args`,
-    // for either server.
-    #[rstest]
-    #[case::both(ServerKind::Vllm, &["--max-model-len", "4096"], &["extra-trailing"], &["--max-model-len", "4096", "extra-trailing"])]
-    #[case::command_args_only(ServerKind::Sglang, &[], &["trail-a", "trail-b"], &["trail-a", "trail-b"])]
-    #[case::server_args_only(ServerKind::Vllm, &["--dtype", "bfloat16"], &[], &["--dtype", "bfloat16"])]
-    fn launch_spec_assembled_args_cases(
-        #[case] kind: ServerKind,
-        #[case] server_args: &[&str],
-        #[case] command_args: &[&str],
-        #[case] expected: &[&str],
-    ) {
-        assert_eq!(
-            docker_spec(kind, server_args, command_args).assembled_args(),
-            expected
+    /// Only a success is ready: a 503 is a server still loading its weights,
+    /// and a refused connection one that has not bound its port yet.
+    #[test]
+    fn only_a_success_from_the_models_route_is_ready() -> anyhow::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let state = ServerState {
+            kind: ServerKind::Vllm,
+            port: listener.local_addr()?.port(),
+            executable: PathBuf::from("docker"),
+        };
+        // One connection per status, then the port closes.
+        let server = std::thread::spawn(move || {
+            [503, 200]
+                .into_iter()
+                .try_for_each(|status| respond(listener.accept()?.0, status))
+        });
+
+        let ready = serving(&state)?;
+        let printed = RuntimeOutput::default();
+        let [loading, up] = [ready(&printed), ready(&printed)];
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("the fake server panicked"))??;
+        let Some(NotReadyError::Yet(loading)) = loading.err() else {
+            anyhow::bail!("a 503 is a server still loading, not a failed one");
+        };
+        let loading = anyhow::anyhow!(loading);
+        assert!(format!("{loading:#}").contains("503"), "{loading:#}");
+        up?;
+        assert!(
+            matches!(ready(&printed), Err(NotReadyError::Yet(_))),
+            "a closed port answered ready"
         );
+        Ok(())
     }
 }

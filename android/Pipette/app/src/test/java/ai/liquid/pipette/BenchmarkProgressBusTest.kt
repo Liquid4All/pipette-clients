@@ -30,6 +30,7 @@ class BenchmarkProgressBusTest {
       overallPermil = 250,
       etaText = "3 min left",
       coolingSinceMillis = coolingSinceMillis,
+      coolingMaxMillis = Readiness.COOLDOWN_MAX_MILLIS,
       running = running,
     )
 

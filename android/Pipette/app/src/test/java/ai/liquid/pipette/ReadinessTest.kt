@@ -158,6 +158,49 @@ class ReadinessTest {
   }
 
   @Test
+  fun aRunThatNamesNoDeadlineFallsBackToTheSharedDefault() {
+    assertEquals(Readiness.COOLDOWN_MAX_MILLIS, RunReadiness.DEFAULT.maxWaitMillis())
+  }
+
+  @Test
+  fun anAbsurdDeadlineSaturatesRatherThanWrappingNegative() {
+    // The parser refuses anything past a day, so this is unreachable from the headless surface. Pinned anyway because the failure mode is silent and
+    // severe: a wrapped conversion yields a negative deadline, which expires before the first poll and reports a device that never cooled.
+    assertEquals(Long.MAX_VALUE, RunReadiness(maxWaitSecs = Long.MAX_VALUE).maxWaitMillis())
+    assertTrue(RunReadiness(maxWaitSecs = Long.MAX_VALUE).maxWaitMillis() > 0)
+  }
+
+  @Test
+  fun reportsTheOverriddenDeadlineRatherThanTheDefault() {
+    // The result has to describe the wait that governed it. A gate handed a cell's `max_wait_secs` and still reporting 300 would publish a row
+    // claiming a deadline nobody enforced, which is the same failure the skip_thermal field exists to prevent.
+    val readiness = Readiness(currentThermalStatus = { PowerManager.THERMAL_STATUS_NONE }, maxWaitMillis = { 1_800_000L })
+    assertEquals(ReadinessPolicy(maxWaitSecs = 1800L, skipThermal = false), readiness.policy)
+  }
+
+  @Test
+  fun waitsOutTheSuppliedDeadlineRatherThanTheDefault() {
+    // A device that never cools must time out on the *cell's* budget. Counted in status emits, which are one per poll, rather than in `sleepMillis`
+    // calls: the poll is served in short cancellation slices, so the sleep count is a function of that slice size and not of the deadline.
+    //
+    // A 6s deadline over a 2s poll admits three polls (at 0s, 2s, 4s) and then expires. On the 300s default it would be 150, so an ignored supplier
+    // fails this loudly rather than subtly.
+    var polls = 0
+    var now = 0L
+    val readiness =
+      Readiness(
+        currentThermalStatus = { PowerManager.THERMAL_STATUS_MODERATE },
+        sleepMillis = { now += it },
+        nowMillis = { now },
+        maxWaitMillis = { 6_000L },
+      )
+    val outcome = readiness.waitUntilReady(CancelFlag()) { _, _ -> polls++ }
+    assertTrue(outcome is ReadinessOutcome.TimedOut)
+    assertEquals(3, polls)
+    assertEquals(6_000L, now)
+  }
+
+  @Test
   fun waiverProceedsThroughAThermalStateThatWouldOtherwiseHold() {
     // The acceptance case for PIP-434, and the reason the waiver had to reach this tier rather than
     // only the JNI one: a device pinned at MODERATE with headroom above the ceiling waits out the

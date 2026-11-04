@@ -20,9 +20,13 @@ data class RunnerState(
   // Wall-clock instant the CURRENT gate wait began, or null when the gate isn't cooling (loading /
   // measuring). Re-derived on every cooling status from the elapsed the reporting gate hands over,
   // so it always describes the wait in progress: the deadline the UI counts against
-  // ([Readiness.COOLDOWN_MAX_MILLIS]) bounds one waitUntilReady call, and there are three call sites
-  // that can fire back to back. Cleared the moment cooling ends.
+  // ([coolingMaxMillis]) bounds one waitUntilReady call, and there are three call sites that can
+  // fire back to back. Cleared the moment cooling ends.
   val coolingSinceMillis: Long? = null,
+  // The deadline that gate is actually applying, which a run's `benchmark_flags.readiness` can move
+  // off the default. Carried alongside the anchor because the UI renders "elapsed / max" from the
+  // pair, and a max read from the shared constant would print a deadline nobody is enforcing.
+  val coolingMaxMillis: Long = Readiness.COOLDOWN_MAX_MILLIS,
 )
 
 /**
@@ -63,10 +67,17 @@ enum class RunSource(val wireName: String) {
  * cancel path persisted: a run cancelled after its last cell finishes has nothing left pending and is saved as [JobStatus.COMPLETED], so the flag is
  * what distinguishes it.
  *
+ * [interrupted] separates the runs the *device* stopped from the ones the user did. Neither is a failure and both can persist [JobStatus.PAUSED], so
+ * without it a cpuset demotion would be indistinguishable from someone tapping Pause and the field data could never show how often the guard fires.
+ *
  * Top-level (not a `JobRunner` member) to keep that class under detekt's `TooManyFunctions` threshold, which it now sits exactly on.
  */
-internal fun jobOutcome(cancelled: Boolean, status: JobStatus?): String =
+internal fun jobOutcome(cancelled: Boolean, status: JobStatus?, interrupted: Boolean): String =
   when {
+    // Ahead of the cancel arm because it is the more specific statement about why the run stopped. Both can be true: the cell loop lets a user cancel
+    // outrank a demotion for the CELL's status, but a cancel landing after the loop already broke on a demotion still sets the flag. Then the
+    // device's verdict is the one worth recording, since it is what actually ended the run.
+    interrupted -> AnalyticsEvents.OUTCOME_INTERRUPTED
     // PAUSED is what this runner's own cancel path persists. CANCELLED is never written here today,
     // but [JobStatus.fromWire] deserializes it, and a manifest from another writer must not be reported
     // as a failure. iOS's `analyticsOutcome` treats both the same way.
@@ -84,6 +95,7 @@ private fun captureJobCompleted(
   storage: JobStore,
   jobId: String,
   cancelled: Boolean,
+  interrupted: Boolean,
   cellCount: Int,
   cellsCompleted: Int,
   startedAtMillis: Long?,
@@ -93,13 +105,19 @@ private fun captureJobCompleted(
     AnalyticsEvents.JOB_COMPLETED,
     mapOf(
       AnalyticsEvents.JOB_ID to jobId,
-      AnalyticsEvents.OUTCOME to jobOutcome(cancelled, status),
+      AnalyticsEvents.OUTCOME to jobOutcome(cancelled, status, interrupted),
       AnalyticsEvents.CELL_COUNT to cellCount,
       AnalyticsEvents.CELLS_COMPLETED to cellsCompleted,
       AnalyticsEvents.DURATION_MS to startedAtMillis?.let { System.currentTimeMillis() - it },
     ),
   )
 }
+
+/**
+ * Thrown to route a run that was interrupted by a [CpusetDemotion] into the cell loop's existing failure handling, rather than duplicating the
+ * unload/save/publish sequence at the success-path check that detects it. Never escapes [JobRunner].
+ */
+private class RunInterruptedException(val demotion: CpusetDemotion) : Exception(demotion.describe())
 
 class CancelFlag {
   private val cancelled = AtomicBoolean(false)
@@ -170,8 +188,8 @@ internal fun shouldSweepAtRunEnd(manifest: JobManifest, registration: Registrati
   manifest.status == JobStatus.COMPLETED && manifest.contributeResults == true && registration != null && hasUnsentResults(manifest)
 
 /**
- * The two hooks a run needs into the surrounding Android app. Grouped rather than passed individually because they always travel together, both no-op
- * in tests, and both exist for the same reason: a benchmark run needs the platform to treat two processes a particular way while it is in flight.
+ * The hooks a run needs into the surrounding Android app. Grouped rather than passed individually because they always travel together, all no-op in
+ * tests, and they exist for the same reason: a benchmark run needs the platform to treat two processes a particular way while it is in flight.
  * Grouping also keeps [JobRunner]'s constructor under detekt's parameter ceiling, which per-cell upload and analytics pushed it over from opposite
  * directions.
  *
@@ -180,11 +198,20 @@ internal fun shouldSweepAtRunEnd(manifest: JobManifest, registration: Registrati
  * @property setForegroundHold Holds a foreground service in THIS (main) process while a run is in flight. The pocket screen gives :benchmark the
  *   foreground, which leaves main cached, and the platform kills cached processes for the very binder traffic pushPocketProgress generates. See
  *   JobOrchestratorService.
+ * @property applyReadiness Installs the starting job's [RunReadiness] where both gates read it (`AppContainer.applyRunReadiness`): the between-cell
+ *   one in this process, and the per-rep one in `:benchmark`, which the proxy re-delivers it to. A hook rather than a value the runner holds, because
+ *   the gates are constructed once per process and the policy belongs to the job about to run.
  */
-data class HostHooks(val launchPocketMode: () -> Unit = {}, val setForegroundHold: (Boolean) -> Unit = {})
+data class HostHooks(
+  val launchPocketMode: () -> Unit = {},
+  val setForegroundHold: (Boolean) -> Unit = {},
+  val applyReadiness: (RunReadiness) -> Unit = {},
+)
 
 @Suppress("TooManyFunctions") // the job orchestrator; the pocket-launch helpers pushed it one over
-class JobRunner(
+class JobRunner
+@Suppress("LongParameterList") // the run's collaborators, each independently faked in tests; a holder type would only move the list behind a name
+constructor(
   private val storage: JobStore,
   private val engine: BenchmarkEngine,
   private val submissionService: ResultSubmitter,
@@ -192,6 +219,11 @@ class JobRunner(
   private val analytics: Analytics = NoOpAnalytics,
   /** Injected rather than read from a Context so unit tests stay hermetic; production passes [NetworkReachability.checker]. */
   private val isOnline: () -> Boolean = { true },
+  /**
+   * Fetches a cell's weights when its path resolves to nothing. Null leaves the pre-provisioning behaviour, which is what the suites that predate it
+   * and the `:benchmark` process both want: a missing file fails the cell.
+   */
+  private val provisioner: ModelProvisioning? = null,
   private val executor: Executor = Executors.newSingleThreadExecutor(),
   private val host: HostHooks = HostHooks(),
   private val onStateChanged: (RunnerState) -> Unit,
@@ -229,6 +261,13 @@ class JobRunner(
   // Whether this run has launched the pocket-mode Activity yet (see launchPocketOnce).
   @Volatile private var pocketLaunched: Boolean = false
 
+  // Whether a cpuset demotion ended this run. Distinct from the cancel flag because the two mean
+  // different things to the manifest: a cancel is the user stopping the job, a demotion is the
+  // device invalidating a measurement, and only the latter has a cell to fail. A field rather than
+  // a local because `run`'s finally reports the outcome while `execute` owns the cell loop, and
+  // `execute` already communicates everything else through the persisted manifest.
+  @Volatile private var runInterrupted: Boolean = false
+
   // Launch the :benchmark pocket-mode Activity at most once per run, deferred to
   // the first cell that actually loads a model (so the service is bound and the
   // run-ended push can finish the activity). host.launchPocketMode self-guards
@@ -255,6 +294,8 @@ class JobRunner(
     contextSize: Int,
     prefillBatch: Int,
     contributeResults: Boolean,
+    /** What this job asks of the readiness gate. Stamped on the manifest, so every later run of it — resume, retry, rerun — gates the same way. */
+    readiness: RunReadiness = RunReadiness.DEFAULT,
   ): String {
     require(models.isNotEmpty()) { "Select at least one model" }
     require(benchmarks.isNotEmpty()) { "Select at least one benchmark" }
@@ -269,6 +310,7 @@ class JobRunner(
         status = JobStatus.RUNNING,
         contributeResults = contributeResults,
         prefillBatch = prefillBatch,
+        readiness = readiness,
       )
     storage.saveJobManifest(manifest)
     run(manifest.jobId, source = RunSource.NEW)
@@ -311,6 +353,10 @@ class JobRunner(
 
   private fun run(jobId: String, source: RunSource) {
     check(runningJobId == null) { "A job is already running" }
+    // Install THIS job's readiness policy, ahead of anything that can gate on it — every start funnels through here, so a resume or a retry is
+    // measured under the policy its own manifest carries rather than under whichever run happened to start last. A job whose manifest will not load
+    // is about to do nothing, and falls back to the client defaults rather than inheriting.
+    host.applyReadiness(runCatching { storage.loadJobManifest(jobId) }.getOrNull()?.readiness ?: RunReadiness.DEFAULT)
     val flag = CancelFlag()
     cancelFlag = flag
     runningJobId = jobId
@@ -322,6 +368,9 @@ class JobRunner(
     cellsCompletedInRun = 0
     coolingSinceMillis = null
     pocketLaunched = false
+    // Reset with the rest of the per-run state: left set, it would report every
+    // later run in this process as device-interrupted.
+    runInterrupted = false
     // Seed totalInRun BEFORE the first "Starting…" publish (execute() re-derives the same value on
     // the executor thread). Otherwise runFraction sees totalInRun == 0 and falls back to the whole-
     // manifest fraction — for a resumed ~90%-done job that momentarily prints a bogus "0s left".
@@ -352,7 +401,7 @@ class JobRunner(
           execute(jobId, flag)
         } finally {
           // Read the counters BEFORE they are cleared below.
-          captureJobCompleted(analytics, storage, jobId, flag.isCancelled, totalInRun, cellsCompletedInRun, startedAtMillis)
+          captureJobCompleted(analytics, storage, jobId, flag.isCancelled, runInterrupted, totalInRun, cellsCompletedInRun, startedAtMillis)
           // Clear the counters BEFORE `runningJobId`, which is the `check` guard in `run()`: the moment it goes null another run may start and seed
           // its own counters, and clearing afterwards would zero them out from under it, costing that run its `duration_ms`.
           cancelFlag = null
@@ -360,6 +409,16 @@ class JobRunner(
           completedInRun = 0
           cellsCompletedInRun = 0
           totalInRun = 0
+          // The job boundary, and the only place the cpuset baseline may be dropped. In this finally rather than at the end of `execute` because this
+          // runs on every exit: `execute` returns early when the manifest will not load, and can throw from the manifest/publish calls outside its
+          // per-cell try. Leaving the baseline behind on those paths is not a missed check but a wrong one, because `:benchmark` outlives a job by a
+          // grace period and the next job's first cell would be judged against this job's top-app state before its pocket screen has been promoted
+          // back to top-app, failing a cell that was fine.
+          //
+          // Immediately before `runningJobId`, for two reasons. That is the ordering the guard needs, since the moment it goes null the next job may
+          // start and load. And this is the only blocking IPC in this block, so everything that must happen regardless of whether `:benchmark` is
+          // answering, above all the foreground-hold release below, is already done or still to come rather than stranded behind it.
+          runCatching { engine.endJob() }
           runningJobId = null
           coolingSinceMillis = null
           currentBenchmarkMap = emptyMap()
@@ -444,18 +503,33 @@ class JobRunner(
       // loop, over cells that have no iteration to hoist out of.
       val cellType = cell.benchmarkType?.let(BenchmarkType::fromWire) ?: item.type
 
-      val resolvedModelPath = storage.resolveModelPath(cell.modelPath)
+      // Absent weights are fetched, not fatal, when the cell says what they are. That is what lets a run name a catalog model nobody has downloaded,
+      // and what lets one survive the file being deleted between planning and execution. A cell with no [JobCell.modelRef] (an old manifest, or a
+      // locally imported file with no coordinate to go back to) has nothing to fetch from and keeps the original message below.
+      //
+      // Reported through `publishCell` while it waits: a multi-gigabyte transfer inside a cell is otherwise indistinguishable from a wedged run,
+      // since the progress views show the cell as running with nothing moving for tens of minutes.
+      // The fetch's own reason for failing, kept in a local rather than written onto the cell: `cell.errorMessage` can still hold the message
+      // from a previous attempt at this point (it is cleared a few lines below, once the cell is known to be runnable), so reading it back to decide
+      // what to report would let a stale reason survive as this attempt's.
+      var fetchError: String? = null
+      val fetch = { attempt: Result<String>? -> attempt?.onFailure { fetchError = it.message }?.getOrNull() }
+      val resolvedModelPath =
+        storage.resolveModelPath(cell.modelPath)
+          ?: cell.modelRef?.let { ref -> fetch(provisioner?.ensureWeights(ref) { s -> publishCell(manifest, cell, s, 0.0) }) }
       if (resolvedModelPath == null) {
         cell.runStatus = CellRunStatus.FAILED
-        cell.errorMessage = "Model file not found: ${File(cell.modelPath).name}. Re-download it from the Models tab."
+        cell.errorMessage = fetchError ?: "Model file not found: ${File(cell.modelPath).name}. Re-download it from the Models tab."
         saveManifest()
         publishCell(manifest, cell, cell.errorMessage ?: "Model file not found", 0.0)
         continue
       }
-      val resolvedMmprojPath = storage.resolveModelPath(cell.mmprojPath)
+      val resolvedMmprojPath =
+        storage.resolveModelPath(cell.mmprojPath)
+          ?: cell.modelRef?.let { ref -> fetch(provisioner?.ensureMmproj(ref) { s -> publishCell(manifest, cell, s, 0.0) }) }
       if (cell.mmprojPath != null && resolvedMmprojPath == null) {
         cell.runStatus = CellRunStatus.FAILED
-        cell.errorMessage = "mmproj file not found: ${File(cell.mmprojPath ?: "").name}. Re-download it from the Models tab."
+        cell.errorMessage = fetchError ?: "mmproj file not found: ${File(cell.mmprojPath ?: "").name}. Re-download it from the Models tab."
         saveManifest()
         publishCell(manifest, cell, cell.errorMessage ?: "mmproj file not found", 0.0)
         continue
@@ -466,6 +540,11 @@ class JobRunner(
       saveManifest()
 
       val cellContext = cellContextSize(cell, benchmarkMap)
+      // The context this cell asks to load at: the job's derivation, or whatever the cell
+      // authored instead, which may be larger or smaller. Named for the request rather than
+      // the load, because the outer catch also reports it for a cell refused before any load
+      // was attempted. Hoisted so both catches report the same number.
+      var requestedContext = cellContext
       publishCell(manifest, cell, "Running...", 0.0)
       try {
         // Asked of the resolved type rather than restated here. This was `cell.benchmarkType == MAX_MEMORY_USAGE.wire`, which compares a nullable
@@ -511,6 +590,25 @@ class JobRunner(
         // fails before load (e.g. deleted model files → each cell continues
         // without binding the service).
         launchPocketOnce()
+        // A knob this engine cannot honor fails the cell rather than being ignored: running
+        // under a value the cell did not ask for, and then reporting that value, is the
+        // failure this whole flag path exists to prevent. Checked before the load so the
+        // refusal costs nothing.
+        val authoredFlags = cell.runtimeFlags ?: RuntimeFlagRef()
+        val unsupported = authoredFlags.unsupportedKnobs()
+        check(unsupported.isEmpty()) { "Unsupported runtime flags: ${unsupported.joinToString(", ")}" }
+        // What this cell actually loads with: its own authored knobs where it has them, the
+        // job's where it does not. Every value below comes from here, and so does the
+        // `runtime_flags` on the payload, so the load and the record cannot disagree.
+        val resolvedFlags = authoredFlags.resolve(nGpuLayers = manifest.nGpuLayers, contextSize = cellContext, nUbatch = manifest.prefillBatch)
+        // `resolve` answers every knob the engine applies, so these are non-null by
+        // construction. Asserted rather than re-defaulted: a second spelling of each default
+        // here is exactly how the load and the record would drift apart again.
+        val nGpuLayers = requireNotNull(resolvedFlags.numberGpuLayers)
+        val contextSize = requireNotNull(resolvedFlags.ctxSize)
+        val nUbatch = requireNotNull(resolvedFlags.nUbatch)
+        val loadMode = requireNotNull(resolvedFlags.loadMode)
+        requestedContext = contextSize
         if (needsFreshLoad) {
           // max_memory_usage must observe the model load itself, so it
           // runs on a fresh load (the actor frees any resident model first).
@@ -519,9 +617,10 @@ class JobRunner(
             engine.runFreshSync(
               benchmarkJson = item.rawJson.toString(),
               modelPath = resolvedModelPath,
-              nGpuLayers = manifest.nGpuLayers,
-              contextSize = cellContext,
-              nUbatch = manifest.prefillBatch,
+              nGpuLayers = nGpuLayers,
+              contextSize = contextSize,
+              nUbatch = nUbatch,
+              loadMode = loadMode,
               mmprojPath = resolvedMmprojPath,
               progress = progressCallback,
               cooldown = cooldownCallback,
@@ -536,15 +635,15 @@ class JobRunner(
           // for a different one.
           publishCell(manifest, cell, "Loading…", 0.0)
           try {
-            engine.loadSync(resolvedModelPath, manifest.nGpuLayers, cellContext, manifest.prefillBatch)
+            engine.loadSync(resolvedModelPath, nGpuLayers, contextSize, nUbatch, loadMode)
           } catch (error: Throwable) {
-            failedModelPaths[cell.modelPath] = formatJobError(error, cellContext)
+            failedModelPaths[cell.modelPath] = formatJobError(error, requestedContext)
             throw error
           }
           resultJson =
             engine.runBenchmarkSync(
               benchmarkJson = item.rawJson.toString(),
-              nGpuLayers = manifest.nGpuLayers,
+              nGpuLayers = nGpuLayers,
               mmprojPath = resolvedMmprojPath,
               progress = progressCallback,
               cooldown = cooldownCallback,
@@ -552,6 +651,11 @@ class JobRunner(
               thermal = null,
             )
         }
+
+        // Checked on the SUCCESS path too, not only from the catch below: a demotion cancels the run, but the run can still return normally if the
+        // cancel landed in its last moments, and a result measured across a descheduling is invalid however cleanly it came back. Thrown rather than
+        // handled inline so it lands in the one catch that already unloads the model and files the cell.
+        engine.lastRunInterruption()?.let { throw RunInterruptedException(it) }
 
         // Diagnostic: the :benchmark process's scheduling group (where inference
         // ran), for OEM-cpuset-demotion analysis. The side-by-side logging (main
@@ -566,8 +670,7 @@ class JobRunner(
           modelName = cell.modelName,
           modelPath = cell.modelPath,
           mmprojPath = cell.mmprojPath,
-          nGpuLayers = manifest.nGpuLayers,
-          contextSize = cellContext,
+          runtimeFlags = resolvedFlags,
           runtimeVersion = engine.llamaCppCommit(),
           runtimeCpuBackend = engine.cpuBackendDescriptor(),
           // The type resolved once at the top of the iteration, rather than the
@@ -617,29 +720,52 @@ class JobRunner(
           )
         }
       } catch (error: Throwable) {
-        if (flag.isCancelled) {
-          cell.runStatus = CellRunStatus.CANCELLED
-        } else {
-          cell.runStatus = CellRunStatus.FAILED
-          cell.errorMessage = formatJobError(error, cellContext)
+        // A demotion that only surfaced as a thrown native cancel still has to be recognized here: `lastRunInterruption` is re-read because the run
+        // may have been cancelled by the watcher and then died on its way out, in which case the throw carries the native error, not the reason.
+        // Not asked at all once the cell is recorded COMPLETED. The progress publish and the between-cell cooldown sit inside this try but after that
+        // assignment, and the cooldown is minutes long and a likely place for a screen-off; a throw from either of them is not a statement about a
+        // measurement that already finished. Note this only stops such a throw being blamed on a demotion, and on breaking the whole job for one: the
+        // `else` arm below still rewrites the cell to FAILED, which is pre-existing behaviour this change does not alter.
+        val demotion =
+          if (cell.runStatus == CellRunStatus.COMPLETED) null else ((error as? RunInterruptedException)?.demotion ?: engine.lastRunInterruption())
+        when {
+          // A user cancel outranks a demotion, matching the readiness gate's precedence (PipetteBenchmarkService.cooldownShim): stopping is the
+          // user's instruction, and a cell they chose to stop should read CANCELLED rather than blame them for a throttle.
+          flag.isCancelled -> cell.runStatus = CellRunStatus.CANCELLED
+          demotion != null -> {
+            runInterrupted = true
+            cell.runStatus = CellRunStatus.FAILED
+            cell.errorMessage = demotion.describe()
+          }
+          else -> {
+            cell.runStatus = CellRunStatus.FAILED
+            cell.errorMessage = formatJobError(error, requestedContext)
+          }
         }
         runCatching { engine.unloadSync() }
         saveManifest()
         publishCell(manifest, cell, cell.errorMessage ?: "Cancelled", 0.0)
-        if (flag.isCancelled) break
+        // Stop the job on a demotion as well as on a cancel. Continuing would measure every remaining cell under whatever demoted the process, which
+        // is the silent-bad-data outcome this whole path exists to prevent. The cells not reached stay CANCELLED and resumable; if there were none
+        // left, the job simply completes with this cell FAILED (see the terminal block below).
+        if (flag.isCancelled || runInterrupted) break
       }
     }
 
     runCatching { engine.unloadSync() }
 
     manifest = storage.loadJobManifest(jobId) ?: manifest
-    if (flag.isCancelled) {
+    if (flag.isCancelled || runInterrupted) {
       manifest.cells.forEach { cell -> if (cell.runStatus == CellRunStatus.PENDING) cell.runStatus = CellRunStatus.CANCELLED }
       manifest.status =
-        if (manifest.cells.any { it.runStatus == CellRunStatus.CANCELLED }) {
-          JobStatus.PAUSED
-        } else {
-          JobStatus.COMPLETED
+        when {
+          // PAUSED exactly when there is something left to resume, for a demotion as much as for a cancel. An earlier version forced PAUSED on any
+          // demotion so the Jobs tab would offer Resume as a signal that the job was cut short. That was a promise the app cannot keep: a resume runs
+          // PENDING cells and revives CANCELLED ones, and the demoted cell is neither (it is FAILED), so a demotion on the LAST cell produced a
+          // Resume that ran nothing and immediately wrote the job back to COMPLETED. A failed cell is already surfaced on its own, as "First failure"
+          // on the job card, which is how a readiness-timeout failure reports too.
+          manifest.cells.any { it.runStatus == CellRunStatus.CANCELLED } -> JobStatus.PAUSED
+          else -> JobStatus.COMPLETED
         }
     } else {
       manifest.status = JobStatus.COMPLETED
@@ -699,6 +825,8 @@ class JobRunner(
         completedInRun = completedInRun,
         totalInRun = totalInRun,
         coolingSinceMillis = coolingSinceMillis,
+        // The gate's own answer, not the constant: it reads the same supplier the wait does.
+        coolingMaxMillis = readiness.policy.maxWaitSecs * 1_000L,
       )
     )
   }
@@ -735,6 +863,7 @@ class JobRunner(
         // "calculating" until past 2%, as on the Compose card.
         etaText = RunProgress.estimatedTimeLeft(state, runFraction) ?: "calculating",
         coolingSinceMillis = state.coolingSinceMillis,
+        coolingMaxMillis = state.coolingMaxMillis,
         running = running,
       )
     // Coalesce the cross-process (oneway Binder) mirror: RunnerState churns on
@@ -785,6 +914,8 @@ class JobRunner(
         when {
           // Eval is identified by its dataset, not token params.
           definition is BenchmarkDefinition.Eval -> definition.datasetName.ifBlank { cell.benchmarkId }
+          // Same reasoning as Eval: the lmms-eval task is the identifying label, not a token count.
+          definition is BenchmarkDefinition.VlmEval -> definition.lmmsTask.ifBlank { cell.benchmarkId }
           definition != null -> definition.type.displayName.let { base -> benchmarkParamSummary(definition)?.let { "$base · $it" } ?: base }
           cell.benchmarkType != null -> BenchmarkCatalog.displayName(cell.benchmarkType)
           else -> cell.benchmarkId
@@ -807,6 +938,7 @@ class JobRunner(
           "${definition.imageWidth}×${definition.imageHeight}px$text"
         }
         is BenchmarkDefinition.Eval -> null
+        is BenchmarkDefinition.VlmEval -> null
       }
 
     fun planCells(
@@ -819,7 +951,7 @@ class JobRunner(
       val cells = mutableListOf<JobCell>()
       for (model in models) {
         for (benchmark in benchmarks) {
-          if (benchmark.type == BenchmarkType.VL_THROUGHPUT) {
+          if (benchmark.type.requiresVisionProjector) {
             if (!isVlCompatible(model, mmprojFiles)) continue
             for (mmproj in selectedMmprojs) {
               cells +=
@@ -829,6 +961,9 @@ class JobRunner(
                   modelPath = model.path,
                   modelName = model.hfRepo ?: model.name,
                   mmprojPath = mmproj.path,
+                  // The vision pair as one coordinate, so the runner can fetch either half. Composed here rather than taken from `model.modelRef`
+                  // because the projector is a separate selection the picker makes, and only this loop knows which one was paired with these weights.
+                  modelRef = visionRef(model, mmproj),
                 )
             }
           } else {
@@ -838,11 +973,28 @@ class JobRunner(
                 benchmarkType = benchmark.benchmarkType,
                 modelPath = model.path,
                 modelName = model.hfRepo ?: model.name,
+                modelRef = model.modelRef,
               )
           }
         }
       }
       return cells
+    }
+
+    /**
+     * The vision coordinate for a weights + projector pairing, or null when either side has none to offer.
+     *
+     * Both files have to live in the same repo, which is what plan-types `HfGgufVision` states and what the download layout assumes. A pairing across
+     * two repos is refused (null) rather than silently attributed to the weights' repo, because the resulting fetch would 404 against a path that
+     * never existed and the cell would report missing weights for a projector that was simply somewhere else.
+     */
+    internal fun visionRef(model: ModelFile, mmproj: ModelFile): Model? {
+      val weights = (model.modelRef as? Model.GgufText)?.model
+      val projector = GgufFilename.parseOrNull(mmproj.name)
+      // A projector with no repo of its own is taken to be in the weights' repo, which is what a local import beside them looks like.
+      val sameRepo = mmproj.hfRepo == null || mmproj.hfRepo == model.hfRepo
+      return if (weights == null || projector == null || !sameRepo) null
+      else Model.GgufVision(HfGgufVision(weights.repo, weights.filename, projector, weights.modelFlags))
     }
 
     fun isVlCompatible(model: ModelFile, mmprojFiles: List<ModelFile>): Boolean {

@@ -1,13 +1,17 @@
+use std::path::PathBuf;
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use pipette_ops::measurement;
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use pipette_ops::measurement::MeasurementObserver;
+use pipette_ops::readiness::ReadinessGate;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::BenchmarkResultData;
+use pipette_plan_types::DecodeThroughputBenchmark;
+use pipette_plan_types::RunRequest;
+use pipette_plan_types::RunResponse;
 
-use super::{server, throughput_http};
+use crate::{measurement, server, throughput_http};
 
 const ENDPOINT: &str = "/decode_throughput";
 
@@ -25,48 +29,52 @@ struct DecodeThroughputResponse {
 
 pub(super) fn run(
     req: &RunRequest,
+    benchmark: &DecodeThroughputBenchmark,
+    sidecar: PathBuf,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: &MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_decode_throughput()
-        .map_err(anyhow::Error::from)?;
-    let prefill_tokens = benchmark.parameter_prefill_tokens;
-    let decode_tokens = benchmark.parameter_decode_tokens;
+    let prefill_tokens = benchmark
+        .parameter_prefill_tokens
+        .into_inner()
+        .unsigned_abs();
+    let decode_tokens = benchmark
+        .parameter_decode_tokens
+        .into_inner()
+        .unsigned_abs();
     require_decode_interval(decode_tokens)?;
 
-    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
-    // gate: a first-use `swift build -c release` saturates every core for
-    // minutes and would sit between the gate certifying the device as thermally
-    // idle and the measurement that certification is for.
-    let sidecar = crate::sidecar::require_coreai_sidecar()?;
     readiness_gate()?;
-    let server = server::start_server(req, Some(sidecar))?;
+    let mut server = server::start_server(req, sidecar)?;
 
-    log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p/{decode_tokens}g)");
-    throughput_http::prepare(&server.base_url)?;
+    tracing::info!(
+        cell = ENDPOINT,
+        prefill_tokens,
+        decode_tokens,
+        "Core AI decode warm-up"
+    );
+    throughput_http::prepare(&server)?;
     let warmup: DecodeThroughputResponse = throughput_http::post_json(
-        &server.base_url,
+        &server,
         ENDPOINT,
         &DecodeThroughputRequest {
             prompt_tokens: prefill_tokens,
             decode_tokens,
         },
     )?;
-    measurement::expect_tokens(
+    pipette_ops::measurement::expect_tokens(
         &format!("{ENDPOINT} warmup decode_tokens"),
         warmup.decode_tokens,
         decode_tokens,
     )?;
-    let measured = measurement::run(
+    let measured = pipette_ops::measurement::run(
         ENDPOINT,
         readiness_gate,
-        observer,
-        |_| throughput_http::prepare(&server.base_url),
+        *observer,
+        |_| throughput_http::prepare(&server),
         |_| {
             throughput_http::post_json::<_, DecodeThroughputResponse>(
-                &server.base_url,
+                &server,
                 ENDPOINT,
                 &DecodeThroughputRequest {
                     prompt_tokens: prefill_tokens,
@@ -76,30 +84,32 @@ pub(super) fn run(
         },
         |idx, rep| {
             let response = &rep.value;
-            measurement::expect_tokens("decode_tokens", response.decode_tokens, decode_tokens)?;
-            measurement::validate_tps("generation_tps", response.generation_tps)
+            pipette_ops::measurement::expect_tokens(
+                "decode_tokens",
+                response.decode_tokens,
+                decode_tokens,
+            )?;
+            pipette_ops::measurement::positive_finite("generation_tps", response.generation_tps)
                 .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            measurement::time_ms_from_tps(ENDPOINT, decode_tokens, response.generation_tps)
+            // `generation_tps` counts the N-1 intervals between tokens, so the
+            // span from the first token to the last is (N-1) / tps.
+            measurement::time_ms_from_tps(ENDPOINT, decode_tokens - 1, response.generation_tps)
         },
     )?;
     let stats = measured.stats();
-    Ok(RunResponse {
-        executable: Some(server.executable.clone()),
-        command: server.command_preview.clone(),
-        ..RunResponse::new(
-            BenchmarkResultData::DecodeThroughput {
-                decode_time_ms: stats.mean_ms,
-                decode_time_ms_stddev: Some(stats.stddev_ms),
-            },
-            server.stdout(),
-            server.stderr(),
-        )
-    })
+    Ok(
+        RunResponseBuilder::new(BenchmarkResultData::DecodeThroughput {
+            decode_time_ms: stats.mean_ms,
+            decode_time_ms_stddev: Some(stats.stddev_ms),
+        })
+        .process(&mut server.process)
+        .build(),
+    )
 }
 
-/// Decode tps is counted over N-1 inter-token intervals (first token starts
-/// the clock). A 1-token cell would report generation_tps=0 and fail mid-run
-/// with a vacuous metric error.
+/// The decode rate (tokens per second, tps) uses the N-1 intervals between
+/// tokens; the first token starts the clock. A cell with one decode token
+/// reports `generation_tps=0`, which fails validation with a misleading error.
 fn require_decode_interval(decode_tokens: u32) -> anyhow::Result<()> {
     if decode_tokens < 2 {
         anyhow::bail!(
@@ -113,21 +123,29 @@ fn require_decode_interval(decode_tokens: u32) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
-    fn rejects_single_token_decode() {
-        let result = require_decode_interval(1);
-        assert!(result.is_err(), "1-token decode must fail");
-        if let Err(err) = result {
-            let msg = format!("{err:#}");
-            assert!(msg.contains("decode_tokens >= 2"), "{msg}");
-            assert!(msg.contains("N-1"), "{msg}");
+    #[rstest]
+    #[case::one_token(1, Some(["decode_tokens >= 2", "N-1"].as_slice()))]
+    #[case::two_tokens(2, None)]
+    fn require_decode_interval_by_token_count(
+        #[case] decode_tokens: u32,
+        #[case] expected_error: Option<&[&str]>,
+    ) -> anyhow::Result<()> {
+        let result = require_decode_interval(decode_tokens);
+        match (result, expected_error) {
+            (Ok(()), None) => Ok(()),
+            (Err(err), Some(fragments)) => {
+                let msg = format!("{err:#}");
+                for fragment in fragments {
+                    anyhow::ensure!(msg.contains(fragment), "missing {fragment:?} in {msg}");
+                }
+                Ok(())
+            }
+            (Ok(()), Some(_)) => anyhow::bail!("{decode_tokens}-token decode must fail"),
+            (Err(err), None) => Err(err.context(format!("{decode_tokens}-token decode must pass"))),
         }
-    }
-
-    #[test]
-    fn accepts_two_token_decode() {
-        assert!(require_decode_interval(2).is_ok());
     }
 }

@@ -3,16 +3,11 @@ import Testing
 
 @testable import Pipette
 
-/// `Descriptor` — the canonical form and the digest that addresses it, mirroring
-/// `crates/pipette-plan-types/src/descriptor.rs`.
-///
-/// The rule is shared with `pipette-mgmt`'s `canonical_json`, so a digest computed here
-/// addresses the same artifact the warehouse groups by. Drift would split one identity in
-/// two, which is why the vectors are pinned rather than assumed.
+/// The canonical form and the digest that addresses it, mirroring `canonical_json` in
+/// pipette-mgmt's `crates/pipette-plan-types/src/descriptor.rs`. The warehouse groups
+/// by that digest, so drift would split one identity in two.
 struct DescriptorTests {
-    /// The fixed vectors `descriptor.rs` shares with `pipette-mgmt`'s `canonical_json`.
-    /// If either side changes its rule, one of these fails instead of the repos quietly
-    /// disagreeing about what a descriptor's id is.
+    /// The fixed vectors from mgmt's `descriptor.rs`.
     @Test func canonicalizationMatchesTheSharedVectors() {
         let cases: [([String: Any], String)] = [
             ([:], "{}"),
@@ -23,7 +18,7 @@ struct DescriptorTests {
         ]
 
         for (value, expected) in cases {
-            #expect(Descriptor.canonicalize(value) == expected)
+            #expect(canonicalJson(value) == expected)
         }
     }
 
@@ -31,8 +26,8 @@ struct DescriptorTests {
     @Test func theDigestIsSha256OfTheCanonicalForm() throws {
         let value: [String: Any] = ["b": 1, "a": 2]
 
-        #expect(try Descriptor.digest(["a": 2, "b": 1])
-            == Descriptor.sha256Hex(Descriptor.canonicalize(value)))
+        #expect(try descriptorDigest(["a": 2, "b": 1])
+            == sha256Hex(canonicalJson(value)))
     }
 
     /// Nested objects sort at every level; arrays keep their order because position
@@ -43,19 +38,25 @@ struct DescriptorTests {
             "a": ["second", "first"],
         ]
 
-        #expect(Descriptor.canonicalize(value)
+        #expect(canonicalJson(value)
             == #"{"a":["second","first"],"b":{"a":2,"z":1}}"#)
     }
 
-    /// A bool is not a number. `JSONSerialization` hands both back as `NSNumber`, and only
-    /// the ObjC type tells them apart — writing `true` as `1` would hash differently from
-    /// the same descriptor on the Rust side.
+    /// `JSONSerialization` hands bools and numbers back as `NSNumber`, and only the ObjC type
+    /// tells them apart; writing `true` as `1` would hash differently from the Rust side.
     @Test func boolsStayBools() {
-        #expect(Descriptor.canonicalize(["t": true, "n": 1]) == #"{"n":1,"t":true}"#)
+        #expect(canonicalJson(["t": true, "n": 1]) == #"{"n":1,"t":true}"#)
     }
 
-    /// The same model formatted two ways reduces to one digest — the property the whole
-    /// scheme rests on.
+    /// `1` and `1.0` stay distinct, as `serde_json` renders them: an integral float keeps
+    /// its fraction, and an exponent is spelled without a sign or padding.
+    @Test func anIntegralFloatKeepsItsFraction() throws {
+        let parsed = try #require(try JSONSerialization.jsonObject(
+            with: Data(#"{"f":1.0,"i":1,"h":0.5}"#.utf8)) as? [String: Any])
+        #expect(canonicalJson(parsed) == #"{"f":1.0,"h":0.5,"i":1}"#)
+        #expect(canonicalJson(["big": 1e20, "small": 1e-7]) == #"{"big":1e20,"small":1e-7}"#)
+    }
+
     @Test func fieldOrderDoesNotChangeTheDigest() throws {
         let model = try ggufTextSpec("org/a-GGUF", "a-Q4_0.gguf")
         let json = try JSONEncoder().encode(model)
@@ -63,20 +64,26 @@ struct DescriptorTests {
         // Re-serialize with sorted keys: different bytes, same value.
         let sorted = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
 
-        #expect(Descriptor.canonicalize(object)
-            == Descriptor.canonicalize(try #require(
+        #expect(canonicalJson(object)
+            == canonicalJson(try #require(
                 JSONSerialization.jsonObject(with: sorted) as? [String: Any])))
-        #expect(try Descriptor.digest(model).count == 64)
+        #expect(try descriptorDigest(model).count == 64)
     }
 
     /// Two different models do not share a digest, and the display form is a prefix of the
     /// full one.
     @Test func distinctModelsGetDistinctDigests() throws {
-        let one = try Descriptor.digest(try ggufTextSpec("org/a-GGUF", "a-Q4_0.gguf"))
-        let two = try Descriptor.digest(try ggufTextSpec("org/a-GGUF", "a-Q5_K_M.gguf"))
+        let one = try descriptorDigest(try ggufTextSpec("org/a-GGUF", "a-Q4_0.gguf"))
+        let two = try descriptorDigest(try ggufTextSpec("org/a-GGUF", "a-Q5_K_M.gguf"))
 
         #expect(one != two)
-        #expect(one.hasPrefix(Descriptor.shortDigest(one)))
-        #expect(Descriptor.shortDigest(one).count == Descriptor.digestDisplayLength)
+        #expect(one.hasPrefix(shortDigest(one)))
+        #expect(shortDigest(one).count == digestDisplayLen)
+    }
+
+    /// `short_digest_truncates_without_panicking_on_short_input`.
+    @Test func shortDigestTruncatesWithoutTrappingOnShortInput() {
+        #expect(shortDigest("abcdef0123456789abcdef") == "abcdef012345")
+        #expect(shortDigest("abc") == "abc")
     }
 }

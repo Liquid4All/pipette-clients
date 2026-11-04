@@ -24,10 +24,34 @@ class ManagementClient(private val secrets: Secrets) {
   data class RegistrationResult(val clientId: String, val status: String)
 
   /**
-   * The client record returned by `PATCH`/`GET /clients/me`, narrowed to the two fields this app acts on. [reindexPending] is `true` when the profile
-   * change voided the client's queue standing; see [ProfileRefreshService] for why this client does not wait on it.
+   * The client record returned by `GET`/`PATCH /clients/me`.
+   *
+   * One type for both methods because the server builds both responses from one `client_profile_response` (`pipette-mgmt/src/handlers.rs`), so a
+   * second shape here could only drift from it. The `device_*` fields it also returns are omitted: this client sends them and never reads them back.
+   *
+   * [reindexPending] is `true` when a profile change voided the client's queue standing; see [ProfileRefreshService] for why this client does not
+   * wait on it.
+   *
+   * The required/defaulted split is the one all three clients make: the five identifying fields are required, and the three collection-ish fields
+   * default. iOS spells it in `ClientProfile.init(from:)` (`Networking/Types.swift`) as `decode` against `decodeIfPresent ?? …`, and the CLI in
+   * `pipette_mgmt_client::types::ClientProfile` as bare fields against `#[serde(default)]`. `tags` and `capabilities` default to empty rather than
+   * null so a caller can join them without a null check, which is what the server's own comment says they are always present for.
+   *
+   * The defaults are for a server that predates a field, not for this one. Every field here is non-optional in the server's `ClientProfileResponse`
+   * and always serialized, so the current server omits none of them. PIP-547 asked for all eight to be defaulted, generalizing from
+   * `reindex_pending`; `status` sat beside it in the same parser and was already required, and relaxing it would have put this client behind the
+   * other two.
    */
-  data class ClientProfile(val status: String, val reindexPending: Boolean)
+  data class ClientProfile(
+    val clientId: String,
+    val organization: String,
+    val clientDetails: String,
+    val contactEmail: String,
+    val status: String,
+    val tags: List<String>,
+    val reindexPending: Boolean,
+    val capabilities: List<String>,
+  )
 
   /**
    * Outcome of a conditional `GET` (`If-None-Match`). [body] is the raw response body on `200`, or `null` on `304` (the caller keeps its cached
@@ -57,15 +81,7 @@ class ManagementClient(private val secrets: Secrets) {
     publicKeyHex: String,
     preauthKey: String? = null,
   ): RegistrationResult {
-    val body =
-      JSONObject()
-        .put("public_key", publicKeyHex)
-        .put("organization", organization)
-        .put("contact_email", contactEmail)
-        .put("client_details", clientDetails)
-    // Optional pre-auth key (`preauth_{key_id}.{secret}`): a valid one makes the server auto-approve
-    // this registration instead of leaving it pending manual approval. Omitted when blank.
-    if (!preauthKey.isNullOrBlank()) body.put("preauth_key", preauthKey)
+    val body = registerBody(organization, contactEmail, clientDetails, publicKeyHex, preauthKey)
     val response = request(serverUrl, "/clients/register", "POST", null, body.toString())
     val json = JSONObject(response)
     return RegistrationResult(clientId = json.getString("client_id"), status = json.getString("status"))
@@ -78,14 +94,32 @@ class ManagementClient(private val secrets: Secrets) {
    * on Android (its implementation is OkHttp-backed, and OkHttp's method list includes `PATCH`) even though the desktop JVM's own implementation
    * rejects it.
    */
-  fun updateMe(serverUrl: String, clientId: String, profile: JSONObject): ClientProfile {
-    val response = request(serverUrl, "/clients/me", "PATCH", clientId, profile.toString())
+  fun updateMe(serverUrl: String, clientId: String, profile: JSONObject): ClientProfile =
+    clientProfile(request(serverUrl, "/clients/me", "PATCH", clientId, profile.toString()))
+
+  /**
+   * `GET /clients/me` — the live profile the server holds for this device, which is what `verb=auth-me` reports. Authenticated like any other client
+   * call, so [request] signs it and it needs both halves of the identity.
+   */
+  fun fetchMe(serverUrl: String, clientId: String): ClientProfile =
+    // A few hundred bytes of profile, and `verb=auth-me` waits on it from a synchronous `onCreate`. The submission budget would let a server that
+    // accepts the connection and then stalls hold a fleet script for two minutes per device.
+    clientProfile(request(serverUrl, "/clients/me", "GET", clientId, null, readTimeoutMs = 15_000))
+
+  /** The `/clients/me` response body, from whichever method returned it. */
+  private fun clientProfile(response: String): ClientProfile {
     val json = JSONObject(response)
     return ClientProfile(
+      clientId = json.getString("client_id"),
+      organization = json.getString("organization"),
+      clientDetails = json.getString("client_details"),
+      contactEmail = json.getString("contact_email"),
       status = json.getString("status"),
-      // Defaulted rather than required so an older server that predates the field still parses, matching the CLI's `#[serde(default)]` and iOS's
-      // `decodeIfPresent ?? false`.
+      // Defaulted rather than required so an older server that predates one of these still parses. The five above are required, which is the split
+      // both other clients make; see the note on [ClientProfile] for where each spells it.
+      tags = json.optStringList("tags"),
       reindexPending = json.optBoolean("reindex_pending", false),
+      capabilities = json.optStringList("capabilities"),
     )
   }
 
@@ -97,7 +131,12 @@ class ManagementClient(private val secrets: Secrets) {
     return request(serverUrl, "/benchmarks/batch", "POST", clientId, body.toString())
   }
 
-  private fun request(serverUrl: String, path: String, method: String, clientId: String?, body: String?): String {
+  /**
+   * @param readTimeoutMs how long to wait for the response body. The default suits a submission, which uploads a payload and then waits on the server
+   *   to store it. A caller whose response is a short record passes a smaller budget, because a server that accepts the connection and then does not
+   *   answer imposes this whole wait on it.
+   */
+  private fun request(serverUrl: String, path: String, method: String, clientId: String?, body: String?, readTimeoutMs: Int = 120_000): String {
     val url = URL(endpoint(serverUrl, path))
     val connection = url.openConnection() as HttpURLConnection
     connection.requestMethod = method
@@ -105,7 +144,7 @@ class ManagementClient(private val secrets: Secrets) {
     // and OkHttp forwards custom headers, `X-Signature` included, to the redirect host. Surface the 3xx instead.
     connection.instanceFollowRedirects = false
     connection.connectTimeout = 15_000
-    connection.readTimeout = 120_000
+    connection.readTimeout = readTimeoutMs
     connection.setRequestProperty("Accept", "application/json")
     connection.setRequestProperty("User-Agent", "pipette-android")
     if (clientId != null) {
@@ -156,6 +195,39 @@ class ManagementClient(private val secrets: Secrets) {
     }
     return ConditionalGet(body = text, etag = etag)
   }
+}
+
+/**
+ * A `[String]` field as a list, empty when the key is absent.
+ *
+ * Blank elements are dropped: these lists are comma-joined into a `verb=auth-me` line, where an empty element reads as `tags=a,,b` and a consumer
+ * splitting on the comma sees a tag whose name is the empty string.
+ */
+private fun JSONObject.optStringList(name: String): List<String> {
+  val array = optJSONArray(name) ?: return emptyList()
+  return (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+}
+
+/**
+ * The `POST /clients/register` body. It carries the CPU architecture and the OS family, so the server derives the `arch:` and `os_family:` flags
+ * before the first profile refresh.
+ */
+internal fun registerBody(organization: String, contactEmail: String, clientDetails: String, publicKeyHex: String, preauthKey: String?): JSONObject {
+  val body =
+    JSONObject()
+      .put("public_key", publicKeyHex)
+      .put("organization", organization)
+      .put("contact_email", contactEmail)
+      .put("client_details", clientDetails)
+      // `putOpt` skips a null, so an unknown ABI is absent rather than null.
+      .putOpt("device_cpu_arch", DeviceInfo.cpuArch)
+      .put("device_os_family", DeviceInfo.OS_FAMILY)
+  // Optional pre-auth key (`client_preauth_{key_id}.{secret}`): a valid one makes the server
+  // auto-approve this registration instead of leaving it pending manual approval. Omitted when
+  // blank. The server renamed the field from `preauth_key`, which it still reads as an alias;
+  // both names in one body are a 400. The token itself may carry either prefix.
+  if (!preauthKey.isNullOrBlank()) body.put("client_preauth_key", preauthKey)
+  return body
 }
 
 /**

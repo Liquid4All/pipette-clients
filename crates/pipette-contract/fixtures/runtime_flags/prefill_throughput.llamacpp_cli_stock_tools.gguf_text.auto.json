@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "prefill_throughput",
+  "flash_attention": "auto",
+  "model_type": "gguf_text",
+  "runtime_type": "llamacpp_cli_stock_tools"
+}

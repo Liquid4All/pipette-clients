@@ -1,68 +1,50 @@
-//! [`ModelStorageKey`] — a filesystem-safe, flat storage identity for a [`Model`].
+//! [`ModelStorageKey`]: a model's identity segments (org, repo, revision,
+//! file/prefix, URL, vault resource or absolute path), made filesystem-safe and
+//! joined with `__` into one flat directory name. The same declaration always
+//! yields the same key, so a re-run finds what it stored.
 //!
-//! The store addresses a model by a single flat directory name rather than a
-//! nested `<org>/<repo>/<file>` tree. The key is the model's identity segments
-//! (org, repo, revision, file/prefix, URL, or **absolute** local path) each
-//! normalized to a filesystem-safe token and joined with `__`. The same
-//! declaration always yields the same key, so a re-run of the plan finds the
-//! artifact it stored; the segments are chosen so distinct models generally get
-//! distinct keys.
+//! The key omits the model type: the segments imply it in practice (a `.gguf`
+//! name, formats in distinct repos) and the manifest records the typed model.
+//! So `Mlx`, `Torch`, `Openvino` and `OnnxGenai` declared against the same HF
+//! `org/repo` with no `prefix` share one entry.
+//! The first type to land owns it and
+//! [`crate::model::ModelArtifactStore::find`] refuses the others with
+//! `ModelStoreError::TypeCollision`; a `prefix` or `models remove` separates them.
 //!
-//! Keys are built only for **declared / fetchable or abs-local** forms:
-//! HuggingFace, Url, and Absolute* path arms. Store-relative `Relative*` arms
-//! (manifest `stored` / entry layout) and Apple Foundation are
-//! [`ModelStorageKeyError::NotStorable`] — no key is constructed for them.
-//!
-//! The key omits the model type: type is implied by the segments in practice
-//! (gguf files carry a `.gguf` name; MLX/Torch/OpenVINO weights live in distinct
-//! repos), and the manifest embeds the full typed [`Model`] anyway. The one
-//! aliasing case is two directory-shaped models — `Mlx`, `Torch`, `Openvino` —
-//! declared against the *same* HF `org/repo`: they share a key. Sound, since the
-//! entry is a snapshot of that repo, but a repo publishing two formats has to
-//! separate them by `prefix` rather than by model type.
-//!
-//! Keys are capped at [`MAX_LEN`] characters. A longer slug keeps its head and
-//! gets 8 hex chars of the full slug's SHA-256 as its tail, so the on-disk name
-//! stays bounded while distinct long models keep distinct keys.
+//! Keys are capped at [`MAX_LEN`]: a longer slug keeps its head plus 8 hex chars
+//! of the full slug's SHA-256, so distinct long models keep distinct keys.
 
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
 use pipette_plan_types::{
-    AppleCoreAi, GgufTextSource, GgufVisionSource, HfRepo, Mlx, Model, ModelSource, Openvino, Torch,
+    GgufTextSource, GgufVision, GgufVisionAbsoluteFiles, GgufVisionHfFiles, GgufVisionSource,
+    GgufVisionSpeculativeSource, GgufVisionUrlFiles, GgufVisionVaultUrlFiles, HfRepo, Mlx, Model,
+    ModelSource, OnnxGenai, Openvino, Torch, VaultPath,
 };
 
 use crate::entry::BLOBS_DIR_NAME;
 
-/// Maximum key length. A slug over this is folded to `<head>_<hash8>`.
 const MAX_LEN: usize = 32;
-/// Hex chars of SHA-256 kept as the disambiguating tail when folding.
 const HASH_LEN: usize = 8;
 
 /// Why a [`Model`] has no [`ModelStorageKey`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ModelStorageKeyError {
-    /// Not a warehouse identity: Apple Foundation, or a store-relative
-    /// (`Relative*`) source that is never used as a storage key.
+    /// Apple Foundation, or a store-relative (`Relative*`) source.
     #[error("model `{0}` has no storage key (not pullable / store-relative)")]
     NotStorable(String),
 }
 
-/// Flat storage key for a stored [`Model`] — its identity segments, normalized
-/// and `__`-joined (see the module docs). HF, URL, and absolute-local sources
-/// have keys; store-relative `Relative*` and Apple Foundation do not. Distinct
-/// from [`Model`]'s `Display` (CLI/reporting reference).
+/// Flat storage key for a stored [`Model`] (see the module docs). Distinct
+/// from [`Model`]'s `Display`, the CLI/reporting reference.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelStorageKey(String);
 
 impl ModelStorageKey {
-    /// Key for a **declared** fetchable or abs-local `model`, or
-    /// [`ModelStorageKeyError::NotStorable`] when no store entry should be keyed
-    /// from this form. Never longer than [`MAX_LEN`].
-    ///
-    /// Exhaustive match on kind + source; `Relative*` and Apple Foundation →
-    /// `NotStorable` (no segments built).
+    /// Key for a declared `model`. `Relative*` sources and Apple Foundation are
+    /// [`ModelStorageKeyError::NotStorable`].
     pub fn of(model: &Model) -> Result<Self, ModelStorageKeyError> {
         let not_storable = || ModelStorageKeyError::NotStorable(model.to_string());
         let segments = match model {
@@ -72,40 +54,84 @@ impl ModelStorageKey {
                     .chain([path.to_string()])
                     .collect(),
                 GgufTextSource::Url { url, .. } => vec![url.to_string()],
+                GgufTextSource::VaultUrl { url, .. } => vault_segments(url),
                 GgufTextSource::AbsoluteFile { path } => vec![path.to_string()],
                 GgufTextSource::RelativeFile { .. } => return Err(not_storable()),
             },
             // Both files distinguish a VL instance: two can share a repo and
             // differ only in the weights or projector filename.
             Model::GgufVision(m) => match &m.source {
-                GgufVisionSource::HuggingFace {
+                GgufVisionSource::HuggingFace(GgufVisionHfFiles {
                     repo,
                     model,
                     mmproj,
                     ..
-                } => repo_segments(repo)
+                }) => repo_segments(repo)
                     .into_iter()
                     .chain([model.to_string(), mmproj.to_string()])
                     .collect(),
-                GgufVisionSource::Url { model, mmproj, .. } => {
+                GgufVisionSource::Url(GgufVisionUrlFiles { model, mmproj, .. }) => {
                     vec![model.to_string(), mmproj.to_string()]
                 }
-                GgufVisionSource::AbsoluteFiles { model, mmproj } => {
+                GgufVisionSource::VaultUrl(GgufVisionVaultUrlFiles { model, mmproj, .. }) => {
+                    vault_segments(model)
+                        .into_iter()
+                        .chain(vault_segments(mmproj).into_iter().skip(1))
+                        .collect()
+                }
+                GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles { model, mmproj }) => {
                     vec![model.to_string(), mmproj.to_string()]
                 }
-                GgufVisionSource::RelativeFiles { .. } => return Err(not_storable()),
+                GgufVisionSource::RelativeFiles(_) => return Err(not_storable()),
             },
+            // `spec` keeps a merged speculative model apart from the plain
+            // `gguf_vision` over the same files: one entry holds one model type.
+            Model::GgufVisionSpeculative(m) => {
+                let vision = ModelStorageKey::of(&Model::GgufVision(GgufVision {
+                    source: m.source.vision(),
+                }))?;
+                let draft = match &m.source {
+                    GgufVisionSpeculativeSource::HuggingFace { draft, .. } => {
+                        draft.as_ref().map(ToString::to_string)
+                    }
+                    GgufVisionSpeculativeSource::RelativeFiles { .. } => return Err(not_storable()),
+                    GgufVisionSpeculativeSource::AbsoluteFiles { draft, .. } => {
+                        draft.as_ref().map(ToString::to_string)
+                    }
+                    GgufVisionSpeculativeSource::Url { draft, .. } => {
+                        draft.as_ref().map(ToString::to_string)
+                    }
+                    GgufVisionSpeculativeSource::VaultUrl { draft, .. } => {
+                        draft.as_ref().map(|url| vault_segments(url).join("_"))
+                    }
+                };
+                return Ok(ModelStorageKey(bound(slug_from(
+                    &["spec".to_owned(), vision.0]
+                        .into_iter()
+                        .chain(draft)
+                        .collect::<Vec<_>>(),
+                ))));
+            }
             Model::Mlx(Mlx { source })
+            | Model::AppleCoreAi(pipette_plan_types::AppleCoreAi { source })
             | Model::Torch(Torch { source })
             | Model::Openvino(Openvino { source })
-            | Model::AppleCoreAi(AppleCoreAi { source }) => match source {
-                ModelSource::HuggingFace { repo, prefix } => repo_segments(repo)
-                    .into_iter()
-                    .chain(prefix.iter().map(|p| p.to_string()))
-                    .collect(),
-                ModelSource::AbsoluteDir { dir } => vec![dir.to_string()],
-                ModelSource::RelativeDir { .. } => return Err(not_storable()),
-            },
+            | Model::OnnxGenai(OnnxGenai { source }) => {
+                dir_segments(source).ok_or_else(not_storable)?
+            }
+            // `spec` and the drafter's own segments keep this apart from the
+            // plain `mlx` entry over the same target: one entry holds one
+            // model type, and swapping the drafter is a different model.
+            Model::MlxSpeculative(m) | Model::TorchSpeculative(m) => ["spec".to_owned()]
+                .into_iter()
+                .chain(
+                    m.sources()
+                        .into_iter()
+                        .map(|source| dir_segments(source).ok_or_else(not_storable))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .concat(),
+                )
+                .collect(),
             Model::AppleFoundationText => return Err(not_storable()),
         };
         Ok(ModelStorageKey(bound(slug_from(&segments))))
@@ -115,14 +141,13 @@ impl ModelStorageKey {
         &self.0
     }
 
-    /// This model's store subdirectory, relative to the `models/` root. A single
-    /// flat component (the key), never a nested path.
+    /// This model's store subdirectory, relative to the `models/` root.
     pub fn relative_dir(&self) -> PathBuf {
         PathBuf::from(&self.0)
     }
 
-    /// Payload dir under the entry, relative to the `models/` root: `<key>/blobs`.
-    /// Pass to [`crate::model::to_stored`] for the manifest `stored` field.
+    /// `<key>/blobs`, relative to the `models/` root: the dir
+    /// [`crate::model::to_stored`] places the manifest's `stored` paths under.
     pub fn blobs_dir(&self) -> PathBuf {
         self.relative_dir().join(BLOBS_DIR_NAME)
     }
@@ -134,8 +159,27 @@ impl std::fmt::Display for ModelStorageKey {
     }
 }
 
-/// `org`, `repo`, and (when pinned) `revision` — the shared prefix of every HF
-/// source's identity.
+/// `None` for a store-relative path, which names nothing outside the store.
+fn dir_segments(source: &ModelSource) -> Option<Vec<String>> {
+    match source {
+        ModelSource::HuggingFace { repo, prefix } => Some(
+            repo_segments(repo)
+                .into_iter()
+                .chain(prefix.iter().map(|p| p.to_string()))
+                .collect(),
+        ),
+        ModelSource::VaultArchive { url, .. } => Some(vault_segments(url)),
+        ModelSource::AbsoluteDir { dir } => Some(vec![dir.to_string()]),
+        ModelSource::RelativeDir { .. } => None,
+    }
+}
+
+/// `vault`, then the resource id: the route around it is the same for every
+/// resource.
+fn vault_segments(path: &VaultPath) -> Vec<String> {
+    vec!["vault".to_owned(), path.resource_id().to_string()]
+}
+
 fn repo_segments(repo: &HfRepo) -> Vec<String> {
     [repo.org.to_string(), repo.repo_name.to_string()]
         .into_iter()
@@ -143,15 +187,11 @@ fn repo_segments(repo: &HfRepo) -> Vec<String> {
         .collect()
 }
 
-/// Normalize each segment to the filesystem-safe charset (`[A-Za-z0-9._-]`) —
-/// every other character (path `/`, the HF `@`/`:` joiners, URL `://`) becomes a
-/// single `_` — then join the segments with `__`. The wider `__` join reads as
-/// the segment boundary against the single `_` used within a segment. Empty
-/// segments (e.g. a leading `/` on a local path) drop out.
-///
-/// `pub(crate)` so [`crate::runtime`] shares the exact same
-/// normalization — the model and runtime stores flatten identity segments the
-/// same way.
+/// Each run of characters outside `[A-Za-z0-9._-]` becomes one `_`, except a
+/// leading or trailing run, which drops (`/on/disk/w.gguf` is `on_disk_w.gguf`).
+/// Empty segments drop out, and segments join with `__` so the boundary reads
+/// apart from an in-segment `_`. Shared with [`crate::runtime`] so both stores
+/// flatten identically.
 pub(crate) fn slug_from(segments: &[String]) -> String {
     segments
         .iter()
@@ -161,8 +201,6 @@ pub(crate) fn slug_from(segments: &[String]) -> String {
         .join("__")
 }
 
-/// Split on unsafe chars and rejoin the non-empty runs with `_` — this collapses
-/// every run of unsafe chars (and any leading/trailing run) to a single `_`.
 fn sanitize(segment: &str) -> String {
     segment
         .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
@@ -171,27 +209,22 @@ fn sanitize(segment: &str) -> String {
         .join("_")
 }
 
-/// Cap the slug at [`MAX_LEN`]: a longer slug keeps its head and gets an 8-hex
-/// SHA-256 tail of the full slug, so distinct long models stay distinct.
 pub(crate) fn bound(slug: String) -> String {
     bound_to(slug, MAX_LEN)
 }
 
-/// [`bound`] against a caller-chosen cap. The slug is ASCII, so byte-slicing
-/// the head is char-safe.
-///
-/// `pub(crate)` so [`crate::runtime`] folds identically while choosing its own
-/// ceiling: a runtime key ends in a full requirements digest that is worth
-/// keeping legible on disk, whereas a model key is already readable coordinates
-/// and stays at the tighter [`MAX_LEN`] rather than re-keying every stored
-/// model.
+/// [`bound`] against a caller-chosen cap. [`crate::runtime`] uses a wider one
+/// to keep its full requirements digest legible; widening [`MAX_LEN`] would
+/// re-key every stored model.
 pub(crate) fn bound_to(slug: String, max_len: usize) -> String {
     if slug.len() <= max_len {
         return slug;
     }
-    let hash = hex::encode(Sha256::digest(slug.as_bytes()));
-    let head = slug[..max_len - HASH_LEN - 1].trim_end_matches('_');
-    format!("{head}_{}", &hash[..HASH_LEN])
+    let mut hash = hex::encode(Sha256::digest(slug.as_bytes()));
+    hash.truncate(HASH_LEN);
+    let mut head = slug;
+    head.truncate(head.floor_char_boundary(max_len - HASH_LEN - 1));
+    format!("{}_{hash}", head.trim_end_matches('_'))
 }
 
 #[cfg(test)]
@@ -199,10 +232,12 @@ mod tests {
     use rstest::rstest;
 
     use pipette_plan_types::{
-        AbsolutePath, GgufText, GgufVision, HfOrg, HfRepoName, HfRevision, RepoSubpath, ResourceUrl,
+        AbsolutePath, GgufText, GgufVision, GgufVisionRelativeFiles, GgufVisionSpeculative,
+        GgufVisionSpeculativeSource, HfOrg, HfRepoName, HfRevision, RepoSubpath, ResourceUrl,
     };
 
     use super::*;
+    use crate::test_support::labelled;
 
     fn hf(org: &str, repo: &str, revision: Option<&str>) -> anyhow::Result<HfRepo> {
         Ok(HfRepo {
@@ -219,31 +254,147 @@ mod tests {
         Model::GgufText(GgufText { source })
     }
 
-    /// Exact key per declared model, covering every source shape and the
-    /// normalization rules. Each case asserts the flat-component invariant and
-    /// determinism too, so the table is the single home for "declared → key".
+    /// Also proves a vault source's `custom_label` does not change the key.
     #[rstest]
     #[case(gguf_text(GgufTextSource::HuggingFace { repo: hf("meta", "llama", None)?, path: RepoSubpath::try_new("Q4.gguf")?, sha256: None }), "meta__llama__Q4.gguf")]
     #[case(gguf_text(GgufTextSource::HuggingFace { repo: hf("org", "repo", None)?, path: RepoSubpath::try_new("sub/dir/w.gguf")?, sha256: None }), "org__repo__sub_dir_w.gguf")]
     #[case(gguf_text(GgufTextSource::HuggingFace { repo: hf("org", "repo", Some("v1"))?, path: RepoSubpath::try_new("w.gguf")?, sha256: None }), "org__repo__v1__w.gguf")]
     #[case(gguf_text(GgufTextSource::Url { url: ResourceUrl::try_new("https://ex.com/m/w.gguf")?, sha256: None }), "https_ex.com_m_w.gguf")]
-    #[case(Model::GgufVision(GgufVision { source: GgufVisionSource::HuggingFace { repo: hf("liquidai", "vl", None)?, model: RepoSubpath::try_new("q4.gguf")?, model_sha256: None, mmproj: RepoSubpath::try_new("mm.gguf")?, mmproj_sha256: None } }), "liquidai__vl__q4.gguf__mm.gguf")]
+    #[case(Model::GgufVision(GgufVision { source: GgufVisionSource::HuggingFace(GgufVisionHfFiles { repo: hf("liquidai", "vl", None)?, model: RepoSubpath::try_new("q4.gguf")?, model_sha256: None, mmproj: RepoSubpath::try_new("mm.gguf")?, mmproj_sha256: None }) }), "liquidai__vl__q4.gguf__mm.gguf")]
     #[case(Model::Torch(Torch { source: ModelSource::HuggingFace { repo: hf("meta", "Llama", None)?, prefix: None } }), "meta__Llama")]
     #[case(Model::Torch(Torch { source: ModelSource::HuggingFace { repo: hf("meta", "Llama", None)?, prefix: Some(RepoSubpath::try_new("4bit")?) } }), "meta__Llama__4bit")]
     #[case(Model::Openvino(Openvino { source: ModelSource::HuggingFace { repo: hf("liquidai", "lfm2-ov", None)?, prefix: Some(RepoSubpath::try_new("int4-sym-cw")?) } }), "liquidai__lfm2-ov__int4-sym-cw")]
+    #[case(Model::Mlx(Mlx { source: ModelSource::HuggingFace { repo: hf("liquidai", "lfm2-mlx", None)?, prefix: None } }), "liquidai__lfm2-mlx")]
+    // A nested `prefix` collapses its separator to one `_`, so one ONNX repo's
+    // per-provider variants each key to their own entry.
+    #[case(Model::OnnxGenai(OnnxGenai { source: ModelSource::HuggingFace { repo: hf("org", "onnx", None)?, prefix: Some(RepoSubpath::try_new("cpu/int4")?) } }), "org__onnx__cpu_int4")]
+    // Folds at `MAX_LEN`; the hash tail covers the `prefix`.
+    #[case(Model::OnnxGenai(OnnxGenai { source: ModelSource::HuggingFace { repo: hf("microsoft", "Phi-3-mini-4k-instruct-onnx", None)?, prefix: Some(RepoSubpath::try_new("cpu_and_mobile/cpu-int4-rtn-block-32")?) } }), "microsoft__Phi-3-mini-4_671e5a0d")]
+    #[case(gguf_text(GgufTextSource::VaultUrl { url: "/vault/resources/vault_0195c3e2/content".parse()?, sha256: None, principal_id: "org_1".parse()?, custom_label: None }), "vault__vault_0195c3e2")]
+    #[case(Model::GgufVision(GgufVision { source: GgufVisionSource::VaultUrl(GgufVisionVaultUrlFiles { model: "/vault/resources/vault_a/content".parse()?, model_sha256: None, mmproj: "/vault/resources/vault_b/content".parse()?, mmproj_sha256: None, principal_id: "org_1".parse()?, custom_label: None }) }), "vault__vault_a__vault_b")]
+    #[case(Model::Mlx(Mlx { source: ModelSource::VaultArchive { url: "/vault/resources/vault_0195c3e2/content".parse()?, sha256: None, principal_id: "user_1".parse()?, custom_label: None } }), "vault__vault_0195c3e2")]
+    // `spec`, the vision key as one segment, then the drafter as one `vault_<id>` segment.
+    #[case(Model::GgufVisionSpeculative(GgufVisionSpeculative { source: GgufVisionSpeculativeSource::VaultUrl { files: GgufVisionVaultUrlFiles { model: "/vault/resources/vault_a/content".parse()?, model_sha256: None, mmproj: "/vault/resources/vault_b/content".parse()?, mmproj_sha256: None, principal_id: "org_1".parse()?, custom_label: None }, draft: Some("/vault/resources/vault_c/content".parse()?), draft_sha256: None } }), "spec__vault__vault_a__v_b465a129")]
     fn declared_model_keys(#[case] model: Model, #[case] expected: &str) -> anyhow::Result<()> {
         let key = ModelStorageKey::of(&model)?;
         assert_eq!(key.as_str(), expected);
-        assert!(!key.as_str().contains('/')); // single flat component
+        assert!(!key.as_str().contains('/'));
         assert_eq!(key.relative_dir(), PathBuf::from(expected));
-        assert_eq!(ModelStorageKey::of(&model)?, key); // deterministic
+        assert_eq!(ModelStorageKey::of(&model)?, key);
+        let labelled = labelled(&model)?;
+        assert_eq!(labelled != model, expected.contains("vault__"));
+        assert_eq!(ModelStorageKey::of(&labelled)?, key);
+        Ok(())
+    }
+
+    /// The store refuses a second type in one entry, so these must not collide.
+    #[test]
+    fn a_speculative_model_keys_apart_from_its_plain_vl_twin() -> anyhow::Result<()> {
+        let files = || -> anyhow::Result<GgufVisionHfFiles> {
+            Ok(GgufVisionHfFiles {
+                repo: hf("liquidai", "vl", None)?,
+                model: RepoSubpath::try_new("q4.gguf")?,
+                model_sha256: None,
+                mmproj: RepoSubpath::try_new("mm.gguf")?,
+                mmproj_sha256: None,
+            })
+        };
+        let speculative = |draft: Option<&str>| -> anyhow::Result<Model> {
+            Ok(Model::GgufVisionSpeculative(GgufVisionSpeculative {
+                source: GgufVisionSpeculativeSource::HuggingFace {
+                    files: files()?,
+                    draft: draft
+                        .map(|d| RepoSubpath::try_new(d.to_owned()))
+                        .transpose()?,
+                    draft_sha256: None,
+                },
+            }))
+        };
+        let vision = Model::GgufVision(GgufVision {
+            source: GgufVisionSource::HuggingFace(files()?),
+        });
+
+        let plain = ModelStorageKey::of(&vision)?;
+        let merged = ModelStorageKey::of(&speculative(None)?)?;
+        let separate = ModelStorageKey::of(&speculative(Some("draft.gguf"))?)?;
+
+        assert_eq!(merged.as_str(), "spec__liquidai__vl__q4._83c51347");
+        assert_ne!(plain, merged, "one entry cannot hold both types");
+        assert_ne!(merged, separate, "the drafter is part of the identity");
+        [&plain, &merged, &separate]
+            .iter()
+            .for_each(|key| assert!(!key.as_str().contains('/')));
+        Ok(())
+    }
+
+    #[test]
+    fn an_mlx_pair_keys_apart_from_its_target_and_from_another_drafter() -> anyhow::Result<()> {
+        use pipette_plan_types::MlxSpeculative;
+
+        let source = |org: &str, repo: &str| -> anyhow::Result<ModelSource> {
+            Ok(ModelSource::HuggingFace {
+                repo: hf(org, repo, None)?,
+                prefix: None,
+            })
+        };
+        let pair = |draft_repo: &str| -> anyhow::Result<Model> {
+            Ok(Model::MlxSpeculative(MlxSpeculative {
+                target: source("liquidai", "vl-mlx")?,
+                draft: source("liquidai", draft_repo)?,
+            }))
+        };
+
+        let plain = ModelStorageKey::of(&Model::Mlx(Mlx {
+            source: source("liquidai", "vl-mlx")?,
+        }))?;
+        let dspark = ModelStorageKey::of(&pair("vl-dspark")?)?;
+        let dflash = ModelStorageKey::of(&pair("vl-dflash")?)?;
+
+        // Folds at `MAX_LEN`; the hash tail is what keeps the drafters apart.
+        assert_eq!(dspark.as_str(), "spec__liquidai__vl-mlx_62ee9a91");
+        assert_ne!(plain, dspark, "one entry cannot hold both types");
+        assert_ne!(dspark, dflash, "the drafter is part of the identity");
+        [&plain, &dspark, &dflash]
+            .iter()
+            .for_each(|key| assert!(!key.as_str().contains('/')));
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::relative_draft(false, true)]
+    #[case::relative_target(true, false)]
+    #[case::both_relative(true, true)]
+    fn an_mlx_pair_with_a_store_relative_half_is_not_storable(
+        #[case] relative_target: bool,
+        #[case] relative_draft: bool,
+    ) -> anyhow::Result<()> {
+        use pipette_plan_types::{MlxSpeculative, RelativePath};
+
+        let half = |relative: bool, name: &str| -> anyhow::Result<ModelSource> {
+            Ok(if relative {
+                ModelSource::RelativeDir {
+                    dir: RelativePath::try_new(name.to_owned())?,
+                }
+            } else {
+                ModelSource::HuggingFace {
+                    repo: hf("liquidai", name, None)?,
+                    prefix: None,
+                }
+            })
+        };
+        let model = Model::MlxSpeculative(MlxSpeculative {
+            target: half(relative_target, "target")?,
+            draft: half(relative_draft, "draft")?,
+        });
+        assert!(matches!(
+            ModelStorageKey::of(&model),
+            Err(ModelStorageKeyError::NotStorable(_))
+        ));
         Ok(())
     }
 
     #[test]
     fn directory_models_of_the_same_repo_alias() -> anyhow::Result<()> {
-        // Documented aliasing — see the module docs. The same HF repo keys
-        // identically across every directory-shaped model type.
         let same_repo = || -> anyhow::Result<ModelSource> {
             Ok(ModelSource::HuggingFace {
                 repo: hf("org", "repo", None)?,
@@ -259,8 +410,33 @@ mod tests {
         let openvino = ModelStorageKey::of(&Model::Openvino(Openvino {
             source: same_repo()?,
         }))?;
+        let onnx_genai = ModelStorageKey::of(&Model::OnnxGenai(OnnxGenai {
+            source: same_repo()?,
+        }))?;
         assert_eq!(torch, mlx);
         assert_eq!(torch, openvino);
+        assert_eq!(torch, onnx_genai);
+        Ok(())
+    }
+
+    #[test]
+    fn folded_onnx_variants_of_one_repo_keep_distinct_keys() -> anyhow::Result<()> {
+        let variant = |prefix: &str| -> anyhow::Result<ModelStorageKey> {
+            Ok(ModelStorageKey::of(&Model::OnnxGenai(OnnxGenai {
+                source: ModelSource::HuggingFace {
+                    repo: hf("microsoft", "Phi-3-mini-4k-instruct-onnx", None)?,
+                    prefix: Some(RepoSubpath::try_new(prefix)?),
+                },
+            }))?)
+        };
+        let int4 = variant("cpu_and_mobile/cpu-int4-rtn-block-32")?;
+        let fp32 = variant("cpu_and_mobile/cpu-fp32")?;
+        assert_ne!(
+            int4.as_str(),
+            fp32.as_str(),
+            "two precisions of one repo must not share an entry"
+        );
+        assert!(int4.as_str().len() <= 32, "key stays bounded");
         Ok(())
     }
 
@@ -270,10 +446,10 @@ mod tests {
         path: pipette_plan_types::RelativePath::try_new("entry/blobs/w.gguf".to_owned())?,
     }))]
     #[case::vision_relative(Model::GgufVision(GgufVision {
-        source: GgufVisionSource::RelativeFiles {
+        source: GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles {
             model: pipette_plan_types::RelativePath::try_new("entry/blobs/m.gguf".to_owned())?,
             mmproj: pipette_plan_types::RelativePath::try_new("entry/blobs/mm.gguf".to_owned())?,
-        },
+        }),
     }))]
     #[case::mlx_relative(Model::Mlx(Mlx {
         source: ModelSource::RelativeDir {
@@ -288,11 +464,10 @@ mod tests {
         Ok(())
     }
 
-    /// Abs-local authoring paths are warehouse identity (import into the store).
     #[rstest]
     #[case(gguf_text(GgufTextSource::AbsoluteFile { path: AbsolutePath::try_new("/on/disk/w.gguf")? }), "on_disk_w.gguf")]
     #[case(Model::Mlx(Mlx { source: ModelSource::AbsoluteDir { dir: AbsolutePath::try_new("/models/x")? } }), "models_x")]
-    #[case(Model::GgufVision(GgufVision { source: GgufVisionSource::AbsoluteFiles { model: AbsolutePath::try_new("/a/m.gguf")?, mmproj: AbsolutePath::try_new("/a/mm.gguf")? } }), "a_m.gguf__a_mm.gguf")]
+    #[case(Model::GgufVision(GgufVision { source: GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles { model: AbsolutePath::try_new("/a/m.gguf")?, mmproj: AbsolutePath::try_new("/a/mm.gguf")? }) }), "a_m.gguf__a_mm.gguf")]
     fn absolute_local_models_have_path_keys(
         #[case] model: Model,
         #[case] expected: &str,
@@ -303,8 +478,14 @@ mod tests {
         Ok(())
     }
 
-    /// A slug over the cap is folded to a bounded `<head>_<hash>`, and two long
-    /// models sharing a head stay distinct via the hash tail.
+    #[test]
+    fn a_non_ascii_slug_folds_on_a_char_boundary() -> anyhow::Result<()> {
+        let folded = bound_to("é".repeat(40), 21);
+        anyhow::ensure!(folded.len() <= 21, "folded to {} bytes", folded.len());
+        anyhow::ensure!(folded.starts_with("éééééé_"), "head: {folded}");
+        Ok(())
+    }
+
     #[test]
     fn long_slugs_are_folded_and_stay_distinct() -> anyhow::Result<()> {
         let long = |repo: &str| -> anyhow::Result<ModelStorageKey> {
@@ -320,7 +501,7 @@ mod tests {
         let b = long("repo-b")?;
         assert!(a.as_str().len() <= MAX_LEN && b.as_str().len() <= MAX_LEN);
         assert!(a.as_str().starts_with("really-long-shared-orga"));
-        assert_ne!(a, b); // shared head, distinct hash tail
+        assert_ne!(a, b);
         Ok(())
     }
 }

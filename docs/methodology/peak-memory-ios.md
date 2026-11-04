@@ -16,30 +16,26 @@ Because the question is "how much to run it," the figure is the **whole-process
 physical footprint**, which includes three things:
 
 1. the **model**: weights + KV/activation buffers;
-2. the **runtime**: llama.cpp or MLX engine state, Metal driver/command buffers,
-   compute scratch;
+2. the **runtime**: llama.cpp, MLX or ONNX Runtime GenAI engine state, Metal
+   driver and command buffers, compute scratch;
 3. the **harness**: the Pipette app itself, meaning the Swift/SwiftUI runtime, networking,
    logging/telemetry, and framework working set.
 
-**No baseline is subtracted and no separate baseline is recorded.** The reported
-figure is the absolute peak footprint (the model, the runtime, and the harness
-together), because you cannot run the model without the process it runs in, so that
-cost is part of the answer. We deliberately do **not** capture a "harness baseline"
-and subtract it, for two reasons:
+The reported figure is the absolute peak footprint of the model, the runtime and
+the harness together. The app records no harness baseline and subtracts none,
+for two reasons:
 
-1. **It's negligible.** Measured on device, the harness floor (the app's footprint
-   before any model/runtime work) is **~8 MB**: about 0.1% of a multi-GB run and
-   only ~2% even of a 230M model. Subtracting ~8 MB would change nothing meaningful
-   while adding a field and a failure mode.
-2. **It's part of "how much to run it."** The app is the process the model runs in;
-   its cost is real memory the device must hold.
+1. **The harness is small.** Measured on the device, the harness floor (the
+   app's footprint before any model or runtime work) is about 8 MB. That is
+   about 0.1% of a multi-GB run and about 2% of a 230M model.
+2. **The harness is part of the cost.** The app is the process that the model
+   runs in, so its memory is real memory that the device must hold.
 
-The harness is kept small and is identical across runs, so it's a constant ~8 MB
-offset, not a per-model variable, which is what keeps results comparable. (Note:
-the larger gap between the reported figure and the runtime's *own* buffer
-self-report (tens of MiB to ~190 MiB depending on the model) is **Metal driver /
-pipeline / residency state**, i.e. part of the runtime, **not** the harness. See
-On-device validation.)
+The harness is the same in every run, so it is a constant offset of about 8 MB,
+not a per-model variable. The larger gap between the reported figure and the
+runtime's own buffer report (tens of MiB to about 190 MiB, by model) is Metal
+driver, pipeline and residency state. That state is part of the runtime, not
+the harness ([On-device validation](#on-device-validation)).
 
 ## Counter
 
@@ -50,10 +46,9 @@ counter cannot see). Per the
 cost is therefore reported as the host figure and there is no separate GPU field:
 
 - `max_host_bytes` = peak process **physical footprint** (`task_vm_info.phys_footprint`),
-  the whole-process resident + compressed memory iOS jetsam kills on. This is the
-  same class of counter the other host-reporting platforms use (macOS
-  `phys_footprint`, Linux `VmHWM`, Android `Max RSS`, Windows `PeakWorkingSetSize`),
-  so iOS host numbers are comparable across runtimes and platforms.
+  the whole-process resident and compressed memory that iOS jetsam kills on.
+  macOS reports the same counter. Compare an iOS figure only with another iOS
+  figure of the same model, runtime and quantization.
 - `max_gpu_bytes` = `null`. There is no second pool to fit into; the host footprint
   already subsumes the Metal/MLX allocations.
 
@@ -62,32 +57,46 @@ every **20 ms** across the bracket of one model's load, prefill, and single deco
 step, and keeps the running max (plus a guaranteed sample at each end of the
 bracket). It samples the *current* footprint, **not** the kernel's own exact
 high-water mark (`task_vm_info.ledger_phys_footprint_peak`): that counter is a
-monotonic, process-lifetime value with no reset API, so in a long-lived in-process
-app it would stick at the largest model ever loaded. The peak of a `max_memory` run
-is a sustained plateau (the weights stay resident for the whole run), not a
-sub-20 ms transient, so polling lands on it reliably. Before the bracket opens, the
-footprint is first settled to a clean floor. See
+monotonic, process-lifetime value, so in a long-lived in-process app it would stick
+at the largest model ever loaded. Before the bracket opens, the footprint is first
+settled to a clean floor. See
 [Cross-cell isolation](#cross-cell-isolation-settle-to-floor).
+
+The kernel also keeps an *interval* high-water mark that can be reset, but only
+through private libproc calls, so only the private-API build (`PIPETTE_PRIVATE_MEMORY`, see
+[private-API builds](../pipette-ios/private-thermal-release-build.md)) uses it: it
+reset it (`proc_reset_footprint_interval`) as the sampler starts, read
+`ri_interval_max_phys_footprint` as it stops, and report the larger of the two peaks.
+A failed reset or read leaves the sampled figure. The kernel figure is a guard against
+a spike shorter than the poll. A llama.cpp or ONNX peak is a plateau (the weights stay
+resident) that polling lands on. On the MLX cells the two agree within 1 MiB at 512
+tokens on six MLX models ([memory carry-over](../pipette-ios/memory-carry-over.md)
+describes a spike that the kernel figure caught). A public build reports the sampled figure alone (see
+[Private-API and public builds](#private-api-and-public-builds)).
+
+ONNX Runtime GenAI is the exception to the footprint-only rule: it maps a package's
+external-data file and reads the 4-bit scales from the mapping, pages `phys_footprint`
+does not bill. Its cell polls the footprint plus the file-backed pages that became
+resident after the bracket opened (see
+[the ONNX runtime](../pipette-ios/onnx-genai-runtime.md)).
 
 ### The GPU allocator peak is a diagnostic, not a field
 
 The runtime's own GPU-allocator high-water mark (Metal `currentAllocatedSize` for
-llama.cpp, `MLX.Memory.peakMemory` for MLX) is a useful breakdown of *how much of
-the footprint the GPU runtime holds*, but on unified memory it is a subset of the
-host footprint, not a separate capacity dimension, so it is **not** reported as
-`max_gpu_bytes`. It remains visible in captured runtime output (llama.cpp's own
-`MTL0 ... buffer size` stderr lines; MLX's `[MLXMEM]` `mlxPeak` log) for auditing.
+llama.cpp, `MLX.Memory.peakMemory` for MLX) is a diagnostic, not `max_gpu_bytes`
+([unified vs. split memory](peak-memory-usage.md#unified-vs-split-memory)). It stays
+visible in captured runtime output for audit: llama.cpp's `MTL0 ... buffer size`
+stderr lines, and the `mlxPeak=` field of MLX's memory log line.
 
-An earlier revision reported that allocator counter *as* the single `max_ram_bytes`.
-On-device cross-checks against llama.cpp's own buffer log showed why that
-under-counts. The Metal counter matches the sum of llama's Metal (`MTL0`) buffers
+As a host figure the allocator counter under-counts. On-device cross-checks against
+llama.cpp's own buffer log show why: the Metal counter matches the sum of llama's Metal (`MTL0`) buffers
 to ~1 MiB, so it omits everything else the process holds: llama's own CPU-side
 buffers (~210 MiB on an 8B) plus non-buffer Metal driver / pipeline / residency
-state (~190 MiB on an 8B). Net, the allocator counter ran **~7% below
+state (~190 MiB on an 8B). Net, the allocator counter runs **~7% below
 `phys_footprint` on the 8B and ~17% below on the 230M** (a larger fraction on
 small models, where the fixed overhead is a bigger share), and with no GPU offload
-it collapses entirely (see On-device validation). The footprint is the figure a
-device must actually fit, so it is the reported `max_host_bytes`.
+it collapses entirely (see On-device validation). The footprint is the figure that a
+device must fit, so it is the reported `max_host_bytes`.
 
 ## Cross-cell isolation (settle-to-floor)
 
@@ -101,36 +110,112 @@ after a large one inherits the large one's un-reclaimed footprint as its "peak."
 Before it opens the sampling bracket, `max_memory` therefore settles the process to
 a clean floor (`ProcessMemory.settleToFloor`):
 
-1. **Drain caches**: `MLX.GPU.clearCache()`, called regardless of the current
+1. **Drain caches**: `MLX.Memory.clearCache()`, called regardless of the current
    runtime, so a prior MLX cell's buffer cache can't inflate a following llama
-   measurement.
+   measurement. The private-API build also flushes libmalloc's reclaim ring (below).
 2. **Poll to a plateau**: read `phys_footprint` until it stops falling (three
    consecutive ~50 ms samples within 1 MiB) or a 4 s timeout elapses.
 
 The reported figure is **not** reduced by this floor. The absolute peak is still
 what jetsam counts. The floor is *logged alongside* the peak (`AppLog.memory`:
-`enter=… floor=… peak=…`) so a run whose footprint never fell back to the harness
-level (contamination the platform couldn't reclaim in time) is detectable after
-the fact.
+`enter=… floor=… peak=… sampled=… kernel=… fresh=…`) so a run whose footprint never fell
+back to the harness level (contamination the platform couldn't reclaim in time) is
+detectable after the fact. `fresh=no` means the app had already run a cell since launch
+(`ProcessMemory.hasRunEngineWork`).
 
-**On-device demonstration** (iPhone 17 Pro, one process, MLX): running the 8B then
-the 230M model back-to-back, the 230M cell **entered at 5756 MB** (the 8B's
-un-reclaimed pages), but the gate scrubbed it and it **reported 462 MB**; matching
-the 457 MB the same model reports from a clean process. Without the gate it would
-have reported ~5.7 GB, ~12× too high. The `memseq` headless diagnostic
-(`HeadlessRunner`) drives this sequence for verification:
-`headlessrun memseq models=<big>,<small>`.
+Three things can still stay counted after a cell ends. The causes, the evidence, and how
+to repeat every experiment are in [memory carry-over](../pipette-ios/memory-carry-over.md).
+
+- **Memory llama.cpp kept.** Patches 002 and 003 under `ios/patches/` fix it on every
+  build.
+- **Freed memory iOS still counts.** iOS 27's allocator parks freed blocks in the task's
+  reclaim ring, still counted in `phys_footprint`, until the kernel trims it, and the
+  plateau wait cannot tell it from live memory. The private-API build flushes the ring in the
+  drain step (`mach_vm_reclaim_ring_flush`, 3 ms at most); a public build cannot.
+- **State an engine keeps while the app runs** (Metal pipelines, MLX's device). Nothing
+  removes it, so only a cell that runs first in its process is exact.
+
+What a reading is worth after other cells, on each build, is in
+[Private-API and public builds](#private-api-and-public-builds). The `diag memseq` headless
+diagnostic runs models one after another in one process to check it:
+`headlessrun diag memseq models=<big>,<small> prefill=<tokens>` (see
+[usage](../pipette-ios/usage.md)).
+
+## Private-API and public builds
+
+The private-API build is this app compiled with `PIPETTE_PRIVATE_MEMORY` (and
+`PIPETTE_PRIVATE_THERMAL`); [private-API builds](../pipette-ios/private-thermal-release-build.md)
+says how to make it. Apple's App Review rejects such a build, so it runs only
+side-loaded on registered development devices. Published iOS results come from
+it ([methodology overview](README.md) gives the full explanation). Every other
+build is a public build, the App Store and TestFlight builds included. Memory
+cells run on both. Two steps need private Apple calls and exist only in the
+private-API build:
+
+| What | Private-API build | Public build |
+| --- | --- | --- |
+| Before the bracket, hand freed memory back to iOS (`ProcessMemory.flushReclaimRing`) | Flushes the reclaim ring | Returns `nil`; nothing happens |
+| Read the kernel's exact interval peak (`resetKernelFootprintPeak`, `kernelFootprintPeak`) | Reported when larger than the 20 ms sample | Both return `nil`; `reportedPeak` reports the 20 ms sample |
+
+Everything else (llama.cpp patches 002 and 003, MLX's mlx_lm-shaped prefill, counting
+ONNX's mapped weight pages) runs on both builds.
+
+What that means for a reading:
+
+- A cell that runs first in a freshly launched app reads within about 5 MiB on either
+  build (the flush also frees a few MiB parked at launch).
+- On the private-API build, a cell after other cells reads within about 30 MiB of its
+  fresh figure: the flush empties the reclaim ring, and what remains is the engines'
+  own live memory.
+- A cell that runs after other cells in the same app can read high on a public build, by
+  how much depending on what ran before. Its settle step still waits for
+  `phys_footprint` to stop falling. But memory parked in the reclaim ring does not fall
+  on its own within those three 50 ms polls, so the loop takes it as the floor and the
+  next model loads on top of it. On an iPhone 17 Pro at 512-token prompts, with patches
+  002 and 003 and no flush, the later cell of each of the seven sequences tested read
+  +1 to +272 MiB above its fresh figure: worst right after a Phi-3 ONNX cell (+270,
+  +272), next an MLX cell after a llama.cpp cell (+49, +50). An MLX cell after ONNX was
+  not tested this way.
+- After an ONNX cell, a longer prompt leaves more behind. At 2048 tokens a 350M GGUF cell
+  right after Phi-3 ONNX started at 1179 MiB before the flush (307 MiB at 512 tokens), so
+  a public build's error there can be larger; that was not measured on a public build.
+  After a llama.cpp cell the leftover did not grow with the prompt.
+- Losing the kernel peak costs little: the 20 ms sample was within 1 MiB of it on
+  every llama.cpp and MLX cell tested, up to 4000-token prompts.
+
+A fleet cell (a cell from the plans that produce published results) whose runtime
+asks for `private_thermal`, as the fleet's iOS plans do, asks for the memory calls too
+(`private_memory` defaults to `private_thermal`). A public build refuses such a cell
+(`UnrunnableClaimError.buildLacksPrivateThermal` or `.buildLacksPrivateMemory` in
+`Claim.swift`), so fleet memory numbers come from the private-API build. Local jobs and
+headless runs have no such check. Every result records its build:
+
+- The runtime descriptor carries `private_thermal: true` on the private-API build and
+  omits the key on a public one. `private_memory` is written only when it differs from
+  `private_thermal`.
+- The private-API build's `client_version` carries the `-internal` suffix.
+- On a device, `headlessrun version` prints `private_memory=on|off`, and each cell's
+  `AppLog.memory` line reads `kernel=off` on a public build.
+
+The private-API build needs no warning: its flush keeps a later cell within about 30 MiB
+of its fresh figure. A public build warns in the app wherever a Max Memory cell may run
+after other work (the wording is in `MemoryFreshness`). It also records on each memory
+cell whether the app had already run something (`JobCell.measuredAfterOtherWork`,
+written as the cell starts). The mark stays on the phone: a marked result still uploads,
+and nothing in it says it may read high. A public build also logs a warning after a cell
+with `fresh=no` (`ProcessMemory.maxMemoryBracket`), which a headless run prints on
+stderr.
 
 ## On-device validation
 
-Measured on an iPhone 17 Pro (LFM2.5-8B and LFM2.5-230M; MLX 4-bit and llama.cpp
-Q4_K_M), sampling every candidate counter across the run:
+Measured on an iPhone 17 Pro (`LiquidAI/LFM2.5-8B-A1B` and `LiquidAI/LFM2.5-230M`;
+MLX 4-bit and llama.cpp Q4_K_M), sampling every candidate counter across the run:
 
-- **`phys_footprint` is literally the jetsam counter.** `phys_footprint +
+- **`phys_footprint` is the jetsam counter.** `phys_footprint +
   os_proc_available_memory()` was constant at **~6.98 GB** across every run. That
   is the device's per-app kill limit, so `available = limit − phys_footprint`. No
   other counter has this property.
-- **The old Metal counter collapses without GPU offload.** With `n_gpu_layers = 0`
+- **The Metal allocator counter collapses without GPU offload.** With `n_gpu_layers = 0`
   (CPU inference) the weights live in CPU buffers, so Metal `currentAllocatedSize`
   read **0.18 GB for an 8B model that occupied 5.57 GB** (−97%), and **0.46 MB**
   for the 230M (−99.8%). `phys_footprint` reported the true 5.57 GB / 0.27 GB. The
@@ -161,31 +246,49 @@ Q4_K_M), sampling every candidate counter across the run:
 
 The app loads the model fresh, tokenizes a prompt of the requested prefill length,
 prefills it, and runs one greedy ignore-end-of-generation decode step. The single
-decode step exercises the same first-decode allocations the `--n-gen 1` flag covers
-on the CLI paths.
+decode step runs on the prefilled context, as the `-pg <N>,1` test does on the CLI
+paths.
 
-The fresh load is mandatory: unlike the latency and throughput benchmarks, which can
-attach to an already-loaded model, max-memory must observe the model-load
-allocations, so the reuse-an-open-model entry point rejects `max_memory_usage` and
-the caller uses the fresh-load path (`LlamaBenchmark.maxMemory` /
-`MLXBenchmark.maxMemory`), which settles the footprint to a clean floor (see
-[Cross-cell isolation](#cross-cell-isolation-settle-to-floor)) and then brackets the
-entire load + drive with the sampler. One observation is reported, matching the
+The fresh load is mandatory: max-memory must observe the model-load allocations, so
+each runtime's `maxMemoryUsage` (`LlamaExecute`, `MlxExecute`, `OnnxGenaiExecute`) loads
+the model inside `ProcessMemory.maxMemoryBracket`, which settles the footprint to a clean
+floor (see [Cross-cell isolation](#cross-cell-isolation-settle-to-floor)) and then
+brackets the entire load + drive with the sampler. One observation is reported, matching the
 single-peak rule for `max_memory_usage`.
+
+`vl_max_memory` uses the same bracket around a vision workload: a fresh load of the
+model and its projector, `vl_throughput`'s image prompt, and `parameter_decode_tokens`
+decode steps, one when the cell sets none
+(`LlamaExecute.vlMaxMemory`; see [vl-max-memory.md](vl-max-memory.md#ios)).
+`asr_max_memory` uses it around a speech workload: a fresh load of the model and
+its audio projector, the clip's audio token count, and one request with
+`asr_throughput`'s prompt and `parameter_decode_tokens` samples, ending at the
+last sample as the server's request does (`LlamaExecute`, the `.asrMaxMemory`
+case; see
+[asr-max-memory.md](asr-max-memory.md#ios)).
 
 ## Caveats
 
-- This assumes the model is loaded without mmap (the llama path sets
-  `use_mmap = false`). With mmap, clean file-backed GGUF pages can be evicted without
-  cost and may not all count toward `phys_footprint`, which would understate the
-  peak. The counter assumes copied-resident weights.
+- This assumes the model is loaded without mmap (the llama path's default load mode is
+  `none`, `LlamaCpp.defaultLoadMode`, unless the cell's runtime flags set `load_mode`).
+  With mmap, clean file-backed GGUF pages can be evicted without cost and may not all
+  count toward `phys_footprint`, which would understate the peak. The counter assumes copied-resident weights.
+- iOS's per-app memory limit bounds what a cell can measure. Phi-3 mini on ONNX Runtime
+  GenAI reads 2906 MiB at a 512-token prompt and 5161 MiB at 2048; at 4000 tokens iOS
+  kills the app mid-cell at that limit (6656 MiB on an iPhone 17 Pro, `per-process-limit`
+  in the `JetsamEvent` report), so the cell produces no reading.
 - The in-process path does not emit the `llama-bench` JSON the CLI paths do, but the
   runtime's stderr (llama.cpp's `model buffer size` / `KV` / `compute buffer` lines)
   is captured and can be audited against the reported figure.
 
 ## Code References
 
-- [`LlamaBenchmark.maxMemory`](../../ios/Pipette/Pipette/Runtimes/Llama/LlamaBenchmark.swift)
-- [`MLXBenchmark.maxMemory`](../../ios/Pipette/Pipette/Runtimes/MLX/MLXBenchmark.swift)
+- [`LlamaExecute.maxMemoryUsage`](../../ios/Pipette/Pipette/Runtimes/Llama/Execute/LlamaMaxMemoryUsage.swift)
+- [`LlamaExecute.vlMaxMemory`](../../ios/Pipette/Pipette/Runtimes/Llama/Execute/LlamaVlMaxMemory.swift)
+- [`MlxExecute.maxMemoryUsage`](../../ios/Pipette/Pipette/Runtimes/Mlx/Execute/MlxMaxMemoryUsage.swift)
+- [`OnnxGenaiExecute.maxMemoryUsage`](../../ios/Pipette/Pipette/Runtimes/OnnxGenai/Execute/OnnxGenaiMaxMemoryUsage.swift)
+- [`BuildFlavor.hasPrivateMemory`](../../ios/Pipette/Pipette/Config/BuildFlavor.swift)
+- [`UnrunnableClaimError.buildLacksPrivateMemory`](../../ios/Pipette/Pipette/Client/Claim.swift)
+- [`MemoryFreshness`](../../ios/Pipette/Pipette/Benchmarks/MemoryFreshness.swift)
 - [`ProcessMemory` / `MemoryPeakSampler` / `settleToFloor`](../../ios/Pipette/Pipette/Runtimes/ProcessMemory.swift)
-- [`HeadlessRunner` `memseq` diagnostic](../../ios/Pipette/Pipette/Headless/HeadlessRunner.swift)
+- [`HeadlessRunner` `diag memseq` diagnostic](../../ios/Pipette/Pipette/Headless/HeadlessRunner.swift)

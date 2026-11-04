@@ -8,10 +8,10 @@ nonisolated enum KeychainHelper {
     private static let privateKeyAccount = "private_key_hex"
     private static let pendingPrivateKeyAccount = "pending_private_key_hex"
     private static let hfTokenAccount = "hf_token"
+    private static let modelTokenPrefix = "\(hfTokenAccount):"
     private static let registrationAccount = "registration_json"
 
-    /// Generate a signing keypair and stage the private key in the Keychain.
-    /// Returns the public key hex string to send to the management server.
+    /// Stage a fresh private key in the Keychain and return the public key hex to register.
     static func generatePendingSigningKeyPair() -> String? {
         let privateKey = Curve25519.Signing.PrivateKey()
         let privateKeyHex = privateKey.rawRepresentation.hexEncodedString()
@@ -21,42 +21,34 @@ nonisolated enum KeychainHelper {
         return privateKey.publicKey.rawRepresentation.hexEncodedString()
     }
 
-    /// Promote the staged private key after server registration succeeds.
-    static func promotePendingPrivateKey() -> Bool {
-        guard let pendingPrivateKey = loadString(account: pendingPrivateKeyAccount),
-              savePrivateKey(pendingPrivateKey)
-        else {
-            return false
-        }
-
-        _ = deletePendingPrivateKey()
-        return true
+    /// Nil when none is staged or the staged value cannot sign.
+    ///
+    /// Reads rather than promotes: only ``ClientRegistrationStore`` writes both the file and
+    /// the Keychain copy, so promoting here would leave the file behind.
+    static func loadPendingPrivateKey() -> PrivateKey? {
+        loadString(account: pendingPrivateKeyAccount).flatMap { try? PrivateKey($0) }
     }
 
-    /// Delete any staged private key left by an interrupted registration.
     static func deletePendingPrivateKey() -> Bool {
         deleteItem(account: pendingPrivateKeyAccount)
     }
 
-    /// Save the private signing key hex string to the Keychain.
     static func savePrivateKey(_ hex: String) -> Bool {
         saveString(hex, account: privateKeyAccount)
     }
 
-    /// Load the private signing key from the Keychain. This is the loose→strict
-    /// boundary: the stored hex string becomes a `PrivateKeyHex` here and stays
-    /// strongly typed through the signing/submission paths.
-    static func loadPrivateKey() -> PrivateKeyHex? {
-        loadString(account: privateKeyAccount).map { PrivateKeyHex($0) }
+    /// A stored value that cannot sign reads as no key, which is what the caller acts on
+    /// anyway: the device must re-register.
+    static func loadPrivateKey() -> PrivateKey? {
+        loadString(account: privateKeyAccount).flatMap { try? PrivateKey($0) }
     }
 
-    /// Delete the private key from the Keychain.
     static func deletePrivateKey() -> Bool {
         deleteItem(account: privateKeyAccount)
     }
 
-    /// The registration record, mirrored beside the signing key so both halves outlive an
-    /// uninstall. Why it has to be both halves: ``RegistrationMirror``.
+    /// Mirrored beside the signing key so both halves outlive an uninstall; see
+    /// ``RegistrationMirror``.
     static func saveRegistration(_ json: Data) -> Bool {
         saveData(json, account: registrationAccount)
     }
@@ -69,43 +61,46 @@ nonisolated enum KeychainHelper {
         deleteItem(account: registrationAccount)
     }
 
-    /// Save the Hugging Face access token to the Keychain.
     static func saveHfToken(_ token: AuthToken) -> Bool {
         saveString(token.value, account: hfTokenAccount)
     }
 
-    /// Load the Hugging Face access token from the Keychain. Loose→strict boundary, as
-    /// `loadPrivateKey` is for the signing key: the stored string becomes an `AuthToken`
-    /// here, so every consumer downstream has a credential that is non-empty by type and
-    /// redacts itself in logs. A stored value `AuthToken` rejects reads as absent — which
-    /// is the honest answer, since an empty token authenticates nothing.
+    /// A stored value `AuthToken` rejects reads as absent: an empty token authenticates
+    /// nothing.
     static func loadHfToken() -> AuthToken? {
         loadString(account: hfTokenAccount).flatMap { try? AuthToken($0) }
     }
 
-    /// Delete the Hugging Face access token from the Keychain.
     static func deleteHfToken() -> Bool {
         deleteItem(account: hfTokenAccount)
     }
 
-    /// A plan-supplied token, keyed by the model's reference (the crate's per-source
-    /// `reference()`). Keying by repo alone collided: two cells pulling different files
-    /// out of one repo shared an entry, so the second claim's token replaced the first's.
+    /// The Keychain account a plan-supplied token lands in, keyed by the model's reference
+    /// rather than its repo: two cells pulling different files from one repo would otherwise
+    /// overwrite each other's token.
     ///
-    /// Internal rather than private so the derivation is assertable without a Keychain —
-    /// a Simulator test host cannot store items. Why iOS persists a token at all, when
-    /// the CLI stores none, is in `docs/pipette-ios/execution-alignment.md`.
+    /// Internal so tests can assert it: a Simulator test host cannot store Keychain items.
+    /// Why iOS persists tokens at all: `docs/pipette-ios/execution-alignment.md`.
     static func modelTokenAccount(_ model: Model) -> String? {
         let reference: String
         switch model {
         case let .ggufText(m): reference = m.source.reference
         // One repo, one credential: the main weights name the entry the projector shares.
-        case let .ggufVision(m): reference = m.source.modelReference
+        case let .ggufVision(m): reference = m.source.weightsReference
+        // Same rule, and it covers the drafter too: a separate `draft` gguf comes out of
+        // the same repo as the weights, so it is the same credential.
+        case let .ggufVisionSpeculative(m): reference = m.source.vision.weightsReference
         case let .mlx(m): reference = m.source.reference
-        // Ships with the OS — nothing to fetch, so nothing to authenticate.
+        case let .onnxGenai(m): reference = m.source.reference
+        // Ships with the OS: nothing to fetch.
         case .appleFoundationText: return nil
         }
-        return "\(hfTokenAccount):\(reference)"
+        return modelTokenAccount(reference: reference)
+    }
+
+    /// Shared by the plan and import paths so the two cannot write different accounts.
+    private static func modelTokenAccount(reference: String) -> String {
+        "\(modelTokenPrefix)\(reference)"
     }
 
     static func saveHfToken(_ token: AuthToken, forModel model: Model) -> Bool {
@@ -113,19 +108,21 @@ nonisolated enum KeychainHelper {
         return saveString(token.value, account: account)
     }
 
-    /// Same loose→strict boundary as `loadHfToken()`.
+    /// For `auth import`. The account is built from the reference, so a bundle can only
+    /// reach the per-model family of Keychain accounts.
+    static func saveModelHfToken(_ token: AuthToken, reference: String) -> Bool {
+        saveString(token.value, account: modelTokenAccount(reference: reference))
+    }
+
     static func loadHfToken(forModel model: Model) -> AuthToken? {
         modelTokenAccount(model)
             .flatMap { loadString(account: $0) }
             .flatMap { try? AuthToken($0) }
     }
 
-    /// Forget every stored model token. The CLI has no counterpart because it stores none
-    /// — it re-reads `PIPETTE_HF_TOKEN` each invocation — so the whole lifecycle is iOS's
-    /// to own, and `auth reset` is the point where "forget this device" has to include
-    /// the credentials it accumulated.
-    @discardableResult
-    static func deleteAllModelHfTokens() -> Int {
+    /// A failed query reads as no stored tokens; both callers print a count the operator
+    /// can check.
+    private static func modelTokenAccounts() -> [String] {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -135,13 +132,26 @@ nonisolated enum KeychainHelper {
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let items = result as? [[String: Any]]
-        else { return 0 }
-        let prefix = "\(hfTokenAccount):"
+        else { return [] }
         return items
             .compactMap { $0[kSecAttrAccount as String] as? String }
-            .filter { $0.hasPrefix(prefix) }
-            .filter { deleteItem(account: $0) }
-            .count
+            .filter { $0.hasPrefix(modelTokenPrefix) }
+    }
+
+    /// Keyed by model reference, so no caller handles a Keychain account. A token whose read
+    /// fails is left out; `auth export` prints the count, so a short bundle is visible.
+    static func loadAllModelHfTokens() -> [String: String] {
+        modelTokenAccounts().reduce(into: [:]) { tokens, account in
+            guard let value = loadString(account: account) else { return }
+            tokens[String(account.dropFirst(modelTokenPrefix.count))] = value
+        }
+    }
+
+    /// No CLI counterpart: the CLI stores no token and re-reads `PIPETTE_HF_TOKEN` each
+    /// invocation.
+    @discardableResult
+    static func deleteAllModelHfTokens() -> Int {
+        modelTokenAccounts().filter { deleteItem(account: $0) }.count
     }
 
     // MARK: - Generic helpers
@@ -183,6 +193,13 @@ nonisolated enum KeychainHelper {
         loadData(account: account).flatMap { String(data: $0, encoding: .utf8) }
     }
 
+    /// Nil both for no item and for an item not readable yet: before the first unlock after
+    /// boot, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` items return
+    /// `errSecInteractionNotAllowed`.
+    ///
+    /// Still safe for `auth import`, which refuses over a key it finds: in that window the
+    /// write fails too (`SecItemAdd`, and the `SecItemUpdate` fallback cannot re-encrypt
+    /// without the class key), so an unreadable key is never overwritten.
     private static func loadData(account: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -209,11 +226,5 @@ nonisolated enum KeychainHelper {
         ]
         let status = SecItemDelete(query as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
-    }
-}
-
-private extension Data {
-    nonisolated func hexEncodedString() -> String {
-        map { String(format: "%02x", $0) }.joined()
     }
 }

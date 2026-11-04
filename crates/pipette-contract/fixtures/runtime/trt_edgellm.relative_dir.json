@@ -1,0 +1,6 @@
+{
+  "dir": "blobs",
+  "flavor": "jetson-orin-cuda-13",
+  "source": "relative_dir",
+  "type": "trt_edgellm"
+}

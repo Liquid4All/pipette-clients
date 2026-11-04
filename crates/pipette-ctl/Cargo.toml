@@ -1,0 +1,52 @@
+[package]
+name = "pipette-ctl"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pipette-ctl"
+path = "src/main.rs"
+
+[dependencies]
+hex.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+pipette-http.workspace = true
+pipette-mgmt-client.workspace = true
+pipette-plan-types.workspace = true
+pipette-readiness.workspace = true
+pipette-ssh.workspace = true
+pipette-subprocess.workspace = true
+pipette-wait.workspace = true
+pipette-workspace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+shlex.workspace = true
+strum.workspace = true
+tabled.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+# The columns of a progress line on a terminal.
+unicode-width.workspace = true
+url.workspace = true
+
+# The width of the terminal that a progress line has to fit.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["termios"] }
+
+[dev-dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+httpmock.workspace = true
+pipette-artifacts-catalog.workspace = true
+pipette-ssh = { workspace = true, features = ["test-support"] }
+rstest.workspace = true
+uuid.workspace = true

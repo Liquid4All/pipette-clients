@@ -1,34 +1,34 @@
 //! Storage quota: a cap on the disk the artifact stores may occupy, enforced
 //! after each publish (see `docs/storage-quota.md`).
 //!
-//! Three concrete steps — [`survey`] → [`plan`] → [`apply_sweep`]. The
-//! split is what makes a dry run free and the eviction order testable without a
-//! filesystem: `survey` is the only step that reads disk, `plan` is pure,
-//! `apply_sweep` is the only step that deletes. `survey` reads one manifest per
-//! entry and no payload file — entries record their own size at publish.
+//! [`survey`] reads disk, [`plan`] is pure, and [`apply_sweep`] deletes, so a
+//! dry run is free and the eviction order is testable without a filesystem.
+//! [`sweep`] runs the three, planning again past entries in use, and reports
+//! every removal back to the caller rather than printing.
 //!
 //! The manifest is the unit of accounting: an entry counts toward the quota if
 //! and only if it carries a manifest this build can read. Everything else under
-//! a store root is garbage, and garbage is what the sweep reclaims first.
-//!
-//! Nothing here prints. [`apply_sweep`] reports every removal back to the
-//! caller so no delete is silent.
+//! a store root is garbage, which the sweep reclaims first.
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 
 use pipette_plan_types::{Model, Runtime};
 
-use crate::entry::{entry_size_bytes, BLOBS_DIR_NAME, MANIFEST_NAME, STAGING_DIR_NAME};
-use crate::model::store::read_manifest as read_model_manifest;
-use crate::model::ModelStorageKey;
-use crate::runtime::store::{
-    classify_manifest_toml, read_manifest as read_runtime_manifest, ManifestKind,
+use crate::entry::{
+    BLOBS_DIR_NAME, LOCK_SUFFIX, LOCKS_DIR_NAME, MANIFEST_NAME, STAGING_DIR_NAME, USE_SUFFIX,
+    entry_size_bytes, open_entry_lock, staged_path, staging_lock_path,
 };
+use crate::model::ModelStorageKey;
+use crate::model::store::read_manifest as read_model_manifest;
 use crate::runtime::RuntimeStorageKey;
+use crate::runtime::store::{
+    ManifestKind, classify_manifest_toml, read_manifest as read_runtime_manifest,
+};
 
 /// Why a fetch was refused on quota grounds.
 #[derive(Debug, thiserror::Error)]
@@ -108,9 +108,8 @@ pub struct StorageEntry {
     /// `cli_ref`, or the store-relative path for garbage.
     pub label: String,
     /// What removing this entry would free. Garbage measures the whole
-    /// directory; a live entry measures `blobs/` alone, because the size its
-    /// manifest records cannot include the manifest carrying it — so a live
-    /// entry under-reports by one manifest, erring low.
+    /// directory; a live entry measures `blobs/` alone (the size its manifest
+    /// records cannot include the manifest itself), erring low.
     pub size_bytes: u64,
     pub kind: EntryKind,
 }
@@ -153,9 +152,9 @@ pub struct SweepPins {
 }
 
 impl SweepPins {
-    /// The artifacts one benchmark cell needs resolved at the same time — the
-    /// runtime's ensure must not evict the model the model's ensure is about to
-    /// resolve, and vice versa.
+    /// The artifacts one benchmark cell needs at the same time: the runtime's
+    /// ensure must not evict the model the cell is about to resolve, and vice
+    /// versa.
     pub fn for_cell(model: &Model, runtime: &Runtime) -> Self {
         Self::default().with_model(model).with_runtime(runtime)
     }
@@ -174,7 +173,18 @@ impl SweepPins {
         self
     }
 
-    /// Absorb `other`'s pins.
+    /// Pin every live entry `report` could not remove; whether any was new.
+    pub(crate) fn pin_failed(&mut self, report: &SweepReport) -> bool {
+        report.failed.iter().fold(false, |pinned, (entry, _)| {
+            let new = match &entry.kind {
+                EntryKind::Model { key, .. } => self.models.insert(key.clone()),
+                EntryKind::Runtime { key, .. } => self.runtimes.insert(key.clone()),
+                EntryKind::Garbage { .. } => false,
+            };
+            pinned || new
+        })
+    }
+
     pub(crate) fn merge(&mut self, other: Self) {
         self.models.extend(other.models);
         self.runtimes.extend(other.runtimes);
@@ -193,8 +203,7 @@ pub struct StoragePolicy {
 }
 
 impl StoragePolicy {
-    /// Cap the stores rooted at `models_dir` / `runtimes_dir`, pinning nothing
-    /// yet — the run layer adds the in-flight cell's pins.
+    /// Pins nothing yet: the run layer adds the in-flight cell's pins.
     pub fn new(quota_bytes: u64, models_dir: PathBuf, runtimes_dir: PathBuf) -> Self {
         Self {
             quota_bytes,
@@ -210,8 +219,8 @@ impl StoragePolicy {
 pub struct SweepPlan {
     pub evictions: Vec<StorageEntry>,
     pub freed_bytes: u64,
-    /// Set when the candidates run out while still over — the caller warns and
-    /// continues; a run never fails over disk bookkeeping.
+    /// Set when the candidates run out while still over. The caller warns and
+    /// continues: a run never fails over disk bookkeeping.
     pub still_over_by_bytes: Option<u64>,
 }
 
@@ -226,28 +235,23 @@ pub struct SweepReport {
 
 /// Classify everything under both store roots, in sweep order.
 ///
-/// Never fails on one bad entry: an unreadable manifest is garbage, which is
-/// the whole point of the manifest-as-unit-of-accounting rule. That is also why
-/// this walks the roots itself instead of going through the stores' `list`,
-/// which fails the whole listing on one bad manifest — the resolve path keeps
-/// its strictness, the accountant does not.
+/// Never fails on one bad entry: an unreadable manifest is garbage. That is why
+/// this walks the roots itself instead of the stores' `list`, which fails the
+/// whole listing on one bad manifest.
 pub fn survey(models_dir: &Path, runtimes_dir: &Path) -> StorageSurvey {
     let mut entries = scan_store(models_dir, model_entry);
     entries.extend(scan_store(runtimes_dir, runtime_entry));
     StorageSurvey::new(entries)
 }
 
-/// What would be dropped to get `survey.used_bytes` at or under
-/// `quota_bytes`, stopping the instant it fits. Pure: no filesystem access.
 /// What would be dropped to bring `survey.used_bytes` to or under
 /// `quota_bytes`: every piece of garbage, then live entries least-recently-used
-/// first until it fits. Pure — no filesystem access.
+/// first until it fits.
 ///
-/// Garbage goes unconditionally, whether or not the store is over. It is
-/// unaccountable by definition and can never be pinned, so keeping it buys
-/// nothing — and a store stranded by a manifest version bump is typically
-/// *under* quota, where gating on the overage would leave the only recovery a
-/// hand-deleted directory.
+/// Garbage goes even when the store is under quota: it can never be pinned, and
+/// a store stranded by a manifest version bump is typically under quota, where
+/// gating on the overage would leave a hand-deleted directory as the only
+/// recovery.
 pub fn plan(survey: &StorageSurvey, quota_bytes: u64, pins: &SweepPins) -> SweepPlan {
     let mut freed_bytes = 0u64;
     let mut evictions = Vec::new();
@@ -274,8 +278,8 @@ pub fn plan(survey: &StorageSurvey, quota_bytes: u64, pins: &SweepPins) -> Sweep
 }
 
 /// Delete the planned entries, reporting each one and skipping any it cannot
-/// remove — a failed unlink is bookkeeping, not a reason to fail a run.
-pub fn apply_sweep(plan: &SweepPlan) -> SweepReport {
+/// remove: a failed unlink is not a reason to fail a run.
+pub(crate) fn apply_sweep(plan: &SweepPlan) -> SweepReport {
     plan.evictions
         .iter()
         .fold(SweepReport::default(), |mut report, entry| {
@@ -290,10 +294,40 @@ pub fn apply_sweep(plan: &SweepPlan) -> SweepReport {
         })
 }
 
-/// Refuse before the fetch starts. Without this the fetch would evict the whole
-/// store and still not fit. `declared_bytes` is `None` when the size isn't
-/// knowable ahead of time (a uv/mlx venv), in which case the post-publish sweep
-/// is the only enforcement.
+/// Survey, plan and apply until nothing more can go, returning the last plan
+/// and every removal and failure. A live entry it could not remove (most often
+/// one in use) is pinned and the plan made again, so the next least recently
+/// used goes in its place.
+pub fn sweep(
+    models_dir: &Path,
+    runtimes_dir: &Path,
+    quota_bytes: u64,
+    mut pins: SweepPins,
+) -> (SweepPlan, SweepReport) {
+    let mut done = SweepReport::default();
+    loop {
+        let plan = plan(&survey(models_dir, runtimes_dir), quota_bytes, &pins);
+        let report = apply_sweep(&plan);
+        let again = pins.pin_failed(&report);
+        done.removed.extend(report.removed);
+        done.freed_bytes = done.freed_bytes.saturating_add(report.freed_bytes);
+        // Garbage kept fails again on every round: report it once.
+        let fresh: Vec<_> = report
+            .failed
+            .into_iter()
+            .filter(|(entry, _)| !done.failed.iter().any(|(kept, _)| kept.path == entry.path))
+            .collect();
+        done.failed.extend(fresh);
+        if !again {
+            return (plan, done);
+        }
+    }
+}
+
+/// Refuse before the fetch starts, which would otherwise evict the whole store
+/// and still not fit. `declared_bytes` is `None` when the size isn't knowable
+/// ahead of time (a venv, a runtime archive, a failed size probe), leaving the
+/// post-publish sweep as the only enforcement.
 pub(crate) fn refuse_if_oversize(
     artifact: &str,
     declared_bytes: Option<u64>,
@@ -310,12 +344,8 @@ pub(crate) fn refuse_if_oversize(
 }
 
 /// Bytes a live entry's payload occupies, preferring the size its manifest
-/// recorded at publish over walking `blobs/`.
-///
-/// The recorded value is why a survey costs one small read per entry instead of
-/// a traversal of every file in the store. It is absent only on entries
-/// published before the field existed, which fall back to the walk — measuring
-/// `blobs/` alone, as the recorded value does, so both paths agree.
+/// recorded at publish over walking `blobs/`. An entry without the field falls
+/// back to the walk, which also measures `blobs/` alone so both paths agree.
 fn payload_bytes(entry_dir: &Path, recorded: Option<u64>) -> u64 {
     recorded.unwrap_or_else(|| entry_size_bytes(&entry_dir.join(BLOBS_DIR_NAME)))
 }
@@ -328,12 +358,38 @@ fn is_candidate(entry: &StorageEntry, pins: &SweepPins) -> bool {
     }
 }
 
-fn remove_entry(path: &Path) -> std::io::Result<()> {
+/// Why [`apply_sweep`] could not remove a planned entry.
+#[derive(Debug, thiserror::Error)]
+enum RemoveError {
+    #[error("its staging lock is held, by a running fetch or another sweep")]
+    Locked,
+    #[error("it is in use, by a process running it or another sweep")]
+    InUse,
+    #[error("{0:#}")]
+    EntryLock(anyhow::Error),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+fn remove_entry(path: &Path) -> Result<(), RemoveError> {
+    if !is_staged(path) {
+        // Garbage too: a build reading another manifest version may run from it.
+        return move_out_and_remove(path);
+    }
+    // Removed only under its lock: `StagedDir::lock` relies on that.
+    let _lock = take_staging_lock(path)?;
+    remove_path(path)?;
+    // One left behind is an orphaned lock the next survey reports.
+    let _ = remove_path(&staging_lock_of(path));
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),
         // Already gone is the outcome we wanted.
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(source),
     }
 }
@@ -363,11 +419,101 @@ fn garbage(root: &Path, path: PathBuf, reason: &str) -> StorageEntry {
 
 /// Each crashed fetch under `.staging` is its own garbage entry, so one orphan
 /// doesn't hide behind the shared scratch dir's name.
+///
+/// A fetch whose lock is held is no entry at all: another process sharing the
+/// store is running it, and deleting it mid-download would leave that fetch to
+/// publish what was left. A lock file goes with its staged dir, so it is an
+/// entry of its own only once the dir is gone.
 fn staging_orphans(root: &Path, staging: &Path) -> Vec<StorageEntry> {
     store_children(staging)
         .into_iter()
-        .map(|path| garbage(root, path, "orphaned staging dir"))
+        .filter(|path| take_staging_lock(path).is_ok())
+        .filter_map(|path| match staged_dir_of_lock(&path) {
+            None => Some(garbage(root, path, "orphaned staging dir")),
+            Some(dir) if dir.exists() => None,
+            Some(_) => Some(garbage(root, path, "orphaned staging lock")),
+        })
         .collect()
+}
+
+fn is_staged(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == STAGING_DIR_NAME)
+}
+
+/// The staged dir a lock file belongs to, or `None` when `path` is no lock file.
+fn staged_dir_of_lock(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let dir = name.strip_suffix(LOCK_SUFFIX)?;
+    Some(path.with_file_name(dir))
+}
+
+/// The lock guarding the staging child at `path`: itself for a lock file, the
+/// file beside it for a staged dir.
+fn staging_lock_of(path: &Path) -> PathBuf {
+    if staged_dir_of_lock(path).is_some() {
+        path.to_path_buf()
+    } else {
+        staging_lock_path(path)
+    }
+}
+
+/// Take the lock guarding the staging child at `path`. `None` when it has no
+/// lock file, so no fetch: it predates the lock, or died between removing its
+/// dir and its lock. Any error counts as a live fetch, since only a lock taken
+/// proves its fetch dead.
+fn take_staging_lock(path: &Path) -> Result<Option<File>, RemoveError> {
+    let lock = match File::open(staging_lock_of(path)) {
+        Ok(lock) => lock,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(source.into()),
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(fs::TryLockError::WouldBlock) => Err(RemoveError::Locked),
+        Err(fs::TryLockError::Error(source)) => Err(source.into()),
+    }
+}
+
+/// Move the entry at `path` under `.staging` under its in-use lock (which
+/// `hold_entry` relies on), then delete it there, so a `touch` racing the delete
+/// cannot leave a manifest without its payload at `path`. One whose delete
+/// fails is an orphan the next survey reclaims.
+fn move_out_and_remove(path: &Path) -> Result<(), RemoveError> {
+    let (Some(root), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(remove_path(path)?);
+    };
+    let key = name.to_string_lossy();
+    let in_use = take_in_use_lock(root, &key)?;
+    let staging = root.join(STAGING_DIR_NAME);
+    fs::create_dir_all(&staging)?;
+    let doomed = staged_path(&staging, &key);
+    match fs::rename(path, &doomed) {
+        Ok(()) => {}
+        // Already gone is the outcome we wanted.
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(source.into()),
+    }
+    // A run taking the entry in use waits for the move, never for the delete.
+    drop(in_use);
+    Ok(remove_path(&doomed)?)
+}
+
+/// Take the in-use lock of the entry `key` under `root` without waiting. Any
+/// error but a filesystem without locks keeps the entry, since only a lock
+/// taken proves no process runs from it.
+fn take_in_use_lock(root: &Path, key: &str) -> Result<File, RemoveError> {
+    let (lock, _) = open_entry_lock(root, key, USE_SUFFIX).map_err(RemoveError::EntryLock)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(fs::TryLockError::WouldBlock) => Err(RemoveError::InUse),
+        // Runs there hold nothing either; refusing would keep the store over quota for good.
+        Err(fs::TryLockError::Error(source)) if source.kind() == io::ErrorKind::Unsupported => {
+            Ok(lock)
+        }
+        Err(fs::TryLockError::Error(source)) => Err(source.into()),
+    }
 }
 
 /// A child that is neither a live entry nor the staging root: whatever it is,
@@ -386,16 +532,19 @@ fn non_entry(root: &Path, path: &Path) -> Option<StorageEntry> {
     None
 }
 
-/// Classify every child of a store root: the staging dir yields one garbage
-/// entry per crashed fetch, anything without a readable manifest is garbage,
-/// and the rest goes to `entry_of` — the only part that differs between the
-/// model and runtime stores.
+/// `entry_of` is the only part that differs between the model and runtime
+/// stores.
 fn scan_store(root: &Path, entry_of: impl Fn(&Path, PathBuf) -> StorageEntry) -> Vec<StorageEntry> {
     store_children(root)
         .into_iter()
         .flat_map(|path| {
             if path.file_name().is_some_and(|n| n == STAGING_DIR_NAME) {
                 return staging_orphans(root, &path);
+            }
+            // Removing an entry's lock file would break its mutual exclusion
+            // (see `lock_entry`).
+            if path.file_name().is_some_and(|n| n == LOCKS_DIR_NAME) {
+                return Vec::new();
             }
             vec![non_entry(root, &path).unwrap_or_else(|| entry_of(root, path))]
         })
@@ -429,7 +578,7 @@ fn model_entry(models_dir: &Path, path: PathBuf) -> StorageEntry {
 }
 
 /// Whether the entry's payload is actually on disk. Mirrors the iOS husk rule
-/// (`FileStorage.payloadURL`): the manifest names where the bytes should be, so
+/// (`ModelArtifactStore.bound(_:under:)`): the manifest names where the bytes should be, so
 /// resolving it and finding nothing means the entry is no longer a model.
 fn payload_present(entry_dir: &Path, manifest: &crate::model::ModelManifest) -> bool {
     let Some(models_dir) = entry_dir.parent() else {
@@ -450,7 +599,7 @@ fn runtime_entry(runtimes_dir: &Path, path: PathBuf) -> StorageEntry {
         Ok(ManifestKind::Store) => {}
         Ok(ManifestKind::Engine) => return garbage(runtimes_dir, path, "legacy engine manifest"),
         Ok(ManifestKind::Unknown) => {
-            return garbage(runtimes_dir, path, "unrecognized manifest schema")
+            return garbage(runtimes_dir, path, "unrecognized manifest schema");
         }
         Err(err) => return garbage(runtimes_dir, path, &unreadable(&err)),
     }
@@ -494,8 +643,8 @@ mod tests {
 
     use pipette_plan_types::{
         DockerVllm, GgufText, GgufTextSource, HfOrg, HfRepo, HfRepoName, LlamaCppFlavor,
-        LlamacppCliStockTools, LlamacppCliStockToolsSource, NonEmptyString, RepoSubpath,
-        RepositoryUrl, SourceRepository, VllmFlavor,
+        LlamacppCliStockTools, LlamacppCliStockToolsRelease, LlamacppCliStockToolsSource,
+        NonEmptyString, RepoSubpath, RepositoryUrl, VllmFlavor,
     };
 
     use super::*;
@@ -523,9 +672,10 @@ mod tests {
 
     fn llamacpp(version: &str) -> anyhow::Result<Runtime> {
         Ok(Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
-            source: LlamacppCliStockToolsSource::GithubRelease(SourceRepository {
+            source: LlamacppCliStockToolsSource::GithubRelease(LlamacppCliStockToolsRelease {
                 repository_url: RepositoryUrl::new("github.com/ggml-org/llama.cpp"),
                 repository_version: NonEmptyString::try_new(version.to_owned())?,
+                asset: None,
             }),
             flavor: LlamaCppFlavor::MacosArm64,
         }))
@@ -577,7 +727,6 @@ mod tests {
         )
     }
 
-    /// Overwrite the recorded payload size on a published entry.
     fn set_blobs_bytes(entry: &Path, bytes: i64) -> anyhow::Result<()> {
         edit_manifest(entry, |table| {
             table.insert("blobs_bytes".into(), toml::Value::Integer(bytes));
@@ -660,8 +809,7 @@ mod tests {
         entries.iter().map(|e| e.label.as_str()).collect()
     }
 
-    /// Two models and two runtimes, oldest-used first within each store, plus
-    /// one garbage entry — 100 bytes each so quotas read as counts.
+    /// 100 bytes each, so quotas read as counts.
     fn mixed_survey() -> anyhow::Result<StorageSurvey> {
         Ok(StorageSurvey::new(vec![
             model_entry_of(&model("fresh")?, 100, "2026-05-01T00:00:00Z")?,
@@ -682,9 +830,7 @@ mod tests {
         assert_eq!(survey.used_bytes, 0);
     }
 
-    /// A manifest outliving its payload is a husk, not a model — the rule iOS
-    /// applies in `isLive`. With `blobs_bytes` recorded it would otherwise hold
-    /// quota against bytes that are gone, and never be reclaimable.
+    /// The rule iOS applies in `ModelArtifactStore.bound(_:under:)`.
     #[test]
     fn survey_treats_a_manifest_without_its_payload_as_garbage() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -703,8 +849,7 @@ mod tests {
         Ok(())
     }
 
-    /// Two entries resolved in the same second fall back to publish time, so the
-    /// order is the same on every run, and matches what iOS does.
+    /// iOS breaks the tie the same way.
     #[test]
     fn an_equal_last_used_tie_breaks_on_fetched_at() -> anyhow::Result<()> {
         let older = StorageEntry {
@@ -735,10 +880,6 @@ mod tests {
         Ok(())
     }
 
-    /// The whole point of `blobs_bytes`: a survey totals a store from manifests,
-    /// without reading a payload. Proven by lying in the manifest — the recorded
-    /// number wins over what is actually on disk, which could only happen if the
-    /// walk is skipped.
     #[test]
     fn survey_trusts_the_recorded_size_over_the_payload() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -754,8 +895,6 @@ mod tests {
         Ok(())
     }
 
-    /// An entry published before the field falls back to measuring the payload —
-    /// `blobs/` alone, so both paths report the same thing.
     #[test]
     fn survey_falls_back_to_the_walk_without_a_recorded_size() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -809,8 +948,6 @@ mod tests {
         let runtimes = tmp.path().join("runtimes");
         store_model(&models, &model("llama")?, "2026-03-01T00:00:00Z")?;
 
-        // A crashed fetch, a dir that never got a manifest, a stray file, and a
-        // published entry whose manifest this build cannot read.
         fs::create_dir_all(models.join(STAGING_DIR_NAME).join("llama.staged-1"))?;
         fs::create_dir_all(models.join("no-manifest"))?;
         fs::create_dir_all(&runtimes)?;
@@ -826,24 +963,32 @@ mod tests {
             .iter()
             .filter_map(|e| match &e.kind {
                 EntryKind::Garbage { reason } => Some((e.label.as_str(), reason.as_str())),
-                _ => None,
+                EntryKind::Model { .. } | EntryKind::Runtime { .. } => None,
             })
             .collect();
         assert_eq!(reasons.len(), 4, "{reasons:?}");
-        assert!(reasons
-            .iter()
-            .any(|(label, reason)| label.ends_with("llama.staged-1")
-                && *reason == "orphaned staging dir"));
-        assert!(reasons
-            .iter()
-            .any(|(label, reason)| *label == "no-manifest" && *reason == "no manifest"));
-        assert!(reasons
-            .iter()
-            .any(|(label, reason)| *label == "stray.txt" && *reason == "not a store entry"));
-        assert!(reasons
-            .iter()
-            .any(|(label, reason)| *label == "meta__zephyr__Q4.gguf"
-                && reason.starts_with("unreadable manifest")));
+        assert!(
+            reasons
+                .iter()
+                .any(|(label, reason)| label.ends_with("llama.staged-1")
+                    && *reason == "orphaned staging dir")
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|(label, reason)| *label == "no-manifest" && *reason == "no manifest")
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|(label, reason)| *label == "stray.txt" && *reason == "not a store entry")
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|(label, reason)| *label == "meta__zephyr__Q4.gguf"
+                    && reason.starts_with("unreadable manifest"))
+        );
         assert_eq!(
             survey.entries.last().map(|e| e.label.as_str()),
             Some(model("llama")?.to_string().as_str()),
@@ -925,9 +1070,6 @@ mod tests {
         Ok(())
     }
 
-    /// Garbage is unaccountable and can never be pinned, so keeping it buys
-    /// nothing — it goes at any quota, which is also the recovery path for a
-    /// store a manifest version bump stranded under quota.
     #[rstest]
     #[case::under_quota(500)]
     #[case::exactly_at_quota(400)]
@@ -964,9 +1106,6 @@ mod tests {
 
     #[test]
     fn plan_never_evicts_a_docker_runtime() -> anyhow::Result<()> {
-        // Docker measures ~0 and freeing it frees nothing, so a store made only
-        // of docker entries stays over quota rather than being pointlessly torn
-        // down.
         let survey = StorageSurvey::new(vec![runtime_entry_of(
             &docker()?,
             100,
@@ -1013,32 +1152,22 @@ mod tests {
         assert_eq!(labels(&report.removed), vec![model("stale")?.to_string()]);
         assert!(report.failed.is_empty());
         assert_eq!(report.freed_bytes, plan.freed_bytes);
-        assert!(!models
-            .join(ModelStorageKey::of(&model("stale")?)?.relative_dir())
-            .exists());
-        assert!(models
-            .join(ModelStorageKey::of(&model("fresh")?)?.relative_dir())
-            .exists());
+        assert!(
+            !models
+                .join(ModelStorageKey::of(&model("stale")?)?.relative_dir())
+                .exists()
+        );
+        assert!(
+            models
+                .join(ModelStorageKey::of(&model("fresh")?)?.relative_dir())
+                .exists()
+        );
         Ok(())
     }
 
-    /// Unix-only because the *fixture* is, not the behaviour: an un-removable
-    /// path is not constructible on Windows with std alone.
-    ///
-    /// Every lever that looks like it should work there is one Rust deliberately
-    /// neutralizes to make Windows behave like Unix:
-    ///
-    /// - Nesting the target under a *file* fails `ENOTDIR` here, but Windows
-    ///   reports that shape as plain `NotFound`, which [`remove_entry`] treats as
-    ///   success — already gone is the outcome it wanted.
-    /// - An open handle does not block it: std opens with `FILE_SHARE_DELETE`.
-    /// - Nor does the read-only attribute: std removes with
-    ///   `FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE`.
-    ///
-    /// What is left is a DENY-DELETE ACL, which means a native dependency for one
-    /// fixture. `apply_sweep`'s failure branch is plain platform-independent
-    /// arithmetic over `remove_entry`'s `Err`, and the linux and macos legs cover
-    /// it, so the coverage lost here is the fixture's reach, not the branch.
+    /// Unix-only because the fixture is: std defeats every std-only way to make
+    /// a removal fail on Windows (`FILE_SHARE_DELETE` on open,
+    /// `FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE` on remove).
     #[cfg(unix)]
     #[test]
     fn apply_sweep_reports_a_removal_it_could_not_perform() -> anyhow::Result<()> {
@@ -1066,6 +1195,121 @@ mod tests {
         Ok(())
     }
 
+    /// A staged fetch with a part on disk and its lock file beside it, unlocked.
+    fn stage(models: &Path, name: &str) -> anyhow::Result<PathBuf> {
+        let staged = models.join(STAGING_DIR_NAME).join(name);
+        fs::create_dir_all(staged.join(BLOBS_DIR_NAME))?;
+        fs::write(staged.join(BLOBS_DIR_NAME).join("part"), b"partial")?;
+        File::create_new(staging_lock_path(&staged))?;
+        Ok(staged)
+    }
+
+    /// A fetch that died between removing its dir and its lock leaves a lone
+    /// lock, swept the same way.
+    #[rstest]
+    #[case::dead_fetch(false, "qwen.staged-1", "orphaned staging dir")]
+    #[case::lock_without_its_dir(true, "qwen.staged-1.lock", "orphaned staging lock")]
+    fn a_staging_child_is_garbage_only_once_its_lock_is_free(
+        #[case] remove_dir: bool,
+        #[case] child: &str,
+        #[case] reason: &str,
+    ) -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let models = tmp.path().join("models");
+        let runtimes = tmp.path().join("runtimes");
+        let staged = stage(&models, "qwen.staged-1")?;
+        if remove_dir {
+            fs::remove_dir_all(&staged)?;
+        }
+
+        let running = File::open(staging_lock_path(&staged))?;
+        running.lock()?;
+        let held = survey(&models, &runtimes);
+        assert!(held.entries.is_empty(), "{:?}", held.entries);
+
+        drop(running);
+        let dead = survey(&models, &runtimes);
+        let found: Vec<_> = dead
+            .entries
+            .iter()
+            .map(|e| (PathBuf::from(&e.label), &e.kind))
+            .collect();
+        let garbage = EntryKind::Garbage {
+            reason: reason.to_owned(),
+        };
+        let label = Path::new(STAGING_DIR_NAME).join(child);
+        assert_eq!(found, vec![(label, &garbage)]);
+        let report = apply_sweep(&plan(&dead, u64::MAX, &SweepPins::default()));
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(fs::read_dir(models.join(STAGING_DIR_NAME))?.count(), 0);
+        Ok(())
+    }
+
+    /// Entry locks outlive their fetches on purpose (see `lock_entry`), so a
+    /// sweep must never count them as garbage.
+    #[test]
+    fn entry_locks_are_no_entries() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let models = tmp.path().join("models");
+        let runtimes = tmp.path().join("runtimes");
+        drop(crate::entry::lock_entry(&models, "meta__llama__Q4.gguf")?);
+        drop(crate::entry::lock_entry(&runtimes, "llama-b9305")?);
+
+        let survey = survey(&models, &runtimes);
+
+        assert!(survey.entries.is_empty(), "{:?}", survey.entries);
+        Ok(())
+    }
+
+    /// The sweep re-takes the lock before deleting, and reports the removal as
+    /// failed.
+    #[test]
+    fn a_staged_fetch_locked_after_the_survey_is_not_removed() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let models = tmp.path().join("models");
+        let staged = stage(&models, "qwen.staged-1")?;
+        let planned = plan(
+            &survey(&models, &tmp.path().join("runtimes")),
+            u64::MAX,
+            &SweepPins::default(),
+        );
+
+        let running = File::open(staging_lock_path(&staged))?;
+        running.lock()?;
+        let report = apply_sweep(&planned);
+
+        assert!(report.removed.is_empty());
+        let reasons: Vec<_> = report.failed.iter().map(|(_, r)| r.as_str()).collect();
+        assert_eq!(reasons, vec![RemoveError::Locked.to_string()]);
+        assert!(staged.join(BLOBS_DIR_NAME).join("part").exists());
+        assert!(staging_lock_path(&staged).exists());
+        Ok(())
+    }
+
+    /// Garbage can be a live entry another build cannot read.
+    #[test]
+    fn garbage_held_in_use_is_not_removed() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let models = tmp.path().join("models");
+        let other_build = models.join("qwen");
+        fs::create_dir_all(other_build.join(BLOBS_DIR_NAME))?;
+        let running = crate::entry::hold_entry(&models, "qwen");
+        anyhow::ensure!(running.is_some(), "could not hold the entry");
+
+        let (_, report) = sweep(
+            &models,
+            &tmp.path().join("runtimes"),
+            u64::MAX,
+            SweepPins::default(),
+        );
+
+        assert!(other_build.exists(), "removed garbage in use");
+        let reasons: Vec<_> = report.failed.iter().map(|(_, r)| r.as_str()).collect();
+        assert_eq!(reasons, vec![RemoveError::InUse.to_string()]);
+        Ok(())
+    }
+
     #[test]
     fn a_cache_hit_changes_the_sweep_order() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -1078,7 +1322,6 @@ mod tests {
             vec![model("stale")?.to_string(), model("fresh")?.to_string()]
         );
 
-        // Resolving the stale model moves it to the back of the queue.
         let store = ModelArtifactStore::new(models.clone());
         let refetched = Cell::new(false);
         store.ensure(&model("stale")?, |_d, _into| {

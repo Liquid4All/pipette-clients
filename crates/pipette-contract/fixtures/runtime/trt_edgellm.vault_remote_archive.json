@@ -1,0 +1,8 @@
+{
+  "custom_label": "TensorRT Edge-LLM 0.11.0+lfm3",
+  "flavor": "jetson-orin-cuda-13",
+  "principal_id": "org_01936d",
+  "source": "vault_remote_archive",
+  "type": "trt_edgellm",
+  "url": "/vault/resources/vault_1/content"
+}

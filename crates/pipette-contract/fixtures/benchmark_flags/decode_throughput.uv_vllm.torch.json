@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "decode_throughput",
+  "model_type": "torch",
+  "runtime_type": "uv_vllm"
+}

@@ -1,36 +1,96 @@
-//! Bound MLX model path projection from a prepared [`RunRequest`].
+//! The directories of a bound MLX model, resolved from the plan's [`Model`].
 //!
 //! Install is `pipette_artifacts::ensure_model`.
 
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
-use pipette_ops::models::require_bound_model_dir;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::ModelType;
+use pipette_ops::models::{require_bound_model_dir, require_bound_model_dir_pair};
+use pipette_plan_types::{Model, ModelType};
 
-/// Files `mlx_lm.load` needs.
-///
 /// `config.json` only: the weights are sharded or not depending on the repo,
-/// and the tokenizer is whatever `AutoTokenizer` accepts — a `tokenizer.json`
-/// or a sentencepiece `tokenizer.model` — so requiring either by name would
-/// refuse snapshots that load fine. This catches the download that stopped
-/// before anything landed, and leaves the rest to mlx-lm.
+/// and the tokenizer is whatever `AutoTokenizer` accepts (`tokenizer.json` or a
+/// sentencepiece `tokenizer.model`), so requiring either by name would refuse
+/// snapshots that load fine. This catches a download that stopped before
+/// anything landed.
 const REQUIRED_FILES: &[&str] = &["config.json"];
 
-/// Bound MLX model directory: `Model::Mlx` + `AbsoluteDir` after ensure/bind.
-pub fn require_mlx_model_dir(req: &RunRequest) -> anyhow::Result<PathBuf> {
-    require_bound_model_dir(&req.model.bound, ModelType::Mlx, REQUIRED_FILES)
+/// A bound `mlx` model's directory.
+#[derive(Debug)]
+pub struct ResolvedMlxModel(PathBuf);
+
+impl TryFrom<&Model> for ResolvedMlxModel {
+    type Error = anyhow::Error;
+
+    fn try_from(model: &Model) -> anyhow::Result<Self> {
+        require_bound_model_dir(model, ModelType::Mlx, REQUIRED_FILES).map(Self)
+    }
+}
+
+impl Deref for ResolvedMlxModel {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// A bound `mlx_speculative` model's directories.
+#[derive(Debug)]
+pub struct ResolvedMlxSpeculativeModel {
+    pub target: ResolvedMlxModel,
+    /// Checked for the same `config.json`: `load_drafter` reads it to tell
+    /// which drafter the directory holds.
+    pub draft: PathBuf,
+}
+
+impl TryFrom<&Model> for ResolvedMlxSpeculativeModel {
+    type Error = anyhow::Error;
+
+    fn try_from(model: &Model) -> anyhow::Result<Self> {
+        let (target, draft) =
+            require_bound_model_dir_pair(model, ModelType::MlxSpeculative, REQUIRED_FILES)?;
+        Ok(Self {
+            target: ResolvedMlxModel(target),
+            draft,
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+
+    use serde_json::json;
+
+    use pipette_plan_types::Model;
+
+    /// A bound `mlx` model or `mlx_speculative` pair whose directories hold
+    /// `config.json`.
+    pub(crate) fn bound_model(dir: &Path, speculative: bool) -> anyhow::Result<Model> {
+        let bundle = |name: &str| -> anyhow::Result<serde_json::Value> {
+            let path = dir.join(name);
+            std::fs::create_dir_all(&path)?;
+            std::fs::write(path.join("config.json"), b"{}")?;
+            Ok(json!({"source": "absolute_dir", "dir": path}))
+        };
+        let spec = if speculative {
+            json!({"type": "mlx_speculative", "target": bundle("target")?, "draft": bundle("draft")?})
+        } else {
+            let mut spec = bundle("target")?;
+            spec["type"] = json!("mlx");
+            spec
+        };
+        Ok(serde_json::from_value(spec)?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use pipette_artifacts::model::ModelArtifactStore;
-    use pipette_plan_types::benchmark::{BenchmarkDefinition, PrefillThroughput};
-    use pipette_plan_types::run::{DeclaredBound, RunRequest};
-    use pipette_plan_types::{AbsolutePath, HfRepo, Mlx, Model, ModelSource};
+    use pipette_plan_types::{AbsolutePath, HfRepo, Mlx, ModelSource};
 
+    use super::test_support::bound_model;
     use super::*;
 
     fn fake_fetch(_declared: &Model, into: &Model) -> anyhow::Result<()> {
@@ -46,31 +106,8 @@ mod tests {
         Ok(())
     }
 
-    fn stub_req(declared: Model, bound: Model) -> anyhow::Result<RunRequest> {
-        let runtime: pipette_plan_types::Runtime = serde_json::from_value(serde_json::json!({
-            "type": "mlx_macos_pipette",
-            "version": "0.31.3",
-            "flavor": "macos-arm64",
-            "source": {
-                "type": "pip_requirements_text",
-                "contents": "mlx-lm==0.31.3"
-            }
-        }))?;
-        Ok(RunRequest {
-            runtime: DeclaredBound::already_bound(runtime),
-            model: DeclaredBound { declared, bound },
-            runtime_flags: None,
-            model_flags: None,
-            benchmark_flags: None,
-            benchmark: BenchmarkDefinition::PrefillThroughput(PrefillThroughput {
-                benchmark_id: "p".into(),
-                parameter_prefill_tokens: 1,
-            }),
-        })
-    }
-
     #[test]
-    fn ensure_bind_and_require_mlx_model_dir() -> anyhow::Result<()> {
+    fn ensure_bind_and_resolve_mlx_model() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
         let models_root = tmp.path().join("models");
         let store = ModelArtifactStore::new(models_root.clone());
@@ -87,8 +124,7 @@ mod tests {
             "mlx-community/LFM2-350M-4bit"
         );
 
-        let bound = manifest.bind_under(&models_root)?;
-        let dir = require_mlx_model_dir(&stub_req(declared.clone(), bound)?)?;
+        let dir = ResolvedMlxModel::try_from(&manifest.bind_under(&models_root)?)?;
         assert!(dir.starts_with(&models_root));
         assert!(dir.join("config.json").exists());
 
@@ -97,7 +133,30 @@ mod tests {
                 dir: AbsolutePath::try_new(tmp.path().join("missing").display().to_string())?,
             },
         });
-        assert!(require_mlx_model_dir(&stub_req(declared, missing)?).is_err());
+        assert!(ResolvedMlxModel::try_from(&missing).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_mlx_model_takes_only_a_plain_model() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let resolved = ResolvedMlxModel::try_from(&bound_model(tmp.path(), false)?)?;
+        assert_eq!(resolved.to_path_buf(), tmp.path().join("target"));
+        let speculative = bound_model(tmp.path(), true)?;
+        assert!(ResolvedMlxModel::try_from(&speculative).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_mlx_speculative_model_takes_only_a_speculative_model() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let resolved = ResolvedMlxSpeculativeModel::try_from(&bound_model(tmp.path(), true)?)?;
+        assert_eq!(
+            (resolved.target.to_path_buf(), resolved.draft),
+            (tmp.path().join("target"), tmp.path().join("draft"))
+        );
+        let plain = bound_model(tmp.path(), false)?;
+        assert!(ResolvedMlxSpeculativeModel::try_from(&plain).is_err());
         Ok(())
     }
 }

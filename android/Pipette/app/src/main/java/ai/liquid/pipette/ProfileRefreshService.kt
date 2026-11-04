@@ -2,6 +2,7 @@ package ai.liquid.pipette
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -25,8 +26,36 @@ class ProfileRefreshService(private val context: Context, private val storage: L
     val registration = storage.loadRegistration() ?: return null
     val capabilities = Capabilities.current()
     val profile = managementClient.updateMe(registration.serverUrl, registration.clientId, profileUpdateBody(context, capabilities))
-    Log.i(TAG, "device profile refreshed: status=${profile.status} reindexPending=${profile.reindexPending} capabilities=$capabilities")
+    Log.i(
+      TAG,
+      "device profile refreshed: status=${profile.status} reindexPending=${profile.reindexPending} capabilities=$capabilities " +
+        "cpuArch=${DeviceInfo.cpuArch ?: "unset"} osFamily=${DeviceInfo.OS_FAMILY}",
+    )
+    storeStatus(profile.status)
     return profile
+  }
+
+  /**
+   * Record the server's verdict on this client, so the Settings screen can show it.
+   *
+   * `registration.status` otherwise holds what the server said at registration and nothing else. A client that registers without a pre-auth key
+   * starts `pending`, so the row an operator reads after they approve the device server-side would keep saying `pending` for the life of the install.
+   * This runs on every launch, which makes the row current as of the last one.
+   *
+   * Reloads rather than reusing the record read at the top of [refresh]: a `PATCH` sits between the two, and `auth-import` can replace the whole
+   * registration inside that window. Writing back the stale copy would undo the restore and leave the device signing as one client and reporting as
+   * another.
+   *
+   * Skipped when the status is unchanged, which is every launch after the first, so an ordinary start does not rewrite `registration.json`. A blank
+   * status is skipped too: the field is required in the response, so a blank one is a server this client does not understand, and the recorded
+   * verdict is worth more than an empty row.
+   */
+  @VisibleForTesting
+  internal fun storeStatus(status: String) {
+    val current = storage.loadRegistration()
+    if (status.isBlank() || current == null || current.status == status) return
+    Log.i(TAG, "client status changed: ${current.status.ifBlank { "unset" }} -> $status clientId=${current.clientId}")
+    storage.saveRegistration(current.copy(status = status))
   }
 
   internal companion object {
@@ -50,8 +79,11 @@ class ProfileRefreshService(private val context: Context, private val storage: L
       JSONObject()
         .put("device_name", DeviceInfo.modelName())
         .put("device_form_factor", DeviceInfo.formFactor(context))
-        .put("device_os_name", "Android")
+        .put("device_os_name", DeviceInfo.OS_NAME)
         .put("device_os_version", DeviceInfo.osVersion())
+        // `putOpt` skips a null, so an unknown ABI is absent rather than null.
+        .putOpt("device_cpu_arch", DeviceInfo.cpuArch)
+        .put("device_os_family", DeviceInfo.OS_FAMILY)
         .put("device_chip_model", DeviceInfo.chipModel())
         .put("device_ram_bytes", DeviceInfo.ramBytes(context))
         // Set-granular: the value replaces the server's stored set wholesale, so this is always the full current set. An empty array is

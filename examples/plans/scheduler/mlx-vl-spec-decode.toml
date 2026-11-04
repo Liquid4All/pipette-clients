@@ -1,0 +1,208 @@
+# Example scheduler-mode plan: the VL spec-decode benchmark on MLX, filed with
+# the management server as a campaign.
+#
+#   pipette-ctl campaigns create --name mlx-vl-spec-decode \
+#     --plan examples/plans/scheduler/mlx-vl-spec-decode.toml
+#
+# The local-dispatch twin, ../mlx-macos-vl-spec-decode.toml, explains the
+# benchmark, the model types and the runtime. This file uses eligibility
+# instead of transports and runs every dataset at k7, k8 and k9: 36 jobs, 18
+# benchmark ids per variant.
+#
+# Eligibility is a named roster only: each job pulls an ~80 MB corpus and
+# refuses to start on battery, so its machines are chosen, not matched. Widen
+# `clients` rather than adding `requires`: a client is eligible when rostered
+# *or* matching, so `requires = ["os:macos"]` would hand these cells to every
+# Mac.
+
+# No `expires_at`: each job takes ingestion's 30-day default.
+# Each dataset is its own measurement; do not merge into another plan's run.
+merge_duplicates = false
+
+# k8 is the reference condition; k7 and k9 find where the optimum sits on this
+# silicon. A pair is joined on the whole benchmark id, so every k needs its own
+# speculation-off row even though that arm never drafts.
+benchmarks = [
+  "vl_spec_decode_mmspec_test_gqa_k8",
+  "vl_spec_decode_mmspec_test_textvqa_k8",
+  "vl_spec_decode_mmspec_test_charxiv_k8",
+  "vl_spec_decode_mmspec_test_mmmu_pro_k8",
+  "vl_spec_decode_mmspec_test_coco_k8",
+  "vl_spec_decode_mmspec_test_multi_turn_k8",
+  "vl_spec_decode_mmspec_test_gqa_k7",
+  "vl_spec_decode_mmspec_test_textvqa_k7",
+  "vl_spec_decode_mmspec_test_charxiv_k7",
+  "vl_spec_decode_mmspec_test_mmmu_pro_k7",
+  "vl_spec_decode_mmspec_test_coco_k7",
+  "vl_spec_decode_mmspec_test_multi_turn_k7",
+  "vl_spec_decode_mmspec_test_gqa_k9",
+  "vl_spec_decode_mmspec_test_textvqa_k9",
+  "vl_spec_decode_mmspec_test_charxiv_k9",
+  "vl_spec_decode_mmspec_test_mmmu_pro_k9",
+  "vl_spec_decode_mmspec_test_coco_k9",
+  "vl_spec_decode_mmspec_test_multi_turn_k9",
+]
+
+# The regular model: speculation off.
+[[variants]]
+clients = ["ev1_9f2c1d3e4b5a6c7d"]
+models = [
+  { type = "mlx", source = "huggingface", org = "example-org", repo_name = "VLM-3B-MLX-bf16" },
+]
+runtime_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "mlx_macos_pipette", model_type = "mlx", speculative_enabled = false },
+]
+benchmark_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "mlx_macos_pipette", model_type = "mlx", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+]
+# Spelled out rather than referenced by catalog key so the plan carries the
+# environment it measured; `version` only labels what `source.contents` pins.
+# The body is the `0.7.4` row of
+# crates/pipette-artifacts-catalog/bundled-catalog/mlx/catalog.toml verbatim.
+[[variants.runtimes]]
+type = "mlx_macos_pipette"
+version = "0.7.4"
+flavor = "macos-arm64"
+
+[variants.runtimes.source]
+type = "pip_requirements_text"
+contents = """
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+fastapi==0.142.2
+filelock==4.0.8
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.33.0
+idna==3.20
+jinja2==3.1.6
+llguidance==1.9.1
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+miniaudio==1.71
+mlx==0.32.3
+mlx-audio==0.5.7
+mlx-lm==0.32.0
+mlx-metal==0.32.3
+mlx-vlm==0.7.4
+numpy==2.5.3
+opencv-python==5.0.0.93
+opentelemetry-api==1.45.0
+packaging==26.3
+pillow==12.3.0
+protobuf==7.36.2
+pycparser==3.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+pygments==2.21.0
+python-multipart==0.0.32
+pyyaml==6.0.3
+regex==2026.9.29
+requests==2.34.2
+rich==15.0.0
+safetensors==0.8.0
+scipy==1.18.1
+sentencepiece==0.2.2
+shellingham==1.5.4
+sounddevice==0.5.6
+starlette==1.7.0
+tokenizers==0.23.2
+tqdm==4.70.1
+transformers==5.18.0
+typer==0.27.2
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uvicorn==0.54.0
+websockets==17.1
+"""
+
+# The spec-decoding pair: speculation on. The drafter repo is gated, so a
+# claiming client needs `PIPETTE_HF_TOKEN` in its environment.
+[[variants]]
+clients = ["ev1_9f2c1d3e4b5a6c7d"]
+models = [
+  { type = "mlx_speculative", target = { source = "huggingface", org = "example-org", repo_name = "VLM-3B-MLX-bf16" }, draft = { source = "huggingface", org = "example-org", repo_name = "VLM-3B-Draft-MLX" } },
+]
+runtime_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "mlx_macos_pipette", model_type = "mlx_speculative", speculative_enabled = true },
+]
+benchmark_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "mlx_macos_pipette", model_type = "mlx_speculative", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+]
+# The same `0.7.4` runtime as above.
+[[variants.runtimes]]
+type = "mlx_macos_pipette"
+version = "0.7.4"
+flavor = "macos-arm64"
+
+[variants.runtimes.source]
+type = "pip_requirements_text"
+contents = """
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+fastapi==0.142.2
+filelock==4.0.8
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.33.0
+idna==3.20
+jinja2==3.1.6
+llguidance==1.9.1
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+miniaudio==1.71
+mlx==0.32.3
+mlx-audio==0.5.7
+mlx-lm==0.32.0
+mlx-metal==0.32.3
+mlx-vlm==0.7.4
+numpy==2.5.3
+opencv-python==5.0.0.93
+opentelemetry-api==1.45.0
+packaging==26.3
+pillow==12.3.0
+protobuf==7.36.2
+pycparser==3.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+pygments==2.21.0
+python-multipart==0.0.32
+pyyaml==6.0.3
+regex==2026.9.29
+requests==2.34.2
+rich==15.0.0
+safetensors==0.8.0
+scipy==1.18.1
+sentencepiece==0.2.2
+shellingham==1.5.4
+sounddevice==0.5.6
+starlette==1.7.0
+tokenizers==0.23.2
+tqdm==4.70.1
+transformers==5.18.0
+typer==0.27.2
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uvicorn==0.54.0
+websockets==17.1
+"""

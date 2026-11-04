@@ -1,8 +1,14 @@
 [package]
 name = "pipette-android"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# cargo-machete scans only this crate's directory, so it cannot see
+# android/native/benchmarks.rs (included via `#[path]` in src/lib.rs), the sole
+# user of anyhow, serde and pipette-ops. `tracing` is here only for its `log` feature.
+[package.metadata.cargo-machete]
+ignored = ["anyhow", "serde", "pipette-ops", "tracing"]
 
 [lints]
 workspace = true
@@ -12,8 +18,7 @@ crate-type = ["cdylib", "lib"]
 name = "pipette_android"
 
 [features]
-# Backends registered in the runtime loader (see src/loader.rs). Only the
-# kernels a build ships are enabled; llama.cpp is the default.
+# Backends registered in the runtime loader (src/loader.rs).
 default = ["llamacpp-backend"]
 llamacpp-backend = []
 
@@ -21,26 +26,19 @@ llamacpp-backend = []
 anyhow.workspace = true
 jni.workspace = true
 pipette-device.workspace = true
-pipette-doomloop.workspace = true
 pipette-ops.workspace = true
-# Thermal wire enums (`AndroidThermalStatus`, `AndroidTemperatureSensor`) named
-# by the `ThermalSampler` trait's per-rep status/sensor methods.
 pipette-plan-types.workspace = true
-pipette-readiness.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
-# Bridges the crate's `log::*` records (e.g. the per-rep
-# `end_to_end_latency: measurement run i/5` lines and decode timings) to
-# logcat. Android-only: on the host `cargo check` build there's no logcat and
-# the logger is never initialized, so the `log` macros stay no-ops.
+# Routes `log` records to logcat. Nothing installs a tracing subscriber, so the
+# `log` feature is what carries pipette-ops and pipette-device events there too.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger.workspace = true
+tracing = { workspace = true, features = ["log"] }
 
-# The build script translates the CMake link-config marker into cargo:rustc-link
-# directives; anyhow lets it propagate failures as typed errors (no panics).
 [build-dependencies]
 anyhow.workspace = true
 

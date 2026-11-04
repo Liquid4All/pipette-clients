@@ -3,903 +3,686 @@ import Testing
 
 @testable import Pipette
 
+/// The claim loop: `pipette-cli`'s `commands/worker.rs` tests, and the loop's own.
+@MainActor
 struct PlannerWorkerTests {
-    @Test func claimedJobDecodesClaimResponse() throws {
-        let json = Data("""
-        {
-          "job_id": "job-abc",
-          "benchmark_id": "prefill_throughput_256",
-          "time_window": "PT10M",
-          "expires_at": null,
-          "model_name": "m",
-          "spec": {
-            "benchmark": "prefill_throughput_256",
-            "model": {"type": "gguf_text", "org": "o", "repo_name": "r", "path": "m.gguf"},
-            "runtime": {"type": "llamacpp_ios_pipette", "repository_version": "b9050"}
-          },
-          "future_field": 1
-        }
-        """.utf8)
-        let job = try JSONDecoder().decode(ClaimedJob.self, from: json)
-        #expect(job.jobId == "job-abc")
-        #expect(job.benchmarkId == "prefill_throughput_256")
-        #expect(job.timeWindow == "PT10M")
-        let spec = try #require(job.spec?.object)
-        #expect((spec["model"] as? [String: Any])?["type"] as? String == "gguf_text")
-        #expect((spec["runtime"] as? [String: Any])?["type"] as? String == "llamacpp_ios_pipette")
-    }
+    private func auth() throws -> ClientIdentity { try testIdentity() }
 
-    /// A body carrying no `spec` must still decode —
-    /// the envelope names a leased job, and reporting it is the only way it
-    /// stops being re-served.
-    @Test func claimedJobWithoutSpecStillDecodes() throws {
-        let json = Data("""
-        {
-          "job_id": "job-abc",
-          "benchmark_id": "prefill_throughput_256",
-          "time_window": "PT10M",
-          "model_descriptor": "{\\"type\\":\\"gguf_text\\"}"
-        }
-        """.utf8)
-        let job = try JSONDecoder().decode(ClaimedJob.self, from: json)
-        #expect(job.jobId == "job-abc")
-        #expect(job.spec == nil)
-    }
-
-    /// A plan carries the token for a gated repo inside the model spec, so the
-    /// payload an operator reads must not contain it.
-    @Test func specDescriptionRedactsPlanSuppliedTokens() throws {
-        let json = Data("""
-        {
-          "job_id": "job-abc",
-          "benchmark_id": "b",
-          "time_window": "PT10M",
-          "spec": {
-            "model": {"type": "gguf_text", "org": "o", "repo_name": "r",
-                      "auth_token": "hf_tokenthatmustnotescape"}
-          }
-        }
-        """.utf8)
-        let job = try JSONDecoder().decode(ClaimedJob.self, from: json)
-        let described = try #require(job.spec).redactedDescription
-        #expect(!described.contains("hf_tokenthatmustnotescape"))
-        #expect(described.contains("<redacted>"))
-    }
-
-    @Test func clientProfileDefaultsMissingOptionalFields() throws {
-        let json = Data("""
-        {
-          "client_id": "ev1_x",
-          "organization": "o",
-          "client_details": "d",
-          "contact_email": "a@b.com",
-          "status": "approved"
-        }
-        """.utf8)
-        let profile = try JSONDecoder().decode(ClientProfile.self, from: json)
-        #expect(profile.tags.isEmpty)
-        #expect(profile.reindexPending == false)
-        #expect(profile.capabilities.isEmpty)
-        #expect(profile.status == "approved")
-    }
-
-    @Test func iso8601DurationParsesCommonWindows() {
-        #expect(Iso8601Duration.seconds(from: "PT10M") == 600)
-        #expect(Iso8601Duration.seconds(from: "PT5M") == 300)
-        #expect(Iso8601Duration.seconds(from: "PT1H2M3S") == 3723)
-        #expect(Iso8601Duration.seconds(from: "pt30s") == 30)
-        #expect(Iso8601Duration.seconds(from: "10M") == nil)
-        #expect(Iso8601Duration.seconds(from: "PT10") == nil)
-    }
-
-    @Test func heartbeatIntervalDefaultsToHalfWindow() {
-        #expect(Iso8601Duration.heartbeatInterval(timeWindow: "PT10M") == 300)
-        #expect(Iso8601Duration.heartbeatInterval(timeWindow: "bogus") == 300) // 600/2 default
-        #expect(Iso8601Duration.heartbeatInterval(timeWindow: "PT10M", overrideSeconds: 60) == 60)
-        #expect(Iso8601Duration.heartbeatInterval(timeWindow: "PT10M", overrideSeconds: 0) == 1)
-    }
-
-    @Test func failureSubmissionIdentifiesTheJob() throws {
-        let job = try Self.claimedJob(
-            benchmarkId: "eval_x",
-            spec: ["runtime": ["type": "mlx_ios_pipette"]]
-        )
-        let failure = FailureSubmission.fromClaim(
-            job, reason: "[ts] oom", retriable: true, clientVersion: "9.9.9 (1234)")
-        let data = try JSONEncoder().encode(failure)
-        let obj = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(obj["message_type"] as? String == "failure")
-        #expect(obj["job_id"] as? String == "job-1")
-        #expect(obj["benchmark_id"] as? String == "eval_x")
-        #expect(obj["retriable"] as? Bool == true)
-        #expect(obj["failure_reason"] as? String == "[ts] oom")
-        // The server cannot recover this from the job body — a failure that
-        // omitted it would leave "which build reported this" unanswerable.
-        #expect(obj["client_version"] as? String == "9.9.9 (1234)")
-    }
-
-    /// Claims are built by decoding, not by a memberwise init: `spec` holds the
-    /// bytes as they arrived, so the tests exercise the same path the wire does.
-    static func claimedJob(
-        benchmarkId: String = "prefill_throughput_256",
-        spec: [String: Any]?
-    ) throws -> ClaimedJob {
-        var body: [String: Any] = [
-            "job_id": "job-1",
-            "benchmark_id": benchmarkId,
-            "time_window": "PT10M",
-        ]
-        if let spec { body["spec"] = spec }
-        let data = try JSONSerialization.data(withJSONObject: body)
-        return try JSONDecoder().decode(ClaimedJob.self, from: data)
-    }
-
-    @Test func deviceProfileUpdateOmitsNilFields() throws {
-        let update = DeviceProfileUpdate(
-            clientDetails: "iPhone",
-            deviceName: "iPhone 16",
-            deviceFormFactor: .phone,
-            deviceOsName: "iOS",
-            deviceOsVersion: "18.0",
-            deviceChipModel: "A18",
-            deviceRamBytes: 8_000_000_000,
-            capabilities: ["runtime:llama_cpp"]
-        )
-        let data = try JSONEncoder().encode(update)
-        let obj = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(obj["device_name"] as? String == "iPhone 16")
-        #expect(obj["capabilities"] as? [String] == ["runtime:llama_cpp"])
-        #expect(obj["device_gpu_model"] == nil)
-    }
-
-    // MARK: - ClientRunSpec validation (claim → run construction)
-
-    /// A claim whose `spec` names `runtime`, optionally with the model and the
-    /// typed flag groups a cell would carry.
-    ///
-    /// `benchmark` sets both halves, so they agree by default; `specBenchmark`
-    /// overrides only the payload's, for the case that sets out to break that.
-    private func claim(
-        runtime: [String: Any],
-        model: [String: Any]? = PlannerWorkerTests.ggufModel,
-        runtimeFlags: [String: Any]? = nil,
-        modelFlags: [String: Any]? = nil,
-        benchmarkFlags: [String: Any]? = nil,
-        benchmark: String = "prefill_throughput_256",
-        specBenchmark: String? = nil
-    ) throws -> ClaimedJob {
-        var spec: [String: Any] = [
-            "benchmark": specBenchmark ?? benchmark,
-            "runtime": runtime,
-        ]
-        if let model { spec["model"] = model }
-        if let runtimeFlags { spec["runtime_flags"] = runtimeFlags }
-        if let modelFlags { spec["model_flags"] = modelFlags }
-        if let benchmarkFlags { spec["benchmark_flags"] = benchmarkFlags }
-        return try Self.claimedJob(benchmarkId: benchmark, spec: spec)
-    }
-
-    /// The `ParseError` a refused claim carries, or a recorded failure.
-    private func refusal(
-        _ job: ClaimedJob,
-        _ comment: Comment
-    ) throws -> UnrunnableClaim? {
-        do {
-            _ = try ClientRunSpec.validated(job: job)
-            Issue.record(comment)
-            return nil
-        } catch let err as UnrunnableClaim {
-            return err
-        }
-    }
-
-    /// A flag group with its three axes filled in — every `…FlagRef` requires
-    /// them, so a group without them never deserializes.
-    private func flags(
-        benchmark: String = "prefill_throughput",
-        runtime: String? = "llamacpp_ios_pipette",
-        model: String = "gguf_text",
-        _ knobs: [String: Any] = [:]
-    ) -> [String: Any] {
-        var group: [String: Any] = ["benchmark_type": benchmark, "model_type": model]
-        if let runtime { group["runtime_type"] = runtime }
-        for (key, value) in knobs { group[key] = value }
-        return group
-    }
-
-    /// Runtimes carrying every field plan-types requires of them, so a fixture
-    /// this suite accepts is a body the Rust client would also have accepted.
-    /// `flavor` is required on both; `mlx_ios_pipette` also pins its Swift stack.
     private static let llamaRuntime: [String: Any] = [
-        "type": "llamacpp_ios_pipette", "repository_version": "b1",
-        "flavor": "ios-arm64",
-    ]
-    private static let mlxRuntime: [String: Any] = [
-        "type": "mlx_ios_pipette", "flavor": "ios-arm64",
-        "packages": [
-            "mlx_swift": ["repository_url": "github.com/ml-explore/mlx-swift",
-                          "repository_version": "0.31.6"],
-            "mlx_swift_lm": ["repository_url": "github.com/ml-explore/mlx-swift-examples",
-                             "repository_version": "2.29.4"],
-            "swift_transformers": ["repository_url": "github.com/huggingface/swift-transformers",
-                                   "repository_version": "0.1.24"],
-        ],
+        "type": "llamacpp_ios_pipette", "repository_url": "github.com/ggml-org/llama.cpp",
+        "repository_version": "b1", "flavor": "ios-arm64",
     ]
 
-    /// `source` is the required tag selecting the arm, as in plan-types.
-    private static let ggufModel: [String: Any] = [
-        "type": "gguf_text", "source": "huggingface",
-        "org": "o", "repo_name": "r", "path": "m.gguf",
-    ]
-    private static let mlxModel: [String: Any] = [
-        "type": "mlx", "source": "huggingface", "org": "o", "repo_name": "r",
-    ]
-    private static let afmModel: [String: Any] = ["type": "apple_foundation_text"]
+    private func session(_ server: ServerUrl) throws -> MgmtSession {
+        MgmtSession(
+            registration: IdentityRegistration(
+                clientId: try ClientId("client-1"),
+                status: "approved",
+                serverUrl: server,
+                organization: "acme",
+                contactEmail: "ops@example.com",
+                registeredAt: "2026-01-01T00:00:00Z"),
+            auth: try auth())
+    }
 
-    @Test func planConfigParsesLlamacppIosRuntimeAndFlags() throws {
-        let cfg = try ClientRunSpec.validated(
-            job: claim(
-                runtime: [
-                    "type": "llamacpp_ios_pipette",
-                    "repository_url": "github.com/ggml-org/llama.cpp",
-                    "repository_version": "b9050",
-                    "flavor": "ios-arm64",
-                ],
-                model: Self.ggufModel,
-                runtimeFlags: flags([
-                    "number_gpu_layers": 33, "ctx_size": 2048, "n_ubatch": 256, "threads": 4,
-                ])
-            )
-        )
-        guard case let .llamacppIosPipette(source, flavor, _) = cfg.runtime else {
-            Issue.record("expected llamacppIosPipette"); return
+    /// Polls rather than sleeping a fixed span, which a loaded simulator would overrun.
+    private func waitUntil(
+        _ what: String,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: () -> Bool
+    ) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
         }
-        #expect(source.repositoryVersion.value == "b9050")
-        #expect(flavor == .iosArm64)
-        #expect(cfg.runtimeFlags?.numberGpuLayers == 33)
-        #expect(cfg.runtimeFlags?.ctxSize == 2048)
-        #expect(cfg.runtimeFlags?.nUbatch == 256)
-        #expect(cfg.runtimeFlags?.threads == 4)
+        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
-    /// A claim naming no thread count leaves it unset, which is what makes the engine
-    /// derive one from the device rather than run on a number the claim never asked for.
-    @Test func planConfigLeavesTheThreadCountUnsetWhenTheClaimOmitsIt() throws {
-        let cfg = try ClientRunSpec.validated(
-            job: claim(
-                runtime: [
-                    "type": "llamacpp_ios_pipette",
-                    "repository_url": "github.com/ggml-org/llama.cpp",
-                    "repository_version": "b9050",
-                    "flavor": "ios-arm64",
-                ],
-                model: Self.ggufModel,
-                runtimeFlags: flags(["ctx_size": 2048])
-            )
-        )
-        #expect(cfg.runtimeFlags?.threads == nil)
+    /// Heartbeat period the tests below run the loop at.
+    private static let fastTick: TimeInterval = 0.02
+    /// Long enough for many ``fastTick`` intervals to pass, so "nothing more happened" is
+    /// a claim about the task rather than about the clock.
+    private static let severalTicks: Duration = .milliseconds(300)
+
+    // MARK: - How a session ends
+
+    /// A 403 stops the loop as `max-jobs` does, but `pipette worker` exits non-zero there:
+    /// a fleet script keyed on `BENCH_DONE` must not read "not approved" as "did its work".
+    @Test func doingTheAskedWorkSucceeds() {
+        #expect(PlannerWorker.SessionOutcome.completed(jobs: 3).isSuccess)
+        #expect(PlannerWorker.SessionOutcome.stopped.isSuccess)
     }
 
-    /// The entry carries what the cell's variant declares and nothing else — an
-    /// `mlx_ios_pipette` cell's is `n_ubatch` alone. The llama knobs are absent rather than
-    /// defaulted: a value here would claim the cell asked for one.
-    @Test func theEntryCarriesOnlyTheVariantsKnobs() throws {
-        let cfg = try ClientRunSpec.validated(
-            job: claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                runtimeFlags: flags(runtime: "mlx_ios_pipette", model: "mlx", ["n_ubatch": 64])
-            )
-        )
-        #expect(cfg.runtimeFlags?.nUbatch == 64)
-        #expect(cfg.runtimeFlags?.numberGpuLayers == nil)
-        #expect(cfg.runtimeFlags?.ctxSize == nil)
+    /// A fatal claim error and a failed profile refresh are the crate's `Err` from
+    /// `execute`, so they exit non-zero like a refusal.
+    @Test func aRefusedUnstartedOrFailedSessionFails() {
+        #expect(!PlannerWorker.SessionOutcome.notApproved.isSuccess)
+        #expect(!PlannerWorker.SessionOutcome.notStarted.isSuccess)
+        #expect(!PlannerWorker.SessionOutcome.failed("fatal claim error: 400").isSuccess)
     }
 
-    /// `mlx_ios_pipette × mlx` types `n_ubatch` alone. A knob the variant does
-    /// not carry is `KnobNotAllowed` in plan-types, so it must be refused here
-    /// rather than quietly applied to a run that cannot honor it.
-    @Test func planConfigRetiresAKnobTheCellDoesNotAccept() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                runtimeFlags: flags(
-                    runtime: "mlx_ios_pipette", model: "mlx",
-                    ["n_ubatch": 64, "number_gpu_layers": 99]
-                )
-            ),
-            "expected a knob outside the cell's variant to be refused"
-        )
-        #expect(err?.retriable == false)
-        #expect(err?.localizedDescription.contains("number_gpu_layers") == true)
-    }
+    // MARK: - Claiming
 
-    /// `apple_foundation` has no `RuntimeFlags` variant on any benchmark, so a
-    /// group naming that cell resolves to nothing at all.
-    @Test func planConfigRetiresRuntimeFlagsOnAnAppleFoundationCell() throws {
-        let err = try refusal(
-            claim(
-                runtime: ["type": "apple_foundation"],
-                model: Self.afmModel,
-                runtimeFlags: flags(runtime: "apple_foundation", model: "apple_foundation_text")
-            ),
-            "expected runtime_flags on an AFM cell to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// `deny_unknown_fields`: a misspelled setting fails the parse instead of
-    /// being dropped, which would run the cell at a default nobody asked for.
-    @Test func planConfigRetiresAnUnknownFlagField() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                runtimeFlags: flags(["n_gpu_layers": 33])
-            ),
-            "expected an unknown field to be refused"
-        )
-        #expect(err?.retriable == false)
-        #expect(err?.localizedDescription.contains("n_gpu_layers") == true)
-    }
-
-    /// The axes are required fields of the `…FlagRef`, not optional hints.
-    @Test func planConfigRetiresAFlagGroupMissingAnAxis() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                runtimeFlags: ["number_gpu_layers": 33]
-            ),
-            "expected a group with no axes to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// The knobs are `Option<u32>`. A quoted digit string is not a JSON number
-    /// and does not deserialize on the Rust side either.
-    @Test func planConfigRetiresANonNumericKnob() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                runtimeFlags: flags(["ctx_size": "2048"])
-            ),
-            "expected a string knob to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// `u32`, so a negative value has no representation.
-    @Test func planConfigRetiresANegativeKnob() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                runtimeFlags: flags(["ctx_size": -1])
-            ),
-            "expected a negative knob to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    @Test func planConfigParsesModelFlagsEnableThinking() throws {
-        let cfg = try ClientRunSpec.validated(
-            job: claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                benchmark: "eval_ifbench"
-            )
-        )
-        guard case .mlxIosPipette = cfg.runtime else {
-            Issue.record("expected mlxIosPipette"); return
+    /// `claim_with_retry`: one second, doubling per transient, capped at a minute.
+    @Test func claimTransientsBackOffDoublingToAMinute() async throws {
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, index in
+            index < 8 ? .reply(503, "down") : .reply(204)
         }
-    }
-
-    /// `ModelFlags` exists only for `eval` — a timing cell has no generation to
-    /// shape, so a group on one names a variant that does not exist.
-    @Test func planConfigRetiresModelFlagsOnATimingCell() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                modelFlags: flags(benchmark: "prefill_throughput", runtime: nil, model: "mlx",
-                                  ["enable_thinking": true])
-            ),
-            "expected model_flags on a timing cell to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// `enable_thinking` is `Option<bool>`; `1` is a number, not a boolean.
-    @Test func planConfigRetiresANonBooleanEnableThinking() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                modelFlags: flags(benchmark: "eval", runtime: nil, model: "mlx",
-                                  ["enable_thinking": 1]),
-                benchmark: "eval_ifbench"
-            ),
-            "expected a numeric enable_thinking to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// A claim carrying no `spec` cannot run and no other client will do better
-    /// with it: matching already keeps revisions this build cannot parse away
-    /// from it, so one that arrives anyway is mis-authored.
-    @Test func planConfigRetiresASpeclessClaim() throws {
-        let err = try refusal(
-            Self.claimedJob(spec: nil),
-            "expected a claim with no spec to be refused"
-        )
-        guard case .missingSpec = try #require(err) else {
-            Issue.record("expected missingSpec, got \(String(describing: err))"); return
-        }
-        #expect(err?.retriable == false)
-    }
-
-    /// A `spec` this revision should have read is terminal too.
-    @Test func planConfigRetiresASpecItCannotRead() throws {
-        let err = try refusal(
-            Self.claimedJob(spec: ["benchmark": "prefill_throughput_256"]),
-            "expected a spec with no runtime to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// A `spec` present but not an object must still leave the envelope
-    /// decodable: the envelope names the leased job, and reporting it is the
-    /// only way it stops being re-served.
-    @Test func planConfigRefusesANonObjectSpecWithoutLosingTheClaim() throws {
-        let body = Data("""
-        {
-          "job_id": "job-1",
-          "benchmark_id": "prefill_throughput_256",
-          "time_window": "PT10M",
-          "spec": "not-a-cell"
-        }
-        """.utf8)
-        let job = try JSONDecoder().decode(ClaimedJob.self, from: body)
-        #expect(job.jobId == "job-1")
-        let err = try refusal(job, "expected a non-object spec to be refused")
-        // Unreadable, not absent — the refusal has to say which.
-        guard case .unreadableSpec = try #require(err) else {
-            Issue.record("expected unreadableSpec, got \(String(describing: err))"); return
-        }
-        #expect(err?.retriable == false)
-    }
-
-    /// `benchmark_id` is duplicated on the wire and the two halves must agree —
-    /// guessing which was meant would run the wrong work or file the result
-    /// against the wrong id (Rust `UnrunnableClaim::BenchmarkMismatch`).
-    @Test func planConfigRetiresAClaimWhoseHalvesNameDifferentBenchmarks() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                specBenchmark: "decode_throughput_512"
-            ),
-            "expected a claim naming two benchmarks to be refused"
-        )
-        #expect(err?.retriable == false)
-        let described = try #require(err?.localizedDescription)
-        #expect(described.contains("prefill_throughput_256"))
-        #expect(described.contains("decode_throughput_512"))
-    }
-
-    /// Flags naming a cell other than the one being run are mis-authored, and
-    /// silently applying settings meant for another runtime is the outcome the
-    /// check rules out. Rust refuses these on arrival; so must this.
-    @Test func planConfigRetiresRuntimeFlagsNamingAnotherRuntime() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                runtimeFlags: flags(runtime: "mlx_macos_pipette", ["number_gpu_layers": 99])
-            ),
-            "expected flags naming another runtime to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    @Test func planConfigRetiresModelFlagsNamingAnotherModel() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                modelFlags: flags(benchmark: "eval", runtime: nil, model: "gguf_text",
-                                  ["enable_thinking": true]),
-                benchmark: "eval_ifbench"
-            ),
-            "expected flags naming another model to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// The benchmark axis comes from the id itself: `prefill_throughput_256` is
-    /// a `prefill_throughput` cell, so an `eval` group does not belong to it.
-    @Test func planConfigRetiresFlagsNamingAnotherBenchmarkType() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.mlxRuntime,
-                model: Self.mlxModel,
-                runtimeFlags: flags(benchmark: "eval", runtime: "mlx_ios_pipette",
-                                    model: "mlx", ["n_ubatch": 64])
-            ),
-            "expected flags naming another benchmark type to be refused"
-        )
-        #expect(err?.retriable == false)
-    }
-
-    /// A correctly authored cell: both groups name it on every axis, and each
-    /// sets only knobs its own variant carries.
-    @Test func planConfigAcceptsFlagsNamingThisCell() throws {
-        let cfg = try ClientRunSpec.validated(
-            job: claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                runtimeFlags: flags(benchmark: "eval", ["number_gpu_layers": 40]),
-                benchmark: "eval_ifbench"
-            )
-        )
-        #expect(cfg.runtimeFlags?.numberGpuLayers == 40)
-    }
-
-    /// `enable_thinking` shapes generation through the chat template's Jinja context,
-    /// which this build does not drive. The claim is refused rather than run as something
-    /// other than what it asked for — and refused *retriably*, because the Rust client
-    /// applies the knob and would run the cell correctly.
-    @Test(arguments: [true, false])
-    func planConfigRefusesThinkingItCannotApply(_ thinking: Bool) throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                modelFlags: flags(benchmark: "eval", runtime: nil,
-                                  ["enable_thinking": thinking]),
-                benchmark: "eval_ifbench"
-            ),
-            "expected a knob this build cannot apply to be refused"
-        )
-        guard case let .flagNotHonouredHere(_, knob) = try #require(err) else {
-            Issue.record("expected flagNotHonouredHere, got \(String(describing: err))")
+        var sleeps: [TimeInterval] = []
+        let poll = await PlannerWorker.claimWithRetry(
+            server: server, http: http, auth: try auth()
+        ) { sleeps.append($0) }
+        guard case .idle = poll else {
+            Issue.record("expected idle after the transients, got \(poll)")
             return
         }
-        #expect(knob == "enable_thinking")
-        #expect(err?.retriable == false, "every claim refusal is terminal, as upstream")
+        #expect(sleeps == [1, 2, 4, 8, 16, 32, 60, 60])
+        #expect(seen.requests.count == 9)
     }
 
-    @Test func planConfigRejectsDesktopRuntime() throws {
-        do {
-            _ = try ClientRunSpec.validated(job: claim(runtime: [
-                "type": "llamacpp_cli_stock_tools", "repository_version": "b1",
-                "flavor": "macos-arm64",
-            ]))
-            Issue.record("expected unsupported runtime")
-        } catch let err as UnrunnableClaim {
-            #expect(err.retriable == false)
+    /// Only a transient is retried: anything else is the loop's to act on at once.
+    @Test func aClaimAnswerThatIsNotTransientIsHandedBackWithoutWaiting() async throws {
+        var sleeps: [TimeInterval] = []
+        let (refusedHttp, refused, _) = try RoutedURLProtocol.serve { _, _ in .reply(403) }
+        let refusal = await PlannerWorker.claimWithRetry(
+            server: refused, http: refusedHttp, auth: try auth()
+        ) { sleeps.append($0) }
+        guard case .refused = refusal else {
+            Issue.record("expected refused, got \(refusal)")
+            return
         }
+        let (badHttp, bad, _) = try RoutedURLProtocol.serve { _, _ in .reply(400, "bad") }
+        let failure = await PlannerWorker.claimWithRetry(
+            server: bad, http: badHttp, auth: try auth()
+        ) { sleeps.append($0) }
+        guard case .fatal = failure else {
+            Issue.record("expected fatal, got \(failure)")
+            return
+        }
+        #expect(sleeps.isEmpty)
     }
 
-    @Test func planConfigRejectsWrongFlavor() throws {
-        do {
-            _ = try ClientRunSpec.validated(job: claim(runtime: [
-                "type": "llamacpp_ios_pipette", "repository_version": "b1",
-                "flavor": "android-arm64-v8",
-            ]))
-            Issue.record("expected invalid flavor")
-        } catch let err as UnrunnableClaim {
-            #expect(!err.retriable)
-        }
-    }
+    // MARK: - Submitting
 
-    /// `flavor` is required on both iOS runtimes, so a body omitting it does not
-    /// deserialize — it must not fall back to this device's own flavor.
-    @Test func planConfigRetiresARuntimeWithNoFlavor() throws {
-        let err = try refusal(
-            claim(runtime: ["type": "llamacpp_ios_pipette", "repository_version": "b1"]),
-            "expected a runtime with no flavor to be refused"
-        )
-        guard case .unreadableSpec = try #require(err) else {
-            Issue.record("expected unreadableSpec, got \(String(describing: err))"); return
-        }
-    }
-
-    /// `mlx_ios_pipette` pins its Swift-package stack. This build never reads
-    /// it, but a body omitting it is not a valid cell.
-    @Test func planConfigRetiresAnMlxRuntimeWithNoPackages() throws {
-        let err = try refusal(
-            claim(
-                runtime: ["type": "mlx_ios_pipette", "flavor": "ios-arm64"],
-                model: Self.mlxModel
-            ),
-            "expected an MLX runtime with no packages to be refused"
-        )
-        guard case .unreadableSpec = try #require(err) else {
-            Issue.record("expected unreadableSpec, got \(String(describing: err))"); return
-        }
-    }
-
-    /// `repository_version` is `NonEmptyString`, and `version` is its alias.
-    @Test func planConfigAcceptsTheVersionAliasAndRejectsAnEmptyPin() throws {
-        let aliased = try ClientRunSpec.validated(
-            job: claim(runtime: [
-                "type": "llamacpp_ios_pipette", "version": "b77", "flavor": "ios-arm64",
-            ])
-        )
-        guard case let .llamacppIosPipette(source, _, _) = aliased.runtime else {
-            Issue.record("expected llamacppIosPipette"); return
-        }
-        #expect(source.repositoryVersion.value == "b77")
-
-        let err = try refusal(
-            claim(runtime: [
-                "type": "llamacpp_ios_pipette", "repository_version": "", "flavor": "ios-arm64",
-            ]),
-            "expected an empty repository_version to be refused"
-        )
-        guard case .unreadableSpec = try #require(err) else {
-            Issue.record("expected unreadableSpec, got \(String(describing: err))"); return
-        }
-    }
-
-    /// Flag groups resolve against the benchmark *type*, so an id this build
-    /// cannot classify is refused by name rather than as an axis mismatch. A
-    /// flagless cell with the same id is left alone.
-    @Test func planConfigRetiresFlagsOnAnUnclassifiableBenchmark() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                runtimeFlags: flags(["number_gpu_layers": 8]),
-                benchmark: "smoke"
-            ),
-            "expected flags on an unclassifiable benchmark to be refused"
-        )
-        guard case .unclassifiableBenchmark = try #require(err) else {
-            Issue.record("expected unclassifiableBenchmark, got \(String(describing: err))")
+    /// What max-jobs counts: every claim `runClaimedJob` returns from, as the crate
+    /// counts every `Ok` of `run_claimed_job`. A dropped submit and an exhausted backoff
+    /// are answers `post_completion` returns; only a definitive refusal throws, and only
+    /// that one leaves the count alone.
+    @Test func aDroppedOrAbandonedSubmitIsAnAnswerAndOnlyAFatalOneThrows() async throws {
+        let body = Data("{}".utf8)
+        let (droppedHttp, dropped, _) = try RoutedURLProtocol.serve { _, _ in .reply(409) }
+        let droppedAnswer = try await PlannerWorker.postCompletion(
+            server: dropped, http: droppedHttp, auth: try auth(), jobId: "job-1",
+            payload: body) { _ in }
+        guard case .dropped = droppedAnswer else {
+            Issue.record("expected dropped")
             return
         }
 
-        // Without flags there is no axis to resolve, so the cell still parses — and it
-        // carries no entry, rather than one full of values it never named.
-        let cfg = try ClientRunSpec.validated(
-            job: claim(runtime: Self.llamaRuntime, benchmark: "smoke")
-        )
-        #expect(cfg.runtimeFlags == nil)
-    }
+        let (downHttp, down, _) = try RoutedURLProtocol.serve { _, _ in .reply(503) }
+        let abandoned = try await PlannerWorker.postCompletion(
+            server: down, http: downHttp, auth: try auth(), jobId: "job-1",
+            payload: body) { _ in }
+        guard case .retryTransient = abandoned else {
+            Issue.record("expected the exhausted backoff to answer retryTransient")
+            return
+        }
 
-    /// Generation flags belong to the cell, never to the model. The crate is explicit that
-    /// `Model` stays identity-only, so there is nowhere on a `Model` for a generation flag
-    /// to land — including in its wire form.
-    @Test func thinkingStaysOnTheCellAndNeverOnTheModel() throws {
-        let text = Model.ggufText(.init(source: .huggingFace(
-            repo: try HFRepo.parse("org/repo"),
-            path: RepoSubpath(validated: "m-Q4_0.gguf"), sha256: nil)))
-        let json = String(decoding: try JSONEncoder().encode(text), as: UTF8.self)
-        #expect(!json.contains("model_flags"))
-    }
-
-    // MARK: - Cell coherence and failure classification
-
-    /// A runtime that cannot run this kind of model is mis-authored, and dies at
-    /// the claim rather than surfacing later as "no local model matched" — the
-    /// CLI's `is_compatible` gate.
-    @Test func planConfigRetiresAModelItsRuntimeCannotRun() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.mlxRuntime,
-                model: Self.ggufModel
-            ),
-            "expected a gguf model on an MLX runtime to be refused"
-        )
-        #expect(err?.retriable == false)
-        #expect(err?.localizedDescription.contains("not compatible") == true)
-    }
-
-    /// `source` is the tag selecting the arm; a model without one does not
-    /// deserialize on either side.
-    @Test func planConfigRetiresAModelWithNoSource() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: ["type": "gguf_text", "org": "o", "repo_name": "r", "path": "m.gguf"]
-            ),
-            "expected a model with no source to be refused"
-        )
-        guard case .unreadableSpec = try #require(err) else {
-            Issue.record("expected unreadableSpec, got \(String(describing: err))"); return
+        let (badHttp, bad, _) = try RoutedURLProtocol.serve { _, _ in .reply(400, "bad") }
+        await #expect(throws: PipetteMgmtClient.Error.self) {
+            try await PlannerWorker.postCompletion(
+                server: bad, http: badHttp, auth: try self.auth(), jobId: "job-1",
+                payload: body) { _ in }
         }
     }
 
-    /// A `local` source is well-formed but names nothing this device can fetch. Refused
-    /// terminally, as every claim refusal is: keeping a cell away from a client that
-    /// cannot run it is a capability in `requires`, not a disposition on the answer.
-    @Test func planConfigRefusesAModelSourceItCannotFetch() throws {
-        let err = try refusal(
-            claim(
-                runtime: Self.llamaRuntime,
-                model: ["type": "gguf_text", "source": "local", "dir": "/tmp/m"]
-            ),
-            "expected a local model source to be refused"
-        )
-        guard case .modelKindNotRunnable = try #require(err) else {
-            Issue.record("expected modelKindNotRunnable, got \(String(describing: err))"); return
+    /// A failure goes through the same backoff a success does (`submit_failure` →
+    /// `post_completion`): a failure lost to one `5xx` would leave the lease to lapse
+    /// and the job to be re-served to every device that cannot run it.
+    @Test func aFailureIsSubmittedThroughTheSameBackoff() async throws {
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, index in
+            index == 0 ? .reply(503, "down") : .reply(202, #"{"job_id":"job-1"}"#)
         }
-        #expect(err?.retriable == false, "every claim refusal is terminal, as upstream")
+        let job = try ClaimTests.claimedJob(spec: nil)
+        var sleeps: [TimeInterval] = []
+        let disposition = try await PlannerWorker.submitFailure(
+            job, reason: "[ts] oom", retriable: true, deviceTime: .seconds(3), server: server,
+            http: http, auth: try auth(), clientVersion: "9.9.9"
+        ) { sleeps.append($0) }
+        guard case .accepted = disposition else {
+            Issue.record("expected accepted")
+            return
+        }
+        #expect(sleeps == [1])
+        #expect(seen.methodsAndPaths == ["POST /benchmarks", "POST /benchmarks"])
+        let lastBody = try #require(seen.bodies.last)
+        let sent = try #require(JSONSerialization.jsonObject(with: lastBody) as? [String: Any])
+        #expect(sent["message_type"] as? String == "failure")
+        #expect(sent["job_id"] as? String == "job-1")
+        #expect(sent["retriable"] as? Bool == true)
     }
 
-    /// A timing cell carries the readiness gate, and it reaches the config typed.
-    @Test func planConfigCarriesTheReadinessGate() throws {
-        let cfg = try ClientRunSpec.validated(
-            job: claim(
-                runtime: Self.llamaRuntime,
-                model: Self.ggufModel,
-                benchmarkFlags: [
-                    "benchmark_type": "prefill_throughput",
-                    "runtime_type": "llamacpp_ios_pipette",
-                    "model_type": "gguf_text",
-                    "readiness": ["max_wait_secs": 1800, "skip_thermal": true],
-                ]
-            )
-        )
-        #expect(cfg.benchmarkFlags?.readiness?.maxWaitSecs == 1800)
-        #expect(cfg.benchmarkFlags?.readiness?.skipThermal == true)
+    /// Filed where the submit sweep files an accepted result, so nothing posts it again.
+    /// The crate's `a_successful_run_that_kept_its_lease_is_submitted_and_stored`.
+    @Test func storeCompletedResultFilesUnderSyncedWithTheJobId() throws {
+        let results = ResultsStore(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("PipetteResults-\(UUID().uuidString)", isDirectory: true))
+        defer { try? FileManager.default.removeItem(at: results.root) }
+        let cellId = CellId(UUID().uuidString)
+        try results.saveResult(
+            .remotePending, cellId,
+            payload: Data(#"{"benchmark_id":"prefill_throughput_512"}"#.utf8),
+            extras: Data("{}".utf8))
+        let collector = try ServerUrl("https://collector.example.com")
+
+        PlannerWorker.storeCompletedResult(
+            results: results, jobId: "job-1", cellId: cellId, serverJobId: "job-1",
+            collector: collector)
+
+        #expect(results.location(of: cellId) == .remoteSynced)
+        let record = try #require(results.loadSubmission(cellId))
+        #expect(record.status == .submitted)
+        #expect(record.serverJobId == "job-1")
+        #expect(record.collector == collector)
+        let payload = try #require(results.loadPayload(cellId))
+        #expect(String(decoding: payload, as: UTF8.self).contains("prefill_throughput_512"))
+
+        // With the manifest's ack beside it, the cell is not offered for upload again.
+        var acked = cell(id: cellId, benchmarkId: "prefill_throughput_512")
+        acked.serverJobId = "job-1"
+        #expect(!results.isUnsubmitted(acked))
     }
 
-    /// The server-only knobs are not declared here, so a body carrying one is refused as an
-    /// unknown field rather than accepted and dropped: an in-process engine has no HTTP
-    /// client to bound.
-    @Test func planConfigRetiresAServerBenchmarkKnob() throws {
-        let job = try Self.claimedJob(spec: [
+    // MARK: - The claim's benchmark
+
+    /// One signed conditional read, answered `304`. `ClaimedBenchmarkCheckTests` covers every
+    /// other answer.
+    @Test func aCachedBenchmarkTheServerConfirmsIsNotFetched() async throws {
+        let store = makeTemporaryBenchmarkStore()
+        defer { removeStore(store) }
+        let cached = BenchmarkDefinition.prefillThroughput(PrefillThroughputBenchmark(
+            benchmarkId: BenchmarkId(validated: "prefill_throughput_512"),
+            parameterPrefillTokens: 512))
+        try store.cacheRemote(cached, etag: #""p""#)
+        let (http, server, seen) = try RoutedURLProtocol.serve { request, _ in
+            request.value(forHTTPHeaderField: "If-None-Match") == #""p""# ? .reply(304) : .reply(500)
+        }
+
+        let definition = try await PlannerWorker.ensureClaimBenchmarkCached(
+            store: store, server: server, http: http, auth: try testIdentity(),
+            benchmarkId: "prefill_throughput_512")
+
+        #expect(definition == cached)
+        #expect(seen.methodsAndPaths == ["GET /benchmarks/prefill_throughput_512"])
+        #expect(seen.requests.first?.value(forHTTPHeaderField: "X-Client-Id") == "client-1")
+        #expect(seen.requests.first?.value(forHTTPHeaderField: "X-Signature") != nil)
+    }
+
+    /// A benchmark the catalog does not hold is fetched and cached on the remote half,
+    /// eval included: this is what lets an eval claim run rather than be retired. The
+    /// fetch is signed as the claiming client.
+    @Test func anUncachedBenchmarkIsFetchedAndCached() async throws {
+        let store = makeTemporaryBenchmarkStore()
+        defer { removeStore(store) }
+        let served = BenchmarkDefinition.eval(EvalBenchmark(
+            benchmarkId: BenchmarkId(validated: "eval_x"),
+            parameterEvalId: EvalId("ifbench"),
+            parameterDatasetName: "d",
+            parameterMaxTokens: 16,
+            parameterMcqChoices: nil,
+            samples: nil))
+        let body = String(decoding: try Coding.encoder.encode(served), as: UTF8.self)
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in .reply(200, body) }
+
+        let definition = try await PlannerWorker.ensureClaimBenchmarkCached(
+            store: store, server: server, http: http, auth: try testIdentity(),
+            benchmarkId: "eval_x")
+
+        #expect(definition == served)
+        #expect(seen.methodsAndPaths == ["GET /benchmarks/eval_x"])
+        #expect(seen.requests.first?.value(forHTTPHeaderField: "X-Client-Id") == "client-1")
+        #expect(seen.requests.first?.value(forHTTPHeaderField: "X-Signature") != nil)
+        #expect(try store.get(.remote("eval_x")) == served)
+    }
+
+    /// A file cached before `parameter_num_images` has no image count, so running it would run
+    /// and declare one image (`BenchmarkParams` is built from the definition), which mgmt
+    /// refuses. Fetched once: the second claim revalidates what the first cached.
+    @Test func aCacheFileAnOlderBuildWroteIsRefetchedNotRun() async throws {
+        let store = makeTemporaryBenchmarkStore()
+        defer { removeStore(store) }
+        let legacy = try store.writeLegacyImg80()
+        let (http, server, seen) = try RoutedURLProtocol.serve { request, _ in
+            request.value(forHTTPHeaderField: "If-None-Match") == #""img80""#
+                ? .reply(304) : .reply(img80Wire, etag: #""img80""#)
+        }
+        let claim = {
+            try await PlannerWorker.ensureClaimBenchmarkCached(
+                store: store, server: server, http: http, auth: try testIdentity(),
+                benchmarkId: img80Id)
+        }
+
+        let definition = try await claim()
+
+        guard case let .vlThroughput(vl) = definition else {
+            Issue.record("expected vl_throughput, got \(definition)")
+            return
+        }
+        #expect(vl.parameterNumImages.value == 80)
+        guard case let .vlThroughput(_, _, _, _, numImages) = BenchmarkParams(definition) else {
+            Issue.record("expected vl_throughput params")
+            return
+        }
+        #expect(numImages.value == 80, "the result would declare it")
+        #expect(seen.methodsAndPaths == ["GET /benchmarks/\(img80Id)"])
+        #expect(FileManager.default.fileExists(atPath: legacy.path),
+                "the older build's file went")
+
+        #expect(try await claim() == definition)
+        #expect(seen.methodsAndPaths == [
+            "GET /benchmarks/\(img80Id)", "GET /benchmarks/\(img80Id)",
+        ])
+    }
+
+    /// Only the server not knowing the id, or a body this build cannot read, is an
+    /// unknown benchmark; both are terminal.
+    @Test func aBenchmarkNobodyCanResolveIsTerminal() async throws {
+        let store = makeTemporaryBenchmarkStore()
+        defer { removeStore(store) }
+        let (missingHttp, missing, _) = try RoutedURLProtocol.serve { _, _ in
+            .reply(404, "benchmark not found")
+        }
+        await expectTerminal {
+            try await PlannerWorker.ensureClaimBenchmarkCached(
+                store: store, server: missing, http: missingHttp, auth: try testIdentity(),
+                benchmarkId: "gone")
+        }
+
+        let (oddHttp, odd, _) = try RoutedURLProtocol.serve { _, _ in
+            .reply(200, #"{"benchmark_id":"odd","benchmark_type":"not_a_type"}"#)
+        }
+        await expectTerminal {
+            try await PlannerWorker.ensureClaimBenchmarkCached(
+                store: store, server: odd, http: oddHttp, auth: try testIdentity(),
+                benchmarkId: "odd")
+        }
+        #expect(try store.get(.remote("odd")) == nil)
+        #expect(!FileManager.default.fileExists(atPath: store.remoteDetailPath("odd").path),
+                "a body that does not convert was cached")
+    }
+
+    /// The cache is an optimization for the next claim, not a precondition for this one.
+    @Test func aBenchmarkCacheWriteFailureIsAWarningNotARefusal() async throws {
+        let store = makeTemporaryBenchmarkStore()
+        defer { removeStore(store) }
+        // A file where the remote half of the catalog goes: the read below misses on it,
+        // and the write cannot create the directory over it.
+        try FileManager.default.createDirectory(at: store.root, withIntermediateDirectories: true)
+        try Data("not a directory".utf8).write(
+            to: store.root.appendingPathComponent(BenchmarkSource.remote.rawValue))
+        let served = BenchmarkDefinition.prefillThroughput(PrefillThroughputBenchmark(
+            benchmarkId: BenchmarkId(validated: "prefill_throughput_512"),
+            parameterPrefillTokens: 512))
+        let body = String(decoding: try Coding.encoder.encode(served), as: UTF8.self)
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in .reply(200, body) }
+
+        let definition = try await PlannerWorker.ensureClaimBenchmarkCached(
+            store: store, server: server, http: http, auth: try testIdentity(),
+            benchmarkId: "prefill_throughput_512")
+
+        #expect(definition == served)
+        #expect(seen.methodsAndPaths == ["GET /benchmarks/prefill_throughput_512"])
+        #expect(try store.get(.remote("prefill_throughput_512")) == nil, "nothing was cached")
+    }
+
+    /// A fetch that fails in transit says nothing about the benchmark.
+    @Test func aBenchmarkFetchThatFailsInTransitStaysRetriable() async throws {
+        let store = makeTemporaryBenchmarkStore()
+        defer { removeStore(store) }
+        let (http, server, _) = try RoutedURLProtocol.serve { _, _ in .reply(503, "down") }
+        do {
+            _ = try await PlannerWorker.ensureClaimBenchmarkCached(
+                store: store, server: server, http: http, auth: try testIdentity(),
+                benchmarkId: "b")
+            Issue.record("expected the fetch to fail")
+        } catch {
+            #expect(classifyRunError(error))
+        }
+    }
+
+    private func expectTerminal(
+        _ body: () async throws -> BenchmarkDefinition,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async {
+        do {
+            _ = try await body()
+            Issue.record("expected a refusal", sourceLocation: sourceLocation)
+        } catch {
+            guard case .unknownBenchmark = error as? PlannerWorker.WorkerResolveError else {
+                Issue.record("expected unknownBenchmark, got \(error)", sourceLocation: sourceLocation)
+                return
+            }
+            #expect(!classifyRunError(error), sourceLocation: sourceLocation)
+        }
+    }
+
+    // MARK: - The manifest a claim becomes
+
+    /// The cell the worker runs is the claim's own, whole: its coordinate and pin (not a
+    /// local copy of the repo) and its `benchmark_flags`. The coordinate is one this
+    /// device does not hold; fetching it is `ensureModel`'s, covered by `EnsureModelTests`.
+    @Test func theManifestCellIsTheClaimsOwn() throws {
+        let job = try ClaimTests.claimedJob(spec: [
             "benchmark": "prefill_throughput_256",
             "runtime": Self.llamaRuntime,
-            "model": Self.ggufModel,
+            "model": [
+                "type": "gguf_text", "source": "huggingface",
+                "org": "o", "repo_name": "never-downloaded",
+                "revision": "v1", "path": "m.gguf",
+            ],
             "benchmark_flags": [
                 "benchmark_type": "prefill_throughput",
                 "runtime_type": "llamacpp_ios_pipette",
                 "model_type": "gguf_text",
-                "http_timeout_seconds": 600,
+                "readiness": ["max_wait_secs": 1800, "skip_thermal": true],
             ],
         ])
-        let err = try refusal(job, "expected http_timeout_seconds to be refused")
-        #expect(err?.retriable == false)
+        let spec = try ClientRunSpec.validated(try runSpecFromClaim(job))
+
+        let manifest = PlannerWorker.shared.makeManifest(
+            job: job, spec: spec,
+            benchmark: .prefillThroughput(PrefillThroughputBenchmark(
+                benchmarkId: BenchmarkId(validated: "prefill_throughput_256"),
+                parameterPrefillTokens: 256)))
+
+        let cell = try #require(manifest.cells.first)
+        #expect(cell.spec.model.repo?.revision?.value == "v1")
+        #expect(cell.spec.model.repo?.repoName.value == "never-downloaded")
+        // The plan-authored readiness gate reaches `JobExecutor`.
+        #expect(cell.spec.benchmarkFlags?.readiness?.maxWaitSecs == 1800)
+        #expect(cell.spec.benchmarkFlags?.readiness?.skipThermal == true)
     }
 
-    /// `max_memory_usage` does not gate, so it has no variant to carry one — the same
-    /// refusal every cell got before iOS declared any.
-    @Test func planConfigRetiresBenchmarkFlagsOnAnUngatedCell() throws {
-        let job = try Self.claimedJob(benchmarkId: "max_memory_usage_512", spec: [
-            "benchmark": "max_memory_usage_512",
+    /// The cell is typed from the resolved benchmark, not from its id: an `eval` claim,
+    /// which the id parse cannot classify, still becomes a cell instead of an empty job
+    /// reported as an unknown benchmark.
+    @Test func anEvalClaimBecomesACell() throws {
+        let job = try ClaimTests.claimedJob(benchmarkId: "eval_ifbench", spec: [
+            "benchmark": "eval_ifbench",
             "runtime": Self.llamaRuntime,
-            "model": Self.ggufModel,
-            "benchmark_flags": [
-                "benchmark_type": "max_memory_usage",
-                "runtime_type": "llamacpp_ios_pipette",
-                "model_type": "gguf_text",
-                "readiness": ["skip_thermal": true],
+            "model": [
+                "type": "gguf_text", "source": "huggingface",
+                "org": "o", "repo_name": "r", "path": "m.gguf",
             ],
         ])
-        let err = try refusal(job, "expected an ungated cell to refuse a readiness block")
-        #expect(err?.retriable == false)
+        let spec = try ClientRunSpec.validated(try runSpecFromClaim(job))
+
+        let manifest = PlannerWorker.shared.makeManifest(
+            job: job, spec: spec,
+            benchmark: .eval(EvalBenchmark(
+                benchmarkId: BenchmarkId(validated: "eval_ifbench"),
+                parameterEvalId: EvalId("ifbench"),
+                parameterDatasetName: "d",
+                parameterMaxTokens: 16,
+                parameterMcqChoices: nil,
+                samples: nil)))
+
+        let cell = try #require(manifest.cells.first)
+        #expect(manifest.cells.count == 1)
+        #expect(cell.benchmarkType == .eval)
+        #expect(cell.benchmarkId == "eval_ifbench")
     }
 
-    /// The disposition policy lives in one classifier, so it can be pinned here
-    /// rather than inferred from eleven scattered call sites.
-    @Test func failureClassificationDefaultsToRetriable() {
-        // Terminal: unreadable by construction, and a benchmark no build knows.
-        #expect(!PlannerWorker.retriable(UnrunnableClaim.missingSpec))
-        #expect(!PlannerWorker.retriable(UnrunnableClaim.unreadableSpec))
-        #expect(!PlannerWorker.retriable(PlannerWorker.WorkerResolveError.unknownBenchmark("b")))
+    // MARK: - The heartbeat that holds the lease
 
-        // Retriable: specific to this device, so another may still succeed.
-        #expect(PlannerWorker.retriable(PlannerWorker.WorkerResolveError.noLocalModel("m")))
-        #expect(PlannerWorker.retriable(PlannerWorker.WorkerResolveError.deviceUnavailable("busy")))
-        // Anything unrecognized stays retriable: a wrongly-terminal failure is
-        // discarded for the whole fleet, a wrongly-retriable one just expires.
-        #expect(PlannerWorker.retriable(URLError(.timedOut)))
+    @Test func theHeartbeatTicksUntilItIsCancelled() async throws {
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in .reply(200) }
+        let leaseLost = PlannerWorker.LeaseLostFlag()
+        let heartbeat = PlannerWorker.spawnHeartbeat(
+            jobId: "job-1", every: Self.fastTick, session: try session(server), http: http,
+            leaseLost: leaseLost)
+
+        await waitUntil("two heartbeats") { seen.requests.count >= 2 }
+        heartbeat.cancel()
+        _ = await heartbeat.value
+
+        let ticks = seen.requests.count
+        try await Task.sleep(for: Self.severalTicks)
+        #expect(seen.requests.count == ticks, "the loop kept beating after it was cancelled")
+        let paths = Set(seen.methodsAndPaths)
+        #expect(paths == ["PUT /plans/job-1/heartbeat"])
+        #expect(!leaseLost.isLost, "a renewed lease was never lost")
     }
 
-    // MARK: - Local-model matching
+    /// A lease the server has given away sets the flag the run's submit consults, and the
+    /// loop stops: there is no cancel path, so it has nothing left to do.
+    @Test func aSupersededLeaseFlagsLeaseLostAndStopsBeating() async throws {
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in .reply(409, "superseded") }
+        let leaseLost = PlannerWorker.LeaseLostFlag()
+        let heartbeat = PlannerWorker.spawnHeartbeat(
+            jobId: "job-1", every: Self.fastTick, session: try session(server), http: http,
+            leaseLost: leaseLost)
 
-    private static func mlxOnDisk(org: String, repo: String, subpath: String?) throws -> DiscoveredModel {
-        DiscoveredModel(
-            source: .mlx(.init(source: .huggingFace(repo: try HFRepo.parse("\(org)/\(repo)"), prefix: subpath.map { RepoSubpath(validated: $0) }))),
-            path: "/models/\(repo)",
-            sizeBytes: 1
+        await waitUntil("the lease-lost flag") { leaseLost.isLost }
+        try await Task.sleep(for: Self.severalTicks)
+
+        #expect(seen.requests.count == 1, "it went on beating on a lease it had lost")
+        heartbeat.cancel()
+    }
+
+    /// A transient is not a lost lease: the loop retries after ``PlannerWorker/retryWait``.
+    /// A cancel mid-wait still returns at once, so a finished run's submit never sits
+    /// behind a retry timer.
+    @Test func aTransientHeartbeatBacksOffAndStillCancelsAtOnce() async throws {
+        #expect(PlannerWorker.retryWait > Self.fastTick, "the wait must be the longer one")
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in .reply(503, "down") }
+        let leaseLost = PlannerWorker.LeaseLostFlag()
+        let heartbeat = PlannerWorker.spawnHeartbeat(
+            jobId: "job-1", every: Self.fastTick, session: try session(server), http: http,
+            leaseLost: leaseLost)
+
+        await waitUntil("the first heartbeat") { seen.requests.count >= 1 }
+        try await Task.sleep(for: Self.severalTicks)
+        #expect(seen.requests.count == 1, "a transient retried at the tick interval")
+
+        let stopping = ContinuousClock.now
+        heartbeat.cancel()
+        _ = await heartbeat.value
+        #expect(stopping.duration(to: .now) < .seconds(1), "the cancel waited out the retry timer")
+        #expect(!leaseLost.isLost, "a transient is not a lost lease")
+    }
+
+    // MARK: - What a finished run owes the server
+
+    /// The server has already given the job to another device, so a lost lease is neither
+    /// submitted nor filed as synced.
+    @Test(arguments: [true, false])
+    func aRunWhoseLeaseWasLostIsNotSubmitted(succeeded: Bool) async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in
+            .reply(202, #"{"job_id":"job-1"}"#)
+        }
+        let (job, run) = try completedRun(ws: ws)
+
+        try await report(
+            job, runResult: succeeded ? .success(run) : .failure(URLError(.timedOut)),
+            leaseLost: true, server: server, http: http, ws: ws)
+
+        #expect(seen.requests.isEmpty, "a lost lease must not be submitted")
+        #expect(ws.results.location(of: run.cellId) != .remoteSynced,
+                "nothing was submitted, so nothing is filed as synced")
+    }
+
+    /// A run that kept its lease is posted against the claim and then filed as synced, so
+    /// no later sweep sends it again.
+    @Test func aSuccessfulRunThatKeptItsLeaseIsSubmittedAndFiled() async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in
+            .reply(202, #"{"job_id":"job-1"}"#)
+        }
+        let (job, run) = try completedRun(ws: ws)
+
+        try await report(
+            job, runResult: .success(run), leaseLost: false, server: server, http: http,
+            ws: ws)
+
+        #expect(seen.methodsAndPaths == ["POST /benchmarks"])
+        let body = try #require(seen.bodies.last)
+        let sent = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        // The claim echo the server's binding check looks for.
+        #expect(sent["job_id"] as? String == "job-1")
+        #expect(ws.results.location(of: run.cellId) == .remoteSynced)
+        let record = try #require(ws.results.loadSubmission(run.cellId))
+        #expect(record.serverJobId == "job-1")
+    }
+
+    /// A run that failed, and the disposition its failure must reach the server with.
+    enum FailedRun: CaseIterable, Sendable {
+        case timedOut, unknownBenchmark, vaultRefused, vaultUnavailable
+
+        var error: any Error {
+            let url = "https://mgmt.test/vault/resources/vault_1/content"
+            return switch self {
+            case .timedOut: URLError(.timedOut)
+            case .unknownBenchmark: PlannerWorker.WorkerResolveError.unknownBenchmark("gone")
+            case .vaultRefused: VaultFetchError.refused(
+                resourceId: VaultResourceId(validated: "vault_1"), status: 403, detail: "refused")
+            case .vaultUnavailable: VaultFetchError.mgmt(
+                .httpStatus(method: "GET", url: url, status: 503, body: ""))
+            }
+        }
+
+        var retriable: Bool {
+            switch self {
+            case .timedOut, .vaultUnavailable: true
+            case .unknownBenchmark, .vaultRefused: false
+            }
+        }
+    }
+
+    /// A run that failed is still an answer the server is owed, carrying the disposition
+    /// ``classifyRunError(_:)`` decided: a local failure or a vault `503` is retriable, a
+    /// benchmark nobody can resolve or a vault `403` is not. Whatever the run left on disk
+    /// stays where it is: only a submitted result is filed as synced.
+    @Test(arguments: FailedRun.allCases)
+    func aFailedRunIsReportedAgainstTheClaim(failed: FailedRun) async throws {
+        let (error, retriable) = (failed.error, failed.retriable)
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in
+            .reply(202, #"{"job_id":"job-1"}"#)
+        }
+        let (job, run) = try completedRun(ws: ws)
+
+        try await report(
+            job, runResult: .failure(error), leaseLost: false, server: server, http: http,
+            ws: ws)
+
+        #expect(seen.methodsAndPaths == ["POST /benchmarks"])
+        let body = try #require(seen.bodies.last)
+        let sent = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(sent["message_type"] as? String == "failure")
+        #expect(sent["job_id"] as? String == "job-1")
+        #expect(sent["retriable"] as? Bool == retriable)
+        // The run's time from the claim, which `report` passes as three seconds.
+        #expect(sent["device_time_ms"] as? Int == 3000)
+        #expect(ws.results.location(of: run.cellId) != .remoteSynced,
+                "a failure filed a result as submitted")
+    }
+
+    /// The checkpoint is retired once the server holds the result, and only then. A refused
+    /// result or a lost lease leaves it, so the job's next run resumes every sample.
+    @Test(arguments: [(202, false, false), (400, false, true), (202, true, true)])
+    func anEvalCheckpointIsKeptUntilTheServerHasTheResult(
+        status: Int, leaseLost: Bool, kept: Bool
+    ) async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let (http, server, _) = try RoutedURLProtocol.serve { _, _ in
+            .reply(status, #"{"job_id":"job-1"}"#)
+        }
+        let request = payloadRequest(
+            model: try ggufTextResolved(),
+            benchmark: .eval(EvalBenchmark(
+                benchmarkId: BenchmarkId(validated: "eval_smoke"),
+                parameterEvalId: EvalId("math_500"),
+                parameterDatasetName: "d",
+                parameterMaxTokens: 8,
+                samples: [EvalSample(id: "s0", messages: [])])))
+        let checkpoint = try ws.evalCompletions.open(request)
+        try checkpoint.append(.completed(id: "s0", completion: "answer", stopReason: .eos,
+                                         stopDetail: nil, completionTokens: 1))
+        checkpoint.close()
+        let (job, run) = try completedRun(
+            ws: ws, evalCheckpoint: try runRequestDigest(request))
+
+        do {
+            try await report(
+                job, runResult: .success(run), leaseLost: leaseLost, server: server, http: http,
+                ws: ws)
+        } catch {
+            // Where the crate reports a refusal as a retriable failure, this throws it.
+            #expect(status == 400, "only a refused submit throws: \(error)")
+        }
+
+        let reopened = try ws.evalCompletions.open(request)
+        defer { reopened.close() }
+        #expect(reopened.contains("s0") == kept)
+    }
+
+    /// Hand a finished run to the worker's report step over the stub at `server`.
+    private func report(
+        _ job: ClaimedJob,
+        runResult: Result<PlannerWorker.CompletedRun, any Error>,
+        leaseLost: Bool,
+        server: ServerUrl,
+        http: HttpClient,
+        ws: PipetteWorkspace
+    ) async throws {
+        try await PlannerWorker.shared.submitFinishedRun(
+            job,
+            runResult: runResult,
+            leaseLost: leaseLost,
+            elapsed: .seconds(3),
+            session: try session(server),
+            http: http,
+            ws: ws,
+            jobStore: JobStore(ws: ws)
         )
     }
 
-    /// A `torch` cell can no longer be built as a `Model` at all — the kind is refused
-    /// when the claim decodes, where the old bridge decoded it into an `unsupported` case
-    /// and matched it against the local inventory. This is the guarantee that replaces
-    /// "a torch coordinate must not match a local MLX model".
-    @Test func aTorchClaimIsRefusedAsARunnableKind() throws {
-        let job = try Self.claimedJob(benchmarkId: "b", spec: [
-            "benchmark": "b",
-            "model": ["type": "torch", "source": "huggingface", "org": "o", "repo_name": "r"],
-            "runtime": ["type": "apple_foundation"],
+    /// A finished run and the claim it answers: the manifest the worker would have built,
+    /// with the payload the executor would have left in the store.
+    private func completedRun(
+        ws: PipetteWorkspace,
+        evalCheckpoint: EvalRunDigest? = nil
+    ) throws -> (job: ClaimedJob, run: PlannerWorker.CompletedRun) {
+        let job = try ClaimTests.claimedJob(spec: [
+            "benchmark": "prefill_throughput_256",
+            "runtime": Self.llamaRuntime,
+            "model": [
+                "type": "gguf_text", "source": "huggingface",
+                "org": "o", "repo_name": "r", "path": "m.gguf",
+            ],
         ])
-        do {
-            _ = try ClientRunSpec.runSpec(from: job)
-            Issue.record("a torch model should not decode")
-        } catch let error as UnrunnableClaim {
-            guard case .modelKindNotRunnable = error else {
-                Issue.record("expected modelKindNotRunnable, got \(error)")
-                return
-            }
-            // Terminal, as every claim refusal is upstream.
-            #expect(!error.retriable)
-        }
-    }
-
-    /// A cell that asks for the private thermal gate is refused by a build without it: the
-    /// two produce different numbers for one cell, because an ungated run is allowed to
-    /// start hot. Terminal — no re-serving makes this device able to run it.
-    @Test func aClaimRequiringPrivateThermalIsRefusedByAStockBuild() throws {
-        let job = try Self.claimedJob(benchmarkId: "prefill_throughput_512", spec: [
-            "benchmark": "prefill_throughput_512",
-            "model": ["type": "gguf_text", "source": "huggingface",
-                      "org": "LiquidAI", "repo_name": "r", "path": "m.gguf"],
-            "runtime": ["type": "llamacpp_ios_pipette", "repository_version": "b10216",
-                        "flavor": "ios-arm64", "private_thermal": true],
-        ])
-
-        do {
-            // The capability refusals live in `parse`, where the engine identity is read;
-            // `runSpec` only types the payload.
-            _ = try ClientRunSpec.validated( try ClientRunSpec.runSpec(from: job))
-            // A build compiled *with* the read accepts it, so only assert the refusal on
-            // the build that lacks it — which is what the test target is.
-            #expect(Runtime.privateThermalBuild, "a stock build should have refused")
-        } catch let error as UnrunnableClaim {
-            guard case .buildLacksPrivateThermal = error else {
-                Issue.record("expected buildLacksPrivateThermal, got \(error)")
-                return
-            }
-            #expect(!error.retriable)
-        }
-    }
-
-    /// A cell that says nothing about it runs on either build — the field defaults to the
-    /// stock meaning, so plans written before it keep working.
-    @Test func aClaimSayingNothingAboutThermalRuns() throws {
-        let job = try Self.claimedJob(benchmarkId: "prefill_throughput_512", spec: [
-            "benchmark": "prefill_throughput_512",
-            "model": ["type": "gguf_text", "source": "huggingface",
-                      "org": "LiquidAI", "repo_name": "r", "path": "m.gguf"],
-            "runtime": ["type": "llamacpp_ios_pipette", "repository_version": "b10216",
-                        "flavor": "ios-arm64"],
-        ])
-
-        let spec = try ClientRunSpec.runSpec(from: job)
-        _ = try ClientRunSpec.validated( spec)
-
-        #expect(!spec.runtime.privateThermal)
-    }
-
-    /// A subdirectory pin is exact in both directions: a cell naming one does
-    /// not take a bare checkout, and a cell naming none does not take a variant
-    /// out of a repo that bundles several.
-    @Test func anMlxSubdirectoryPinMatchesExactly() throws {
-        let repo = try HFRepo.parse("o/r")
-        let bare = try Self.mlxOnDisk(org: "o", repo: "r", subpath: nil)
-        let nested = try Self.mlxOnDisk(org: "o", repo: "r", subpath: "4bit")
-        func cell(_ prefix: String?) throws -> Model {
-            .mlx(Mlx(source: .huggingFace(repo: repo, prefix: try prefix.map { try RepoSubpath($0) })))
-        }
-
-        #expect(!PlannerWorker.matchesModel(bare, coord: .init(try cell("4bit"))))
-        #expect(PlannerWorker.matchesModel(nested, coord: .init(try cell("4bit"))))
-        #expect(!PlannerWorker.matchesModel(nested, coord: .init(try cell(nil))))
-    }
-
-    /// A different repo never matches, whatever the type agreement.
-    @Test func aDifferentRepoDoesNotMatch() throws {
-        let onDisk = try Self.mlxOnDisk(org: "o", repo: "r", subpath: nil)
-        let elsewhere = Model.mlx(Mlx(source: .huggingFace(repo: try HFRepo.parse("other/r"), prefix: nil)))
-        #expect(!PlannerWorker.matchesModel(onDisk, coord: .init(elsewhere)))
+        let spec = try ClientRunSpec.validated(try runSpecFromClaim(job))
+        let manifest = PlannerWorker.shared.makeManifest(
+            job: job, spec: spec,
+            benchmark: .prefillThroughput(PrefillThroughputBenchmark(
+                benchmarkId: BenchmarkId(validated: "prefill_throughput_256"),
+                parameterPrefillTokens: 256)))
+        let cellId = try #require(manifest.cells.first).cellId
+        // Where the executor leaves it: the submit files this, it does not write it.
+        try writePayload(ws: ws, cellId: cellId, benchmarkId: "prefill_throughput_256")
+        let stored = try #require(ws.results.loadPayload(cellId))
+        let payload = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        return (
+            job,
+            PlannerWorker.CompletedRun(manifest: manifest, cellId: cellId, payload: payload,
+                                       evalCheckpoint: evalCheckpoint)
+        )
     }
 }

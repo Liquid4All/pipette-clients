@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "eval",
+  "enable_thinking": true,
+  "model_type": "torch",
+  "reasoning_effort": "medium"
+}

@@ -1,39 +1,59 @@
-# Example scheduler-mode plan: expanded by `pipette-plan generate` into job
-# files that `pipette-mgmt plans ingest` stages onto the job server.
+# Example scheduler-mode plan: `pipette-ctl campaigns create` sends it to the
+# management server, which expands it into jobs and stages them onto the job
+# server.
 #
-#   pipette-plan generate --plan examples/plans/scheduler/afm-mlx.toml --out ./jobs
-#   pipette-mgmt plans ingest ./jobs --plan-name afm-mlx-smoke
+#   pipette-ctl campaigns create --name "AFM smoke" \
+#     --plan examples/plans/scheduler/afm-mlx.toml --note afm-mlx-smoke
 #
-# A distinct format from the local-dispatch plans alongside it: no `plan_id`,
-# no `[[transports]]`, no `[retry]`. A variant declares *eligibility* — which
-# registered clients may run it — instead of naming execution targets, and the
-# server leases each job to a matching device. The two formats don't parse as
-# each other, so a mis-selected mode is a loud failure.
+# On the server host, `pipette-mgmt campaigns create <NAME> --org <ORG> --plan
+# <FILE>` files the same document without the HTTP API.
+#
+# Unlike a local-dispatch plan there is no `plan_id`, `[[transports]]` or
+# `[retry]`: a variant declares which registered clients are eligible, and the
+# server leases each job to a matching one. Neither format parses as the other,
+# so using the wrong mode fails loudly.
 
-# Stamped on every generated job; after it the server stops handing them out.
-# Drop the line for jobs that never expire on their own.
-expires_at = "2026-09-01T00:00:00Z"
+# After `expires_at` the server stops handing out this plan's jobs. Omitted, it
+# defaults to 30 days; "never" disables expiry.
+# expires_at = "2026-12-01T00:00:00Z"
+# expires_at = "never"
+
+# The server merges a job into one that already runs the same cell. Uncomment
+# when the plan needs its own run of every cell, such as a variance measurement.
+# merge_duplicates = false
 
 benchmarks = [
   "decode_throughput_512_100",
   "end_to_end_latency_512_256",
 ]
 
-# iOS Apple Foundation. `requires` is what this variant commits to; the
-# supported-iPhone family is injected by the capability rules at generation, so
-# the plan never spells out which devices can run AFM. `clients` widens
-# eligibility to that device whatever its capabilities say.
+# iOS Apple Foundation. The server's capability rules inject the
+# supported-iPhone family, so the plan never lists which devices run AFM.
+# `clients` also admits that device whatever its capabilities. Drop `requires`
+# to pin the variant to the roster: a roster-only variant gets no injection.
+#
+# `private_thermal = true` because the farm's iPhones run only private-API
+# builds, and pipette-ios-proxy runs a job only on a build whose manifest lists
+# its runtime exactly.
 [[variants]]
 requires   = ["os:ios"]
 clients    = ["ev1_9f2c1d3e4b5a6c7d"]
 models     = [{ type = "apple_foundation_text" }]
-runtimes   = [{ type = "apple_foundation" }]
+runtimes   = [{ type = "apple_foundation", private_thermal = true }]
 benchmarks = ["decode_throughput_512_100"]
 
-# macOS MLX: eligibility by capability alone — any registered, approved macOS
-# client that matches claims it. Both top-level benchmarks run here.
+# macOS MLX: eligibility by capability alone, so any approved macOS client may
+# claim it. Both top-level benchmarks run here.
+#
+# The commented clauses narrow that set, and a denial beats the `clients`
+# roster: a known-bad unit, a broken OS build, or one combination that crashes
+# while each part of it is fine. The server rejects an empty `not_all_of`
+# group, which would deny every client.
 [[variants]]
 requires = ["os:macos"]
+# exclude_clients = ["ev1_4a1b2c3d4e5f6a7b"]
+# excludes = ["os_version:15.0"]
+# not_all_of = [["chip:applem1", "runtime:mlx:0.31.3"]]
 models = [
   { type = "mlx", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-350M-MLX-4bit" },
 ]

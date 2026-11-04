@@ -1,0 +1,100 @@
+llama: stage no-mmap weight loads through one bounded buffer
+
+Without mmap and without an async upload backend, load_all_data reads each tensor
+into one reused heap std::vector (upstream #31321). The vector is sized to the
+largest tensor and is reallocated as the biggest-first tensors shrink. On iOS Metal
+has no host buffer type, so every weight takes this path. Each freed vector parks in
+libmalloc's deferred reclaim ring and stays in phys_footprint, and the next
+in-process max_memory_usage cell starts on top of it. The vector also adds the
+largest tensor to the load's own peak.
+
+Stage through ONE ggml_aligned_malloc buffer (vm_allocate on iOS with 002) of
+min(16 MiB, largest staged tensor): read and tensor_set in chunks, free it after the
+loop. Host buffers keep the direct read. CPU_REPACK buffers (not host, and their
+set_tensor takes a tensor only whole) and check_tensors loads keep upstream's reused
+vector. mmap and upload_backend loads are untouched.
+
+Applied at build time by ios/build-llama.sh after 002. Remove once upstreamed to
+ggml-org.
+---
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -18,6 +18,12 @@
+ static const size_t kiB = 1024;
+ static const size_t MiB = 1024*kiB;
+ static const size_t GiB = 1024*MiB;
++
++// exported by ggml-base, declared only in its private ggml-impl.h
++extern "C" {
++GGML_API void * ggml_aligned_malloc(size_t size);
++GGML_API void   ggml_aligned_free(void * ptr, size_t size);
++}
+ 
+ const char * llama_file_version_name(llama_fver version) {
+     switch (version) {
+@@ -1693,6 +1699,41 @@
+         });
+     }
+ 
++    // stage in chunks through one ggml_aligned_malloc buffer (vm_allocate on Apple) of at most 16 MiB,
++    // so no tensor-sized heap block is freed into malloc's deferred reclaim. check_tensors keeps the
++    // whole-tensor read, which validation needs.
++    struct staging_free {
++        size_t size;
++        void operator()(void * p) const { ggml_aligned_free(p, size); }
++    };
++    std::unique_ptr<void, staging_free> staging(nullptr, staging_free{0});
++    // CPU_REPACK buffers take a tensor only whole (their set_tensor asserts offset 0 and full size).
++    auto chunkable = [](const ggml_tensor * t) {
++        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(t->buffer);
++        return !ggml_backend_buft_is_host(buft) && strstr(ggml_backend_buft_name(buft), "REPACK") == nullptr;
++    };
++    if (!use_mmap && !check_tensors && !upload_backend) {
++        size_t n_staged = 0;
++        size_t n_largest = 0;
++        for (const ggml_tensor * cur : tensors) {
++            if (get_weight(ggml_get_name(cur)) == nullptr || lazy.has(cur) || !chunkable(cur)) {
++                continue;
++            }
++            n_staged++;
++            n_largest = std::max(n_largest, ggml_nbytes(cur));
++        }
++        if (n_largest > 0) {
++            // 16 MiB is a multiple of every page size, so each chunk but a tensor's last is one too
++            const size_t size = std::min(16*MiB, n_largest);
++            staging = std::unique_ptr<void, staging_free>(ggml_aligned_malloc(size), staging_free{size});
++            if (!staging) {
++                throw std::runtime_error(format("failed to allocate a %zu-byte staging buffer", size));
++            }
++            LLAMA_LOG_INFO("%s: bounded staging: %zu tensors through one %.2f MiB buffer (largest %.2f MiB)\n",
++                __func__, n_staged, size/1024.0/1024.0, n_largest/1024.0/1024.0);
++        }
++    }
++
+     // staging buffer for non-host buffers without async uploads, reused because a fresh allocation per tensor page faults on every load
+     std::vector<no_init<uint8_t>> read_buf;
+     for (struct ggml_tensor * cur : tensors) {
+@@ -1813,6 +1854,15 @@
+                         ++buffer_idx;
+                         buffer_idx %= n_buffers;
+                     }
++                } else if (staging && chunkable(cur)) {
++                    const size_t chunk = staging.get_deleter().size;
++                    for (size_t off = 0; off < n_size; off += chunk) {
++                        const size_t n = std::min(chunk, n_size - off);
++                        // seek per chunk: a direct-I/O read leaves the position past the chunk
++                        file->seek(weight->offs + off, SEEK_SET);
++                        file->read_raw(staging.get(), n);
++                        ggml_backend_tensor_set(cur, staging.get(), off, n);
++                    }
+                 } else {
+                     // with direct IO read the aligned range around the tensor and use the data inside it, so no bounce buffer is needed
+                     const size_t align          = file->read_alignment();
+@@ -1852,6 +1902,7 @@
+         ggml_backend_buffer_free(buf);
+     }
+     ggml_backend_free(upload_backend);
++    staging.reset();
+ 
+     // check validation results
+     bool validation_failed = false;

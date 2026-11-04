@@ -13,7 +13,8 @@ enum class BenchmarkType(val wire: String, val displayName: String, val rank: In
   DECODE_THROUGHPUT("decode_throughput", "Decode Throughput", 2),
   MAX_MEMORY_USAGE("max_memory_usage", "Max Memory Usage", 3),
   VL_THROUGHPUT("vl_throughput", "Vision-Language Throughput", 4),
-  EVAL("eval", "Eval Accuracy", 5);
+  EVAL("eval", "Eval Accuracy", 5),
+  VLM_EVAL("vlm_eval", "VLM Eval Accuracy", 6);
 
   /**
    * Whether this benchmark must observe the model load itself, so the runner has to load fresh inside the measured window rather than reuse a
@@ -25,6 +26,14 @@ enum class BenchmarkType(val wire: String, val displayName: String, val rank: In
    */
   val requiresFreshLoad: Boolean
     get() = this == MAX_MEMORY_USAGE
+
+  /**
+   * Whether a cell of this type needs an mmproj paired with its model, so [JobRunner.planCells] can decide which benchmarks get the vision-pairing
+   * loop (mmproj selection, `isVlCompatible` gating) instead of the plain one. Lives on the type for the same reason [requiresFreshLoad] does: a call
+   * site that restates `== VL_THROUGHPUT` silently misses the next vision benchmark added, as [VLM_EVAL] would have if this weren't centralized.
+   */
+  val requiresVisionProjector: Boolean
+    get() = this == VL_THROUGHPUT || this == VLM_EVAL
 
   companion object {
     fun fromWire(wire: String): BenchmarkType? = entries.firstOrNull { it.wire == wire }
@@ -55,31 +64,44 @@ sealed class BenchmarkDefinition {
 
   protected fun base(): JSONObject = JSONObject().put("benchmark_id", benchmarkId.toString()).put("benchmark_type", type.wire)
 
-  data class PrefillThroughput(override val benchmarkId: BenchmarkId, val prefillTokens: Int) : BenchmarkDefinition() {
+  /** The picker shows two rows at different concurrency apart; the reference size adds nothing to a label that predates it. */
+  protected fun batchSuffix(batchSize: Int): String = if (batchSize == 1) "" else " x$batchSize in flight"
+
+  /**
+   * The three timing kinds carry `parameter_batch_size`, the requests kept in flight at once: `1` is the reference procedure and what an entry that
+   * omits it means, as the crate's `default_batch_size` and iOS's `decodeIfPresent ?? 1` read it. Carried through [toJson] because that JSON is what
+   * the engine is fed: an entry that lost the field here would run serially and be filed under a `_bs<n>` id that promises the measurement under
+   * load, which is exactly what the engine's `checkBatchSize` exists to refuse.
+   */
+  data class PrefillThroughput(override val benchmarkId: BenchmarkId, val prefillTokens: Int, val batchSize: Int = 1) : BenchmarkDefinition() {
     override val type = BenchmarkType.PREFILL_THROUGHPUT
 
-    override fun toJson(): JSONObject = base().put("parameter_prefill_tokens", prefillTokens)
+    override fun toJson(): JSONObject = base().put("parameter_prefill_tokens", prefillTokens).put("parameter_batch_size", batchSize)
 
     override val label: String
-      get() = "${prefillTokens}tok in"
+      get() = "${prefillTokens}tok in${batchSuffix(batchSize)}"
   }
 
-  data class DecodeThroughput(override val benchmarkId: BenchmarkId, val prefillTokens: Int, val decodeTokens: Int) : BenchmarkDefinition() {
+  data class DecodeThroughput(override val benchmarkId: BenchmarkId, val prefillTokens: Int, val decodeTokens: Int, val batchSize: Int = 1) :
+    BenchmarkDefinition() {
     override val type = BenchmarkType.DECODE_THROUGHPUT
 
-    override fun toJson(): JSONObject = base().put("parameter_prefill_tokens", prefillTokens).put("parameter_decode_tokens", decodeTokens)
+    override fun toJson(): JSONObject =
+      base().put("parameter_prefill_tokens", prefillTokens).put("parameter_decode_tokens", decodeTokens).put("parameter_batch_size", batchSize)
 
     override val label: String
-      get() = "${prefillTokens}tok in - $decodeTokens tok out"
+      get() = "${prefillTokens}tok in - $decodeTokens tok out${batchSuffix(batchSize)}"
   }
 
-  data class EndToEndLatency(override val benchmarkId: BenchmarkId, val prefillTokens: Int, val decodeTokens: Int) : BenchmarkDefinition() {
+  data class EndToEndLatency(override val benchmarkId: BenchmarkId, val prefillTokens: Int, val decodeTokens: Int, val batchSize: Int = 1) :
+    BenchmarkDefinition() {
     override val type = BenchmarkType.END_TO_END_LATENCY
 
-    override fun toJson(): JSONObject = base().put("parameter_prefill_tokens", prefillTokens).put("parameter_decode_tokens", decodeTokens)
+    override fun toJson(): JSONObject =
+      base().put("parameter_prefill_tokens", prefillTokens).put("parameter_decode_tokens", decodeTokens).put("parameter_batch_size", batchSize)
 
     override val label: String
-      get() = "${prefillTokens}tok in - $decodeTokens tok out"
+      get() = "${prefillTokens}tok in - $decodeTokens tok out${batchSuffix(batchSize)}"
   }
 
   data class MaxMemoryUsage(override val benchmarkId: BenchmarkId, val prefillTokens: Int) : BenchmarkDefinition() {
@@ -123,6 +145,34 @@ sealed class BenchmarkDefinition {
 
     override fun toJson(): JSONObject {
       val json = base().put("parameter_eval_id", evalId).put("parameter_dataset_name", datasetName).put("parameter_max_tokens", maxTokens)
+      mcqChoices?.let { json.put("parameter_mcq_choices", JSONArray(it)) }
+      samples?.let { json.put("samples", it) }
+      return json
+    }
+
+    override val label: String
+      get() = benchmarkId.toString()
+  }
+
+  /** Mirrors pipette-plan-types `VlmEvalBenchmark`: an lmms-eval task run against image-bearing samples. */
+  data class VlmEval(
+    override val benchmarkId: BenchmarkId,
+    val lmmsTask: String,
+    val datasetVersion: String,
+    val sampleCount: Int,
+    val maxTokens: Int,
+    val mcqChoices: List<String>?,
+    val samples: JSONArray?,
+  ) : BenchmarkDefinition() {
+    override val type = BenchmarkType.VLM_EVAL
+
+    override fun toJson(): JSONObject {
+      val json =
+        base()
+          .put("parameter_lmms_task", lmmsTask)
+          .put("parameter_dataset_version", datasetVersion)
+          .put("parameter_sample_count", sampleCount)
+          .put("parameter_max_tokens", maxTokens)
       mcqChoices?.let { json.put("parameter_mcq_choices", JSONArray(it)) }
       samples?.let { json.put("samples", it) }
       return json
@@ -183,9 +233,11 @@ sealed class BenchmarkDefinition {
     private fun decodeKnown(obj: JSONObject, type: BenchmarkType): BenchmarkDefinition {
       val id = BenchmarkId.parse(obj.getString("benchmark_id"))
       return when (type) {
-        BenchmarkType.PREFILL_THROUGHPUT -> PrefillThroughput(id, obj.getInt("parameter_prefill_tokens"))
-        BenchmarkType.DECODE_THROUGHPUT -> DecodeThroughput(id, obj.getInt("parameter_prefill_tokens"), obj.getInt("parameter_decode_tokens"))
-        BenchmarkType.END_TO_END_LATENCY -> EndToEndLatency(id, obj.getInt("parameter_prefill_tokens"), obj.getInt("parameter_decode_tokens"))
+        BenchmarkType.PREFILL_THROUGHPUT -> PrefillThroughput(id, obj.getInt("parameter_prefill_tokens"), batchSize(obj))
+        BenchmarkType.DECODE_THROUGHPUT ->
+          DecodeThroughput(id, obj.getInt("parameter_prefill_tokens"), obj.getInt("parameter_decode_tokens"), batchSize(obj))
+        BenchmarkType.END_TO_END_LATENCY ->
+          EndToEndLatency(id, obj.getInt("parameter_prefill_tokens"), obj.getInt("parameter_decode_tokens"), batchSize(obj))
         BenchmarkType.MAX_MEMORY_USAGE -> MaxMemoryUsage(id, obj.getInt("parameter_prefill_tokens"))
         BenchmarkType.VL_THROUGHPUT ->
           VlThroughput(
@@ -204,8 +256,21 @@ sealed class BenchmarkDefinition {
             obj.optJSONArray("parameter_mcq_choices")?.let { arr -> List(arr.length()) { arr.getString(it) } },
             obj.optJSONArray("samples"),
           )
+        BenchmarkType.VLM_EVAL ->
+          VlmEval(
+            id,
+            obj.getString("parameter_lmms_task"),
+            obj.getString("parameter_dataset_version"),
+            obj.getInt("parameter_sample_count"),
+            obj.getInt("parameter_max_tokens"),
+            obj.optJSONArray("parameter_mcq_choices")?.let { arr -> List(arr.length()) { arr.getString(it) } },
+            obj.optJSONArray("samples"),
+          )
       }
     }
+
+    /** Absent (or null) means the reference procedure, one request in flight, as every entry written before the parameter existed. */
+    private fun batchSize(obj: JSONObject): Int = if (obj.isNull("parameter_batch_size")) 1 else obj.getInt("parameter_batch_size")
 
     /**
      * Reconstruct a definition from a structured benchmark id, for the four ladder types — the resolution fallback when the synced catalog has no
@@ -217,7 +282,8 @@ sealed class BenchmarkDefinition {
      * - `decode_throughput_<P>_<D>` → [DecodeThroughput]
      * - `end_to_end_latency_<P>_<D>` → [EndToEndLatency]
      *
-     * Returns null for `eval`, `vl_throughput`, `_smoke`, or anything that doesn't match a known type with the expected trailing integers.
+     * Returns null for `eval`, `vlm_eval`, `vl_throughput`, `_smoke`, or anything that doesn't match a known type with the expected trailing
+     * integers.
      */
     fun parseId(id: String): BenchmarkDefinition? {
       val bid = BenchmarkId.parseOrNull(id) ?: return null

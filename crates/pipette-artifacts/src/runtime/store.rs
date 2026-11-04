@@ -1,15 +1,8 @@
-//! [`RuntimeArtifactStore`] — resolve a declared runtime to its installed
-//! on-disk form, the runtime-side counterpart to [`crate::model`].
-//!
-//! The store owns *where* a runtime's binaries live (the workspace `runtimes/`
-//! tree); the install callback owns *how* they arrive.
-//! [`RuntimeArtifactStore::find`] is the read path (is it installed?);
-//! [`RuntimeArtifactStore::ensure`] is find-or-fetch. Staging and atomic publish
-//! are delegated to the shared [`crate::entry`] engine (the same one the model
-//! store uses), so a partial or failed fetch never leaves a half-written entry
-//! and a re-run resolves the already-installed runtime.
+//! [`RuntimeArtifactStore`]: the workspace `runtimes/` tree, the runtime-side
+//! counterpart to [`crate::model`]'s store. Staging and atomic publish are the
+//! shared [`crate::entry`] engine's.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
@@ -20,41 +13,35 @@ use super::key::{RuntimeStorageKey, RuntimeStorageKeyError};
 use super::manifest::{RuntimeManifest, RuntimeManifestError};
 use super::stored::to_stored;
 use crate::entry::{
-    entry_size_bytes, install_dir_computing_manifest, BLOBS_DIR_NAME, MANIFEST_NAME,
-    STAGING_DIR_NAME,
+    BLOBS_DIR_NAME, MANIFEST_NAME, STAGING_DIR_NAME, entry_size_bytes, hold_entry,
+    install_dir_computing_manifest, lock_entry,
 };
 use crate::quota::QuotaError;
 
-/// A runtime-store failure.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeStoreError {
-    /// The runtime has no storage key (on-device or OS-bundled — not installed).
     #[error(transparent)]
     NotStorable(#[from] RuntimeStorageKeyError),
-    /// A stored manifest is unusable — bad version or placement drift.
+    /// The manifest parses but is invalid: bad version or placement drift.
     #[error("installed runtime is corrupt: {0}")]
     Corrupt(String),
-    /// The runtime cannot fit under the configured storage quota.
     #[error(transparent)]
     Quota(#[from] QuotaError),
-    /// The fetcher failed to install the runtime's binaries (or the publish
-    /// failed). The shared staging engine has already cleaned up.
+    /// The install or the publish failed; staging is already cleaned up.
     #[error("installing runtime `{runtime}` failed")]
     Fetch {
         runtime: String,
         #[source]
         source: anyhow::Error,
     },
-    /// A filesystem operation on the manifest failed; `doing` names it.
     #[error("{doing}")]
     Io {
         doing: String,
         #[source]
         source: std::io::Error,
     },
-    /// A manifest on disk didn't parse as TOML, or a typed field failed
-    /// deserialization (e.g. non–RFC 3339 `fetched_at`) — distinct from a
-    /// parseable-but-invalid manifest, which is `Corrupt`.
+    /// Not TOML, or a typed field failed to deserialize. `ensure` treats this
+    /// as a torn write and reinstalls; `Corrupt` it does not.
     #[error("parsing the runtime manifest at {path} failed")]
     Parse {
         path: PathBuf,
@@ -63,7 +50,6 @@ pub enum RuntimeStoreError {
     },
 }
 
-// The manifest layer's failures fold into the store's own variants.
 impl From<RuntimeManifestError> for RuntimeStoreError {
     fn from(err: RuntimeManifestError) -> Self {
         match err {
@@ -76,13 +62,9 @@ impl From<RuntimeManifestError> for RuntimeStoreError {
 
 /// Filesystem runtime store rooted at a workspace `runtimes/` directory.
 ///
-/// Assumes a single writer: [`Self::ensure`] stages an install, then swaps it
-/// into place (replacing any stale copy first), so a reader never sees a
-/// half-written entry. A crash mid-install can orphan a `.staging/<name>` dir;
-/// those are safe to delete and are the operator's to garbage-collect.
-///
-/// The store owns *where* payloads land (`blobs/`); the `install` callback owns
-/// *how*. Tools are resolved later via [`RuntimeManifest::resolve_tool`].
+/// [`Self::ensure`] stages an install and renames it into place, so a reader
+/// never sees a half-written entry. A crash mid-install leaves a staged dir
+/// under `.staging`, which [`crate::quota`] reclaims as garbage.
 pub struct RuntimeArtifactStore {
     runtimes_dir: PathBuf,
 }
@@ -92,12 +74,10 @@ impl RuntimeArtifactStore {
         Self { runtimes_dir }
     }
 
-    /// Workspace `runtimes/` root this store was opened on.
     pub fn runtimes_dir(&self) -> &Path {
         &self.runtimes_dir
     }
 
-    /// Absolute entry dir for `manifest` under this store.
     pub fn entry_dir_for(
         &self,
         manifest: &RuntimeManifest,
@@ -105,7 +85,6 @@ impl RuntimeArtifactStore {
         manifest.entry_dir(self.runtimes_dir())
     }
 
-    /// Absolute install root for `manifest` under this store (`stored` form).
     pub fn install_dir_for(
         &self,
         manifest: &RuntimeManifest,
@@ -113,21 +92,16 @@ impl RuntimeArtifactStore {
         manifest.install_dir(self.runtimes_dir())
     }
 
-    /// The on-disk entry directory for a stored runtime: `runtimes_dir/<key>`.
     fn entry_dir(&self, key: &RuntimeStorageKey) -> PathBuf {
         self.runtimes_dir.join(key.relative_dir())
     }
 
-    /// The stored manifest for `declared`, or `None` if it isn't installed. Pure
-    /// read — no fetch, no mutation. Unparseable bytes or typed-field failures
-    /// (including a non–RFC 3339 `fetched_at`) → `Err(Parse)`;
-    /// parseable-but-invalid (bad version, placement drift) → `Err(Corrupt)`.
+    /// The stored manifest for `declared`, or `None` if it isn't installed.
+    /// Read-only.
     ///
-    /// Only `manifest.toml` is read — neither the `blobs/` payload nor, for a
-    /// docker runtime, the daemon image is checked, so an out-of-band deletion
-    /// isn't caught here (nor by [`Self::ensure`]). A docker entry records only
-    /// that a pull once succeeded; a filesystem kind surfaces a missing payload
-    /// when its tool is resolved at launch.
+    /// Only `manifest.toml` is read: an out-of-band deletion of the `blobs/`
+    /// payload or the docker image is not caught here (nor by [`Self::ensure`]).
+    /// A filesystem kind surfaces a missing payload when its tool is resolved.
     pub fn find(&self, declared: &Runtime) -> Result<Option<RuntimeManifest>, RuntimeStoreError> {
         let entry = self.entry_dir(&RuntimeStorageKey::of(declared)?);
         if !entry.join(MANIFEST_NAME).exists() {
@@ -136,7 +110,32 @@ impl RuntimeArtifactStore {
         Ok(Some(read_manifest(&entry)?))
     }
 
-    /// Stamp `last_used_at = now` on a resolved entry — the eviction order.
+    /// Like [`Self::find`], but `None` when the manifest does not parse
+    /// ([`Self::ensure`] repairs that entry under its lock). `Corrupt` and
+    /// other errors pass through.
+    pub(crate) fn find_intact(
+        &self,
+        declared: &Runtime,
+    ) -> Result<Option<RuntimeManifest>, RuntimeStoreError> {
+        match self.find(declared) {
+            Err(RuntimeStoreError::Parse { .. }) => Ok(None),
+            found => found,
+        }
+    }
+
+    /// The in-use lock on `declared`'s entry (see [`hold_entry`]), or `None` when
+    /// a sweep removed the entry before the lock was taken. The inner `None` is a
+    /// store that cannot be locked.
+    pub(crate) fn hold(
+        &self,
+        declared: &Runtime,
+    ) -> Result<Option<Option<File>>, RuntimeStoreError> {
+        let key = RuntimeStorageKey::of(declared)?;
+        let lock = hold_entry(&self.runtimes_dir, key.as_str());
+        Ok(self.find_intact(declared)?.map(|_| lock))
+    }
+
+    /// Stamp `last_used_at`, the sweep's eviction order.
     /// Best-effort: a read-only store must still resolve runtimes, so a failed
     /// write is logged and the in-memory value advances regardless.
     fn touch(&self, manifest: &mut RuntimeManifest) {
@@ -145,18 +144,29 @@ impl RuntimeArtifactStore {
             return;
         };
         if let Err(err) = crate::entry::rewrite_manifest(&entry, MANIFEST_NAME, manifest) {
-            log::debug!(
-                "could not record last_used_at for {}: {err:#}",
-                entry.display()
+            tracing::debug!(
+                path = %entry.display(),
+                error = %format_args!("{err:#}"),
+                "could not record last_used_at"
             );
         }
     }
 
-    /// The manifest for `declared`, installing + recording it first if it isn't
-    /// already stored. A re-run resolves the existing install without re-fetching.
+    fn touched(&self, found: Option<RuntimeManifest>) -> Option<RuntimeManifest> {
+        found.map(|mut manifest| {
+            self.touch(&mut manifest);
+            manifest
+        })
+    }
+
+    /// The manifest for `declared`, installing it first on a miss.
+    ///
+    /// An entry whose manifest does not parse (a crash mid-write, or an older
+    /// version such as v1) is removed and reinstalled: the runtime spec lived
+    /// in that manifest, so nothing else can repair it.
     ///
     /// `install` writes into the store-owned `blobs/` dir and must fail if
-    /// required tools are missing (same role as the model store's `fetch` callback).
+    /// required tools are missing.
     pub fn ensure<F>(
         &self,
         declared: &Runtime,
@@ -165,22 +175,38 @@ impl RuntimeArtifactStore {
     where
         F: FnMut(&Runtime, &Path) -> anyhow::Result<()>,
     {
-        if let Some(mut manifest) = self.find(declared)? {
-            self.touch(&mut manifest);
+        if let Some(manifest) = self.touched(self.find_intact(declared)?) {
             return Ok(manifest);
         }
         let key = RuntimeStorageKey::of(declared)?;
+        // Another process sharing the store may be installing it: wait for it,
+        // then look again.
+        let _installing = lock_entry(&self.runtimes_dir, key.as_str()).map_err(|source| {
+            RuntimeStoreError::Fetch {
+                runtime: declared.to_string(),
+                source,
+            }
+        })?;
+        let found = match self.find(declared) {
+            Err(RuntimeStoreError::Parse { path, source }) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %source,
+                    "runtime manifest does not parse; removing the entry to reinstall it"
+                );
+                // Before the install, so that the disk does not hold two payloads.
+                self.remove(declared)?;
+                None
+            }
+            found => found?,
+        };
+        if let Some(manifest) = self.touched(found) {
+            return Ok(manifest);
+        }
         let entry = self.entry_dir(&key);
-        // Deliberately taken before the install, matching the model store: the
-        // record dates when the pull started, not when it finished.
+        // Before the install, matching the model store: the record dates when
+        // the pull started.
         let fetched_at = OffsetDateTime::now_utc();
-        // The shared engine stages into `.staging/<key>.staged-<uuid>`, runs the
-        // install, writes `manifest.toml` at the entry root beside the `blobs/`
-        // payload, renames the whole dir into place — cleaning up on any failure.
-        // The store creates and owns `blobs/`; the callback only sees that payload
-        // dir. Required tools are checked by the installer; lookup at use time
-        // walks install_dir. The manifest is built inside the closure (install
-        // must run first), then handed back.
         let manifest = install_dir_computing_manifest(
             &self.runtimes_dir.join(STAGING_DIR_NAME),
             &entry,
@@ -190,8 +216,7 @@ impl RuntimeArtifactStore {
                 let blobs = staged.join(BLOBS_DIR_NAME);
                 fs::create_dir_all(&blobs)?;
                 install(declared, &blobs)?;
-                // Measured after the install, which is the only moment the size
-                // is knowable for a venv nobody declared a size for.
+                // A venv has no declared size; only the install reveals it.
                 Ok(RuntimeManifest::new(
                     declared.clone(),
                     fetched_at,
@@ -206,12 +231,20 @@ impl RuntimeArtifactStore {
         Ok(manifest)
     }
 
-    /// Every recorded runtime, read from each `runtimes/<key>/manifest.toml`.
-    /// Dirs without a manifest (partial installs, `.staging`, foreign entries)
-    /// are skipped; sorted by the runtime's CLI ref for stable output. Includes
-    /// docker runtimes — their entry is manifest-only. A malformed manifest or an
-    /// unreadable dir entry surfaces as an error rather than being dropped.
+    /// Every recorded runtime, sorted by CLI ref. Dirs without a manifest
+    /// (partial installs, `.staging`) and legacy engine manifests are skipped;
+    /// an unparseable manifest is an error.
     pub fn list(&self) -> Result<Vec<RuntimeManifest>, RuntimeStoreError> {
+        self.walk(false)
+    }
+
+    /// Like [`Self::list`], but warn and skip an unparseable manifest, so one
+    /// torn entry does not stop the worker's capability survey.
+    pub fn list_intact(&self) -> Result<Vec<RuntimeManifest>, RuntimeStoreError> {
+        self.walk(true)
+    }
+
+    fn walk(&self, skip_unparseable: bool) -> Result<Vec<RuntimeManifest>, RuntimeStoreError> {
         if !self.runtimes_dir.exists() {
             return Ok(Vec::new());
         }
@@ -230,8 +263,6 @@ impl RuntimeArtifactStore {
                 Err(e) => Some(Err(e)),
                 Ok(entry) => {
                     let dir = entry.path();
-                    // Skip non-dirs, reserved/hidden dirs (`.staging`), and dirs
-                    // without a manifest.
                     let recorded = dir.is_dir()
                         && dir
                             .file_name()
@@ -255,15 +286,24 @@ impl RuntimeArtifactStore {
                     }
                 }
             })
+            .filter(|read| match read {
+                Err(RuntimeStoreError::Parse { path, source }) if skip_unparseable => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %source,
+                        "runtime manifest does not parse; skipping its entry"
+                    );
+                    false
+                }
+                _ => true,
+            })
             .collect::<Result<Vec<RuntimeManifest>, _>>()?;
         manifests.sort_by_key(|m| m.declared.cli_ref());
         Ok(manifests)
     }
 
-    /// Remove a runtime's `runtimes/<key>/` record (and any `blobs/` payload).
-    /// Returns whether an entry was present. Record-only: a docker runtime's
-    /// daemon image is left in place — removing it is the docker installer's
-    /// concern, not the filesystem store's.
+    /// Remove a runtime's entry; returns whether one was present. A docker
+    /// runtime's daemon image is left in place.
     pub fn remove(&self, declared: &Runtime) -> Result<bool, RuntimeStoreError> {
         let entry = self.entry_dir(&RuntimeStorageKey::of(declared)?);
         if !entry.exists() {
@@ -277,20 +317,20 @@ impl RuntimeArtifactStore {
     }
 }
 
-/// Read + validate the `manifest.toml` at an entry dir: raw read → TOML /
-/// typed deserialize (`Parse`) → validation (`Corrupt`). Typed, so callers keep
-/// the unparseable-vs-invalid distinction. Free of the store because the entry
-/// dir is the whole input — the quota survey reads entries the store never
+/// Free of the store because the quota survey reads entries the store never
 /// resolved.
 pub(crate) fn read_manifest(entry: &Path) -> Result<RuntimeManifest, RuntimeStoreError> {
     let manifest_path = entry.join(MANIFEST_NAME);
-    let raw = fs::read_to_string(&manifest_path).map_err(|source| RuntimeStoreError::Io {
+    let raw = fs::read(&manifest_path).map_err(|source| RuntimeStoreError::Io {
         doing: format!("reading {}", manifest_path.display()),
         source,
     })?;
-    let m: RuntimeManifest = toml::from_str(&raw).map_err(|source| RuntimeStoreError::Parse {
-        path: manifest_path.clone(),
-        source,
+    // Bytes that are not UTF-8 fail the TOML parse as `Parse`, not as `Io`.
+    let m: RuntimeManifest = toml::from_str(&String::from_utf8_lossy(&raw)).map_err(|source| {
+        RuntimeStoreError::Parse {
+            path: manifest_path.clone(),
+            source,
+        }
     })?;
     if m.manifest_version != crate::runtime::manifest::MANIFEST_VERSION {
         return Err(RuntimeStoreError::Corrupt(format!(
@@ -309,14 +349,12 @@ pub(crate) fn read_manifest(entry: &Path) -> Result<RuntimeManifest, RuntimeStor
     Ok(m)
 }
 
-/// Peek-only owner of a `runtimes/*/manifest.toml` (full parse is per-owner).
+/// Who wrote a `runtimes/*/manifest.toml`, from a peek.
 ///
-/// `Engine` is the legacy torch-oai format — a serde-tagged `RuntimeEngine`,
-/// written until #872 removed that writer. Its dir names, e.g.
-/// `vllm@0.22.0+cu129.py3.12`, can't collide with a [`RuntimeStorageKey`], so
-/// [`RuntimeArtifactStore::find`] never lands on one; only
-/// [`RuntimeArtifactStore::list`] walks the dir blind and meets them, and
-/// skipping beats failing a workspace that predates the unification.
+/// `Engine` is a legacy serde-tagged `RuntimeEngine` record. Its dir names
+/// (e.g. `vllm@0.22.0+cu129.py3.12`) can't collide with a
+/// [`RuntimeStorageKey`], so `find` never lands on one. The list walk skips
+/// them rather than fail an older workspace; [`crate::quota`] reclaims them.
 pub(crate) enum ManifestKind {
     Store,
     Engine,
@@ -324,15 +362,19 @@ pub(crate) enum ManifestKind {
 }
 
 pub(crate) fn classify_manifest_toml(path: &Path) -> Result<ManifestKind, RuntimeStoreError> {
-    let raw = fs::read_to_string(path).map_err(|source| RuntimeStoreError::Io {
+    let raw = fs::read(path).map_err(|source| RuntimeStoreError::Io {
         doing: format!("reading {}", path.display()),
         source,
     })?;
-    let value: toml::Value = toml::from_str(&raw).map_err(|source| RuntimeStoreError::Parse {
-        path: path.to_path_buf(),
-        source,
+    let value: toml::Value = toml::from_str(&String::from_utf8_lossy(&raw)).map_err(|source| {
+        RuntimeStoreError::Parse {
+            path: path.to_path_buf(),
+            source,
+        }
     })?;
-    if value.get("manifest_version").is_some() {
+    // A document with no keys is an empty file, which a crash during a write
+    // can leave. The store reader reports it as `Parse`, as `find` does.
+    if value.get("manifest_version").is_some() || value.as_table().is_some_and(|t| t.is_empty()) {
         return Ok(ManifestKind::Store);
     }
     if value
@@ -356,31 +398,39 @@ mod tests {
     use std::fs;
 
     use pipette_plan_types::{
-        LlamaCppFlavor, LlamacppCliStockTools, LlamacppCliStockToolsSource, NonEmptyString,
-        RepositoryUrl, SourceRepository,
+        LlamaCppFlavor, LlamacppCliStockTools, LlamacppCliStockToolsRelease,
+        LlamacppCliStockToolsSource, NonEmptyString, RepositoryUrl,
     };
 
     use super::*;
 
     fn declared() -> anyhow::Result<Runtime> {
         Ok(Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
-            source: LlamacppCliStockToolsSource::GithubRelease(SourceRepository {
+            source: LlamacppCliStockToolsSource::GithubRelease(LlamacppCliStockToolsRelease {
                 repository_url: RepositoryUrl::new("github.com/ggml-org/llama.cpp"),
                 repository_version: NonEmptyString::try_new("b9305".to_owned())?,
+                asset: None,
             }),
             flavor: LlamaCppFlavor::MacosArm64,
         }))
     }
 
-    /// A runtime's entry dir under `root`, without needing an installed manifest.
     fn entry_dir(root: &std::path::Path, runtime: &Runtime) -> anyhow::Result<std::path::PathBuf> {
         Ok(root.join(RuntimeStorageKey::of(runtime)?.relative_dir()))
     }
 
-    /// Writes a fake `llama-server` into the store-owned `blobs/` dir.
     fn install_stub(_declared: &Runtime, blobs_dir: &std::path::Path) -> anyhow::Result<()> {
         fs::write(blobs_dir.join("llama-server"), b"")?;
         Ok(())
+    }
+
+    fn counting_install(
+        calls: &Cell<usize>,
+    ) -> impl FnMut(&Runtime, &std::path::Path) -> anyhow::Result<()> + '_ {
+        move |declared, blobs_dir| {
+            calls.set(calls.get() + 1);
+            install_stub(declared, blobs_dir)
+        }
     }
 
     #[test]
@@ -392,12 +442,8 @@ mod tests {
 
         assert!(store.find(&runtime)?.is_none(), "not installed yet");
 
-        let mut install = |d: &Runtime, blobs: &std::path::Path| {
-            calls.set(calls.get() + 1);
-            install_stub(d, blobs)
-        };
+        let mut install = counting_install(&calls);
         let manifest = store.ensure(&runtime, &mut install)?;
-        // The manifest resolves its own on-disk entry dir.
         let entry = manifest.entry_dir(tmp.path())?;
         assert_eq!(entry, entry_dir(tmp.path(), &runtime)?);
         assert!(
@@ -413,7 +459,6 @@ mod tests {
             entry.join("blobs/llama-server")
         );
 
-        // `find` now resolves it, and a second `ensure` doesn't re-install.
         assert!(store.find(&runtime)?.is_some());
         store.ensure(&runtime, &mut install)?;
         assert_eq!(calls.get(), 1);
@@ -458,6 +503,72 @@ mod tests {
         Ok(())
     }
 
+    /// A crash mid-write left 444 zero bytes in a manifest on a handset; a torn
+    /// write can also leave non-UTF-8 bytes.
+    #[rstest::rstest]
+    #[case::zero_bytes(&[0u8; 444])]
+    #[case::not_utf8(&[0xFFu8; 444])]
+    #[case::not_toml(b"not = [a manifest")]
+    fn ensure_reinstalls_an_entry_whose_manifest_does_not_parse(
+        #[case] manifest: &[u8],
+    ) -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = RuntimeArtifactStore::new(tmp.path().to_path_buf());
+        let runtime = declared()?;
+        let calls = Cell::new(0usize);
+        let manifest_path = entry_dir(tmp.path(), &runtime)?.join(MANIFEST_NAME);
+        let mut counted = counting_install(&calls);
+        let mut install = |d: &Runtime, blobs: &std::path::Path| {
+            anyhow::ensure!(
+                !manifest_path.exists(),
+                "the old entry is gone before the install"
+            );
+            counted(d, blobs)
+        };
+        store.ensure(&runtime, &mut install)?;
+        fs::write(&manifest_path, manifest)?;
+
+        let (reinstalled, logged) =
+            crate::test_support::logged_text(|| store.ensure(&runtime, &mut install))?;
+        let reinstalled = reinstalled?;
+
+        assert!(
+            logged.contains("WARN") && logged.contains(&manifest_path.display().to_string()),
+            "the damaged entry is logged with its path: {logged}"
+        );
+        assert_eq!(calls.get(), 2, "the damaged entry is installed again");
+        assert_eq!(reinstalled.declared, runtime);
+        assert_eq!(
+            store.find(&runtime)?.map(|m| m.declared),
+            Some(runtime),
+            "the replaced manifest reads back"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::zero_bytes(&[0u8; 444])]
+    #[case::empty(&[])]
+    #[case::not_utf8(&[0xFFu8; 444])]
+    #[case::not_toml(b"not = [a manifest")]
+    fn list_intact_skips_a_zero_byte_manifest_that_list_reports(
+        #[case] manifest: &[u8],
+    ) -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = RuntimeArtifactStore::new(tmp.path().to_path_buf());
+        store.ensure(&declared()?, install_stub)?;
+        let torn = tmp.path().join("llama-cpp__torn");
+        fs::create_dir_all(&torn)?;
+        fs::write(torn.join(MANIFEST_NAME), manifest)?;
+
+        let intact = store.list_intact()?;
+
+        assert_eq!(intact.len(), 1);
+        assert_eq!(intact[0].declared, declared()?);
+        assert!(matches!(store.list(), Err(RuntimeStoreError::Parse { .. })));
+        Ok(())
+    }
+
     #[test]
     fn an_uninstallable_runtime_has_no_entry() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -471,9 +582,6 @@ mod tests {
 
     #[test]
     fn a_payload_named_like_the_manifest_cannot_clobber_the_record() -> anyhow::Result<()> {
-        // The payload lives under `blobs/`, isolated from the entry-root
-        // `manifest.toml`. So even an archive that ships its own `manifest.toml`
-        // lands at `blobs/manifest.toml` and can't overwrite our record.
         let tmp = tempfile::tempdir()?;
         let store = RuntimeArtifactStore::new(tmp.path().to_path_buf());
         let manifest = store.ensure(&declared()?, |_, blobs_dir| {
@@ -482,7 +590,6 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(manifest.declared, declared()?);
-        // Our record is intact and re-readable — not the payload's file.
         assert!(store.find(&declared()?)?.is_some());
         Ok(())
     }
@@ -539,10 +646,7 @@ mod tests {
         let store = RuntimeArtifactStore::new(tmp.path().to_path_buf());
         let runtime = declared()?;
         let calls = Cell::new(0usize);
-        let mut install = |d: &Runtime, blobs: &std::path::Path| {
-            calls.set(calls.get() + 1);
-            install_stub(d, blobs)
-        };
+        let mut install = counting_install(&calls);
         let published = store.ensure(&runtime, &mut install)?;
 
         let resolved = store.ensure(&runtime, &mut install)?;
@@ -595,15 +699,16 @@ mod tests {
         Ok(())
     }
 
-    /// No migration: the version bump strands v1 stores on purpose, and the
-    /// missing field means they fail at deserialization rather than the version
-    /// check. `pipette storage gc` is the recovery, not a compat shim.
+    /// A v1 manifest fails at deserialization (a missing field), not at the
+    /// version check.
     #[test]
     fn a_v1_manifest_is_unreadable() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
         let store = RuntimeArtifactStore::new(tmp.path().to_path_buf());
         let runtime = declared()?;
-        store.ensure(&runtime, install_stub)?;
+        let calls = Cell::new(0usize);
+        let mut install = counting_install(&calls);
+        store.ensure(&runtime, &mut install)?;
 
         let manifest_path = entry_dir(tmp.path(), &runtime)?.join(MANIFEST_NAME);
         let mut table: toml::Table = toml::from_str(&fs::read_to_string(&manifest_path)?)?;
@@ -615,6 +720,12 @@ mod tests {
             store.find(&runtime),
             Err(RuntimeStoreError::Parse { .. })
         ));
+        store.ensure(&runtime, &mut install)?;
+        assert_eq!(calls.get(), 2, "the v1 entry is installed again");
+        assert!(
+            store.find(&runtime)?.is_some(),
+            "the replaced manifest reads back"
+        );
         Ok(())
     }
 

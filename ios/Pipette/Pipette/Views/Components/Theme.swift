@@ -6,12 +6,7 @@ import UIKit
 private let serifFontName = "IowanOldStyle-Roman"
 
 extension Font {
-    /// The app's serif display font (used for page titles and card headings).
-    ///
-    /// Centralizes the font-family name so it lives in exactly one place. It
-    /// was previously spelled out as `.custom("IowanOldStyle-Roman", size:)` at
-    /// ~20 call sites — a single typo there would silently fall back to the
-    /// system font with no compiler warning.
+    /// The app's serif display font, for page titles and card headings.
     static func serif(_ size: CGFloat) -> Font {
         .custom(serifFontName, size: size)
     }
@@ -48,10 +43,8 @@ extension View {
 // MARK: - Card chrome
 
 extension View {
-    /// The hairline border drawn around cards and grouped containers. Replaces
-    /// the `RoundedRectangle(...).strokeBorder(Color(.systemGray5), lineWidth: 1)`
-    /// overlay that was hand-rolled in ~10 places. Compose it over whatever
-    /// background the card already sets.
+    /// The hairline border around cards and grouped containers, drawn over
+    /// whatever background the card sets.
     func cardBorder(cornerRadius: CGFloat) -> some View {
         overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -59,10 +52,8 @@ extension View {
         )
     }
 
-    /// A card container: the standard `systemBackground` fill in a continuous
-    /// rounded rect plus the `cardBorder` hairline — the `.background(…, in:).cardBorder(…)`
-    /// pair that recurred across the New Job steps and the settings cards. Clip and
-    /// shadow stay caller-side, since only some cards want them.
+    /// A card container: `systemBackground` fill plus the `cardBorder` hairline.
+    /// Clip and shadow stay caller-side, since only some cards want them.
     func appCard(cornerRadius: CGFloat) -> some View {
         background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .cardBorder(cornerRadius: cornerRadius)
@@ -79,9 +70,7 @@ extension View {
 
 // MARK: - Status badge
 
-/// A small capsule pill showing a status label tinted by its colour — used for
-/// the overall job status and for per-cell run status, which previously
-/// repeated the same six modifiers inline.
+/// A capsule status pill, for job and per-cell run status.
 struct StatusBadge: View {
     let label: String
     let color: Color

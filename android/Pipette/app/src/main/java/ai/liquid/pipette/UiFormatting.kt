@@ -57,9 +57,12 @@ fun thermalDescription(provider: AndroidThermalStatusProvider): String = Android
  * Caption for the live cooldown timer at a render instant, e.g. `"Cooling 0:20 / 3:00 max"`. Shared by the Compose pocket (JobLiveActivity) and the
  * classic-Views BenchmarkActivity — pure Kotlin (no Compose), so both processes can call it. [sinceMillis] is when cooling began; [nowMillis] is the
  * render clock.
+ *
+ * [maxMillis] is the budget the gate is actually applying, which a cell's `benchmark_flags.readiness.max_wait_secs` can move off the default; the
+ * caption both prints it and clamps the elapsed to it, so a caller that passes the wrong one renders a timer against a deadline nobody is enforcing.
  */
-fun coolingCaption(sinceMillis: Long, nowMillis: Long): String {
-  val max = (Readiness.COOLDOWN_MAX_MILLIS / MILLIS_PER_SECOND).toInt()
+fun coolingCaption(sinceMillis: Long, nowMillis: Long, maxMillis: Long = Readiness.COOLDOWN_MAX_MILLIS): String {
+  val max = (maxMillis / MILLIS_PER_SECOND).toInt()
   // Clamp: the gate polls on an interval, so it can sit a poll past its own deadline before
   // returning, and the once-a-second ticker would otherwise render an elapsed above `max`.
   val elapsed = ((nowMillis - sinceMillis).coerceAtLeast(0L) / MILLIS_PER_SECOND).toInt().coerceAtMost(max)

@@ -8,6 +8,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowBuild
 
 /**
  * Pins the `PATCH /clients/me` body against the server's schema (`pipette-mgmt` `docs/httpapi.md` §2.4.1). Robolectric supplies the real Android
@@ -24,14 +25,23 @@ class ProfileRefreshBodyTest {
 
   @Test
   fun `carries the device profile fields the server accepts`() {
+    ShadowBuild.setSupportedAbis(arrayOf("arm64-v8a"))
     val json = body()
     assertEquals("Android", json.getString("device_os_name"))
     assertTrue(json.getString("device_name").isNotBlank())
     assertTrue(json.getString("device_os_version").isNotBlank())
     assertTrue(json.getString("device_chip_model").isNotBlank())
+    assertEquals("arm64-v8a", json.getString("device_cpu_arch"))
+    assertEquals("Android", json.getString("device_os_family"))
     // Presence and type only: Robolectric's shadowed ActivityManager leaves MemoryInfo.totalMem at 0, so the value is 0 here and real on a device.
     assertTrue(json.has("device_ram_bytes"))
     assertTrue(json.getLong("device_ram_bytes") >= 0)
+  }
+
+  @Test
+  fun `omits the cpu arch when the platform lists no ABI`() {
+    ShadowBuild.setSupportedAbis(emptyArray())
+    assertFalse("device_cpu_arch must be absent, not null", body().has("device_cpu_arch"))
   }
 
   @Test
@@ -84,4 +94,77 @@ class ProfileRefreshBodyTest {
     assertTrue(json.has("capabilities"))
     assertEquals(0, json.getJSONArray("capabilities").length())
   }
+
+  // ── the recorded status ─────────────────────────────────────────────────
+
+  private val storage by lazy { LocalStorage(ApplicationProvider.getApplicationContext()) }
+
+  private val service by lazy {
+    // The client is never reached: `storeStatus` reads and writes the registration and makes no request.
+    ProfileRefreshService(
+      ApplicationProvider.getApplicationContext(),
+      storage,
+      ManagementClient(Secrets(ApplicationProvider.getApplicationContext())),
+    )
+  }
+
+  /**
+   * The server's verdict lands on the registration, which is what the Settings `Status` row reads.
+   *
+   * A client that registers without a pre-auth key starts `pending`. Without this the row says `pending` for the life of the install, including to
+   * the operator who has just approved the device and is looking at the phone to confirm it.
+   */
+  @Test
+  fun `records an approval the server reports after registration`() {
+    storage.saveRegistration(registration(status = "pending"))
+
+    service.storeStatus("approved")
+
+    assertEquals("approved", storage.loadRegistration()?.status)
+  }
+
+  /** Every other field survives, so recording a verdict cannot cost the device the rest of its registration. */
+  @Test
+  fun `rewrites only the status`() {
+    storage.saveRegistration(registration(status = "pending"))
+
+    service.storeStatus("approved")
+
+    assertEquals(registration(status = "approved"), storage.loadRegistration())
+  }
+
+  /** `status` is required in the response, so a blank one is a server this client does not understand, and the recorded verdict is worth more. */
+  @Test
+  fun `keeps the recorded status when the server reports a blank one`() {
+    storage.saveRegistration(registration(status = "approved"))
+
+    service.storeStatus("   ")
+
+    assertEquals("approved", storage.loadRegistration()?.status)
+  }
+
+  /**
+   * A device with no registration is left with none.
+   *
+   * `refresh` returns before the request when the registration is absent, so this is only reachable if that guard moves. Writing a bare status here
+   * would invent a registration with no client id.
+   */
+  @Test
+  fun `writes nothing when the device has no registration`() {
+    storage.deleteRegistration()
+
+    service.storeStatus("approved")
+
+    assertEquals(null, storage.loadRegistration())
+  }
+
+  private fun registration(status: String) =
+    RegistrationData(
+      clientId = "ev1_a3f8c2d1",
+      status = status,
+      serverUrl = "https://pipette.liquid.ai",
+      organization = "Liquid AI",
+      contactEmail = "ops@liquid.ai",
+      registeredAt = "2026-08-12T00:00:00Z",
+    )
 }

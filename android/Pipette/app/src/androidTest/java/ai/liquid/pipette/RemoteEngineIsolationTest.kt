@@ -48,6 +48,7 @@ class RemoteEngineIsolationTest {
           nGpuLayers = 99,
           contextSize = contextSize,
           nUbatch = 512,
+          loadMode = LlamacppLoadMode.DEFAULT,
           mmprojPath = null,
           progress = null,
           cooldown = null,

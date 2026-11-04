@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "end_to_end_latency",
+  "ipc": "private",
+  "model_type": "torch",
+  "runtime_type": "docker_sglang"
+}

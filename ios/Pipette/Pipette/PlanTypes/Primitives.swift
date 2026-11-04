@@ -1,36 +1,29 @@
 import Foundation
 
-// The iOS counterpart of `crates/pipette-plan-types/src/primitives.rs`: the validated
-// scalar types every coordinate is built from, plus the repo coordinate itself. Kept in
-// one file for the same reason the crate does — they are one vocabulary, and a reader
-// who knows the crate should find them where its module puts them.
+// The value layer's primitives: pipette-mgmt's
+// `crates/pipette-plan-types/src/text.rs` and `numbers.rs`, plus `ValidatedString` (the
+// stand-in for the crate's `nutype` wrappers) and `ModelError` (one enum where the crate
+// declares an error per type).
 
 // MARK: - Validated string newtypes
 //
-// Swift analog of the `nutype` wrappers in `pipette-plan-types`: a string newtype
-// validates at construction *and* on `Codable` decode, so an invalid value is
-// unrepresentable — rejected at the boundary, never caught by a later pass. Peer of
-// this app's `StringNewtype`, but with a *throwing* constructor (validation) instead
-// of the transparent unvalidated one. Extension members are `nonisolated` so they
-// satisfy `nonisolated` conformers (required for `Sendable` under main-actor default
-// isolation).
+// Validates at construction and on decode, so an invalid value is unrepresentable. Unlike
+// `StringNewtype`, the constructor throws. Extension members are `nonisolated` so they
+// satisfy `nonisolated` conformers under main-actor default isolation.
 
 protocol ValidatedString: Codable, Hashable, Sendable, CustomStringConvertible {
     nonisolated var value: String { get }
-    /// Trusted constructor — only called after `validate` has passed.
+    /// Trusted constructor, only called after `validate` has passed.
     nonisolated init(validated value: String)
     nonisolated static func validate(_ value: String) -> Bool
-    /// The error thrown when `validate` fails (e.g. `ModelError.invalidOrg`).
     nonisolated static var rejection: (String) -> ModelError { get }
-    /// Normalizes before `validate`, in nutype's sanitize-then-validate order. Identity
-    /// unless the crate declares a `sanitize(with = …)` for the type.
+    /// Runs before `validate`, as nutype's `sanitize(with = …)` does. Identity by default.
     nonisolated static func sanitize(_ value: String) -> String
 }
 
 extension ValidatedString {
     nonisolated static func sanitize(_ value: String) -> String { value }
 
-    /// The one public constructor: sanitizes, validates, or throws the type's rejection.
     nonisolated init(_ value: String) throws {
         let value = Self.sanitize(value)
         guard Self.validate(value) else { throw Self.rejection(value) }
@@ -49,17 +42,13 @@ extension ValidatedString {
     }
 }
 
-/// A HuggingFace org segment, e.g. `LiquidAI` — `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
-nonisolated struct HFOrg: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    static func validate(_ value: String) -> Bool { value.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._-]*/) != nil }
-    static let rejection = ModelError.invalidOrg
+/// Rust's `str::trim` set, which leaves U+200B in place, so a value refused by the crate
+/// is refused here too.
+nonisolated func rustTrim(_ value: String) -> String {
+    value.trimmingCharacters(in: .whitespacesAndNewlines.subtracting(["\u{200B}"]))
 }
 
-/// A HuggingFace repo-name segment, e.g. `LFM2.5-350M-MLX-4bit`.
-/// A string the crate types `NonEmptyString` — the rule lives on the type so no
-/// construction path can bypass it, rather than in whichever decoder remembered to check.
+/// The crate's `NonEmptyString`.
 nonisolated struct NonEmptyString: ValidatedString {
     let value: String
     init(validated value: String) { self.value = value }
@@ -67,251 +56,160 @@ nonisolated struct NonEmptyString: ValidatedString {
     static let rejection = ModelError.emptyValue
 }
 
-nonisolated struct HFRepoName: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    static func validate(_ value: String) -> Bool { value.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._-]*/) != nil }
-    static let rejection = ModelError.invalidRepoName
-}
-
-/// A subdirectory within a multi-model repo, e.g. `4bit` or `variants/4bit`.
-/// Slash-joined path segments of `[A-Za-z0-9._-]`; no leading/trailing/empty segment.
-nonisolated struct RepoSubpath: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    /// `.` and `..` match the segment character class, so they have to be excluded by
-    /// name — as the crate's `is_relative_repo_subpath` does. A subpath is
-    /// server-authored (a claim's `prefix`) and is joined onto a cache path that is
-    /// later removed, so a traversal here would let a claim name a directory tree for
-    /// deletion. Rejecting it at the type makes that unrepresentable rather than
-    /// something each consumer has to remember.
-    static func validate(_ value: String) -> Bool {
-        !value.isEmpty && value.split(separator: "/", omittingEmptySubsequences: false)
-            .allSatisfy {
-                !$0.isEmpty && $0 != "." && $0 != ".."
-                    && $0.wholeMatch(of: /[A-Za-z0-9._-]+/) != nil
-            }
-    }
-    static let rejection = ModelError.invalidSubpath
-    /// The final path component — the model directory's name.
-    var leaf: String { value.split(separator: "/").last.map(String.init) ?? value }
-}
-
-/// The crate's `strip_leading_current_dir`: a redundant `./` is dropped so a stored path
-/// is normalized. Shared by both path types, as the crate shares the one sanitizer — and
-/// load-bearing on `AbsolutePath`, where `./x` must fail *after* stripping rather than be
-/// mistaken for a prefix worth honoring.
-private nonisolated func strippingLeadingCurrentDir(_ raw: String) -> String {
-    raw.hasPrefix("./") ? String(raw.dropFirst(2)) : raw
-}
-
-/// Both separators, as the crate's `split(['/', '\\'])` does. Splitting on `/` alone
-/// would let a Windows-authored `a\..\b` past the traversal check.
-private nonisolated func isPathSeparator(_ character: Character) -> Bool {
-    character == "/" || character == "\\"
-}
-
-/// `C:` — an ASCII drive letter followed by a colon.
-private nonisolated func hasDriveLetterPrefix(_ value: String) -> Bool {
-    var characters = value.makeIterator()
-    guard let first = characters.next(), first.isASCII, first.isLetter else { return false }
-    return characters.next() == ":"
-}
-
-/// A portable, store-relative filesystem path — the crate's `RelativePath`. Never
-/// absolute, so a stored coordinate stays valid across the container-UUID changes and
-/// layout moves that invalidate an absolute one.
-///
-/// Mirrors `is_relative_fs_path`: rejects empty, `~`, a leading `/`, a Windows drive or
-/// UNC prefix, and any empty / `.` / `..` segment. Wider than `RepoSubpath`, which
-/// additionally constrains the character class — a stored path can contain whatever a
-/// repo's filenames do.
-nonisolated struct RelativePath: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    static func sanitize(_ value: String) -> String { strippingLeadingCurrentDir(value) }
-    static func validate(_ value: String) -> Bool {
-        // A leading `/` covers the UNC `//server` form too.
-        guard !value.isEmpty, !value.hasPrefix("~"), !value.hasPrefix("/"),
-              !value.hasPrefix("\\\\"), !hasDriveLetterPrefix(value)
-        else { return false }
-        return value.split(omittingEmptySubsequences: false, whereSeparator: isPathSeparator)
-            .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
-    }
-    static let rejection = ModelError.invalidRelativePath
-}
-
-/// An absolute host path — the crate's `AbsolutePath`. The bound form a source takes
-/// after `bindUnder`; never a portable store coordinate.
-///
-/// Mirrors `is_absolute_path`: Unix `/…`, UNC, or a Windows drive, with no `~` and no
-/// `.` / `..` segment.
-nonisolated struct AbsolutePath: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    static func sanitize(_ value: String) -> String { strippingLeadingCurrentDir(value) }
-    static func validate(_ value: String) -> Bool {
-        guard !value.isEmpty, !value.hasPrefix("~") else { return false }
-        let unc = value.hasPrefix("\\\\") || value.hasPrefix("//")
-        // `C:/…` or `C:\…` — the colon alone is not absolute.
-        let drive = hasDriveLetterPrefix(value)
-            && value.dropFirst(2).first.map(isPathSeparator) == true
-
-        let body: Substring
-        if unc {
-            let rest = value.dropFirst(2)
-            // UNC names a server and a share; an empty one is not a host path.
-            guard rest.split(omittingEmptySubsequences: false, whereSeparator: isPathSeparator)
-                .prefix(2).allSatisfy({ !$0.isEmpty })
-            else { return false }
-            body = rest
-        } else if value.hasPrefix("/") {
-            body = value.dropFirst()
-        } else if drive {
-            body = value.dropFirst(3)
-        } else {
-            return false
-        }
-        // A root with nothing after it is still absolute; anything after it carries the
-        // same no-traversal, no-empty-segment rule.
-        return body.isEmpty
-            || body.split(omittingEmptySubsequences: false, whereSeparator: isPathSeparator)
-                .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
-    }
-    static let rejection = ModelError.invalidAbsolutePath
-}
-
-/// A fetchable resource URL — the crate's `ResourceUrl`, `^(https?|file)://.+`.
-nonisolated struct ResourceUrl: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    static func validate(_ value: String) -> Bool {
-        value.wholeMatch(of: /(https?|file):\/\/.+/) != nil
-    }
-    static let rejection = ModelError.invalidResourceUrl
-}
-
-/// A pin to a specific repo snapshot — a tag, branch or commit.
-/// `^[A-Za-z0-9][A-Za-z0-9._/-]*$`, matching the crate; `/` is allowed so a ref like
-/// `refs/pr/1` validates.
-nonisolated struct HFRevision: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    static func validate(_ value: String) -> Bool {
-        value.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._\/-]*/) != nil
-    }
-    static let rejection = ModelError.invalidRevision
-}
-
-/// A lowercase hex SHA-256 digest — `^[0-9a-f]{64}$`. Verifies a download; a local
-/// file is identified by its path instead, so this is only ever set on a fetching arm.
-nonisolated struct Sha256: ValidatedString {
-    let value: String
-    init(validated value: String) { self.value = value }
-    static func validate(_ value: String) -> Bool {
-        value.wholeMatch(of: /[0-9a-f]{64}/) != nil
-    }
-    static let rejection = ModelError.invalidSha256
-}
-
-/// An access token for a gated or private repo, carried in the plan rather than read
-/// from the environment.
-///
-/// `description` renders `<redacted>`, as the crate's hand-written `Display` and `Debug`
-/// do — so interpolating a token, or a struct holding one, cannot publish it. `value` is
-/// the one door to the secret, which makes auditing where it can escape a search for
-/// `.value` on this type.
-nonisolated struct AuthToken: ValidatedString, CustomDebugStringConvertible {
+/// The crate's `NonEmptyTrimmedString`: trimmed, then refused when nothing is left.
+nonisolated struct NonEmptyTrimmedString: ValidatedString {
     let value: String
     init(validated value: String) { self.value = value }
     static func validate(_ value: String) -> Bool { !value.isEmpty }
-    /// Discards the input rather than threading it into the error — see
-    /// `ModelError.invalidAuthToken`.
-    static let rejection: (String) -> ModelError = { _ in .invalidAuthToken }
-
-    var description: String { "<redacted>" }
-    var debugDescription: String { "AuthToken(<redacted>)" }
+    static func sanitize(_ value: String) -> String { rustTrim(value) }
+    static let rejection = ModelError.emptyValue
 }
 
-// MARK: - Coordinates
+/// A count of at least one, in its warehouse column's `Int32` width; past the max it is
+/// refused, not wrapped.
+nonisolated struct PositiveCount: Hashable, Comparable, Sendable, Codable,
+    CustomStringConvertible {
+    let value: Int32
 
-/// A HuggingFace repo coordinate. The canonical `org/repo_name` parser is the single
-/// authoritative split-and-validate path (mirrors `HfRepo::parse_slug`).
-nonisolated struct HFRepo: Hashable, Codable, Sendable, CustomStringConvertible {
-    let org: HFOrg
-    /// `repoName`, not `name`, matching the crate's `HfRepo::repo_name` — on a repo,
-    /// a bare `name` reads as "the name of the repo coordinate" rather than the
-    /// second half of the slug.
-    let repoName: HFRepoName
-    /// Pin to a snapshot. `nil` resolves to the repo's default branch — latest and
-    /// mutable — so a plan that wants reproducible weights sets it. Part of the repo's
-    /// identity: it feeds `reference`, and therefore the storage key, so two cells
-    /// pinning different revisions do not collide on one entry.
-    var revision: HFRevision?
-    /// Credential for a gated repo, carried in the plan. **Not** part of the repo's
-    /// identity — see `==` and `hash(into:)` below.
-    var authToken: AuthToken?
-
-    /// Canonical `org/repo_name` slug — matches HuggingFace's URL/CLI convention.
-    var description: String { "\(org)/\(repoName)" }
-
-    /// The identity string, `org/repo_name[@revision]`, mirroring `HfRepo::reference`.
-    /// This is what a storage key is derived from, which is why the revision belongs in
-    /// it and the token does not.
-    var reference: String {
-        revision.map { "\(description)@\($0.value)" } ?? description
+    init(_ value: Int) throws(PositiveCountError) {
+        guard let narrowed = Int32(exactly: value), narrowed > 0 else {
+            throw PositiveCountError(value: value)
+        }
+        self.value = narrowed
     }
 
-    /// The same coordinate with the credential dropped, for anything that gets written
-    /// down. `encode` emits `auth_token` — it has to, since that is how a claim's model
-    /// arrives — so the boundary that must not keep a secret is the one that redacts.
-    /// Mirrors the crate, which strips the token before persisting rather than teaching
-    /// its encoder to lie.
-    var withoutAuthToken: HFRepo {
-        var copy = self
-        copy.authToken = nil
-        return copy
+    /// Trusted constructor, for a value already known to be in range.
+    init(validated value: Int32) { self.value = value }
+
+    var description: String { "\(value)" }
+
+    static func < (lhs: PositiveCount, rhs: PositiveCount) -> Bool { lhs.value < rhs.value }
+
+    init(from decoder: any Decoder) throws {
+        try self.init(Int(try decoder.singleValueContainer().decode(Int32.self)))
     }
 
-    /// Identity is the coordinate, so the token is excluded from both. Two references to
-    /// the same weights must compare equal whether or not one of them happens to carry a
-    /// credential — otherwise a claim that ships a token would fail to match the model
-    /// already on disk, and the same weights would be fetched twice under two keys.
-    ///
-    /// The crate reaches the same place from the other direction: it derives `Hash`/`Eq`
-    /// over every field but strips the token before anything is persisted or keyed.
-    static func == (lhs: HFRepo, rhs: HFRepo) -> Bool {
-        lhs.org == rhs.org && lhs.repoName == rhs.repoName && lhs.revision == rhs.revision
-    }
-
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(org)
-        hasher.combine(repoName)
-        hasher.combine(revision)
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case org
-        case repoName = "repo_name"
-        case revision
-        case authToken = "auth_token"
-    }
-
-    /// Omits an absent revision or token rather than writing `null`, matching the
-    /// crate's `skip_serializing_if = "Option::is_none"`.
     func encode(to encoder: any Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(org, forKey: .org)
-        try c.encode(repoName, forKey: .repoName)
-        try c.encodeIfPresent(revision, forKey: .revision)
-        try c.encodeIfPresent(authToken, forKey: .authToken)
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
+    }
+}
+
+nonisolated struct PositiveCountError: Error, Equatable, LocalizedError {
+    let value: Int
+
+    var errorDescription: String? { "count must be between 1 and \(Int32.max), got \(value)" }
+}
+
+/// A count that may be zero, such as the tokens of an empty prompt; capped at `Int32.max`
+/// like ``PositiveCount``.
+nonisolated struct NonNegativeCount: Hashable, Comparable, Sendable, Codable,
+    CustomStringConvertible {
+    let value: Int32
+
+    init(_ value: Int) throws(NonNegativeCountError) {
+        guard let narrowed = Int32(exactly: value), narrowed >= 0 else {
+            throw NonNegativeCountError(value: value)
+        }
+        self.value = narrowed
     }
 
-    static func parse(_ slug: String) throws -> HFRepo {
-        guard let slash = slug.firstIndex(of: "/") else { throw ModelError.repoMissingSeparator(slug) }
-        let name = String(slug[slug.index(after: slash)...])
-        // HF ids are exactly two segments; a nested `/` is not an `org/repo_name`.
-        guard !name.contains("/") else { throw ModelError.repoMissingSeparator(slug) }
-        return HFRepo(org: try HFOrg(String(slug[..<slash])), repoName: try HFRepoName(name))
+    /// Trusted constructor, for a value already known to be in range.
+    init(validated value: Int32) { self.value = value }
+
+    /// The crate's `Default`.
+    static let zero = NonNegativeCount(validated: 0)
+
+    var description: String { "\(value)" }
+
+    static func < (lhs: NonNegativeCount, rhs: NonNegativeCount) -> Bool {
+        lhs.value < rhs.value
     }
+
+    init(from decoder: any Decoder) throws {
+        try self.init(Int(try decoder.singleValueContainer().decode(Int32.self)))
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
+    }
+}
+
+nonisolated struct NonNegativeCountError: Error, Equatable, LocalizedError {
+    let value: Int
+
+    var errorDescription: String? { "count must be between 0 and \(Int32.max), got \(value)" }
+}
+
+// MARK: - Construction failures
+
+/// Every `ValidatedString` rejection, plus a repo slug with no `/` and an unknown model
+/// `type`/`source` tag, in one enum where the crate declares an error per type. Wraps the
+/// offending string, not an underlying `Error`, so it stays `Equatable`.
+nonisolated enum ModelError: Error, Equatable {
+    case repoMissingSeparator(String)
+    case invalidOrg(String)
+    case invalidRepoName(String)
+    case invalidSubpath(String)
+    case invalidRelativePath(String)
+    case invalidAbsolutePath(String)
+    case invalidResourceUrl(String)
+    case invalidRevision(String)
+    case invalidSha256(String)
+    case emptyValue(String)
+    /// Payload-free: the rejected input is the token.
+    case invalidAuthToken
+    case unknownModelType(String)
+    case invalidBenchmarkId(String)
+    case invalidClientId(String)
+    case invalidCapabilityFlag(String)
+    case invalidGitOid(String)
+    case invalidRepositoryUrl(String)
+    case invalidDatasetPath(String)
+    case invalidVaultResourceId(String)
+    case invalidVaultPrincipalId(String)
+    case invalidVaultPath(String)
+}
+
+extension ModelError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        // The crate's wording, which names the shape rather than echoing the input.
+        case .repoMissingSeparator: "HF repo must be in the form `org/repo_name`"
+        case let .invalidOrg(s): "invalid HF org: \(s)"
+        case let .invalidRepoName(s): "invalid HF repo name: \(s)"
+        case let .invalidSubpath(s): "invalid repo subpath: \(s)"
+        case let .invalidRelativePath(s): "path must be store-relative: \(s)"
+        case let .invalidAbsolutePath(s): "path must be absolute: \(s)"
+        case let .invalidResourceUrl(s): "not an http(s)/file URL: \(s)"
+        case let .invalidRevision(s): "invalid HF revision: \(s)"
+        case let .invalidSha256(s): "invalid sha256 digest: \(s)"
+        case .emptyValue: "expected a non-empty value"
+        // No interpolation: the rejected value is the token.
+        case .invalidAuthToken: "the HF access token is empty"
+        case let .unknownModelType(s): "unknown model type: \(s)"
+        case let .invalidBenchmarkId(s):
+            "benchmark id must match [A-Za-z0-9][A-Za-z0-9_.-]*: \(escapedQuoted(s))"
+        case let .invalidClientId(s):
+            "client id must match [A-Za-z0-9_-]+: \(escapedQuoted(s))"
+        case let .invalidCapabilityFlag(s):
+            "capability flag must be non-empty, lowercase, with no whitespace: \(s)"
+        case let .invalidGitOid(s): "not a full git object id: \(s)"
+        case let .invalidRepositoryUrl(s): "not a `host/path` repository coordinate: \(s)"
+        case let .invalidDatasetPath(s): "invalid dataset path: \(s)"
+        case let .invalidVaultResourceId(s):
+            "vault resource id must be `vault_` then [A-Za-z0-9_-]: \(escapedQuoted(s))"
+        case let .invalidVaultPrincipalId(s):
+            "principal id must start with `org_` or `user_`, then [A-Za-z0-9_-]: \(escapedQuoted(s))"
+        case let .invalidVaultPath(s):
+            "a vault path has the form `/vault/resources/{resource_id}/content`, relative to the server. Give a path in that form: \(escapedQuoted(s))"
+        }
+    }
+}
+
+/// `value` quoted with every control or non-ASCII scalar escaped, so a refused id can
+/// neither forge a log line nor hide a zero-width character.
+nonisolated func escapedQuoted(_ value: String) -> String {
+    "\"" + value.unicodeScalars.map { $0.escaped(asASCII: true) }.joined() + "\""
 }

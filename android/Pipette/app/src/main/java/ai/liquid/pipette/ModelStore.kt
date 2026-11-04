@@ -59,7 +59,26 @@ class ModelStore(private val modelsDir: File) {
       hfRepo = repo,
       displayName = displayName,
       familyId = familyId,
+      modelRef = refFor(repo, file.name),
     )
+  }
+
+  /**
+   * The coordinate a discovered file can be re-fetched from, or null when its layout does not name one.
+   *
+   * Derived from the bucket path rather than looked up in [ModelTemplateCatalog], so a model downloaded from a repo the preset catalog has never
+   * heard of still gets one. The Models tab accepts any `org/repo/file.gguf`, and those are exactly the models no preset could describe.
+   *
+   * Always the text variant. A vision pairing is composed later by `JobRunner.visionRef`, which reads this ref for the weights half and takes the
+   * projector from the pairing the picker made; a projector's own ref is unused.
+   *
+   * Without this, the models with no coordinate would be precisely the ones already on disk, so a cell whose file was deleted between planning and
+   * execution could not recover it, which is the case [JobCell.modelRef] exists to cover.
+   */
+  private fun refFor(repo: String?, filename: String): Model? {
+    val hfRepo = repo?.let { HfRepo.parseSlugOrNull(it) }
+    val gguf = GgufFilename.parseOrNull(filename)
+    return if (hfRepo == null || gguf == null) null else Model.GgufText(HfGgufText(hfRepo, gguf))
   }
 
   private fun relativePath(file: File): String = file.relativeTo(modelsDir).invariantSeparatorsPath

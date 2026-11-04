@@ -1,0 +1,4 @@
+{
+  "onnxruntime": {"repository_url": "github.com/microsoft/onnxruntime", "tag": "v1.31.1", "commit": "6af1a932e"},
+  "onnxruntime_genai": {"repository_url": "github.com/microsoft/onnxruntime-genai", "tag": null, "commit": "533de8cc9"}
+}

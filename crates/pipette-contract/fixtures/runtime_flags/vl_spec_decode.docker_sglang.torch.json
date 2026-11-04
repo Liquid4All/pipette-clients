@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "vl_spec_decode",
+  "model_type": "torch",
+  "runtime_type": "docker_sglang"
+}

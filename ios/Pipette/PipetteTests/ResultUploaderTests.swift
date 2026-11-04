@@ -2,21 +2,19 @@ import Testing
 import Foundation
 @testable import Pipette
 
-/// Each test injects its own temporary `FileStorage` into the uploader, so the
-/// suite carries no shared global and runs in parallel.
 @MainActor struct ResultUploaderTests {
     @Test func drainAllRetriesTransientNetworkFailureWithinPass() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
-        try saveManifest(storage: storage, cells: [cell(id: "cell-1", benchmarkId: "bench-1")], contributeResults: true)
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
+        try saveManifest(ws: ws, cells: [cell(id: "cell-1", benchmarkId: "bench-1")], contributeResults: true)
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
         let submitter = ScriptedBatchSubmitter(steps: [
             .fail("network down"),
             .respond(try batchResponse([["index": 0, "job_id": "server-1"]]))
         ])
         let sleeps = SleepRecorder()
-        let uploader = uploader(submitter: submitter, storage: storage, retryDelays: [0.01], sleeps: sleeps)
+        let uploader = try uploader(submitter: submitter, ws: ws, retryDelays: [0.01], sleeps: sleeps)
 
         let outcomes = await uploader.drainAll()
 
@@ -24,51 +22,46 @@ import Foundation
         #expect(outcomes["job-1"]?.errors == [])
         #expect(submitter.batches.count == 2)
         #expect(sleeps.recorded == [0.01])
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
-        #expect(storage.results.loadSubmission("cell-1")?.serverJobId == "server-1")
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
+        #expect(ws.results.loadSubmission("cell-1")?.serverJobId == "server-1")
     }
 
     @Test func networkFailureThenSuccessfulReDrain() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
-        try saveManifest(storage: storage, cells: [cell(id: "cell-1", benchmarkId: "bench-1")], contributeResults: true)
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
+        try saveManifest(ws: ws, cells: [cell(id: "cell-1", benchmarkId: "bench-1")], contributeResults: true)
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
 
-        // First pass: the network is down and stays down (no retries left),
-        // stranding the cell as a failed submission record.
         let failing = ScriptedBatchSubmitter(steps: [.fail("network down")])
-        let firstPass = await uploader(submitter: failing, storage: storage, retryDelays: []).drainAll()
+        let firstPass = try await uploader(submitter: failing, ws: ws, retryDelays: []).drainAll()
 
         #expect(firstPass["job-1"]?.submitted == 0)
         #expect(firstPass["job-1"]?.errors.count == 1)
-        #expect(storage.results.loadSubmission("cell-1")?.status == .failed)
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == nil)
+        #expect(ws.results.loadSubmission("cell-1")?.status == .failed)
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == nil)
 
-        // Second pass — as fired on the next launch/foreground — re-drives
-        // the stranded cell and syncs it.
         let succeeding = ScriptedBatchSubmitter(steps: [
             .respond(try batchResponse([["index": 0, "job_id": "server-1"]]))
         ])
-        let secondPass = await uploader(submitter: succeeding, storage: storage, retryDelays: []).drainAll()
+        let secondPass = try await uploader(submitter: succeeding, ws: ws, retryDelays: []).drainAll()
 
         #expect(secondPass["job-1"]?.submitted == 1)
         #expect(secondPass["job-1"]?.errors == [])
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
-        #expect(storage.results.loadSubmission("cell-1")?.status == .submitted)
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
+        #expect(ws.results.loadSubmission("cell-1")?.status == .submitted)
     }
 
     @Test func drainAllDoesNotResubmitAlreadySyncedCells() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
-        // cell-1 is fully synced; cell-2's record was accepted but the
-        // manifest never adopted it (app died between the two writes);
-        // cell-3 is genuinely unsubmitted.
+        // cell-2's record was accepted but the manifest never adopted it (the app died
+        // between the two writes).
         var synced = cell(id: "cell-1", benchmarkId: "bench-1")
         synced.serverJobId = "server-1"
         try saveManifest(
-            storage: storage,
+            ws: ws,
             cells: [
                 synced,
                 cell(id: "cell-2", benchmarkId: "bench-2"),
@@ -77,110 +70,104 @@ import Foundation
             contributeResults: true
         )
         for (cellId, benchmarkId) in [("cell-1", "bench-1"), ("cell-2", "bench-2"), ("cell-3", "bench-3")] {
-            try writePayload(storage: storage, cellId: CellId(cellId), benchmarkId: benchmarkId)
+            try writePayload(ws: ws, cellId: CellId(cellId), benchmarkId: benchmarkId)
         }
-        try storage.results.saveSubmission(.submitted(serverJobId: "server-1"), "cell-1")
-        try storage.results.saveSubmission(.submitted(serverJobId: "server-2"), "cell-2")
+        try ws.results.saveSubmission(.submitted(serverJobId: "server-1"), "cell-1")
+        try ws.results.saveSubmission(.submitted(serverJobId: "server-2"), "cell-2")
         let submitter = ScriptedBatchSubmitter(steps: [
             .respond(try batchResponse([["index": 0, "job_id": "server-3"]]))
         ])
-        let uploader = uploader(submitter: submitter, storage: storage)
+        let uploader = try uploader(submitter: submitter, ws: ws)
 
         let outcomes = await uploader.drainAll()
 
-        // Only bench-3 ever hits the network; cell-2 heals from its record.
+        // cell-2 heals from its record.
         #expect(submitter.batches == [["bench-3"]])
         #expect(outcomes["job-1"]?.submitted == 2)
-        let manifest = try #require(storage.loadJobManifest(jobId: "job-1"))
+        let manifest = try #require(ws.loadJobManifest(jobId: "job-1"))
         #expect(manifest.cells.map(\.serverJobId) == ["server-1", "server-2", "server-3"])
 
-        // A follow-up pass finds nothing stranded and stays off the network.
         let secondPass = await uploader.drainAll()
         #expect(secondPass.isEmpty)
         #expect(submitter.batches.count == 1)
     }
 
     @Test func drainAllSkipsJobsThatNeverIntendedToSubmit() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
-        // job-1 never opted into contribution and was never submitted
-        // manually; job-2 also has no opt-in, but a failed record proves a
-        // submission was attempted — only it gets re-driven.
-        try saveManifest(storage: storage, jobId: "job-1", cells: [cell(id: "cell-1", benchmarkId: "bench-1")])
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
-        try saveManifest(storage: storage, jobId: "job-2", cells: [cell(id: "cell-2", benchmarkId: "bench-2")])
-        try writePayload(storage: storage, cellId: "cell-2", benchmarkId: "bench-2")
-        try storage.results.saveSubmission(.failed(["network down"]), "cell-2")
+        // Neither job opted in, but job-2's failed record proves a submission was attempted.
+        try saveManifest(ws: ws, jobId: "job-1", cells: [cell(id: "cell-1", benchmarkId: "bench-1")])
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
+        try saveManifest(ws: ws, jobId: "job-2", cells: [cell(id: "cell-2", benchmarkId: "bench-2")])
+        try writePayload(ws: ws, cellId: "cell-2", benchmarkId: "bench-2")
+        try ws.results.saveSubmission(.failed(["network down"]), "cell-2")
         let submitter = ScriptedBatchSubmitter(steps: [
             .respond(try batchResponse([["index": 0, "job_id": "server-2"]]))
         ])
 
-        let outcomes = await uploader(submitter: submitter, storage: storage).drainAll()
+        let outcomes = try await uploader(submitter: submitter, ws: ws).drainAll()
 
         #expect(submitter.batches == [["bench-2"]])
         #expect(outcomes["job-1"] == nil)
         #expect(outcomes["job-2"]?.submitted == 1)
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == nil)
-        #expect(storage.loadJobManifest(jobId: "job-2")?.cells[0].serverJobId == "server-2")
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == nil)
+        #expect(ws.loadJobManifest(jobId: "job-2")?.cells[0].serverJobId == "server-2")
     }
 
     @Test func drainAllSkipsRunningJobs() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
         try saveManifest(
-            storage: storage,
+            ws: ws,
             cells: [cell(id: "cell-1", benchmarkId: "bench-1")],
             status: .running,
             contributeResults: true
         )
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
         let submitter = ScriptedBatchSubmitter(steps: [])
 
-        let outcomes = await uploader(submitter: submitter, storage: storage).drainAll()
+        let outcomes = try await uploader(submitter: submitter, ws: ws).drainAll()
 
         #expect(outcomes.isEmpty)
         #expect(submitter.batches.isEmpty)
     }
 
     @Test func drainJobForcesSubmissionWithoutContributeOptIn() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
-        try saveManifest(storage: storage, cells: [cell(id: "cell-1", benchmarkId: "bench-1")])
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
+        try saveManifest(ws: ws, cells: [cell(id: "cell-1", benchmarkId: "bench-1")])
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
         let submitter = ScriptedBatchSubmitter(steps: [
             .respond(try batchResponse([["index": 0, "job_id": "server-1"]]))
         ])
 
-        let outcome = await uploader(submitter: submitter, storage: storage).drainJob(jobId: "job-1")
+        let outcome = try await uploader(submitter: submitter, ws: ws).drainJob(jobId: "job-1")
 
         #expect(outcome.submitted == 1)
         #expect(outcome.errors == [])
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
     }
 
-    /// The race PIP-257 fixes: two drains firing together (e.g. the launch
-    /// drain and a job-end `drainJob` from the background executor) must
-    /// serialize through the actor. The submitter's per-call delay forces the
-    /// two passes to overlap in wall-clock time; if the `queueTail` chain were
-    /// not serialized they would both see the cell unsubmitted and the network
-    /// would be hit twice. We assert exactly one batch per cell.
+    /// The launch drain and a job-end `drainJob` firing together must serialize through
+    /// `queueTail`. The submitter's delay makes the passes overlap, so without it both
+    /// would see the cells unsubmitted and hit the network twice.
     @Test func concurrentDrainsSerializeAndDoNotDoubleSubmit() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
         try saveManifest(
-            storage: storage,
+            ws: ws,
             cells: [
                 cell(id: "cell-1", benchmarkId: "bench-1"),
                 cell(id: "cell-2", benchmarkId: "bench-2")
             ],
             contributeResults: true
         )
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
-        try writePayload(storage: storage, cellId: "cell-2", benchmarkId: "bench-2")
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
+        try writePayload(ws: ws, cellId: "cell-2", benchmarkId: "bench-2")
         let submitter = ScriptedBatchSubmitter(
             steps: [
                 .respond(try batchResponse([
@@ -190,46 +177,40 @@ import Foundation
             ],
             delayNanoseconds: 50_000_000
         )
-        let uploader = uploader(submitter: submitter, storage: storage)
+        let uploader = try uploader(submitter: submitter, ws: ws)
 
-        // Launch drain (drainAll) and a job-end drain (drainJob) firing
-        // together: the second queues behind the first and finds nothing left.
         async let first = uploader.drainAll()
         async let second = uploader.drainJob(jobId: "job-1")
         _ = await (first, second)
 
-        // Each cell submitted exactly once: one network batch, no duplicates.
         #expect(submitter.batches == [["bench-1", "bench-2"]])
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[1].serverJobId == "server-2")
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "server-1")
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[1].serverJobId == "server-2")
     }
 
     @Test func resendMigratesResultsSubmittedToADifferentCollector() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
-        // The configured collector is registrationData().serverUrl. cell-1 was
-        // submitted to a different collector and cell-3 to none (a legacy record
-        // counts as different) — both must migrate. cell-2 is already on the
-        // current collector, so it must be left untouched even though it matches.
+        // cell-1 went to another collector and cell-3 recorded none, so both migrate. cell-2
+        // is already on the configured collector.
         var acked1 = cell(id: "cell-1", benchmarkId: "bench-1")
         acked1.serverJobId = "old-1"
         var acked2 = cell(id: "cell-2", benchmarkId: "bench-2")
         acked2.serverJobId = "cur-2"
         var acked3 = cell(id: "cell-3", benchmarkId: "bench-3")
         acked3.serverJobId = "old-3"
-        try saveManifest(storage: storage, cells: [acked1, acked2, acked3])
+        try saveManifest(ws: ws, cells: [acked1, acked2, acked3])
         for (cellId, benchmarkId) in [("cell-1", "bench-1"), ("cell-2", "bench-2"), ("cell-3", "bench-3")] {
-            try writePayload(storage: storage, cellId: CellId(cellId), benchmarkId: benchmarkId)
+            try writePayload(ws: ws, cellId: CellId(cellId), benchmarkId: benchmarkId)
         }
-        try storage.results.saveSubmission(
-            .submitted(serverJobId: "old-1", collector: ServerURL("https://old.example.com")),
+        try ws.results.saveSubmission(
+            .submitted(serverJobId: "old-1", collector: try ServerUrl("https://old.example.com")),
             "cell-1")
-        try storage.results.saveSubmission(
-            .submitted(serverJobId: "cur-2", collector: registrationData().serverUrl),
+        try ws.results.saveSubmission(
+            .submitted(serverJobId: "cur-2", collector: try registrationData().serverUrl),
             "cell-2")
-        // cell-3: a pre-collector-tracking record — no collector recorded.
-        try storage.results.saveSubmission(.submitted(serverJobId: "old-3"), "cell-3")
+        try ws.results.saveSubmission(.submitted(serverJobId: "old-3"), "cell-3")
         let submitter = ScriptedBatchSubmitter(steps: [
             .respond(try batchResponse([
                 ["index": 0, "job_id": "server-1"],
@@ -237,34 +218,32 @@ import Foundation
             ]))
         ])
 
-        let outcome = await uploader(submitter: submitter, storage: storage)
+        let outcome = try await uploader(submitter: submitter, ws: ws)
             .resendForCollectorChange(benchmarkIds: ["bench-1", "bench-2", "bench-3"])
 
         #expect(outcome.submitted == 2)
         #expect(outcome.errors == [])
-        // Different-collector and legacy results are batched; cell-2 stays put.
         #expect(submitter.batches == [["bench-1", "bench-3"]])
-        let manifest = try #require(storage.loadJobManifest(jobId: "job-1"))
+        let manifest = try #require(ws.loadJobManifest(jobId: "job-1"))
         #expect(manifest.cells.map(\.serverJobId) == ["server-1", "cur-2", "server-3"])
-        // The migrated results now record the current collector.
-        #expect(storage.results.loadSubmission("cell-1")?.collector == registrationData().serverUrl)
-        #expect(storage.results.loadSubmission("cell-3")?.collector == registrationData().serverUrl)
+        #expect(ws.results.loadSubmission("cell-1")?.collector == (try registrationData().serverUrl))
+        #expect(ws.results.loadSubmission("cell-3")?.collector == (try registrationData().serverUrl))
     }
 
     @Test func resendSkipsBenchmarksNotOfferedByTheCollector() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
         var acked = cell(id: "cell-1", benchmarkId: "bench-1")
         acked.serverJobId = "old-1"
-        try saveManifest(storage: storage, cells: [acked])
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
-        try storage.results.saveSubmission(
-            .submitted(serverJobId: "old-1", collector: ServerURL("https://old.example.com")),
+        try saveManifest(ws: ws, cells: [acked])
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
+        try ws.results.saveSubmission(
+            .submitted(serverJobId: "old-1", collector: try ServerUrl("https://old.example.com")),
             "cell-1")
         let submitter = ScriptedBatchSubmitter(steps: [])
 
-        let outcome = await uploader(submitter: submitter, storage: storage)
+        let outcome = try await uploader(submitter: submitter, ws: ws)
             .resendForCollectorChange(benchmarkIds: ["bench-999"])
 
         #expect(outcome.submitted == 0)
@@ -273,16 +252,15 @@ import Foundation
     }
 
     @Test func resendIgnoresNeverSubmittedResults() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
-        // No serverJobId, no submission record: never submitted anywhere, so
-        // it isn't a collector migration — the drain triggers handle it.
-        try saveManifest(storage: storage, cells: [cell(id: "cell-1", benchmarkId: "bench-1")])
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
+        // Never submitted anywhere, so not a migration: the drain triggers handle it.
+        try saveManifest(ws: ws, cells: [cell(id: "cell-1", benchmarkId: "bench-1")])
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
         let submitter = ScriptedBatchSubmitter(steps: [])
 
-        let outcome = await uploader(submitter: submitter, storage: storage)
+        let outcome = try await uploader(submitter: submitter, ws: ws)
             .resendForCollectorChange(benchmarkIds: ["bench-1"])
 
         #expect(outcome.submitted == 0)
@@ -290,49 +268,48 @@ import Foundation
     }
 
     @Test func resendKeepsPriorRecordWhenMigrationFails() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
         var acked = cell(id: "cell-1", benchmarkId: "bench-1")
         acked.serverJobId = "old-1"
-        try saveManifest(storage: storage, cells: [acked])
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
-        try storage.results.saveSubmission(
-            .submitted(serverJobId: "old-1", collector: ServerURL("https://old.example.com")),
+        try saveManifest(ws: ws, cells: [acked])
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
+        try ws.results.saveSubmission(
+            .submitted(serverJobId: "old-1", collector: try ServerUrl("https://old.example.com")),
             "cell-1")
         let submitter = ScriptedBatchSubmitter(steps: [.fail("network down")])
 
-        let outcome = await uploader(submitter: submitter, storage: storage)
+        let outcome = try await uploader(submitter: submitter, ws: ws)
             .resendForCollectorChange(benchmarkIds: ["bench-1"])
 
         #expect(outcome.submitted == 0)
         #expect(outcome.errors.count == 1)
-        // The failed migration must not clobber the record that proves the
-        // result already lives on the old collector — it stays submitted there.
-        let record = try #require(storage.results.loadSubmission("cell-1"))
+        // The record proves the result already lives on the old collector.
+        let record = try #require(ws.results.loadSubmission("cell-1"))
         #expect(record.status == .submitted)
         #expect(record.serverJobId == "old-1")
-        #expect(record.collector == ServerURL("https://old.example.com"))
-        #expect(storage.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "old-1")
+        #expect(record.collector == (try ServerUrl("https://old.example.com")))
+        #expect(ws.loadJobManifest(jobId: "job-1")?.cells[0].serverJobId == "old-1")
     }
 
     @Test func resendWithoutRegistrationReportsError() async throws {
-        let storage = makeTemporaryStorage()
-        defer { removeStorage(storage) }
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
 
         var acked = cell(id: "cell-1", benchmarkId: "bench-1")
         acked.serverJobId = "old-1"
-        try saveManifest(storage: storage, cells: [acked])
-        try writePayload(storage: storage, cellId: "cell-1", benchmarkId: "bench-1")
-        try storage.results.saveSubmission(
-            .submitted(serverJobId: "old-1", collector: ServerURL("https://old.example.com")),
+        try saveManifest(ws: ws, cells: [acked])
+        try writePayload(ws: ws, cellId: "cell-1", benchmarkId: "bench-1")
+        try ws.results.saveSubmission(
+            .submitted(serverJobId: "old-1", collector: try ServerUrl("https://old.example.com")),
             "cell-1")
         let submitter = ScriptedBatchSubmitter(steps: [])
         let uploader = ResultUploader(
             submitResultBatch: submitter.submit,
             credentials: { throw IdentityError.privateKeyMissing },
             retryDelays: [],
-            storage: storage
+            ws: ws
         )
 
         let outcome = await uploader.resendForCollectorChange(benchmarkIds: ["bench-1"])
@@ -342,37 +319,121 @@ import Foundation
         #expect(submitter.batches.isEmpty)
     }
 
+    // MARK: - The stranded counter
+    //
+    // It must agree with the submit sweep's own gate, or the job page's "Submit N Results"
+    // button counts work the sweep will never do.
+
+    private func sourcedCell(_ id: String, source: BenchmarkSource?) -> JobCell {
+        JobCell(
+            cellId: CellId(id), benchmarkId: "prefill_throughput_512",
+            benchmarkType: .prefillThroughput,
+            runStatus: .completed, serverJobId: nil, errorMessage: nil,
+            source: ggufTextFixture("test/model-GGUF", "model.gguf"),
+            benchmarkSource: source)
+    }
+
+    private func manifest(_ cells: [JobCell], contribute: Bool = true) -> JobManifest {
+        JobManifest(
+            jobId: "job-1", createdAt: "2026-06-24T00:00:00Z",
+            nGpuLayers: 99, contextSize: 4096, cells: cells, status: .completed,
+            contributeResults: contribute)
+    }
+
+    /// A local result is finished, not stranded: counting it would wake the uploader on
+    /// every launch and foreground to submit nothing.
+    @Test func aLocalResultIsNotStranded() async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let local = sourcedCell("local-1", source: .local)
+        try writePayload(ws: ws, cellId: local.cellId, benchmarkId: local.benchmarkId)
+
+        let uploader = ResultUploader(ws: ws)
+        #expect(await uploader.hasStrandedResults(manifest([local])) == false)
+    }
+
+    @Test func aRemoteResultIsStillStranded() async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let remote = sourcedCell("remote-1", source: .remote)
+        try writePayload(ws: ws, cellId: remote.cellId, benchmarkId: remote.benchmarkId)
+
+        let uploader = ResultUploader(ws: ws)
+        #expect(await uploader.hasStrandedResults(manifest([remote])))
+    }
+
+    /// A cell written before the local half existed carries no source and came from the
+    /// synced catalog, so it must keep counting, or an upgrade strands every result already
+    /// waiting to go up.
+    @Test func aCellWithNoRecordedSourceIsStillStranded() async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let old = sourcedCell("old-1", source: nil)
+        try writePayload(ws: ws, cellId: old.cellId, benchmarkId: old.benchmarkId)
+
+        let uploader = ResultUploader(ws: ws)
+        #expect(await uploader.hasStrandedResults(manifest([old])))
+    }
+
+    @Test func onlySubmittableCellsAreStranded() async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let cells = [sourcedCell("local-1", source: .local), sourcedCell("remote-1", source: .remote)]
+        for c in cells {
+            try writePayload(ws: ws, cellId: c.cellId, benchmarkId: c.benchmarkId)
+        }
+
+        let uploader = ResultUploader(ws: ws)
+        #expect(await uploader.hasStrandedResults(manifest(cells)))
+        #expect(await uploader.hasStrandedResults(manifest([cells[0]])) == false)
+    }
+
+    /// A `claim=` run's leftovers are `pipette-ios-proxy`'s to submit: a launch drain
+    /// would echo a lease that may be gone or re-leased, even after a failed attempt.
+    @Test func aClaimedJobIsNeverStranded() async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let remote = sourcedCell("remote-1", source: .remote)
+        try writePayload(ws: ws, cellId: remote.cellId, benchmarkId: remote.benchmarkId)
+        try ws.results.saveSubmission(.failed(["offline"]), remote.cellId)
+        var claimed = manifest([remote])
+        claimed.claimJobId = "job-claimed"
+
+        let uploader = ResultUploader(ws: ws)
+        #expect(await uploader.hasStrandedResults(manifest([remote])))
+        #expect(await uploader.hasStrandedResults(claimed) == false)
+    }
+
     // MARK: - Helpers
 
     private func uploader(
         submitter: ScriptedBatchSubmitter,
-        storage: Storage,
+        ws: PipetteWorkspace,
         retryDelays: [TimeInterval] = [],
         sleeps: SleepRecorder = SleepRecorder()
-    ) -> ResultUploader {
-        // Capture the registration as a value: the credentials closure is a
-        // nonisolated function type, so it must not call back into
+    ) throws -> ResultUploader {
+        // The credentials closure is nonisolated, so it must not call back into
         // MainActor-isolated test helpers.
-        let registration = registrationData()
-        let auth = AuthIdentity(
-            clientId: registration.clientId, privateKeyHex: PrivateKeyHex("private-key"))
+        let registration = try registrationData()
+        let auth = ClientIdentity(
+            clientId: registration.clientId, privateKeyHex: try PrivateKey(testPrivateKeyHex))
         return ResultUploader(
             submitResultBatch: submitter.submit,
             credentials: { (registration, auth) },
             retryDelays: retryDelays,
-            storage: storage,
+            ws: ws,
             sleep: sleeps.sleep
         )
     }
 
     private func saveManifest(
-        storage: Storage,
+        ws: PipetteWorkspace,
         jobId: JobId = "job-1",
         cells: [JobCell],
         status: JobStatus = .completed,
         contributeResults: Bool? = nil
     ) throws {
-        storage.saveJobManifest(JobManifest(
+        ws.saveJobManifest(JobManifest(
             jobId: jobId,
             createdAt: "2026-06-10T10:00:00Z",
             nGpuLayers: 99,
@@ -385,17 +446,13 @@ import Foundation
 
 }
 
-/// Scripted stand-in for the batch submit network call: plays back one step
-/// per call and records the benchmark ids of every batch it saw. Calls past
-/// the end of the script fail the test via `unexpectedNetworkCall`.
-/// Explicitly `nonisolated` so `submit` matches the nonisolated
-/// `BatchSubmitter` function type with no actor hop — under the project's
-/// MainActor default isolation, an implicitly isolated method crashes the
-/// runner when invoked through that type (seen on CI's Xcode 26.2).
+/// Explicitly `nonisolated` so `submit` matches the nonisolated `BatchSubmitter` type:
+/// under the project's MainActor default isolation, an implicitly isolated method crashes
+/// the runner when invoked through that type (seen on CI's Xcode 26.2).
 private nonisolated final class ScriptedBatchSubmitter: @unchecked Sendable {
     enum Step {
         case fail(String)
-        case respond(String)
+        case respond(BatchSubmitResponse)
     }
 
     private let lock = NSLock()
@@ -415,32 +472,31 @@ private nonisolated final class ScriptedBatchSubmitter: @unchecked Sendable {
     }
 
     func submit(
-        serverUrl: ServerURL,
-        auth: AuthIdentity,
-        payloadsJson: String
-    ) async throws -> String {
+        server: ServerUrl,
+        auth: ClientIdentity,
+        payloadsJson: [Data]
+    ) async throws -> BatchSubmitResponse {
         if delayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: delayNanoseconds)
         }
-        guard let data = payloadsJson.data(using: .utf8),
-              let payloads = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else {
-            throw UploaderTestError.invalidPayloadJson
+        let payloads = try payloadsJson.map { payload -> [String: Any] in
+            guard let object = try JSONSerialization.jsonObject(with: payload) as? [String: Any]
+            else { throw UploaderTestError.invalidPayloadJson }
+            return object
         }
 
         let step = record(payloads.map { $0["benchmark_id"] as? String ?? "" })
         switch step {
         case .fail(let message):
             throw NSError(domain: "Test", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-        case .respond(let json):
-            return json
+        case .respond(let response):
+            return response
         case nil:
             throw UploaderTestError.unexpectedNetworkCall
         }
     }
 
-    /// Synchronous so the NSLock use stays out of the async context, where
-    /// it is unavailable (an error in the Swift 6 language mode).
+    /// Synchronous because NSLock is unavailable in an async context in Swift 6 mode.
     private func record(_ batch: [String]) -> Step? {
         lock.lock()
         defer { lock.unlock() }
@@ -449,8 +505,8 @@ private nonisolated final class ScriptedBatchSubmitter: @unchecked Sendable {
     }
 }
 
-/// `nonisolated` for the same reason as `ScriptedBatchSubmitter`: `sleep` is
-/// passed as the uploader's nonisolated `Sleeper` function type.
+/// `nonisolated` for the same reason as `ScriptedBatchSubmitter`: `sleep` is passed as
+/// the nonisolated `Sleeper` type.
 private nonisolated final class SleepRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var storedDelays: [TimeInterval] = []

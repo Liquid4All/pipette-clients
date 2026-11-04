@@ -1,0 +1,10 @@
+{
+  "benchmark_id": "asr_eval_fleurs_nl_nl_2026.10.1_voxtral",
+  "benchmark_type": "asr_eval",
+  "parameter_asr_task": "asr_fleurs_nl_nl",
+  "parameter_dataset_version": "2026.10.1",
+  "parameter_max_tokens": 500,
+  "parameter_prompt_profile": "voxtral",
+  "parameter_sample_count": 364,
+  "parameter_temperature": 0.0
+}

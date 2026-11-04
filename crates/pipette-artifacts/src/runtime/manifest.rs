@@ -1,153 +1,212 @@
-//! [`RuntimeManifest`] — the on-disk record for one installed runtime, the
-//! runtime-side counterpart to [`crate::model::ModelManifest`].
-//!
-//! An installed runtime is one directory under the workspace `runtimes/` tree,
-//! named by its [`RuntimeStorageKey`] segment — the same `<key>/manifest.toml` +
-//! `<key>/blobs/` layout the model store uses:
-//!
-//! ```text
-//! runtimes/<key>/
-//! ├── manifest.toml         # this record, at the entry root
-//! └── blobs/                # payload (empty for docker)
-//! ```
-//!
-//! Like models, the manifest records the runtime twice: `declared` (pull
-//! identity) and `stored` (effective form under the entry — `RelativeDir` /
-//! `RelativePreinstalled` / docker clone). Tool binaries are discovered under
-//! [`Self::install_dir`] at use time via [`Self::resolve_tool`].
+//! [`RuntimeManifest`]: `runtimes/<key>/manifest.toml`, the record for one
+//! installed runtime, laid out like [`crate::model::ModelManifest`] with the
+//! payload in `blobs/` (absent for docker).
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use pipette_plan_types::Runtime;
 
 use super::key::{RuntimeStorageKey, RuntimeStorageKeyError};
-use super::stored::{to_stored, RuntimeStoredError};
+use super::stored::{RuntimeStoredError, to_stored};
 
-/// The manifest schema version (a validity gate, not a migration signal — old
-/// entries under a different name/layout are simply not found and re-pulled).
+/// A validity gate, not a migration signal: a manifest that parses at another
+/// version reads as `Corrupt`.
 pub const MANIFEST_VERSION: u32 = 2;
 
 /// Why a [`RuntimeManifest`] couldn't be built or read.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeManifestError {
-    /// The runtime has no storage key (on-device or OS-bundled — not installed).
     #[error(transparent)]
     NotStorable(#[from] RuntimeStorageKeyError),
-    /// Could not build the effective `stored` form of `declared`.
     #[error(transparent)]
     Local(#[from] RuntimeStoredError),
-    /// A parsed manifest is unusable — an unsupported version, a bad timestamp,
-    /// or a drift / missing tool.
     #[error("installed runtime is corrupt: {0}")]
     Corrupt(String),
 }
 
-/// The declared runtime plus its effective on-disk form, recorded in
-/// `runtimes/<key>/`.
-///
-/// This type is a **serde record** for the on-disk fields. Version / key /
-/// `stored` drift checks run in the store read path (same pattern as
-/// [`crate::model::ModelManifest`]). [`Self::new`] validates on write.
+/// Version, key and `stored` drift checks run in the store read path;
+/// [`Self::new`] validates on write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeManifest {
     pub manifest_version: u32,
-    /// When the pull started — stamped before the install runs, not after.
+    /// When the pull started, stamped before the install runs.
     #[serde(with = "time::serde::rfc3339")]
     pub fetched_at: OffsetDateTime,
-    /// When an `ensure` last resolved this entry — the eviction order. Seeded to
+    /// When an `ensure` last resolved this entry: the eviction order. Seeded to
     /// `fetched_at` on publish, rewritten best-effort on every hit.
     #[serde(with = "time::serde::rfc3339")]
     pub last_used_at: OffsetDateTime,
-    /// The runtime as declared, i.e. the storage key + reporting identity.
+    /// The storage key and reporting identity.
     pub declared: Runtime,
-    /// Effective install under the entry (`RelativeDir` / `RelativePreinstalled` / docker).
+    /// Entry-relative installed form (see [`to_stored`]).
     pub stored: Runtime,
-    /// Bytes `blobs/` occupied at publish — see
-    /// [`crate::model::ModelManifest::blobs_bytes`] for why this measures
-    /// `blobs/` alone and when it is `None`. Docker records `Some(0)`: the image
-    /// lives in the daemon, so the entry here really is manifest-only.
+    /// Bytes `blobs/` occupied at publish; see
+    /// [`crate::model::ModelManifest::blobs_bytes`]. Docker records `Some(0)`:
+    /// the image lives in the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blobs_bytes: Option<u64>,
 }
 
-/// Host-absolute install root already on `stored`, if any.
 fn absolute_install_root(stored: &Runtime) -> Option<&str> {
-    use pipette_plan_types::{LlamacppCliStockToolsSource, UvRuntimeSource};
+    use pipette_plan_types::{
+        LlamacppCliStockToolsSource, OvmsSource, TrtEdgellmSource, UvRuntimeSource,
+    };
     match stored {
         Runtime::LlamacppCliStockTools(rt) => match &rt.source {
             LlamacppCliStockToolsSource::AbsoluteDir { dir } => Some(dir.as_ref()),
-            _ => None,
+            LlamacppCliStockToolsSource::GithubRelease(_)
+            | LlamacppCliStockToolsSource::RemoteArchive { .. }
+            | LlamacppCliStockToolsSource::VaultRemoteArchive { .. }
+            | LlamacppCliStockToolsSource::RelativeDir { .. } => None,
+        },
+        Runtime::Ovms(rt) => match &rt.source {
+            OvmsSource::AbsoluteDir { dir } => Some(dir.as_ref()),
+            OvmsSource::GithubRelease(_)
+            | OvmsSource::RemoteArchive { .. }
+            | OvmsSource::VaultRemoteArchive { .. }
+            | OvmsSource::RelativeDir { .. } => None,
+        },
+        Runtime::TrtEdgellm(rt) => match &rt.source {
+            TrtEdgellmSource::AbsoluteDir { dir } => Some(dir.as_ref()),
+            TrtEdgellmSource::RemoteArchive { .. }
+            | TrtEdgellmSource::VaultRemoteArchive { .. }
+            | TrtEdgellmSource::RelativeDir { .. } => None,
         },
         Runtime::UvVllm(rt) => match &rt.source {
             UvRuntimeSource::AbsolutePreinstalled { dir } => Some(dir.as_ref()),
-            _ => None,
+            UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::RelativePreinstalled { .. } => None,
         },
         Runtime::UvSglang(rt) => match &rt.source {
             UvRuntimeSource::AbsolutePreinstalled { dir } => Some(dir.as_ref()),
-            _ => None,
+            UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::RelativePreinstalled { .. } => None,
         },
         Runtime::MlxMacosPipette(rt) => match &rt.source {
             UvRuntimeSource::AbsolutePreinstalled { dir } => Some(dir.as_ref()),
-            _ => None,
+            UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::RelativePreinstalled { .. } => None,
         },
         Runtime::UvOpenvino(rt) => match &rt.source {
             UvRuntimeSource::AbsolutePreinstalled { dir } => Some(dir.as_ref()),
-            _ => None,
+            UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::RelativePreinstalled { .. } => None,
         },
-        _ => None,
+        Runtime::UvOnnxGenai(rt) => match &rt.source {
+            UvRuntimeSource::AbsolutePreinstalled { dir } => Some(dir.as_ref()),
+            UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::RelativePreinstalled { .. } => None,
+        },
+        Runtime::LlamacppApkPipette(_)
+        | Runtime::LlamacppIosPipette(_)
+        | Runtime::MlxIosPipette(_)
+        | Runtime::OnnxGenaiIosPipette(_)
+        | Runtime::DockerVllm(_)
+        | Runtime::DockerSglang(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
+        | Runtime::AppleFoundation(_) => None,
     }
 }
 
 /// Entry-relative install subtree from `stored`, or `None` when the entry root
 /// is the install root (docker) or the root is already absolute on `stored`.
 fn install_rel(stored: &Runtime) -> Result<Option<&str>, RuntimeManifestError> {
-    use pipette_plan_types::{LlamacppCliStockToolsSource, UvRuntimeSource};
+    use pipette_plan_types::{
+        LlamacppCliStockToolsSource, OvmsSource, TrtEdgellmSource, UvRuntimeSource,
+    };
     if absolute_install_root(stored).is_some() {
         return Ok(None);
     }
     match stored {
         Runtime::LlamacppCliStockTools(rt) => match &rt.source {
             LlamacppCliStockToolsSource::RelativeDir { dir } => Ok(Some(dir.as_ref())),
-            other => Err(RuntimeManifestError::Corrupt(format!(
-                "stored llama.cpp source is not RelativeDir: {other:?}"
+            other @ (LlamacppCliStockToolsSource::GithubRelease(_)
+            | LlamacppCliStockToolsSource::RemoteArchive { .. }
+            | LlamacppCliStockToolsSource::VaultRemoteArchive { .. }
+            | LlamacppCliStockToolsSource::AbsoluteDir { .. }) => {
+                Err(RuntimeManifestError::Corrupt(format!(
+                    "stored llama.cpp source is not RelativeDir: {other:?}"
+                )))
+            }
+        },
+        Runtime::Ovms(rt) => match &rt.source {
+            OvmsSource::RelativeDir { dir } => Ok(Some(dir.as_ref())),
+            other @ (OvmsSource::GithubRelease(_)
+            | OvmsSource::RemoteArchive { .. }
+            | OvmsSource::VaultRemoteArchive { .. }
+            | OvmsSource::AbsoluteDir { .. }) => Err(RuntimeManifestError::Corrupt(format!(
+                "stored ovms source is not RelativeDir: {other:?}"
+            ))),
+        },
+        Runtime::TrtEdgellm(rt) => match &rt.source {
+            TrtEdgellmSource::RelativeDir { dir } => Ok(Some(dir.as_ref())),
+            other @ (TrtEdgellmSource::RemoteArchive { .. }
+            | TrtEdgellmSource::VaultRemoteArchive { .. }
+            | TrtEdgellmSource::AbsoluteDir { .. }) => Err(RuntimeManifestError::Corrupt(format!(
+                "stored trt_edgellm source is not RelativeDir: {other:?}"
             ))),
         },
         Runtime::UvVllm(rt) => match &rt.source {
             UvRuntimeSource::RelativePreinstalled { dir } => Ok(Some(dir.as_ref())),
-            other => Err(RuntimeManifestError::Corrupt(format!(
-                "stored uv-vllm source is not RelativePreinstalled: {other:?}"
-            ))),
+            other @ (UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::AbsolutePreinstalled { .. }) => Err(RuntimeManifestError::Corrupt(
+                format!("stored uv-vllm source is not RelativePreinstalled: {other:?}"),
+            )),
         },
         Runtime::UvSglang(rt) => match &rt.source {
             UvRuntimeSource::RelativePreinstalled { dir } => Ok(Some(dir.as_ref())),
-            other => Err(RuntimeManifestError::Corrupt(format!(
-                "stored uv-sglang source is not RelativePreinstalled: {other:?}"
-            ))),
+            other @ (UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::AbsolutePreinstalled { .. }) => Err(RuntimeManifestError::Corrupt(
+                format!("stored uv-sglang source is not RelativePreinstalled: {other:?}"),
+            )),
         },
         Runtime::MlxMacosPipette(rt) => match &rt.source {
             UvRuntimeSource::RelativePreinstalled { dir } => Ok(Some(dir.as_ref())),
-            other => Err(RuntimeManifestError::Corrupt(format!(
-                "stored mlx source is not RelativePreinstalled: {other:?}"
-            ))),
+            other @ (UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::AbsolutePreinstalled { .. }) => Err(RuntimeManifestError::Corrupt(
+                format!("stored mlx source is not RelativePreinstalled: {other:?}"),
+            )),
         },
         Runtime::UvOpenvino(rt) => match &rt.source {
             UvRuntimeSource::RelativePreinstalled { dir } => Ok(Some(dir.as_ref())),
-            other => Err(RuntimeManifestError::Corrupt(format!(
-                "stored uv-openvino source is not RelativePreinstalled: {other:?}"
-            ))),
+            other @ (UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::AbsolutePreinstalled { .. }) => Err(RuntimeManifestError::Corrupt(
+                format!("stored uv-openvino source is not RelativePreinstalled: {other:?}"),
+            )),
+        },
+        Runtime::UvOnnxGenai(rt) => match &rt.source {
+            UvRuntimeSource::RelativePreinstalled { dir } => Ok(Some(dir.as_ref())),
+            other @ (UvRuntimeSource::PipRequirementsText { .. }
+            | UvRuntimeSource::VaultWheelhouse { .. }
+            | UvRuntimeSource::AbsolutePreinstalled { .. }) => Err(RuntimeManifestError::Corrupt(
+                format!("stored uv-onnx-genai source is not RelativePreinstalled: {other:?}"),
+            )),
         },
         Runtime::DockerVllm(_) | Runtime::DockerSglang(_) => Ok(None),
-        other => Err(RuntimeManifestError::Corrupt(format!(
+        other @ (Runtime::LlamacppApkPipette(_)
+        | Runtime::LlamacppIosPipette(_)
+        | Runtime::MlxIosPipette(_)
+        | Runtime::OnnxGenaiIosPipette(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
+        | Runtime::AppleFoundation(_)) => Err(RuntimeManifestError::Corrupt(format!(
             "stored runtime has no install dir: {other}"
         ))),
     }
 }
 
-/// Walk `root` for a file whose name is `expected_name` (or `expected_name.exe`).
 fn find_tool_file(root: &Path, expected_name: &str) -> Option<PathBuf> {
     let exe = format!("{expected_name}.exe");
     let mut stack = vec![root.to_path_buf()];
@@ -171,9 +230,6 @@ fn find_tool_file(root: &Path, expected_name: &str) -> Option<PathBuf> {
 }
 
 impl RuntimeManifest {
-    /// Build the manifest for a freshly-installed `declared` runtime at
-    /// `fetched_at`. Only an installable runtime has a storage key (else
-    /// [`RuntimeManifestError::NotStorable`]).
     pub fn new(
         declared: Runtime,
         fetched_at: OffsetDateTime,
@@ -191,22 +247,16 @@ impl RuntimeManifest {
         })
     }
 
-    /// This runtime's storage key.
     pub fn storage_key(&self) -> Result<RuntimeStorageKey, RuntimeStorageKeyError> {
         RuntimeStorageKey::of(&self.declared)
     }
 
-    /// This runtime's entry directory under `runtimes_dir` (`runtimes_dir/<key>`)
-    /// — where its manifest and any payload live.
+    /// `runtimes_dir/<key>`.
     pub fn entry_dir(&self, runtimes_dir: &Path) -> Result<PathBuf, RuntimeManifestError> {
         Ok(runtimes_dir.join(self.storage_key()?.relative_dir()))
     }
 
-    /// Absolute install root from `stored` under `runtimes_dir`.
-    ///
-    /// - already-absolute on `stored` (`AbsoluteDir` / `AbsolutePreinstalled`): as-is
-    /// - file-tree / venv: `entry_dir` + relative install subtree
-    /// - docker: the entry dir itself (manifest-only payload)
+    /// Absolute install root; for docker, the entry dir itself.
     pub fn install_dir(&self, runtimes_dir: &Path) -> Result<PathBuf, RuntimeManifestError> {
         if let Some(abs) = absolute_install_root(&self.stored) {
             return Ok(PathBuf::from(abs));
@@ -218,7 +268,7 @@ impl RuntimeManifest {
         })
     }
 
-    /// Resolve a tool by basename under [`Self::install_dir`] (walks the tree).
+    /// Finds `name` (or `name.exe`) anywhere under [`Self::install_dir`].
     pub fn resolve_tool(
         &self,
         runtimes_dir: &Path,
@@ -233,13 +283,12 @@ impl RuntimeManifest {
         })
     }
 
-    /// Loader form: rewrite `stored` path fields to host-absolute under `runtimes_dir`.
-    ///
-    /// Llama → `AbsoluteDir`; UV/MLX → `AbsolutePreinstalled`; docker unchanged.
+    /// Loader form: `stored` with its path made host-absolute under `runtimes_dir`.
     pub fn bind_under(&self, runtimes_dir: &Path) -> Result<Runtime, RuntimeManifestError> {
         use pipette_plan_types::{
             AbsolutePath, LlamacppCliStockTools, LlamacppCliStockToolsSource, MlxMacosPipette,
-            UvOpenvino, UvRuntimeSource, UvSglang, UvVllm,
+            Ovms, OvmsSource, TrtEdgellm, TrtEdgellmSource, UvOnnxGenai, UvOpenvino,
+            UvRuntimeSource, UvSglang, UvVllm,
         };
 
         let install = self.install_dir(runtimes_dir)?;
@@ -254,6 +303,14 @@ impl RuntimeManifest {
                     flavor: rt.flavor.clone(),
                 }))
             }
+            Runtime::Ovms(rt) => Ok(Runtime::Ovms(Ovms {
+                source: OvmsSource::AbsoluteDir { dir: abs(install)? },
+                flavor: rt.flavor.clone(),
+            })),
+            Runtime::TrtEdgellm(rt) => Ok(Runtime::TrtEdgellm(TrtEdgellm {
+                source: TrtEdgellmSource::AbsoluteDir { dir: abs(install)? },
+                flavor: rt.flavor.clone(),
+            })),
             Runtime::UvVllm(rt) => Ok(Runtime::UvVllm(UvVllm {
                 server_version: rt.server_version.clone(),
                 build: rt.build.clone(),
@@ -276,16 +333,27 @@ impl RuntimeManifest {
                 python_version: rt.python_version.clone(),
                 source: UvRuntimeSource::AbsolutePreinstalled { dir: abs(install)? },
             })),
-            other => Ok(other.clone()),
+            Runtime::UvOnnxGenai(rt) => Ok(Runtime::UvOnnxGenai(UvOnnxGenai {
+                server_version: rt.server_version.clone(),
+                execution_provider: rt.execution_provider.clone(),
+                python_version: rt.python_version.clone(),
+                source: UvRuntimeSource::AbsolutePreinstalled { dir: abs(install)? },
+            })),
+            other @ (Runtime::LlamacppApkPipette(_)
+            | Runtime::LlamacppIosPipette(_)
+            | Runtime::MlxIosPipette(_)
+            | Runtime::OnnxGenaiIosPipette(_)
+            | Runtime::DockerVllm(_)
+            | Runtime::DockerSglang(_)
+            | Runtime::AppleCoreAiMacosPipette(_)
+            | Runtime::AppleFoundation(_)) => Ok(other.clone()),
         }
     }
 
-    /// RFC 3339 form of [`Self::fetched_at`] for display / logs.
     pub fn fetched_at_rfc3339(&self) -> Result<String, time::error::Format> {
         self.fetched_at.format(&Rfc3339)
     }
 
-    /// RFC 3339 form of [`Self::last_used_at`] for display / logs.
     pub fn last_used_at_rfc3339(&self) -> Result<String, time::error::Format> {
         self.last_used_at.format(&Rfc3339)
     }
@@ -296,8 +364,9 @@ mod tests {
     use time::format_description::well_known::Rfc3339;
 
     use pipette_plan_types::{
-        LlamaCppFlavor, LlamacppCliStockTools, LlamacppCliStockToolsSource, NonEmptyString,
-        RepositoryUrl, SourceRepository,
+        LlamaCppFlavor, LlamacppCliStockTools, LlamacppCliStockToolsRelease,
+        LlamacppCliStockToolsSource, NonEmptyString, OnnxExecutionProvider, RepositoryUrl,
+        UvOnnxGenai, UvPythonVersion, UvRuntimeSource, UvServerVersion,
     };
 
     use super::*;
@@ -310,9 +379,10 @@ mod tests {
 
     fn llamacpp() -> anyhow::Result<Runtime> {
         Ok(Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
-            source: LlamacppCliStockToolsSource::GithubRelease(SourceRepository {
+            source: LlamacppCliStockToolsSource::GithubRelease(LlamacppCliStockToolsRelease {
                 repository_url: RepositoryUrl::new("github.com/ggml-org/llama.cpp"),
                 repository_version: NonEmptyString::try_new("b9305".to_owned())?,
+                asset: None,
             }),
             flavor: LlamaCppFlavor::MacosArm64,
         }))
@@ -358,6 +428,40 @@ mod tests {
             ),
             Err(RuntimeManifestError::NotStorable(_))
         ));
+        Ok(())
+    }
+
+    fn onnx_genai(execution_provider: OnnxExecutionProvider) -> anyhow::Result<Runtime> {
+        Ok(Runtime::UvOnnxGenai(UvOnnxGenai {
+            server_version: UvServerVersion::try_new("0.16.0".to_owned())?,
+            execution_provider,
+            python_version: UvPythonVersion::try_new("3.11".to_owned())?,
+            source: UvRuntimeSource::PipRequirementsText {
+                contents: NonEmptyString::try_new("onnxruntime-genai==0.16.0\n".to_owned())?,
+                install_flags: None,
+            },
+        }))
+    }
+
+    /// A variant moved into `bind_under`'s pass-through arm would still compile
+    /// and return a relative source that fails later in `pipette-venv`.
+    #[rstest::rstest]
+    #[case(OnnxExecutionProvider::Cpu)]
+    #[case(OnnxExecutionProvider::Cuda)]
+    fn bind_under_rewrites_onnx_genai_source_and_keeps_the_provider(
+        #[case] execution_provider: OnnxExecutionProvider,
+    ) -> anyhow::Result<()> {
+        let manifest =
+            RuntimeManifest::new(onnx_genai(execution_provider.clone())?, fetched_at()?, 4096)?;
+        let root = Path::new("/ws/runtimes");
+        let Runtime::UvOnnxGenai(rt) = manifest.bind_under(root)? else {
+            anyhow::bail!("expected a UvOnnxGenai runtime");
+        };
+        let UvRuntimeSource::AbsolutePreinstalled { dir } = &rt.source else {
+            anyhow::bail!("expected AbsolutePreinstalled, got {:?}", rt.source);
+        };
+        assert_eq!(Path::new(dir.as_ref()), manifest.install_dir(root)?);
+        assert_eq!(rt.execution_provider, execution_provider);
         Ok(())
     }
 

@@ -45,7 +45,8 @@ internal object BenchmarkCrashReporter {
   /** Exit code used only in the (unusual) no-previous-handler fallback, so the process still dies on an uncaught exception. */
   private const val UNCAUGHT_EXIT_CODE = 10
 
-  // Shared crash-file protocol — one definition so the writer (here + native/crash_reporter.cpp) and the reader ([CrashEnvelopeForwarder]) can't
+  // Shared crash-file protocol: one definition so the writer (here + android/native/crash_reporter.cpp) and the reader ([CrashEnvelopeForwarder])
+  // can't
   // drift. The dir is passed to the native side via nativeInit's envelope_dir arg; the native writer builds `<pid>-<process-token>-<seq>.envelope`,
   // so keep ENVELOPE_SUFFIX in sync with the C writer's suffix.
   const val PENDING_DIR_NAME = "pending-crashes"

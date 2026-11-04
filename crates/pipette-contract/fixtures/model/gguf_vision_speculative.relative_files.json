@@ -1,0 +1,7 @@
+{
+  "draft": "blobs/draft-f16.gguf",
+  "mmproj": "blobs/mmproj-f16.gguf",
+  "model": "blobs/target-f16.gguf",
+  "source": "relative_files",
+  "type": "gguf_vision_speculative"
+}

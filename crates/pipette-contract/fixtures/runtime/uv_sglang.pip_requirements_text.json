@@ -1,0 +1,10 @@
+{
+  "build": "cu121",
+  "python_version": "3.12",
+  "server_version": "0.5.0",
+  "source": {
+    "contents": "sglang==0.5.0\n",
+    "type": "pip_requirements_text"
+  },
+  "type": "uv_sglang"
+}

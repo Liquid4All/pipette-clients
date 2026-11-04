@@ -1,12 +1,16 @@
 import Foundation
 
 enum CollectorEndpoint {
-    static let productionURL = "https://collector.pipette.liquid.ai"
+    nonisolated static let productionURL = "https://collector.pipette.liquid.ai"
 
-    /// Whether `stored` identifies the same collector as `current`, comparing
-    /// normalized forms so a trailing slash or omitted scheme isn't a false
-    /// mismatch. A nil or blank `stored` — a legacy submission with no recorded
-    /// collector — counts as a *different* collector, so it re-syncs.
+    /// The registration wins: its identity signs for that server alone.
+    nonisolated static func effectiveServerUrl(registered: ServerUrl?) -> ServerUrl? {
+        registered ?? (try? ServerUrl(productionURL))
+    }
+
+    /// Compares normalized forms, so a trailing slash or omitted scheme isn't a
+    /// mismatch. A nil or blank `stored` (a submission with no recorded
+    /// collector) counts as a different collector, so it re-syncs.
     static func isSameCollector(_ stored: String?, as current: String) -> Bool {
         guard let stored, !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return false }
@@ -34,8 +38,7 @@ enum CollectorEndpoint {
         }
 
         components.scheme = scheme
-        // Host is case-insensitive (DNS); lowercase it so two spellings of the
-        // same collector don't read as different endpoints.
+        // DNS is case-insensitive: two spellings of one host are one collector.
         components.host = host.lowercased()
         components.path = components.path.trimmingTrailingSlashes()
 

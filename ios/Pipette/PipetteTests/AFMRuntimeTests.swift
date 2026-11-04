@@ -1,10 +1,9 @@
+import FoundationModels
 import Testing
 @testable import Pipette
 
-/// Unit tests for the pure AFM logic — the chat-message→session mapping used by eval
-/// and the cap-reached threshold used by the timing benchmarks. Neither touches the
-/// on-device model, so they run anywhere (the model itself is device + Apple
-/// Intelligence only, and is exercised via `headlessrun runtime=afm`).
+/// The pure AFM logic (eval's chat-message to session mapping, the timing benchmarks'
+/// cap-reached threshold, eval sampling), which runs without the on-device model.
 struct AFMRuntimeTests {
     // MARK: - splitMessages
 
@@ -15,10 +14,6 @@ struct AFMRuntimeTests {
         let prompt: String
     }
 
-    /// Pins the documented mapping: `system` turns join (blank-line separated) into the
-    /// session instructions; a lone user turn is the prompt verbatim; multiple
-    /// non-system turns fold into one role-labeled block; a missing role defaults to
-    /// `user`; empty input yields empty strings.
     @Test(arguments: [
         SplitCase(name: "single user verbatim",
                   messages: [["role": "user", "content": "What is 2+2?"]],
@@ -63,5 +58,54 @@ struct AFMRuntimeTests {
     ])
     func capFloor(_ c: (cap: Int, floor: Int)) {
         #expect(AFMRuntime.capFloor(c.cap) == c.floor, "capFloor(\(c.cap))")
+    }
+
+    // MARK: - eval sampling
+
+    private func sampling(temperature: Double = 1, topP: Double? = nil, topK: Int32? = nil,
+                          minP: Double? = nil, seed: Int64? = nil) throws -> Sampling {
+        try Sampling.fromBenchmark(EvalBenchmark(
+            benchmarkId: BenchmarkId(validated: "eval_math_500"),
+            parameterEvalId: .known(.math500), parameterDatasetName: "2026.06.1",
+            parameterMaxTokens: 8, parameterTemperature: try SamplingTemperature(temperature),
+            parameterTopP: try topP.map { try TopP($0) },
+            parameterTopK: try topK.map { try TopK($0) },
+            parameterMinP: try minP.map { try MinP($0) },
+            parameterSeed: try seed.map { try SamplingSeed($0) }))
+    }
+
+    /// The framework takes one cut and no min-p, so a pin it cannot apply fails the cell;
+    /// greedy applies no cut, so nothing is refused there.
+    @Test func aPinTheFrameworkCannotApplyIsRefused() throws {
+        #expect(throws: RuntimeError.self) {
+            try AFMRuntime.requireHonoured(try sampling(minP: 0.05))
+        }
+        #expect(throws: RuntimeError.self) {
+            try AFMRuntime.requireHonoured(try sampling(topP: 0.95, topK: 64))
+        }
+        try AFMRuntime.requireHonoured(try sampling(temperature: 0, topP: 0.95, topK: 64,
+                                                    minP: 0.05))
+        try AFMRuntime.requireHonoured(try sampling(topP: 0.95, topK: 0, minP: 0))
+    }
+
+    /// Each honoured pin lands on the mode, the sample's seed with it.
+    @Test func theHonouredPinsBecomeTheSamplingMode() throws {
+        let cases: [(Sampling, UInt32?, GenerationOptions.SamplingMode?)] = [
+            (try sampling(topK: 64), 7, .random(top: 64, seed: 7)),
+            (try sampling(topP: 0.95), 7, .random(probabilityThreshold: 0.95, seed: 7)),
+            (try sampling(), 7, .random(probabilityThreshold: 1, seed: 7)),
+            (try sampling(topK: 0), nil, .random(probabilityThreshold: 1, seed: nil)),
+            (try sampling(topP: 1), nil, .random(probabilityThreshold: 1, seed: nil)),
+            (try sampling(), nil, nil),
+            (try sampling(temperature: 0, topK: 64), 7, .greedy),
+        ]
+        for (sampling, seed, mode) in cases {
+            let options = AFMRuntime.evalOptions(sampling, seed: seed, maxTokens: 8)
+            #if compiler(>=6.4)
+            #expect(options.samplingMode == mode, "\(sampling)")
+            #else
+            #expect(options.sampling == mode, "\(sampling)")
+            #endif
+        }
     }
 }

@@ -1,19 +1,35 @@
-//! Bound OpenVINO runtime projection for a prepared [`RunRequest`].
+//! The venv python of a bound OpenVINO runtime, resolved from the plan's
+//! [`Runtime`], and the device a cell runs on.
 //!
-//! Install is `pipette_artifacts::ensure_runtime`. This module finds the venv
-//! `python` under a bound `AbsolutePreinstalled` dir, and reads the compute
-//! device off the **declared** runtime.
+//! Install is `pipette_artifacts::ensure_runtime`.
 
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::{OpenvinoDevice, RuntimeType};
+use pipette_plan_types::{OpenvinoDevice, RunRequest, Runtime, RuntimeType};
 use pipette_venv::{require_bound_venv, venv_python};
 
-/// Bound OpenVINO venv python: `UvOpenvino` + `AbsolutePreinstalled` after bind.
-pub fn require_openvino_python(req: &RunRequest) -> anyhow::Result<PathBuf> {
-    let venv = require_bound_venv(&req.runtime.bound, &[RuntimeType::UvOpenvino])?;
-    Ok(venv_python(&venv))
+/// The venv python of a bound `uv_openvino` runtime.
+#[derive(Debug)]
+pub struct ResolvedOpenvinoPython(PathBuf);
+
+impl TryFrom<&Runtime> for ResolvedOpenvinoPython {
+    type Error = anyhow::Error;
+
+    fn try_from(runtime: &Runtime) -> anyhow::Result<Self> {
+        let Runtime::UvOpenvino(rt) = runtime else {
+            anyhow::bail!("expected uv_openvino, got `{}`", RuntimeType::of(runtime));
+        };
+        Ok(Self(venv_python(&require_bound_venv(&rt.source)?)))
+    }
+}
+
+impl Deref for ResolvedOpenvinoPython {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
 }
 
 /// The device this cell runs on, from its flags.
@@ -47,18 +63,18 @@ pub fn device_property(device: &OpenvinoDevice) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use pipette_plan_types::benchmark::{BenchmarkDefinition, PrefillThroughput};
-    use pipette_plan_types::run::DeclaredBound;
     use pipette_plan_types::{
-        AbsolutePath, Model, ModelSource, ModelType, Openvino, Runtime, RuntimeFlagRef,
-        RuntimeFlags, RuntimeType, UvOpenvino, UvPythonVersion, UvRuntimeSource, UvServerVersion,
+        AbsolutePath, BatchSize, BenchmarkDefinition, BenchmarkId, DeclaredBound, Model,
+        ModelSource, ModelType, NonNegativeCount, Openvino, PrefillThroughputBenchmark,
+        RuntimeFlagRef, RuntimeFlags, UvOpenvino, UvPythonVersion, UvRuntimeSource,
+        UvServerVersion,
     };
 
     use super::*;
 
     fn runtime(source: UvRuntimeSource) -> anyhow::Result<Runtime> {
         Ok(Runtime::UvOpenvino(UvOpenvino {
-            server_version: UvServerVersion::try_new("2026.2.1".to_string())?,
+            server_version: UvServerVersion::try_new("2026.4.1".to_string())?,
             python_version: UvPythonVersion::try_new("3.11".to_string())?,
             source,
         }))
@@ -104,15 +120,15 @@ mod tests {
             runtime_flags,
             model_flags: None,
             benchmark_flags: None,
-            benchmark: BenchmarkDefinition::PrefillThroughput(PrefillThroughput {
-                benchmark_id: "prefill".into(),
-                parameter_prefill_tokens: 512,
+            benchmark: BenchmarkDefinition::PrefillThroughput(PrefillThroughputBenchmark {
+                benchmark_id: BenchmarkId::try_new("prefill".to_owned())?,
+                parameter_prefill_tokens: NonNegativeCount::try_new(512)?,
+                parameter_batch_size: BatchSize::one(),
             }),
         })
     }
 
-    /// The device is the cell's, so binding cannot change it — the hazard that
-    /// forced this to read the *declared* runtime is gone with the field.
+    /// The device is the cell's, so binding the runtime cannot change it.
     #[test]
     fn device_comes_from_the_cells_flags() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -145,22 +161,9 @@ mod tests {
     }
 
     #[test]
-    fn require_openvino_python_rejects_a_venv_without_python() -> anyhow::Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let bound = runtime(UvRuntimeSource::AbsolutePreinstalled {
-            dir: AbsolutePath::try_new(tmp.path().to_string_lossy().into_owned())?,
-        })?;
-        let Err(err) = require_openvino_python(&req(bound.clone(), bound)?) else {
-            anyhow::bail!("expected a missing-interpreter error");
-        };
-        assert!(format!("{err:#}").contains("python missing"), "got {err:#}");
-        Ok(())
-    }
-
-    #[test]
-    fn require_openvino_python_rejects_another_runtime() -> anyhow::Result<()> {
+    fn resolved_openvino_python_rejects_another_runtime() -> anyhow::Result<()> {
         let other = Runtime::AppleFoundation(Default::default());
-        let Err(err) = require_openvino_python(&req(other.clone(), other)?) else {
+        let Err(err) = ResolvedOpenvinoPython::try_from(&other) else {
             anyhow::bail!("expected a wrong-runtime rejection");
         };
         assert!(

@@ -1,0 +1,6 @@
+{
+  "batch_size": 1,
+  "benchmark_type": "decode_throughput",
+  "decode_tokens": 128,
+  "prefill_tokens": 512
+}

@@ -1,0 +1,40 @@
+# Bundled openvino-genai runtime catalog, keyed by `version` (the
+# openvino-genai version minus its trailing wheel component). README.md beside
+# this file describes the columns.
+#
+# The set is deliberately minimal: no transformers, optimum-intel or nncf.
+# Those are export-side, and pinning them would drag in the export stack's
+# heavier version constraints.
+#
+# Pin the version to whatever `openvino` produced the IR being benchmarked; a
+# runtime newer than the export is not guaranteed to load it.
+
+[[openvino]]
+version = "2026.2.1"
+requirements = '''
+numpy==2.4.6
+openvino==2026.2.1
+openvino-genai==2026.2.1.0
+openvino-telemetry==2025.2.0
+openvino-tokenizers==2026.2.1.0
+'''
+
+[[openvino]]
+version = "2026.4.0"
+requirements = '''
+numpy==2.4.6
+openvino==2026.4.0
+openvino-genai==2026.4.0.0
+openvino-telemetry==2025.2.0
+openvino-tokenizers==2026.4.0.0
+'''
+
+[[openvino]]
+version = "2026.4.1"
+requirements = '''
+numpy==2.4.6
+openvino==2026.4.1
+openvino-genai==2026.4.1.0
+openvino-telemetry==2025.2.0
+openvino-tokenizers==2026.4.1.0
+'''

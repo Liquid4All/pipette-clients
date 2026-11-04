@@ -1,0 +1,33 @@
+{
+  "benchmark": "prefill_throughput_512",
+  "benchmark_flags": null,
+  "model": {
+    "org": "LiquidAI",
+    "repo_name": "LFM2-350M-CoreAI",
+    "source": "huggingface",
+    "type": "core_ai"
+  },
+  "model_flags": null,
+  "runtime": {
+    "packages": {
+      "coreai_models": {
+        "repository_url": "github.com/apple/coreai-models",
+        "repository_version": "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
+      },
+      "swift_transformers": {
+        "repository_url": "github.com/huggingface/swift-transformers",
+        "repository_version": "1.2.0"
+      },
+      "xgrammar": {
+        "repository_url": "github.com/mlc-ai/xgrammar",
+        "repository_version": "0.2.2"
+      },
+      "swift_jinja": {
+        "repository_url": "github.com/huggingface/swift-jinja",
+        "repository_version": "2.3.2"
+      }
+    },
+    "type": "core_ai_macos_pipette"
+  },
+  "runtime_flags": null
+}

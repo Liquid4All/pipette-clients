@@ -1,0 +1,50 @@
+# Example plan: llama.cpp vision-language accuracy evals on an Android phone.
+#
+# The pipette CLI is pushed over adb and drives the stock android-arm64
+# llama.cpp release (`llama-server`, plus `llama-mtmd-cli` for image-token
+# calibration), not the Pipette app's in-process kotlinEngine.
+#
+# vlm_eval entries are server-defined: the mgmt catalog resolves the lmms-eval
+# task, dataset version and prompt profile and pins the samples as a corpus.
+# An entry is one benchmark for one model family; a cell running a model its
+# recipe does not cover is refused at ingestion and by the client. The entries
+# are org-private, so run against an organization that holds them.
+
+plan_id = "llamacpp-android-vlm-eval-example"
+benchmarks = [
+  "vlm_eval_mmstar_lfm2_5_vl_3b",
+  "vlm_eval_ocrbench_lfm2_5_vl_3b",
+  "vlm_eval_realworldqa_lfm2_5_vl_3b",
+]
+
+[[transports]]
+client_id   = "android-a"
+type        = "adb"
+serial      = "R5CY80M8ZZK"
+binary_path = "/data/local/tmp/pipette/pipette"
+work_dir    = "/data/local/tmp/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["android-a"]
+models = [
+  { type = "gguf_vision", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-VL-3B-GGUF", model = "LFM2.5-VL-3B-Q4_K_M.gguf", mmproj = "mmproj-LFM2.5-VL-3B-BF16.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", repository_version = "b10216", flavor = "android-arm64-v8a" },
+]
+# The VL throughput release's phone settings: CPU only, flash attention off
+# (it cost Snapdragon prefill 30-60% there), 8 threads.
+runtime_flags = [
+  { benchmark_type = "vlm_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", threads = 8, number_gpu_layers = 0, flash_attention = "off" },
+]
+# An MCQ request is one non-streamed response, so the timeout must cover the
+# whole image prefill: up to 65 s TTFT at 512² on the S26 Ultra, and eval images
+# are often larger; 1800 s is the release's phone budget. The readiness gate
+# runs once, best-effort, before the server starts.
+benchmark_flags = [
+  { benchmark_type = "vlm_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 1800, readiness = { max_wait_secs = 1800 } },
+]

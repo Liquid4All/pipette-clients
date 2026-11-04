@@ -1,0 +1,32 @@
+[package]
+name = "pipette-ssh"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "The SSH keys a host already has: the OpenSSH wire vocabulary, Ed25519 public keys, and the local agent that signs with one."
+
+[lints]
+workspace = true
+
+[features]
+# The fake agent, for a dependent's tests (enabled from its [dev-dependencies]).
+test-support = ["dep:anyhow", "dep:ed25519-dalek", "dep:tempfile"]
+
+# No agent-protocol crate, on purpose: the wire format is length-prefixed
+# strings and four message types, and a dependency here would put a
+# third-party crate on the path every authenticated management call signs
+# through.
+[dependencies]
+anyhow = { workspace = true, optional = true }
+base64.workspace = true
+ed25519-dalek = { workspace = true, optional = true }
+hex.workspace = true
+sha2.workspace = true
+tempfile = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+ed25519-dalek.workspace = true
+rstest.workspace = true
+tempfile.workspace = true

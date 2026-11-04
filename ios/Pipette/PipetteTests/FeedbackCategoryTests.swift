@@ -2,12 +2,9 @@ import XCTest
 @testable import Pipette
 
 final class FeedbackCategoryTests: XCTestCase {
-    /// Tripwire pinning the iOS feedback category ids and their order. The same set is
-    /// hand-duplicated in the Android `FeedbackDialog.CATEGORY_IDS` and pipette-dashboard's
-    /// `FEEDBACK_CATEGORIES`. This can't enforce true cross-platform parity (each platform pins
-    /// its own copy), but it catches an *accidental* change here — and when the change is
-    /// intentional, updating this list is the reminder to update the other platforms so the
-    /// Sentry `category` tag keeps meaning the same thing across web, Android, and iOS.
+    /// The same ids, in order, are hand-copied in Android's `FeedbackDialog.CATEGORY_IDS`
+    /// and pipette-dashboard's `FEEDBACK_CATEGORIES`, so the Sentry `category` tag means
+    /// the same on every platform. Changing this list means changing those too.
     func testCategoryIdsMatchCrossPlatformContract() {
         let expected = [
             "report_bug",

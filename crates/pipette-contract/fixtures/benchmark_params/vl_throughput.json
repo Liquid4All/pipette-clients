@@ -1,0 +1,8 @@
+{
+  "benchmark_type": "vl_throughput",
+  "decode_tokens": 64,
+  "image_height": 336,
+  "image_width": 224,
+  "num_images": 3,
+  "text_tokens": 8
+}

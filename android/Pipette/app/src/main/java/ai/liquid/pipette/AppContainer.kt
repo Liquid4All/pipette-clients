@@ -64,6 +64,35 @@ class AppContainer(
     skipThermalGate = enabled
   }
 
+  /**
+   * The readiness deadline both gates apply, from the running job's `benchmark_flags.readiness.max_wait_secs`.
+   *
+   * Not device state, unlike the waiver: a deadline is a property of the measurement that was asked for, so it is stored on the job's manifest and
+   * installed here for the length of each run of that job.
+   */
+  @Volatile
+  var readinessMaxWaitMillis: Long = Readiness.COOLDOWN_MAX_MILLIS
+    private set
+
+  /**
+   * A run's thermal waiver, layered *over* [skipThermalGate] for the duration of that run.
+   *
+   * Separate from the setting rather than written into it, so a headless `readiness_skip_thermal=` cannot leave the Settings toggle rendering one
+   * thing while the gates do another, and cannot outlive the run that asked for it. Null defers to the toggle.
+   */
+  @Volatile
+  var runSkipThermalOverride: Boolean? = null
+    private set
+
+  /**
+   * Installs the policy the starting job asked for. Called by [JobRunner] at **every** run start — a new job, a resume, a retry, a rerun — off that
+   * job's own manifest, so a job that names nothing is gated on the defaults rather than inheriting the last run's overrides.
+   */
+  fun applyRunReadiness(readiness: RunReadiness) {
+    readinessMaxWaitMillis = readiness.maxWaitMillis()
+    runSkipThermalOverride = readiness.skipThermal
+  }
+
   // On every `:benchmark` (re)connect, drain crash reports and report any OOM/ANR from the process that just died. sentry-native flushes a prior
   // native crash during the respawn's init, so connect is when a new envelope becomes available; reporting here also catches the crash-then-retry
   // flow promptly, before the next launch. See [CrashEnvelopeForwarder] / [BenchmarkExitReporter].
@@ -76,7 +105,8 @@ class AppContainer(
       },
       // Read at service-start time, not now: the proxy starts `:benchmark` when a run begins, which
       // is after the toggle has had a chance to load or change.
-      skipThermalGate = { skipThermalGate },
+      skipThermalGate = { runSkipThermalOverride ?: skipThermalGate },
+      readinessMaxWaitMillis = { readinessMaxWaitMillis },
     )
   // Launches the pocket-mode Activity in the :benchmark process so that process
   // claims top-app and inference regains the prime cores an OEM (e.g. Samsung)
@@ -109,13 +139,37 @@ class AppContainer(
       // sharing the one cache keeps the UI's poll from starving the gate's read to NaN (which would
       // drop it onto the coarse status-enum fallback). The :benchmark per-rep gate is a separate
       // process with no UI reader, so it keeps the raw read.
-      readiness = Readiness(thermalStatusProvider::currentStatus, thermalStatusProvider::cachedHeadroom, skipThermal = { skipThermalGate }),
-      // JobRunner calls this when the run's first cell actually loads.
-      host = HostHooks(launchPocketMode = launchBenchmarkPocket, setForegroundHold = setJobForegroundHold),
+      readiness =
+        Readiness(
+          thermalStatusProvider::currentStatus,
+          thermalStatusProvider::cachedHeadroom,
+          skipThermal = { runSkipThermalOverride ?: skipThermalGate },
+          maxWaitMillis = { readinessMaxWaitMillis },
+        ),
+      // launchPocketMode fires when the run's first cell actually loads; applyRunReadiness is called at every run start (see its doc above).
+      host = HostHooks(launchPocketMode = launchBenchmarkPocket, setForegroundHold = setJobForegroundHold, applyReadiness = ::applyRunReadiness),
       analytics = analytics,
       // Gates the per-cell result upload. Bound to the app context here, not read inside the
       // runner, so the runner stays constructible in tests.
       isOnline = NetworkReachability.checker(appContext),
+      // Fetches a cell's weights when they are absent. Constructible here and nowhere else in the app: this container is deliberately not built in
+      // the :benchmark process (see the class doc), which is also the process that must never start a download.
+      provisioner =
+        ModelProvisioner(
+          resolvePath = storage::resolveModelPath,
+          // Adapter rather than making the coordinator implement the interface: it is the app's download API, and should not take on a second,
+          // narrower identity because one caller wants two methods of it.
+          downloads =
+            object : ModelProvisioner.Downloads {
+              override fun resume(key: String) = downloadCoordinator.resume(key)
+
+              override fun enqueue(url: String, repo: String?) {
+                downloadCoordinator.enqueueDownload(urlString = url, repo = repo)
+              }
+            },
+          records = { DownloadStore.records(appContext) },
+          isOnline = NetworkReachability.checker(appContext),
+        ),
     )
 
   init {

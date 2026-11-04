@@ -2,18 +2,13 @@ import Foundation
 import SwiftUI
 import UIKit
 
-/// The single benchmark run loop, shared by the "start new job" flow
-/// (NewJobView) and the resume / retry / re-run flow (JobDetailView). The two
-/// flows previously carried near-identical copies of this loop that had
-/// already drifted in small ways; run-path changes (recovery, gating, pause
-/// behavior) belong here so they land in both flows at once.
+/// The single benchmark run loop, shared by every job start: `JobLauncher`, the resume /
+/// retry / re-run flow (JobDetailView) and the planner worker. Run-path changes (recovery,
+/// gating, pause behavior) belong here.
 @MainActor
 enum JobExecutor {
-    /// Human-readable "<benchmark> <params> · <model>" label for the cell
-    /// currently running, shown live in the progress views. Uses the benchmark's
-    /// catalog display name plus a compact token summary — so several benchmarks
-    /// of the same type (e.g. two decode runs at different token counts) are
-    /// distinguishable — and the model's repo tail rather than the full org/repo.
+    /// "<benchmark> <params> · <model>" label for the running cell. The token summary
+    /// tells same-type benchmarks apart; the model shows its repo tail only.
     static func liveCellLabel(_ cell: JobCell, params: [String: Any]?) -> String {
         let name: String
         if let type = cell.benchmarkType, type != .eval {
@@ -50,21 +45,27 @@ enum JobExecutor {
         case .decodeThroughput, .endToEndLatency:
             if let prefill, let decode { return "\(prefill)→\(decode) tok" }
             return (decode ?? prefill).map { "\($0) tok" }
-        case .vlThroughput:
+        case .vlThroughput, .vlMaxMemory:
             guard let w = intVal("parameter_image_width"), let h = intVal("parameter_image_height") else { return nil }
             let text = intVal("parameter_text_tokens").map { " · \($0) tok" } ?? ""
             return "\(w)×\(h)px\(text)"
+        case .asrThroughput, .asrMaxMemory:
+            guard let ms = intVal("parameter_audio_duration_ms") else { return nil }
+            let text = intVal("parameter_text_tokens").map { " · \($0) tok" } ?? ""
+            return "\(ms) ms audio\(text)"
+        case .vlSpecDecode:
+            // The corpus is the workload, and it is a pin rather than a size. What
+            // distinguishes two cells on one corpus is the draft length, which is what the
+            // catalog id's own suffix names (`…_k8`).
+            return intVal("parameter_draft_length").map { "k\($0)" }
         case .eval:
             return nil
         }
     }
 
-    /// Whether a completed cell's result should be auto-submitted now — the shared
-    /// gate for both the per-cell upload and the job-end sweep. True only when the
-    /// run opted into auto-submit, the job opted into contributing, the network is
-    /// reachable (so an offline run skips rather than burning the uploader's retries),
-    /// and a registration exists to submit under. Pure, so it's unit-testable without
-    /// standing up the run loop.
+    /// Whether a completed cell's result should be auto-submitted now, for both the
+    /// per-cell upload and the job-end sweep. An offline run skips rather than burning the
+    /// uploader's retries.
     nonisolated static func shouldAutoSubmit(
         _ manifest: JobManifest,
         autoSubmit: Bool,
@@ -77,67 +78,96 @@ enum JobExecutor {
             && ResultSubmissionFeatureGate.canSubmitResults(registration: registration)
     }
 
-    /// Execute every `.pending` cell of `manifest` on a detached background
-    /// task, then auto-submit if the finished job is marked for contribution.
+    /// The benchmark each of `ids` runs. Ids that resolve nowhere drop out, and their cells
+    /// fail as a missing benchmark. In order:
     ///
-    /// The caller has already reserved the runner via
-    /// `jobRunner.start(jobId:flag:)` (the double-start guard) and persisted
-    /// `manifest` with the cells to execute set to `.pending` and
-    /// `status == .running`.
+    /// 1. `claimed`: a claim revalidated or fetched it, so it is newer than anything on disk.
+    /// 2. The synced detail, for a corpus-pinned type: the server stamps `dataset.url` only on
+    ///    `GET /benchmarks/{id}`, so the list row names the corpus but not where to get it.
+    /// 3. The synced list's row, else the local half. The list keeps `parameter_*` fields this
+    ///    build may not have classified, which the live label reads.
+    /// 4. A synced detail the list does not name: a claim caches a fetched benchmark there.
+    /// 5. A definition reconstructed from a structured id.
+    static func pendingBenchmarks(
+        ids: Set<String>, store: BenchmarkStore, claimed: [BenchmarkDefinition]
+    ) -> [BenchmarkItem] {
+        let claimedById = Dictionary(
+            claimed.map { ($0.benchmarkId.value, $0) }, uniquingKeysWith: { _, last in last })
+        let catalogById = Dictionary(
+            BenchmarkCatalog.all(store: store).map { ($0.benchmarkId, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let detail: (String) -> BenchmarkItem? = { id in
+            (try? BenchmarkId(id)).flatMap { try? store.get(.remote($0)) }
+                .map { BenchmarkItem(parsed: $0) }
+        }
+        return ids.compactMap { id in
+            claimedById[id].map { BenchmarkItem(parsed: $0) }
+                ?? (BenchmarkType.fromId(id)?.needsCorpus == true ? detail(id) : nil)
+                ?? catalogById[id]
+                ?? detail(id)
+                ?? BenchmarkCatalog.item(forId: id, in: catalogById)
+        }
+    }
+
+    /// Execute every `.pending` cell of `manifest` on a detached task, then auto-submit if
+    /// the finished job is marked for contribution. The caller has already reserved the
+    /// runner via `jobRunner.start(jobId:flag:)` and persisted `manifest` as `.running`.
     ///
-    /// `onFinish` runs on the main actor after the loop and any auto-submit
-    /// pass, with the final persisted manifest. It is **always invoked exactly
-    /// once** — per-cell errors are caught in the loop and never escape, so the
-    /// detached task always reaches the finalize step. Headless relies on this
-    /// to resume its `withCheckedContinuation`; any early `return`/`throw` added
-    /// inside the task before that step would silently hang every headless run.
+    /// `onFinish` runs on the main actor with the final persisted manifest, **exactly
+    /// once**: per-cell errors are caught in the loop. Callers awaiting it through
+    /// `withCheckedContinuation` (headless, the planner worker) hang if an early
+    /// `return`/`throw` is added inside the task before the finalize step.
+    ///
+    /// `keepEvalCheckpoint`: for a caller that still owes the server the saved result; it
+    /// receives the cell's eval checkpoint rather than the executor finalizing it. It holds
+    /// one digest, so pass it only with a one-cell manifest.
+    ///
+    /// `keepFetchFailure`: for a caller that reports the failure to the server; it receives
+    /// the first cell's typed vault failure, which `errorMessage` holds only as text.
+    ///
+    /// `claimedAt`: when this device received the claim that started the job. Each result
+    /// records the time since it as `device_time_ms` (none when nil). Every cell counts from
+    /// the same instant, so pass it only with a one-cell manifest.
+    ///
+    /// `claimedBenchmarks`: the definitions a claim resolved through the server. Each runs as
+    /// given, ahead of the synced list, which can be older.
     static func run(
         manifest: JobManifest,
         jobRunner: JobRunner,
         jobStore: JobStore,
         flag: CancelFlag,
-        storage: Storage,
+        ws: PipetteWorkspace,
         source: RunSource,
         autoSubmit: Bool = true,
-        readiness readinessOverrides: ReadinessPolicy = .init(),
+        claimedAt: ContinuousClock.Instant? = nil,
+        claimedBenchmarks: [BenchmarkDefinition] = [],
+        keepEvalCheckpoint: KeptEvalCheckpoint? = nil,
+        keepFetchFailure: KeptFetchFailure? = nil,
         onFinish: @escaping @MainActor (JobManifest) -> Void = { _ in }
     ) {
-        // The cells THIS run will execute. Both analytics events are scoped to these, never to the
-        // whole manifest: a resume of a 90%-done job runs a handful of cells, and reporting the
-        // job's full cell count at the end would make every resume look like a full run. Matches
-        // Android's run-relative `totalInRun` / `cellsCompletedInRun`.
+        // Scoped to the cells THIS run executes, so a resume of a 90%-done job doesn't
+        // report as a full run. Matches Android's run-relative `totalInRun` /
+        // `cellsCompletedInRun`.
         let pendingCells = manifest.cells.filter { $0.runStatus == .pending }
         let cellIdsThisRun = Set(pendingCells.map(\.cellId))
         let runStartedAt = Date()
 
-        // Capture-then-flush BEFORE the detached run task starts, so the analytics queue is empty
-        // entering the measurement window and the SDK's periodic flush timer has nothing to send
-        // while a cell is being timed. The flush's network call overlaps model load (seconds), not
-        // a timed measurement. The loop's only capture is `results_submitted` from the per-cell
-        // drain below, which flushes itself for the same reason. See `AnalyticsEvents`.
+        // Capture-then-flush before the run starts, so the SDK's periodic flush has nothing
+        // to send while a cell is timed; the network call overlaps model load instead. See
+        // `AnalyticsEvents`.
         Analytics.capture(AnalyticsEvents.jobStarted, [
             AnalyticsEvents.jobId: manifest.jobId.value,
             AnalyticsEvents.cellCount: cellIdsThisRun.count,
             AnalyticsEvents.source: source.rawValue,
         ])
         Analytics.flush()
-        let neededIds = Set(pendingCells.map { $0.benchmarkId })
-        // Resolve every needed cell's benchmark catalog-independently via
-        // `BenchmarkCatalog.item(forId:in:)`: the synced-catalog entry when listed,
-        // else a `BenchmarkItem` reconstructed from the structured id. The parsed
-        // item carries the same shape downstream, so context sizing and the
-        // existence guard work uniformly. Ids that neither resolve nor parse drop
-        // out here and fail per-cell exactly as a missing benchmark.
-        let catalogById = Dictionary(
-            BenchmarkCatalog.all(store: storage.benchmarks).map { ($0.benchmarkId, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let pendingBenchmarks: [BenchmarkItem] = neededIds.compactMap {
-            BenchmarkCatalog.item(forId: $0, in: catalogById)
-        }
+        let pendingBenchmarks = Self.pendingBenchmarks(
+            ids: Set(pendingCells.map { $0.benchmarkId }), store: ws.benchmarks,
+            claimed: claimedBenchmarks)
         let benchmarkJsonMap: [String: [String: Any]] = pendingBenchmarks
             .reduce(into: [:]) { $0[$1.benchmarkId] = $1.rawJson }
-        // Typed benchmark definitions fed to `RunCell.dispatch` for every cell. The raw
+        // Typed benchmark definitions fed to `RunCell.dispatchRun` for every cell. The raw
         // `benchmarkJsonMap` above is kept for the live cell label and the existence
         // guard, both of which read parameters this build may not have classified.
         let definitionMap: [String: BenchmarkDefinition] = pendingBenchmarks
@@ -166,51 +196,44 @@ enum JobExecutor {
         Task.detached {
             var updatedManifest = initialManifest
 
-            // path → formatted failure reason from the first failed load.
-            // Reused so subsequent cells in the group show the real cause.
-            // Keyed by the model, not its on-disk path: a cell for a model that has not
-            // been downloaded yet carries an empty path, and every such cell would share
-            // one bucket — so the first failure would mark every undownloaded model
-            // failed. The coordinate is the identity that actually distinguishes them.
+            // Model -> formatted reason from its first failed load, so later cells for it
+            // show the real cause. Keyed by model, not path: every undownloaded model has
+            // an empty path.
             var failedModels: [Model: String] = [:]
 
-            // The cell to run. One authored since the spec exists carries its own — from a
-            // claim or from New Job. One written before it carries the model alone, so the
-            // job's settings stand in: they are where a pre-spec manifest recorded them.
+            // A cell authored since the spec existed carries its own load settings; an older
+            // one carries the model alone, so the job's settings stand in.
             func cellSpec(_ cell: JobCell, definition: BenchmarkDefinition) -> ClientRunSpec {
                 guard cell.spec.runtimeFlags == nil else { return cell.spec }
                 // Only the load settings stand in. The readiness gate the cell named is not
                 // among them, and rebuilding the spec here would drop it from the record
                 // while the gate below still applied it.
                 let settings = ClientRunSpec.authored(
-                    benchmarkId: cell.benchmarkId, benchmarkType: definition.type,
+                    benchmarkId: cell.benchmarkId, benchmarkType: definition.benchmarkType,
                     model: cell.source, numberGpuLayers: gpuLayers, nUbatch: ubatch,
                     threads: threads)
                 return cell.spec.replacingRuntimeFlags(settings.runtimeFlags)
             }
 
-            // The context a cell will load with, read from the engine's own sizing rather
-            // than recomputed. A cell whose benchmark this build cannot classify is refused
-            // before it loads, so the value only has to order it stably.
+            // The context a cell asks for, read from the engine's own sizing rather than
+            // recomputed; the VL and ASR kinds replace theirs with the projector's count at
+            // load. A cell whose benchmark this build cannot classify is
+            // refused before it loads, so the value only has to order it stably.
             func cellContextSize(_ cell: JobCell) -> Int {
                 definitionMap[cell.benchmarkId]
-                    .map { Int(LlamaRuntimeFlags.contextSize(for: $0)) } ?? 0
+                    .map { Int(LlamaRuntimeFlags.ctxSize(for: $0)) } ?? 0
             }
 
-            // Persist `manifest` (re-adopting the user-editable fields the job
-            // page may have changed mid-run) and sync the in-memory store —
-            // one call so no save site can forget the store half.
+            // Persist and sync the store in one call, re-adopting the fields the job page may
+            // edit mid-run.
             func saveRunManifest(_ manifest: inout JobManifest) async {
-                if let latest = storage.loadJobManifest(jobId: manifest.jobId) {
-                    manifest.contributeResults = ResultSubmissionFeatureGate.canSubmitResults(registration: storage.identity.getRegistration())
+                if let latest = ws.loadJobManifest(jobId: manifest.jobId) {
+                    manifest.contributeResults = ResultSubmissionFeatureGate.canSubmitResults(registration: ws.registration.get())
                         && (latest.contributeResults == true)
                     manifest.title = latest.title
-                    // `serverJobId` is owned by the uploader, which acks straight to
-                    // disk (it also serves launch/foreground/manual triggers that hold
-                    // no in-memory manifest). Re-adopt those acks so this write — which
-                    // carries the executor-owned `runStatus` — never clobbers a
-                    // submission the uploader just recorded. A cell the loop is actively
-                    // running has no ack yet, so `runStatus` still wins.
+                    // `serverJobId` is the uploader's, which acks straight to disk. Re-adopt
+                    // its acks so this write never clobbers a submission just recorded; a
+                    // running cell has no ack yet, so `runStatus` still wins.
                     let acked = Dictionary(
                         latest.cells.compactMap { cell in cell.serverJobId.map { (cell.cellId, $0) } },
                         uniquingKeysWith: { first, _ in first }
@@ -221,23 +244,19 @@ enum JobExecutor {
                         }
                     }
                 }
-                storage.saveJobManifest(manifest)
+                ws.saveJobManifest(manifest)
                 let snapshot = manifest
                 await MainActor.run { store.apply(snapshot) }
             }
 
-            // Sort pending cells by (model, ctx) so the load-once-per-model
-            // optimization holds even for manifests persisted in
-            // benchmark-major order, and so we only reload when the context
-            // window changes within a model group. The compare key is the
-            // coordinate — the cell's declared `Model`, stable whether or not the
-            // weights are on disk yet, so cells for one model stay adjacent and the
-            // engine loads it once.
+            // Group pending cells by (model, ctx), whatever order the manifest was stored
+            // in. The key is the declared `Model`, stable whether or not the weights are on
+            // disk yet.
             let executionOrder: [Int] = updatedManifest.cells.indices
                 .filter { updatedManifest.cells[$0].runStatus == .pending }
                 .sorted {
-                    (updatedManifest.cells[$0].source.reference, cellContextSize(updatedManifest.cells[$0]))
-                        < (updatedManifest.cells[$1].source.reference, cellContextSize(updatedManifest.cells[$1]))
+                    (updatedManifest.cells[$0].source.description, cellContextSize(updatedManifest.cells[$0]))
+                        < (updatedManifest.cells[$1].source.description, cellContextSize(updatedManifest.cells[$1]))
                 }
 
             for index in executionOrder {
@@ -252,10 +271,8 @@ enum JobExecutor {
                     continue
                 }
 
-                // Completed count entering this cell — stable for its whole
-                // duration, so the ETA anchor can reuse it as cells that emit no
-                // intra-cell samples (e.g. throughput) still re-project each
-                // boundary and count down in between.
+                // Stable for the whole cell, so cells that emit no intra-cell samples still
+                // re-anchor the ETA at each boundary.
                 let completedBeforeCell = updatedManifest.completedCells
                 await MainActor.run {
                     runner.currentCellLabel = liveCellLabel(cell, params: benchmarkJsonMap[cell.benchmarkId])
@@ -266,25 +283,23 @@ enum JobExecutor {
                     runner.anchorETA(completedCells: completedBeforeCell)
                 }
 
-                // Crash forensics: if the process dies anywhere in this
-                // iteration (a jetsam OOM kill never reaches the catch
-                // below), the sentinel left on disk tells the next launch
-                // exactly which cell was running. Cleared when the iteration
-                // ends with the cell's terminal status already saved.
+                // If the process dies in this iteration (a jetsam kill never reaches the
+                // catch below), the sentinel tells the next launch which cell was running.
                 let cellStartedAt = JobDateFormat.iso8601.string(from: Date())
-                storage.saveActiveCellSentinel(
+                ws.saveActiveCellSentinel(
                     ActiveCellSentinel(cellId: cell.cellId, startedAt: cellStartedAt),
                     jobId: jobId
                 )
-                defer { storage.clearActiveCellSentinel(jobId: jobId) }
+                defer { ws.clearActiveCellSentinel(jobId: jobId) }
 
                 updatedManifest.cells[index].runStatus = .running
+                // With the `.running` save, so crash recovery keeps it.
+                updatedManifest.cells[index].measuredAfterOtherWork = MemoryFreshness.record(
+                    for: cell.benchmarkType, ranEngineWork: ProcessMemory.hasRunEngineWork)
                 await saveRunManifest(&updatedManifest)
 
                 guard benchmarkJsonMap[cell.benchmarkId] != nil else {
-                    // Neither the synced catalog nor `BenchmarkDefinition(parsingId:)`
-                    // could resolve this id — log it (the sibling guards below do)
-                    // so a server-assigned job with an unrecognized benchmark isn't
+                    // Logged so a server-assigned job with an unrecognized benchmark isn't
                     // failed silently.
                     let msg = "Benchmark definition not found"
                     AppLog.jobRun.error("\(cell.benchmarkId) / \(cell.modelName): \(msg)")
@@ -294,46 +309,14 @@ enum JobExecutor {
                     continue
                 }
 
-                let cellCtx = cellContextSize(cell)
+                // What an out-of-memory message names: nothing for the cells whose window
+                // only exists inside the load.
+                let cellCtx: Int? = switch definitionMap[cell.benchmarkId]?.benchmarkType {
+                case .vlThroughput?, .vlMaxMemory?, .asrThroughput?, .asrMaxMemory?: nil
+                default: cellContextSize(cell)
+                }
 
                 do {
-                    // Cool the device before each measured rep — the gate before
-                    // a cell's first measured rep also serves as the between-cell
-                    // cooldown (throughput benchmarks only; ignored by the
-                    // engine for eval / max_memory / vl).
-                    // The cell's own gate, over the job's: a plan authors `readiness` per
-                    // cell because waiving the temperature criterion changes what the
-                    // result means, and the job-level value is a headless-run default.
-                    // Resolved, not read raw: `resolve` is what checks the entry belongs
-                    // to this cell, and the request records the resolved value — honouring
-                    // an unresolved one would hold the run under a policy the result denies.
-                    let gate = (try? cell.spec.benchmarkFlags?.resolve())?.readiness?
-                        .resolved(over: readinessOverrides) ?? readinessOverrides
-                    let readiness = BenchmarkReadiness(
-                        cancelFlag: flag,
-                        maxSeconds: gate.maxSeconds,
-                        skipThermal: gate.skipThermal
-                    ) { status in
-                        // Keep the CLI-style line in the log (raw temp, -1 included,
-                        // for debugging); surface the structured status to the UI.
-                        // `info`, not `debug`: this is the only account of a wait that can
-                        // run for minutes, and a headless run drops `debug` without `-v`.
-                        AppLog.jobRun.info("\(status)")
-                        Task { @MainActor in
-                            if status.isWaiting {
-                                // Stamp the start once, at the transition into cooling,
-                                // so the TimelineView anchor stays fixed across polls.
-                                if runner.readinessStatus?.isWaiting != true {
-                                    runner.readinessStartedAt = Date()
-                                }
-                                runner.readinessStatus = status
-                            } else {
-                                runner.readinessStatus = nil
-                                runner.readinessStartedAt = nil
-                            }
-                        }
-                    }
-
                     guard let definition = definitionMap[cell.benchmarkId] else {
                         throw NSError(domain: "Pipette", code: -1, userInfo: [
                             NSLocalizedDescriptionKey:
@@ -342,78 +325,82 @@ enum JobExecutor {
                     }
 
                     let coordinator = await MainActor.run { DownloadCoordinator.shared }
-                    let spec = cellSpec(cell, definition: definition)
-                    let request = try await RunCell.prepare(
-                        spec: spec, benchmark: definition,
-                        storage: storage, coordinator: coordinator,
-                        // A re-fetch can take minutes; without this the run looks hung.
-                        progress: { fetch in
-                            Task { @MainActor in
-                                runner.currentProgressText =
-                                    "Downloading \(cell.modelName): "
-                                    + "\(Int(fetch.fraction * 100))%"
-                            }
-                        })
-                    let model = request.model
-
-                    // Memory pre-flight: measure the model against the remaining jetsam
-                    // budget, but never block the load — barely-fitting runs are
-                    // legitimate benchmarks, and the sentinel turns a kill into an
-                    // explained failure. Re-stamp the sentinel with the numbers so that
-                    // explanation can say how tight the fit was, and surface a warning
-                    // while the model loads. AFM has no bound path, so it weighs nothing.
-                    let memory = model.bound.boundPaths
-                        .flatMap { MemoryGate.snapshot(modelPath: $0.payload) }
-                    if let memory {
-                        storage.saveActiveCellSentinel(
-                            ActiveCellSentinel(
-                                cellId: cell.cellId,
-                                startedAt: cellStartedAt,
-                                availableBytes: memory.availableBytes,
-                                modelBytes: memory.modelBytes
-                            ),
-                            jobId: jobId
-                        )
-                    }
-                    let memoryWarning = memory.flatMap {
-                        MemoryGate.warning(
-                            modelName: cell.modelName,
-                            modelBytes: $0.modelBytes,
-                            availableBytes: $0.availableBytes
-                        )
-                    }
-                    if let memoryWarning {
-                        AppLog.jobRun.warning("\(cell.benchmarkId) / \(cell.modelName): \(memoryWarning)")
-                    }
-
-                    // Reload fresh for every benchmark — isolated, comparable
-                    // measurements that reset memory between cells. Each runtime
-                    // owns its model handle for the duration of `.run(...)` and
-                    // unloads it before returning.
-                    await MainActor.run {
-                        // The model name is already shown on the cell-label row, so
-                        // the loading line just states the phase — no duplicate name.
-                        runner.currentProgressText = memoryWarning ?? "Loading…"
-                    }
-
-                    let response: RunResponse
+                    let run: FinishedRun
                     do {
-                        // Presentation policy for intra-cell progress lives here — the
-                        // runtimes report *what* advanced; we decide *how* to show it.
-                        // Faithful to the historical behavior: an eval sample advances
-                        // the progress bar (eval reported per-sample); a throughput
-                        // attempt is a status line only, so the bar advances at cell
-                        // boundaries via the completed-cells counter. To get an
-                        // intra-cell throughput bar, also set `currentCellFraction` in
-                        // the `.attempt` arm.
-                        response = try await RunCell.dispatch(
-                            request,
-                            storage: storage,
-                            // Throughput/latency wait for a cool baseline before each
-                            // measured rep; eval instead runs flat-out and only stops on
-                            // cancel (see `cancellationGate`).
-                            readiness: { readiness.waitUntilReady() },
-                            isCancelled: { flag.isCancelled },
+                        // The steps and their order are `RunCell.runCell`'s; this closure set
+                        // is the presentation: the wait's status line, the download percentage,
+                        // the jetsam sentinel, and the intra-cell progress text.
+                        run = try await RunCell.runCell(
+                            spec: cellSpec(cell, definition: definition),
+                            benchmark: definition,
+                            ws: ws,
+                            coordinator: coordinator,
+                            readiness: { policy in
+                                BenchmarkReadiness(
+                                    cancelFlag: flag,
+                                    readiness: policy
+                                ) { status in
+                                    // `info`, not `debug`: this is the only account of a wait
+                                    // that can run for minutes, and a headless run drops
+                                    // `debug` without `-v`.
+                                    AppLog.jobRun.info("\(status)")
+                                    Task { @MainActor in
+                                        if status.isWaiting() {
+                                            // Stamp the start once, on entering cooling, so
+                                            // the TimelineView anchor stays fixed across polls.
+                                            if runner.readinessStatus?.isWaiting() != true {
+                                                runner.readinessStartedAt = Date()
+                                            }
+                                            runner.readinessStatus = status
+                                        } else {
+                                            runner.readinessStatus = nil
+                                            runner.readinessStartedAt = nil
+                                        }
+                                    }
+                                }
+                            },
+                            cancelled: { flag.isCancelled },
+                            // A re-fetch can take minutes; without this the run looks hung.
+                            fetchProgress: { fetch in
+                                Task { @MainActor in
+                                    runner.currentProgressText =
+                                        "Downloading \(cell.modelName): "
+                                        + "\(Int(fetch.fraction * 100))%"
+                                }
+                            },
+                            jobId: jobId,
+                            preflight: { _, memory in
+                                // Re-stamp the sentinel with the model's weight against the
+                                // remaining budget, so a jetsam kill can be explained.
+                                if let memory {
+                                    ws.saveActiveCellSentinel(
+                                        ActiveCellSentinel(
+                                            cellId: cell.cellId,
+                                            startedAt: cellStartedAt,
+                                            availableBytes: memory.availableBytes,
+                                            modelBytes: memory.modelBytes
+                                        ),
+                                        jobId: jobId
+                                    )
+                                }
+                                let memoryWarning = memory.flatMap {
+                                    MemoryGate.warning(
+                                        modelName: cell.modelName,
+                                        modelBytes: $0.modelBytes,
+                                        availableBytes: $0.availableBytes
+                                    )
+                                }
+                                if let memoryWarning {
+                                    AppLog.jobRun.warning("\(cell.benchmarkId) / \(cell.modelName): \(memoryWarning)")
+                                }
+                                // The model name is already on the cell-label row, so this
+                                // states the phase alone.
+                                await MainActor.run {
+                                    runner.currentProgressText = memoryWarning ?? "Loading…"
+                                }
+                            },
+                            // An eval sample advances the progress bar; a throughput attempt
+                            // is a status line only, so that bar advances at cell boundaries.
                             progress: { event in
                                 Task { @MainActor in
                                     switch event {
@@ -424,50 +411,59 @@ enum JobExecutor {
                                         }
                                         runner.currentProgressText = "Sample \(completed)/\(total)"
                                     case .attempt(let completed, let total):
-                                        // A measured repetition of a throughput/latency
-                                        // benchmark (the runner averages several).
+                                        // A measured repetition; the runner averages several.
                                         runner.currentProgressText = "Measurement \(completed)/\(total)"
+                                    case .corpusDownload:
+                                        runner.currentProgressText = "Downloading the corpus…"
                                     }
                                 }
                             })
-                    } catch {
-                        failedModels[cell.source] = formatJobError(error, contextSize: cellCtx)
-                        throw error
+                    } catch let failure as ModelLoadFailure {
+                        // Only a failure to load the weights belongs to the model: every
+                        // later cell for it would hit the same wall. A per-cell failure (a
+                        // rejected rep, a cancelled wait, a body this build cannot read)
+                        // leaves the rest of the job runnable.
+                        failedModels[cell.source] = formatJobError(failure, contextSize: cellCtx)
+                        throw failure
                     }
 
-                    try await MainActor.run {
-                        try PayloadBuilder.writeLocal(
-                            request: request,
-                            response: response,
-                            cellId: cell.cellId,
-                            source: cell.benchmarkSource ?? .remote,
-                            storage: storage
-                        )
+                    // The result is ready: a claimed job's clock stops here, before the
+                    // result is filed or submitted.
+                    let payload = timedFromClaim(
+                        run.payload, claimedAt: claimedAt, now: ContinuousClock.now)
+                    // Filed by the half its benchmark came from, as the crate files it.
+                    try recordResult(
+                        results: ws.results, payload: payload, extras: run.extras,
+                        location: BenchmarkResultLocation(cell.benchmarkSource ?? .remote),
+                        resultId: cell.cellId)
+                    // Saved on disk, so the checkpoint has done its job, unless the caller
+                    // still owes the server the result.
+                    if let keepEvalCheckpoint {
+                        await MainActor.run { keepEvalCheckpoint.digest = run.evalCheckpoint }
+                    } else {
+                        RunCell.finalizeEvalCheckpoint(ws: ws, digest: run.evalCheckpoint)
                     }
 
                     AppLog.jobRun.info(
-                        "result \(cell.benchmarkId) / \(cell.modelName): \(response.resultData)")
+                        "result \(cell.benchmarkId) / \(cell.modelName): \(run.payload.result)")
                     updatedManifest.cells[index].runStatus = .completed
                     await saveRunManifest(&updatedManifest)
 
-                    // Upload this result now, before the next cell — so a crash,
-                    // jetsam kill, or interruption mid-job doesn't strand every
-                    // completed cell's data until job end (PIP-358). `drainJob` is
-                    // serialized and idempotent, so no double-submit; the ack lands
-                    // on disk and the next `saveRunManifest` re-adopts it.
+                    // Upload now, before the next cell, so a crash or jetsam kill mid-job
+                    // doesn't strand every completed result until job end. `drainJob` is
+                    // serialized and idempotent; the ack lands on disk and the next
+                    // `saveRunManifest` re-adopts it.
                     if Self.shouldAutoSubmit(updatedManifest, autoSubmit: autoSubmit,
                                              online: NetworkReachability.shared.isConnected,
-                                             registration: storage.identity.getRegistration()) {
+                                             registration: ws.registration.get()) {
                         let outcome = await ResultUploader.shared.drainJob(jobId: jobId)
                         if !outcome.errors.isEmpty {
                             AppLog.jobRun.error("per-cell submit \(cell.benchmarkId) / \(cell.modelName): \(outcome.errors.joined(separator: "; "))")
                         }
                     }
 
-                    // Between-cell cooldown is handled inside the benchmark
-                    // runner: every throughput cell gates on the SoC die
-                    // temperature before its warm-up (cell entry) and before
-                    // each measured rep, via the same `BenchmarkReadiness`.
+                    // No cooldown here: the readiness gate waits on the SoC die temperature
+                    // before each timing cell's model load and before each measured rep.
                 } catch {
                     if flag.isCancelled {
                         updatedManifest.cells[index].runStatus = .cancelled
@@ -476,49 +472,41 @@ enum JobExecutor {
                         AppLog.jobRun.error("\(cell.benchmarkId) / \(cell.modelName) failed: \(formatted)")
                         updatedManifest.cells[index].runStatus = .failed
                         updatedManifest.cells[index].errorMessage = formatted
+                        if let keepFetchFailure {
+                            await MainActor.run { keepFetchFailure.keep(error) }
+                        }
                     }
                     await saveRunManifest(&updatedManifest)
                     if flag.isCancelled { break }
                 }
             }
 
-            // If the run stopped early, mark remaining pending cells as
-            // cancelled and put the job in the .paused state so it can be
-            // resumed; an auto-pause (app backgrounded) records why.
             updatedManifest.finalizeRunEnd(cancelled: flag.isCancelled, cancelReason: flag.reason)
             await saveRunManifest(&updatedManifest)
 
-            // Final sweep after the job finishes: same `shouldAutoSubmit` gate as
-            // the per-cell upload, plus a completed-status check. Headless passes
-            // autoSubmit=false, so it never runs here.
+            // Final sweep: the same gate as the per-cell upload, plus a completed-status
+            // check. The planner worker passes autoSubmit=false, so it never runs there.
             if updatedManifest.status == .completed,
                Self.shouldAutoSubmit(updatedManifest, autoSubmit: autoSubmit,
                                      online: NetworkReachability.shared.isConnected,
-                                     registration: storage.identity.getRegistration()) {
+                                     registration: ws.registration.get()) {
                 await MainActor.run {
                     runner.currentProgressText = "Submitting results..."
                 }
 
-                // Route through the shared uploader so this job-end submit
-                // serializes with any launch/foreground drain firing at the
-                // same time. This is a final sweep — most cells were already
-                // submitted per-cell during the loop; it catches any that hit a
-                // transient error then.
+                // Through the shared uploader so this serializes with a launch/foreground
+                // drain. Most cells were submitted per-cell; this catches transient failures.
                 let outcome = await ResultUploader.shared.drainJob(jobId: jobId)
                 if !outcome.errors.isEmpty {
                     AppLog.jobRun.error("contribution failed: \(outcome.errors.joined(separator: "; "))")
                 }
             }
 
-            // Hand the UI the final on-disk state. Every serverJobId was recorded
-            // to disk (the uploader's acks, folded into the in-memory manifest by
-            // `saveRunManifest`'s re-adopt), so the disk manifest is authoritative
-            // — no need to thread the acks back through `updatedManifest`.
-            let finalManifest = storage.loadJobManifest(jobId: jobId) ?? updatedManifest
-            // The outcome comes from the persisted manifest rather than from a thrown error: the
-            // cell loop absorbs per-cell failures and always writes a terminal status, so a
-            // manifest left non-terminal is the "the run itself died" case. Mirrors Android's
-            // `jobOutcome`.
+            // The disk manifest is authoritative: every serverJobId ack was written there.
+            let finalManifest = ws.loadJobManifest(jobId: jobId) ?? updatedManifest
+            // The outcome comes from the persisted manifest, not a thrown error: the loop
+            // always writes a terminal status, so a non-terminal one means the run itself
+            // died. Mirrors Android's `jobOutcome`.
             Analytics.capture(AnalyticsEvents.jobCompleted, [
                 AnalyticsEvents.jobId: jobId.value,
                 AnalyticsEvents.outcome: analyticsOutcome(cancelled: flag.isCancelled, status: finalManifest.status),
@@ -527,9 +515,8 @@ enum JobExecutor {
                     .filter { cellIdsThisRun.contains($0.cellId) && $0.runStatus == .completed }
                     .count,
                 AnalyticsEvents.cellCount: cellIdsThisRun.count,
-                // Wall-clock for the whole run, matching Android's `System.currentTimeMillis()`
-                // delta. Includes model load and between-cell cooldown, so it is run duration, not
-                // summed measurement time.
+                // Wall-clock for the whole run (load and cooldown included), matching
+                // Android's `System.currentTimeMillis()` delta.
                 AnalyticsEvents.durationMs: Int(Date().timeIntervalSince(runStartedAt) * 1000),
             ])
             await MainActor.run {
@@ -539,5 +526,25 @@ enum JobExecutor {
                 onFinish(finalManifest)
             }
         }
+    }
+}
+
+/// A saved cell's eval checkpoint, left by `JobExecutor.run` for its caller to finalize.
+@MainActor
+final class KeptEvalCheckpoint {
+    var digest: EvalRunDigest?
+}
+
+/// The first cell's vault failure, left by `JobExecutor.run` in its type, so the worker
+/// can tell a refusal every device would meet from one worth another claim.
+@MainActor
+final class KeptFetchFailure {
+    private(set) var error: VaultFetchError?
+
+    /// Keep `error` if it is the first vault failure of the run. A later failure, or an
+    /// error of another type, leaves the kept failure in place.
+    func keep(_ error: any Error) {
+        guard self.error == nil, let vault = error as? VaultFetchError else { return }
+        self.error = vault
     }
 }

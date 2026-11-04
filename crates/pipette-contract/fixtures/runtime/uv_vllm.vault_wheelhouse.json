@@ -1,0 +1,17 @@
+{
+  "build": "cu121",
+  "python_version": "3.12",
+  "server_version": "0.10.0",
+  "source": {
+    "contents": "vllm==0.10.0\n",
+    "custom_label": "acme wheelhouse",
+    "install_flags": [
+      "--index-strategy",
+      "unsafe-best-match"
+    ],
+    "principal_id": "org_01936d",
+    "type": "vault_wheelhouse",
+    "url": "/vault/resources/vault_1/content"
+  },
+  "type": "uv_vllm"
+}

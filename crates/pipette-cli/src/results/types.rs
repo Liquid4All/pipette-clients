@@ -1,14 +1,9 @@
-//! Wire/entry types describing a stored result's lifecycle: where it lives,
-//! its display state, its listing entry, and its pulled score metrics.
+//! Types describing a stored result's lifecycle, listing and scores.
 
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-use pipette_plan_types::BenchmarkType;
-
-// ---------------------------------------------------------------------------
-// BenchmarkResultLocation — where a result is stored
-// ---------------------------------------------------------------------------
+use pipette_plan_types::{BenchmarkType, TurnObservation};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BenchmarkResultLocation {
@@ -17,13 +12,13 @@ pub enum BenchmarkResultLocation {
     RemoteSynced,
 }
 
-impl From<pipette_plan_types::benchmark::BenchmarkSource> for BenchmarkResultLocation {
+impl From<pipette_plan_types::BenchmarkSource> for BenchmarkResultLocation {
     /// A body from the synced catalog is submittable, so its result waits for
     /// `sync`; one only this machine has is not, so it stays local.
-    fn from(source: pipette_plan_types::benchmark::BenchmarkSource) -> Self {
+    fn from(source: pipette_plan_types::BenchmarkSource) -> Self {
         match source {
-            pipette_plan_types::benchmark::BenchmarkSource::Local => Self::Local,
-            pipette_plan_types::benchmark::BenchmarkSource::Remote => Self::RemotePending,
+            pipette_plan_types::BenchmarkSource::Local => Self::Local,
+            pipette_plan_types::BenchmarkSource::Remote => Self::RemotePending,
         }
     }
 }
@@ -38,10 +33,6 @@ impl BenchmarkResultLocation {
     }
 }
 
-// ---------------------------------------------------------------------------
-// BenchmarkResultState — lifecycle state for display/filtering
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Display, EnumString)]
 #[strum(serialize_all = "lowercase")]
 pub enum BenchmarkResultState {
@@ -50,29 +41,18 @@ pub enum BenchmarkResultState {
     Scored,
 }
 
-// ---------------------------------------------------------------------------
-// BenchmarkResultListEntry — slim entry for result listing
-// ---------------------------------------------------------------------------
-
 pub struct BenchmarkResultListEntry {
     pub result_id: String,
     pub benchmark_ref: String,
     pub benchmark_id: Option<String>,
-    /// The resolved benchmark type — validated when the entry is built, so
-    /// consumers filter on it directly rather than re-parsing an id/ref.
+    /// Validated when the entry is built, so consumers filter on it directly.
     pub benchmark_type: BenchmarkType,
     pub state: BenchmarkResultState,
     pub created_at: String,
-    /// The payload's `runtime_descriptor` — canonical JSON of the run's
-    /// `pipette_plan_types::Runtime` — carried verbatim so a runtime-agnostic
-    /// listing can show it without a second payload read. `None` for legacy
-    /// payloads that predate the descriptor.
+    /// The payload's `runtime_descriptor` (canonical JSON of the run's
+    /// `Runtime`), verbatim. `None` for payloads that predate it.
     pub runtime_descriptor: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Scored results — metrics pulled from the management server
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkJobMetric {
@@ -87,26 +67,22 @@ pub struct BenchmarkScoredResult {
     pub metrics: Option<Vec<BenchmarkJobMetric>>,
 }
 
-// ---------------------------------------------------------------------------
-// BenchmarkResultExtras — on-disk `extras.json` sidecar
-// ---------------------------------------------------------------------------
-
-/// Invocation preview and captured streams for a stored result, kept in
-/// `extras.json` next to `payload.json` rather than on the submission wire.
-///
-/// Local only: [`BenchmarkSubmissionPayload`](pipette_plan_types::result::BenchmarkSubmissionPayload)
-/// carries neither field, so what ran is recoverable on the box that ran it and
-/// nowhere else. Putting either on the wire needs a `pipette-mgmt` schema
-/// change first.
+/// `extras.json`, beside `payload.json`: the invocation and the streams as
+/// captured. Local only, because the submission carries no invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BenchmarkResultExtras {
-    /// The runtime binary this cell invoked, when it invoked one. Distinct from
-    /// `command[0]` for a cell whose preview is a shape rather than a literal
-    /// argv — OpenVINO names its driver script there, not the temp path it ran
-    /// from.
+    /// The runtime binary this cell invoked, when it invoked one. Can differ
+    /// from `command[0]` when the preview is a shape rather than a literal argv.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
     pub command: Vec<String>,
     pub stdout: String,
     pub stderr: String,
+    /// Per turn of a corpus traversal (`vl_spec_decode`), in order; empty for
+    /// other kinds. Each reply's sha256, not its text, so two rows compare turn
+    /// by turn without holding either's text; per-turn timings show drift that
+    /// a summed row cannot. The submitted `observation_output_digest` summarises
+    /// it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<TurnObservation>,
 }

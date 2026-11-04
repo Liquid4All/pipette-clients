@@ -1,13 +1,17 @@
+use std::path::PathBuf;
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use pipette_ops::measurement;
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use pipette_ops::measurement::MeasurementObserver;
+use pipette_ops::readiness::ReadinessGate;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::BenchmarkResultData;
+use pipette_plan_types::PrefillThroughputBenchmark;
+use pipette_plan_types::RunRequest;
+use pipette_plan_types::RunResponse;
 
-use super::{server, throughput_http};
+use crate::{measurement, server, throughput_http};
 
 const ENDPOINT: &str = "/prefill_throughput";
 
@@ -24,42 +28,42 @@ struct PrefillThroughputResponse {
 
 pub(super) fn run(
     req: &RunRequest,
+    benchmark: &PrefillThroughputBenchmark,
+    sidecar: PathBuf,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: &MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_prefill_throughput()
-        .map_err(anyhow::Error::from)?;
-    let prefill_tokens = benchmark.parameter_prefill_tokens;
+    let prefill_tokens = benchmark
+        .parameter_prefill_tokens
+        .into_inner()
+        .unsigned_abs();
 
-    // Resolve (and, on first use, build) the sidecar BEFORE the readiness
-    // gate: a first-use `swift build -c release` saturates every core for
-    // minutes and would sit between the gate certifying the device as thermally
-    // idle and the measurement that certification is for.
-    let sidecar = crate::sidecar::require_coreai_sidecar()?;
     readiness_gate()?;
-    let server = server::start_server(req, Some(sidecar))?;
+    let mut server = server::start_server(req, sidecar)?;
 
-    log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p)");
-    throughput_http::prepare(&server.base_url)?;
+    tracing::info!(cell = ENDPOINT, prefill_tokens, "Core AI prefill warm-up");
+    throughput_http::prepare(&server)?;
     let warmup: PrefillThroughputResponse = throughput_http::post_json(
-        &server.base_url,
+        &server,
         ENDPOINT,
         &PrefillThroughputRequest {
             prompt_tokens: prefill_tokens,
         },
     )?;
-    measurement::expect_tokens("warmup prompt_tokens", warmup.prompt_tokens, prefill_tokens)?;
+    pipette_ops::measurement::expect_tokens(
+        "warmup prompt_tokens",
+        warmup.prompt_tokens,
+        prefill_tokens,
+    )?;
 
-    let measured = measurement::run(
+    let measured = pipette_ops::measurement::run(
         ENDPOINT,
         readiness_gate,
-        observer,
-        |_| throughput_http::prepare(&server.base_url),
+        *observer,
+        |_| throughput_http::prepare(&server),
         |_| {
             throughput_http::post_json::<_, PrefillThroughputResponse>(
-                &server.base_url,
+                &server,
                 ENDPOINT,
                 &PrefillThroughputRequest {
                     prompt_tokens: prefill_tokens,
@@ -68,23 +72,23 @@ pub(super) fn run(
         },
         |idx, rep| {
             let response = &rep.value;
-            measurement::expect_tokens("prompt_tokens", response.prompt_tokens, prefill_tokens)?;
-            measurement::validate_tps("prompt_tps", response.prompt_tps)
+            pipette_ops::measurement::expect_tokens(
+                "prompt_tokens",
+                response.prompt_tokens,
+                prefill_tokens,
+            )?;
+            pipette_ops::measurement::positive_finite("prompt_tps", response.prompt_tps)
                 .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
             measurement::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
         },
     )?;
     let stats = measured.stats();
-    Ok(RunResponse {
-        executable: Some(server.executable.clone()),
-        command: server.command_preview.clone(),
-        ..RunResponse::new(
-            BenchmarkResultData::PrefillThroughput {
-                prefill_time_ms: stats.mean_ms,
-                prefill_time_ms_stddev: Some(stats.stddev_ms),
-            },
-            server.stdout(),
-            server.stderr(),
-        )
-    })
+    Ok(
+        RunResponseBuilder::new(BenchmarkResultData::PrefillThroughput {
+            prefill_time_ms: stats.mean_ms,
+            prefill_time_ms_stddev: Some(stats.stddev_ms),
+        })
+        .process(&mut server.process)
+        .build(),
+    )
 }

@@ -1,0 +1,390 @@
+# Bundled mlx runtime catalog; README.md beside this file describes the
+# columns and how `version` is chosen.
+#
+# A shipped row is never edited in place: a pulled runtime is keyed by its
+# requirements body, so new pins mean a new `[[mlx]]` row.
+
+[[mlx]]
+version = "0.31.3"
+flavor = "macos-arm64"
+requirements = '''
+annotated-doc==0.0.4
+anyio==4.14.1
+certifi==2026.6.17
+click==8.4.2
+filelock==3.29.7
+fsspec==2026.6.0
+h11==0.16.0
+hf-xet==1.5.1
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.22.0
+idna==3.18
+jinja2==3.1.6
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+mlx==0.32.0
+mlx-lm==0.31.3
+mlx-metal==0.32.0
+numpy==2.5.1
+packaging==26.2
+protobuf==7.35.1
+pygments==2.20.0
+pyyaml==6.0.3
+regex==2026.6.28
+rich==15.0.0
+safetensors==0.8.0
+sentencepiece==0.2.1
+shellingham==1.5.4
+tokenizers==0.22.2
+tqdm==4.68.4
+transformers==5.12.1
+typer==0.26.8
+typing-extensions==4.16.0
+'''
+
+# Same mlx-lm as the row above, re-locked on the mlx 0.32.2 core, so the row
+# is keyed by the mlx version.
+[[mlx]]
+version = "0.32.2"
+flavor = "macos-arm64"
+requirements = '''
+annotated-doc==0.0.5
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+filelock==3.32.6
+fsspec==2026.7.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.31.0
+idna==3.19
+jinja2==3.1.6
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+mlx==0.32.2
+mlx-lm==0.31.3
+mlx-metal==0.32.2
+numpy==2.5.3
+packaging==26.3
+protobuf==7.36.1
+pygments==2.21.0
+pyyaml==6.0.3
+regex==2026.9.10
+rich==15.0.0
+safetensors==0.8.0
+sentencepiece==0.2.2
+shellingham==1.5.4
+tokenizers==0.23.2
+tqdm==4.70.1
+transformers==5.17.0
+typer==0.27.2
+typing-extensions==4.16.0
+'''
+
+# mlx-vlm on the same mlx 0.32.2 core as the row above, for the
+# `vl_spec_decode` cell: `mlx-lm` cannot load a VL bundle, and `mlx_vlm`
+# carries the DSpark/DFlash drafters and the speculative decode loop.
+#
+# The pin is a commit on `main` (c59b0161), not the 0.7.1 release: LFM2-VL
+# targets could not pair with a drafter until Blaizzy/mlx-vlm#2280, which
+# merged after 0.7.1. The PEP 440 local label in the key names that.
+[[mlx]]
+version = "0.7.1+lfm2-vl-speculative"
+flavor = "macos-arm64"
+requirements = '''
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+fastapi==0.141.1
+filelock==4.0.0
+fsspec==2026.7.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.32.0
+idna==3.20
+jinja2==3.1.6
+llguidance==1.8.0
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+miniaudio==1.71
+mlx-audio==0.5.4
+mlx-lm==0.31.3
+mlx-metal==0.32.2
+mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm@c59b01618b9221fdad6c00fd98ce4fbd47a0d4c4
+mlx==0.32.2
+numpy==2.5.3
+opencv-python==5.0.0.93
+packaging==26.3
+pillow==12.3.0
+protobuf==7.36.2
+pycparser==3.0
+pydantic-core==2.46.5
+pydantic==2.13.5
+pygments==2.21.0
+python-multipart==0.0.32
+pyyaml==6.0.3
+regex==2026.9.10
+requests==2.34.2
+rich==15.0.0
+safetensors==0.8.0
+scipy==1.18.1
+sentencepiece==0.2.2
+shellingham==1.5.4
+sounddevice==0.5.6
+starlette==1.6.0
+tokenizers==0.23.2
+tqdm==4.70.1
+transformers==5.17.0
+typer==0.27.2
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uvicorn==0.53.0
+websockets==17.1
+'''
+
+# mlx-lm 0.32.0 (https://pypi.org/project/mlx-lm/0.32.0/) on the mlx 0.32.3
+# core. mlx-lm moved, so the row is keyed by its version, which sorts it
+# before the older `0.32.2` row (mlx-lm 0.31.3 on the 0.32.2 core).
+[[mlx]]
+version = "0.32.0"
+flavor = "macos-arm64"
+requirements = '''
+annotated-doc==0.0.5
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+filelock==4.0.8
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.33.0
+idna==3.20
+jinja2==3.1.6
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+mlx==0.32.3
+mlx-lm==0.32.0
+mlx-metal==0.32.3
+numpy==2.5.3
+packaging==26.3
+protobuf==7.36.2
+pygments==2.21.0
+pyyaml==6.0.3
+regex==2026.9.29
+rich==15.0.0
+safetensors==0.8.0
+sentencepiece==0.2.2
+shellingham==1.5.4
+tokenizers==0.23.2
+tqdm==4.70.1
+transformers==5.18.0
+typer==0.27.2
+typing-extensions==4.16.0
+'''
+
+# mlx-vlm 0.7.4 on the same mlx-lm and core as the `0.32.0` row. Released
+# mlx-vlm carries Blaizzy/mlx-vlm#2280 since 0.7.2, so this row needs neither
+# the commit pin nor the local label of the `0.7.1+lfm2-vl-speculative` row.
+[[mlx]]
+version = "0.7.4"
+flavor = "macos-arm64"
+requirements = '''
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+fastapi==0.142.2
+filelock==4.0.8
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.33.0
+idna==3.20
+jinja2==3.1.6
+llguidance==1.9.1
+markdown-it-py==4.2.0
+markupsafe==3.0.3
+mdurl==0.1.2
+miniaudio==1.71
+mlx==0.32.3
+mlx-audio==0.5.7
+mlx-lm==0.32.0
+mlx-metal==0.32.3
+mlx-vlm==0.7.4
+numpy==2.5.3
+opencv-python==5.0.0.93
+opentelemetry-api==1.45.0
+packaging==26.3
+pillow==12.3.0
+protobuf==7.36.2
+pycparser==3.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+pygments==2.21.0
+python-multipart==0.0.32
+pyyaml==6.0.3
+regex==2026.9.29
+requests==2.34.2
+rich==15.0.0
+safetensors==0.8.0
+scipy==1.18.1
+sentencepiece==0.2.2
+shellingham==1.5.4
+sounddevice==0.5.6
+starlette==1.7.0
+tokenizers==0.23.2
+tqdm==4.70.1
+transformers==5.18.0
+typer==0.27.2
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uvicorn==0.54.0
+websockets==17.1
+'''
+
+# mlx-lm 0.32.2 on the mlx 0.32.4 core. The 0.32.2 key is already
+# used by an older core-only row, so this row uses the new core version.
+[[mlx]]
+version = "0.32.4"
+flavor = "macos-arm64"
+requirements = '''
+annotated-doc==0.0.5
+anyio==4.15.1
+click==8.5.0
+filelock==4.2.4
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.8.0
+httpcore2==2.16.0
+httpx2==2.16.0
+huggingface-hub==2.4.0
+idna==3.20
+jinja2==3.1.6
+markdown-it-py==4.2.0
+markupsafe==3.0.4
+mdurl==0.1.2
+mlx==0.32.4
+mlx-lm==0.32.2
+mlx-metal==0.32.4
+numpy==2.5.4
+packaging==26.3
+protobuf==7.36.2
+pygments==2.21.0
+pyyaml==6.0.3
+regex==2026.9.29
+rich==15.0.0
+safetensors==0.8.0
+sentencepiece==0.2.2
+shellingham==1.5.4
+tokenizers==0.23.3
+tqdm==4.70.1
+transformers==5.22.1
+truststore==0.10.5
+typer==0.27.3
+typing-extensions==4.16.0
+'''
+
+# mlx-vlm 0.7.11 on the same mlx-lm and core as the 0.32.4 text row.
+[[mlx]]
+version = "0.7.11"
+flavor = "macos-arm64"
+requirements = '''
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.5
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+attrs==26.1.0
+certifi==2026.10.23
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+cryptography==50.0.2
+datasets==5.1.0
+dill==0.4.1
+fastapi==0.162.0
+filelock==4.2.4
+frozenlist==1.8.0
+fsspec==2026.7.0
+h11==0.16.0
+hf-xet==1.8.0
+httpcore2==2.16.0
+httpx2==2.16.0
+huggingface-hub==2.4.0
+idna==3.20
+jinja2==3.1.6
+llguidance==1.9.1
+markdown-it-py==4.2.0
+markupsafe==3.0.4
+mdurl==0.1.2
+miniaudio==1.71
+mlx==0.32.4
+mlx-audio==0.6.3
+mlx-lm==0.32.2
+mlx-metal==0.32.4
+mlx-vlm==0.7.11
+multidict==7.2.1
+multiprocess==0.70.19
+numpy==2.5.4
+opencv-python==5.0.0.93
+opentelemetry-api==1.45.2
+packaging==26.3
+pandas==3.1.0
+pillow==13.0.0
+propcache==0.5.4
+protobuf==7.36.2
+pyarrow==26.0.0
+pycparser==3.12
+pydantic==2.14.2
+pydantic-core==2.50.2
+pygments==2.21.0
+python-dateutil==3.0.0
+python-multipart==0.0.32
+pyyaml==6.0.3
+regex==2026.9.29
+requests==2.34.2
+rich==15.0.0
+safetensors==0.8.0
+scipy==1.18.1
+sentencepiece==0.2.2
+shellingham==1.5.4
+six==1.17.0
+sounddevice==0.5.6
+starlette==1.10.0
+tokenizers==0.23.3
+tqdm==4.70.1
+transformers==5.22.1
+truststore==0.10.5
+typer==0.27.3
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+tzdata==2026.6
+urllib3==2.8.0
+uvicorn==0.54.0
+websockets==17.4
+xxhash==4.0.2
+yarl==1.25.1
+'''

@@ -2,8 +2,8 @@ import Combine
 import SwiftUI
 import UIKit
 
-/// Full-screen Pocket Mode for a running job. Presented as a fullScreenCover so
-/// the tab bar is hidden and exit remains intentional while the benchmark runs.
+/// Full-screen Pocket Mode for a running job. A fullScreenCover, so the tab bar is
+/// hidden and leaving takes a deliberate swipe while the benchmark runs.
 struct PocketModeView: View {
     let jobId: JobId
     private let previewManifest: JobManifest?
@@ -125,8 +125,6 @@ struct PocketModeView: View {
         return jobRunner.estimatedTimeLeft(jobId: manifest.jobId, now: now)
     }
 
-    /// Device-temperature indicator: the real reading (with the cooldown target
-    /// while cooling) when a sensor is available, else the OS thermal-state label.
     private var thermalDisplay: DeviceThermalDisplay {
         DeviceThermalDisplay(
             temperatureC: jobRunner.deviceTemperatureC,
@@ -145,20 +143,16 @@ private enum PocketPalette {
     static let primaryText = Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255)
     static let secondaryText = Color(red: 163 / 255, green: 163 / 255, blue: 163 / 255)
     static let green = Color(red: 34 / 255, green: 197 / 255, blue: 94 / 255)
-    // Cool wash laid over the card while the readiness gate cools the device — an
-    // ambient "waiting" cue that adds no layout, only color.
+    // Laid over the card while the readiness gate cools the device; adds no layout.
     static let coolWash = Color(red: 56 / 255, green: 122 / 255, blue: 210 / 255).opacity(0.16)
     static let coolBorder = Color(red: 104 / 255, green: 162 / 255, blue: 230 / 255).opacity(0.5)
-    // Emphasis color for the cooldown caption — a light cool blue that reads on
-    // the dark card and ties to the wash.
+    // Cooldown caption color, light enough to read on the dark card.
     static let coolText = Color(red: 137 / 255, green: 186 / 255, blue: 247 / 255)
 }
 
 private struct PocketBrandMark: View {
-    // A transparent "P" silhouette tinted (template mode) with the light gradient
-    // so it reads on the dark pocket background. The shipped `pipette-logo-mark`
-    // has an opaque white background, so template mode fills the whole square —
-    // this dedicated alpha-only silhouette is what makes the glyph show.
+    // An alpha-only silhouette, because `pipette-logo-mark` has an opaque white
+    // background that template mode would fill as a solid square.
     var body: some View {
         Image("pipette-mark-silhouette")
             .resizable()
@@ -279,9 +273,8 @@ private struct PocketProgressCard: View {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(PocketPalette.card)
                 .overlay(
-                    // Cross-fade only the wash opacity at the cooling boundaries —
-                    // scoped to this shape so it can't tween the progress bar. Safe
-                    // for the measurement: the gate holds the GPU idle while cooling.
+                    // Animated, but scoped to this shape so it can't tween the progress
+                    // bar. Safe for the measurement: the gate holds the GPU idle while cooling.
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
                         .fill(PocketPalette.coolWash)
                         .opacity(isCooling ? 1 : 0)
@@ -317,8 +310,7 @@ private struct PocketProgressBar: View {
             }
         }
         .clipShape(Capsule())
-        // Progress ticks must not animate: no implicit width tween competing with
-        // the GPU-bound benchmark while pocket mode is on screen.
+        // No width tween: UI animation would compete with the GPU-bound benchmark.
         .animation(nil, value: progress)
     }
 }
@@ -356,10 +348,9 @@ private struct SlideToExitControl: View {
                 // The gesture lives on the whole capsule (below), not the thumb.
                 .allowsHitTesting(false)
             }
-            // Drag anywhere on the capsule, not just the 42pt thumb — the thumb-only
-            // hit target made the control feel unresponsive (most touches landed on the
-            // label, which ignores hits). Tracking `translation` keeps a tap (no
-            // movement) from ever crossing the threshold and exiting accidentally.
+            // Drag anywhere on the capsule: most touches land on the label, so a
+            // thumb-only target feels unresponsive. Tracking `translation` keeps a tap
+            // from ever crossing the threshold and exiting by accident.
             .contentShape(Capsule())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -374,9 +365,7 @@ private struct SlideToExitControl: View {
                                 .notificationOccurred(.success)
                             onExit()
                         } else {
-                            // Snap back with no animation — pocket mode is on screen
-                            // while the benchmark runs, and UI animation shares the GPU
-                            // with inference, skewing the measurement.
+                            // No animation: UI animation shares the GPU with inference.
                             offset = 0
                         }
                     }
@@ -397,7 +386,7 @@ private struct PocketModePreviewHost: View {
             previewManifest: Self.previewManifest
         )
         .environment(runner)
-        .environment(JobStore(storage: FileStorage.production))
+        .environment(JobStore(ws: PipetteWorkspace.production))
         .previewLayout(.fixed(width: 440, height: 988))
     }
 
@@ -405,14 +394,12 @@ private struct PocketModePreviewHost: View {
 
     private static var previewRunner: JobRunner {
         let runner = JobRunner()
-        // Fresh run over all 28 preview cells (1 done + 1 running at 42%),
-        // backdated ~90s so the ETA label shows a realistic estimate.
+        // Backdated ~90s so the ETA label shows a realistic estimate.
         runner.start(jobId: previewJobId, flag: CancelFlag(), completedAtStart: 0, totalToRun: 28)
         runner.startedAt = Date().addingTimeInterval(-90)
         runner.currentCellLabel = "decode_throughput_512_100 / LFM2.5-350M"
         runner.currentProgressText = "Prefill 42%"
         runner.currentCellFraction = 0.42
-        // 1 cell done + 42% into the next, so the ETA label shows an estimate.
         runner.anchorETA(completedCells: 1)
         return runner
     }

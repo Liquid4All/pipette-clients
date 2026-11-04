@@ -1,0 +1,9 @@
+{
+  "benchmark_id": "vl_throughput_224x336_8_64",
+  "benchmark_type": "vl_throughput",
+  "parameter_decode_tokens": 64,
+  "parameter_image_height": 336,
+  "parameter_image_width": 224,
+  "parameter_num_images": 1,
+  "parameter_text_tokens": 8
+}

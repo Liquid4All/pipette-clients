@@ -1,21 +1,18 @@
-# cargo-deny configuration: the license and security-advisory gates for the
-# Rust workspace.
+# cargo-deny gates for the Rust workspace: licenses, advisories, bans, sources.
 #
-# Run locally with `cargo deny check licenses advisories`; CI runs both on the
-# linux leg of `rust-check` (see .github/workflows/build.yml).
+# Run locally with `cargo deny check licenses advisories bans sources`. In CI,
+# build.yml runs `check licenses`; security.yml runs the rest on every PR and a
+# daily cron, because a new advisory lands against an unchanged tree and the
+# `rust` path filter would hide it.
 #
-# Needs cargo-deny 0.19+. Older builds abort on any advisory carrying a CVSS 4.0
-# vector ("unsupported CVSS version: 4.0") before reading this file, which looks
-# like a policy failure but is a stale tool. CI installs the current release.
+# Needs cargo-deny 0.19+: older builds abort on any advisory with a CVSS 4.0
+# vector ("unsupported CVSS version: 4.0"). CI pins it in ci/install-tool.sh.
 #
-# This file is the Rust license policy. The Android app's shipping dependencies
-# have their own gate in ci/android-licenses.py; the two allow-lists are meant to
-# agree, so change them together. See docs/licensing.md for the whole picture.
+# ci/android-licenses.py holds the Android allow-list; change the two together
+# (docs/licensing.md).
 
 [graph]
-# Check every target the clients actually build for, rather than just the host.
-# A host-only check would miss a dependency that only appears under
-# cfg(target_os = "android") or cfg(target_os = "ios").
+# Every target the clients build for, so cfg(target_os = ...) dependencies count.
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -24,29 +21,24 @@ targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
 ]
-# Evaluate every feature combination's dependencies, so a license can't slip in
-# behind a feature flag that the default build happens not to enable.
+# So a license can't slip in behind a feature the default build leaves off.
 all-features = true
 
 [licenses]
-# Allow-list, not a deny-list: an unrecognized license fails the check. That is
-# the point — a new copyleft dependency should turn CI red rather than depend on
-# someone having predicted its exact SPDX id.
+# An allow-list, so a new copyleft dependency turns CI red without anyone having
+# predicted its SPDX id.
 allow = [
-    # --- the licenses actually present across the shipped graphs ---
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    # Weak copyleft, allowed: MPL-2.0 operates per file, so it reaches only the
-    # dependency's own sources even when statically linked. (L)GPL reaches ours,
-    # which is why nothing in that family appears here.
+    # MPL-2.0 is per file, so it reaches only the dependency's own sources even
+    # when statically linked. (L)GPL would reach ours, so none is allowed.
     "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
-    # --- the permissive tail, present in the CLI / Android / Windows graphs ---
     "0BSD",
     "BSD-1-Clause",
     "CC0-1.0",
@@ -54,55 +46,57 @@ allow = [
     "ISC",
 ]
 
-# The allow-list is a policy — which licenses are acceptable — so it may name
-# licenses no crate in today's graph carries (BSD-1-Clause, BSD-2-Clause,
-# CC0-1.0 and MPL-2.0 are all unmatched at present). This setting keeps those
-# entries quiet; otherwise each emits a `license-not-encountered` warning on every
-# run, and a gate that always prints warnings is a gate people stop reading.
+# The allow-list is policy, so it may name licenses no crate carries today
+# (BSD-1-Clause, BSD-2-Clause, CC0-1.0, MPL-2.0). Without this each would warn
+# `license-not-encountered` on every run, and an always-warning gate goes unread.
 unused-allowed-license = "allow"
 
-# Deliberately NOT configured:
-#
-# - No `exceptions`. Every crate in the graph satisfies `allow` above on its own,
-#   including the one crate that offers a copyleft option: r-efi is
-#   `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and cargo-deny satisfies an OR
-#   expression from the allow-list, so it resolves to MIT with no exception
-#   needed. (It is also UEFI-only — getrandom pulls it under
-#   cfg(target_os = "uefi") — so it never compiles for any target above.)
-#
-# - No `[[clarify]]` entries. Every third-party crate in the graph declares a
-#   license in its manifest; none needs one inferred from a bundled file.
+# No `exceptions` needed: r-efi (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and
+# UEFI-only) resolves to MIT. No `[[clarify]]`: every crate declares a license.
 
-# The `pipette-*` workspace members carry no `license` field, since nothing here
-# is published (hence `publish = false` in each member's manifest — which is
-# also what this setting keys off). Without it they fail the check as
-# unlicensed. Third-party dependencies are still checked.
+# The `pipette-*` members carry no `license` field and are `publish = false`,
+# which is what this keys off.
 [licenses.private]
 ignore = true
 
-# The RUSTSEC gate. Unlike the license allow-list this policy is a moving target:
-# the database is fetched at check time, so a newly published advisory can turn a
-# green `main` red with no change here. A red advisories step is often not the
-# triggering PR's doing.
+# The database is fetched at check time, so a new advisory can turn `main` red
+# with no change here; a red advisories step is often not the PR's doing.
 [advisories]
-# A yank is usually the author withdrawing a broken or compromised version, so
-# treat it as an advisory rather than a warning.
+# A yank is usually the author withdrawing a broken or compromised version.
 yanked = "deny"
 
-# "all" covers transitive crates, so an abandoned dependency is visible even when
-# nothing we name pulls it directly. The trade is that an unfixable transitive
-# case needs an explicit entry below, matching the licenses gate's allow-list
-# stance above.
+# "all" includes transitive crates; an unfixable one needs an explicit `ignore`.
 unmaintained = "all"
 
-# Each `reason` says why the crate is out of reach; these comments add only what
-# it takes to re-check the entry. An ignore that outlives its reason is how a
-# real advisory gets waved through.
-ignore = [
-    # Nowhere to move: tabled 0.21 is newest, every tabled_derive back to 0.9
-    # depends on this crate, and 0.8-and-earlier depend on proc-macro-error,
-    # also unmaintained (RUSTSEC-2024-0370).
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time only, via tabled_derive. No safe upgrade; needs an upstream tabled release." },
-    # Dropping it means replacing httpmock itself.
-    { id = "RUSTSEC-2025-0052", reason = "async-std discontinued; dev-dependency only, via httpmock. Never linked into a shipped client." },
+# Only crates.io, plus the mgmt repo for `pipette-plan-types`. Both keys default
+# to "warn", which exits 0: with a git dependency on a fork, cargo-deny 0.20.2
+# reports "sources ok" under the defaults and "sources FAILED" with these.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/Liquid4All/pipette-mgmt"]
+
+[bans]
+# A "warn" exits 0, so duplicates deny. Each `skip` is an older version upstream
+# still pins; CI denies `unnecessary-skip` and `unmatched-skip`, so an entry
+# fails once that version leaves the graph.
+multiple-versions = "deny"
+skip = [
+    # ring's move to 0.4 is unreleased; aws-lc-rs instead adds a C/cmake build per target.
+    { crate = "getrandom@0.2", reason = "ring 0.17 still uses 0.2; tempfile, uuid and the workspace are on 0.4" },
+    # No macro crate below has a syn 3 release yet; build-time only.
+    { crate = "syn@2", reason = "derive macros not yet on syn 3: jni, nutype, rstest, strum, tabled, tracing and more" },
+]
+# Only pipette-cli may depend on a runtime crate, dev-dependencies included, so
+# a change to one runtime cannot reach another. `ci/checks/runtime-crates.py`
+# requires this list to name exactly its runtime crates.
+deny = [
+    { crate = "pipette-llamacpp", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
+    { crate = "pipette-mlx", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
+    { crate = "pipette-coreai", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
+    { crate = "pipette-onnx-genai", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
+    { crate = "pipette-openvino", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
+    { crate = "pipette-ovms", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
+    { crate = "pipette-torch-oai", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
+    { crate = "pipette-trt-edgellm", wrappers = ["pipette-cli"], reason = "only pipette-cli may use a runtime crate" },
 ]

@@ -1,0 +1,6 @@
+{
+  "dir": "blobs",
+  "flavor": "macos-arm64",
+  "source": "relative_dir",
+  "type": "llamacpp_cli_stock_tools"
+}

@@ -25,16 +25,14 @@ struct BenchmarkMetricsTests {
             Case(label: "max memory usage", type: .maxMemoryUsage,
                  payload: ["max_ram_bytes": 1_073_741_824], params: [:],
                  expected: ("Max memory", "bytes", 1_073_741_824, false)),
-            Case(label: "vl throughput with payload prompt tokens", type: .vlThroughput,
+            Case(label: "vl throughput reports ttft", type: .vlThroughput,
                  payload: ["prompt_ms": 250, "predicted_ms": 750, "prompt_tokens": 72],
                  params: ["parameter_decode_tokens": 128],
-                 expected: ("VL throughput", "tok/s", 200, true)),
-            Case(label: "vl throughput falls back to catalog text tokens", type: .vlThroughput,
-                 payload: ["prompt_ms": 250, "predicted_ms": 750],
-                 params: ["parameter_text_tokens": 72, "parameter_decode_tokens": 128],
-                 expected: ("VL throughput", "tok/s", 200, true)),
-            // Reconciled semantics: a missing token count yields zero throughput,
-            // not the cell detail view's former raw-milliseconds fallback.
+                 expected: ("TTFT", "ms", 250, false)),
+            Case(label: "vl ttft needs no token count", type: .vlThroughput,
+                 payload: ["prompt_ms": 150.905, "predicted_ms": 266.445],
+                 params: [:],
+                 expected: ("TTFT", "ms", 150.905, false)),
             Case(label: "prefill with absent token count is zero throughput", type: .prefillThroughput,
                  payload: ["prefill_time_ms": 250], params: [:],
                  expected: ("Prefill throughput", "tok/s", 0, true)),
@@ -46,8 +44,8 @@ struct BenchmarkMetricsTests {
                  payload: ["decode_time_ms": 0], params: ["parameter_decode_tokens": 100], expected: nil),
             Case(label: "latency without total time", type: .endToEndLatency,
                  payload: [:], params: [:], expected: nil),
-            Case(label: "vl with zero elapsed time", type: .vlThroughput,
-                 payload: ["prompt_ms": 0, "predicted_ms": 0], params: [:], expected: nil)
+            Case(label: "vl with zero prefill time", type: .vlThroughput,
+                 payload: ["prompt_ms": 0, "predicted_ms": 750], params: [:], expected: nil)
         ]
 
         for testCase in cases {
@@ -98,22 +96,18 @@ struct BenchmarkMetricsTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // Absent file -> nil, not an error.
         let absent = dir.appendingPathComponent("absent.json")
         #expect(try ResultPayload.readObject(at: absent) == nil)
 
-        // Valid JSON object -> parsed dictionary.
         let valid = dir.appendingPathComponent("valid.json")
         try Data(#"{"decode_time_ms":500}"#.utf8).write(to: valid)
         let parsed = try #require(try ResultPayload.readObject(at: valid))
         #expect(PayloadScalars.string(parsed["decode_time_ms"]) == "500")
 
-        // Present but corrupt -> throws.
         let corrupt = dir.appendingPathComponent("corrupt.json")
         try Data("{not json".utf8).write(to: corrupt)
         #expect(throws: PayloadError.self) { try ResultPayload.readObject(at: corrupt) }
 
-        // Valid JSON that isn't an object -> throws.
         let array = dir.appendingPathComponent("array.json")
         try Data("[1,2,3]".utf8).write(to: array)
         #expect(throws: PayloadError.self) { try ResultPayload.readObject(at: array) }

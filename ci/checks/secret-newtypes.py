@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
 """Keep secrets inside the newtypes that redact them.
 
-Two secret values cross this workspace — a HuggingFace access token and a
-pre-auth registration key — and each is a newtype whose `Debug` and `Display`
-are hand-written to print `<redacted>` (see `docs/architecture.md`, "Secrets").
-That is what makes it safe for the client to log a whole `RunRequest` with
-`{:?}`: the leaf hides itself, so every struct holding one inherits the
-redaction.
-
-Nothing in the compiler defends that arrangement. A field added as
-`api_key: String` gets a derived `Debug` and is published by the first log line
-that dumps its parent, and a `derive(Debug)` slipped into a secret newtype's
-`nutype` list silently replaces the hand-written redaction. A unit test can't
-see either one: it can only assert about a token it plants itself, in a field
-that already exists.
-
-So this check reads the declarations instead:
+Each secret is a newtype whose hand-written `Debug` and `Display` print
+`<redacted>`, so any struct holding one can be logged with `{:?}` (see
+docs/architecture.md, "Secrets"). The compiler does not defend that: a new
+`api_key: String` field, or a `derive(Debug)` on a secret newtype, leaks. So this
+check reads the declarations:
 
 1. A struct or enum field whose name reads like a secret must be typed with a
    registered secret newtype (bare, or inside `Option`/`Vec`).
 2. A registered secret newtype must hand-write `Debug` and `Display`, each
    rendering `<redacted>` and neither touching the raw value, and must not
-   gain `Deref` — the escape hatch is `AsRef`.
+   gain `Deref` (the escape hatch is `AsRef`).
+3. A field excepted from rule 1 because it stages a value before validation
+   must sit in a type that renders nothing.
 
-Field-name matching deliberately treats a plural `tokens` as *not* a secret:
-`parameter_max_tokens` and friends count LLM tokens, and they outnumber the
-real secrets in this tree. Only scans type bodies, so a `token: &str` function
-parameter or a `const HF_TOKEN_ENV` naming an env var is not a violation.
+A plural `tokens` is not a secret name: `parameter_max_tokens` counts LLM
+tokens. Only type bodies are scanned, so function parameters and consts pass.
 """
 
 import re
@@ -34,42 +24,48 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Registered secret newtypes: the type a secret-named field must be declared
-# with, and whose own shape rule 2 enforces. Adding a secret means adding it
-# here — which is the review moment this check exists to force.
+# Adding a secret newtype means registering it here, which forces a review.
 SECRET_TYPES = {
-    "AuthToken": Path("crates/pipette-plan-types/src/primitives.rs"),
-    "PreauthKey": Path("crates/pipette-mgmt-client/src/types.rs"),
+    "ClientPreauthKey": Path("crates/pipette-mgmt-client/src/types.rs"),
+    "PrivateKey": Path("crates/pipette-mgmt-client/src/types.rs"),
+    "UserPreauthKey": Path("crates/pipette-mgmt-client/src/types.rs"),
 }
 
-# Types that answer a secret-sounding field name but hold no credential —
-# "token" also means a capability guard. Reviewed exceptions, so a secret-named
-# field typed `String` still fails.
+# Secret-sounding but not a credential ("token" also means a capability guard).
 NON_SECRET_TYPES = {"TeardownToken"}
 
-# Expressions that reach the wrapped value. A rendering impl containing one is
-# printing the secret, whatever else it also prints.
+# Redacting newtypes from `pipette-plan-types` in pipette-mgmt. Rule 1
+# accepts them; their shape is mgmt's to check.
+FOREIGN_SECRET_TYPES = {"AuthToken"}
+
+# Secret-named fields that stay a plain `String`, keyed `Type.field`: a staging
+# struct decodes loosely so a bad key is named rather than reported as a
+# malformed record. Sound only while the type renders nothing (rule 3).
+UNVALIDATED_STAGING_FIELDS = {
+    "BundleWire.private_key_hex": Path("crates/pipette-cli/src/identity/bundle.rs"),
+}
+
+# Expressions that reach the wrapped value; a rendering impl must not contain one.
 RAW_ACCESS = ("as_ref", "self.0", "into_inner")
 
 REDACTED = "<redacted>"
 
-# A field name that reads like it holds a credential. `token` matches only in
-# the singular — see the module docstring.
+# `token` matches only in the singular (see the module docstring). `_hex` is how
+# the bundle wire format spells the private key field.
 SECRET_NAME = re.compile(
     r"^(?:[a-z0-9_]*_)?"
-    r"(?:token|secret|password|passwd|credential|api_key|apikey|preauth_key)$"
+    r"(?:token|secret|password|passwd|credential|api_key|apikey|preauth_key"
+    r"|private_key(?:_hex)?)$"
 )
 
-# `pub auth_token: Option<AuthToken>,` → name, type. Struct fields and
-# struct-variant fields read the same.
+# `pub auth_token: Option<AuthToken>,` -> name, type. Struct-variant fields too.
 FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z][a-z0-9_]*)\s*:\s*(.+?),?\s*$")
 
-# `struct Foo {` / `enum Bar {` — the bodies rule 1 scans.
+# Captures the type name so a field can be keyed `Type.field`.
 TYPE_OPEN = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+[A-Za-z_][A-Za-z0-9_]*"
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 
-# The type a field must resolve to once wrappers are peeled off.
 WRAPPER = re.compile(r"^(?:Option|Vec)<(.+)>$")
 
 
@@ -90,24 +86,25 @@ def unwrap(ty: str) -> str:
     return ty.strip()
 
 
-def type_body_fragments(path: Path) -> list[tuple[int, str]]:
-    """Field-declaration candidates inside a `struct`/`enum` body.
+def type_body_fragments(path: Path) -> list[tuple[int, str, str]]:
+    """Field-declaration candidates inside a `struct`/`enum` body, with the name
+    of the type declaring them.
 
-    Brace counting, not parsing: it only has to answer "could this be a field
-    declaration in a type body", which excludes function parameters and consts.
-    A body opening and closing on one line (`struct Foo { a: u8 }`) still
-    declares fields, so the text after the brace is split and kept.
+    Brace counting, not parsing. A one-line body (`struct Foo { a: u8 }`) is
+    split after its brace.
     """
-    fragments: list[tuple[int, str]] = []
+    fragments: list[tuple[int, str, str]] = []
     depth = 0
+    enclosing = ""
     for number, line in enumerate(path.read_text().splitlines(), start=1):
         if depth == 0:
-            if not (TYPE_OPEN.match(line) and "{" in line):
+            if not ((opened := TYPE_OPEN.match(line)) and "{" in line):
                 continue
+            enclosing = opened.group(1)
             inline = line.split("{", 1)[1].rstrip().removesuffix("}")
-            fragments.extend((number, field) for field in inline.split(","))
+            fragments.extend((number, field, enclosing) for field in inline.split(","))
         else:
-            fragments.append((number, line))
+            fragments.append((number, line, enclosing))
         depth += line.count("{") - line.count("}")
     return fragments
 
@@ -115,9 +112,10 @@ def type_body_fragments(path: Path) -> list[tuple[int, str]]:
 def check_fields(files: list[Path]) -> list[str]:
     """Rule 1: a secret-named field is declared with a registered secret type."""
     violations = []
-    approved = SECRET_TYPES.keys() | NON_SECRET_TYPES
+    secret = SECRET_TYPES.keys() | FOREIGN_SECRET_TYPES
+    approved = secret | NON_SECRET_TYPES
     for path in files:
-        for number, line in type_body_fragments(path):
+        for number, line, enclosing in type_body_fragments(path):
             if (stripped := line.strip()).startswith(("//", "#[")):
                 continue
             if not (field := FIELD.match(line)):
@@ -125,9 +123,11 @@ def check_fields(files: list[Path]) -> list[str]:
             name, ty = field.group(1), field.group(2)
             if not SECRET_NAME.match(name) or unwrap(ty) in approved:
                 continue
+            if f"{enclosing}.{name}" in UNVALIDATED_STAGING_FIELDS:
+                continue
             violations.append(
                 f"{path}:{number}: field `{name}: {ty}` reads as a secret but is "
-                f"not one of {', '.join(sorted(SECRET_TYPES))}.\n"
+                f"not one of {', '.join(sorted(secret))}.\n"
                 f"       Declare it with a redacting newtype, or, if it holds no "
                 f"credential, add its type to NON_SECRET_TYPES in "
                 f"{Path(__file__).name}.\n"
@@ -136,14 +136,17 @@ def check_fields(files: list[Path]) -> list[str]:
     return violations
 
 
+def type_declaration(source: str, ty: str) -> re.Match[str] | None:
+    """`struct BundleWire {`, the declaration rule 3 reads the derive list before."""
+    return re.search(rf"^(?:pub(?:\([^)]*\))?\s+)?struct {ty}\b", source, re.M)
+
+
 def rendering_impl(source: str, trait: str, ty: str) -> str | None:
     """The code of `impl std::fmt::<trait> for <ty>`, or `None` if absent.
 
-    Bounded at the impl's closing brace so a `<redacted>` belonging to some
-    later impl can't vouch for this one, and stripped of comments so prose
-    about `as_ref` neither implicates nor absolves the impl. Stripping is
-    line-based, which would also cut a `//` inside a string literal — no
-    redaction marker contains one.
+    Bounded at the impl's closing brace so a later impl's `<redacted>` cannot
+    vouch for this one, and stripped of `//` comments (also inside strings,
+    which no redaction marker contains).
     """
     start = source.find(f"impl std::fmt::{trait} for {ty} {{")
     if start == -1:
@@ -165,8 +168,7 @@ def check_newtype_shape() -> list[str]:
             continue
         source = path.read_text()
 
-        # The `nutype`/`derive` list preceding the declaration. Rendering has to
-        # be hand-written, so a derived one is the bug.
+        # The `nutype` attribute preceding the declaration.
         head = source.split(f"struct {ty}(")[0].rsplit("#[nutype", 1)
         derives = head[-1] if len(head) > 1 else ""
 
@@ -210,8 +212,41 @@ def check_newtype_shape() -> list[str]:
     return violations
 
 
+def check_staging_shape() -> list[str]:
+    """Rule 3: a type excepted from rule 1 renders nothing.
+
+    A `Debug` or `Display` on it, derived or hand-written, would print the
+    raw secret the exception lets it hold.
+    """
+    violations = []
+    for qualified, path in UNVALIDATED_STAGING_FIELDS.items():
+        ty, field = qualified.split(".", 1)
+        source = path.read_text() if path.exists() else ""
+        if not (declaration := type_declaration(source, ty)):
+            violations.append(
+                f"{path}: expected to define `{ty}`; update "
+                f"UNVALIDATED_STAGING_FIELDS in {Path(__file__).name} if it moved."
+            )
+            continue
+        head = source[: declaration.start()]
+        derives = head.rsplit("#[derive(", 1)[-1] if "#[derive(" in head else ""
+        for trait in ("Debug", "Display"):
+            if re.search(rf"\b{trait}\b", derives) or rendering_impl(source, trait, ty):
+                violations.append(
+                    f"{path}: `{ty}` renders {trait}, and `{ty}.{field}` holds a "
+                    f"raw secret by exception.\n"
+                    f"       Drop the {trait}, or type the field and remove the "
+                    f"exception from {Path(__file__).name}."
+                )
+    return violations
+
+
 def main() -> int:
-    violations = check_fields(tracked_rust_files()) + check_newtype_shape()
+    violations = (
+        check_fields(tracked_rust_files())
+        + check_newtype_shape()
+        + check_staging_shape()
+    )
     if not violations:
         return 0
     print("secret values must live in a redacting newtype:\n")

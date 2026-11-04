@@ -10,6 +10,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowBuild
 
 /**
  * Drives the real [LocalStorage.writePayload] on Robolectric (a genuine Android [android.content.Context] against a sandboxed app filesystem +
@@ -40,8 +41,7 @@ class LocalStoragePayloadTest {
       modelName = modelName,
       modelPath = modelPath,
       mmprojPath = mmprojPath,
-      nGpuLayers = 99,
-      contextSize = 4096,
+      runtimeFlags = RuntimeFlagRef(numberGpuLayers = 99, ctxSize = 4096, nUbatch = 512, loadMode = LlamacppLoadMode.READ),
       runtimeVersion = "b8683",
       runtimeCpuBackend = "dotprod,neon",
       benchmarkType = benchmarkType,
@@ -52,6 +52,7 @@ class LocalStoragePayloadTest {
 
   @Test
   fun textModelPayloadCarriesRefsAndDropsMmprojQuant() {
+    ShadowBuild.setSupportedAbis(arrayOf("arm64-v8a"))
     val payload = writeAndRead("LiquidAI/LFM2.5-350M-GGUF", "/models/LiquidAI/LFM2.5-350M-GGUF/LFM2.5-350M-Q4_0.gguf", null)
 
     // Scalar grouping fields stay.
@@ -69,7 +70,8 @@ class LocalStoragePayloadTest {
       """{"flavor":"android-arm64-v8","repository_url":"github.com/ggml-org/llama.cpp","repository_version":"b8683","type":"llamacpp_apk_pipette"}""",
       payload.getString("runtime_descriptor"),
     )
-    assertEquals("-ngl 99 -c 4096", payload.getString("runtime_flags"))
+    // The resolved load knobs as canonical JSON, in the flat plan-types wire form, matching what iOS submits. See [SubmissionRefTest].
+    assertEquals("""{"ctx_size":4096,"load_mode":"none","n_ubatch":512,"number_gpu_layers":99}""", payload.getString("runtime_flags"))
 
     // What the harness ran under, as distinct from the load knobs above: the readiness policy that gated this cell. The only record of it the server
     // ever sees, since readiness is decided entirely client-side.
@@ -77,7 +79,7 @@ class LocalStoragePayloadTest {
 
     // The app build that produced the run — distinct from runtime_version
     // above, which names the engine it drove. BUILD_VERSION is the release this
-    // APK was published as (ci/version.sh, matching the GitHub release tag), NOT
+    // APK was published as (build.yml's `release-metadata`, matching the GitHub release tag), NOT
     // the user-visible VERSION_NAME; the two are deliberately separate fields.
     assertEquals(BuildConfig.BUILD_VERSION, payload.getString("client_version"))
 
@@ -87,7 +89,16 @@ class LocalStoragePayloadTest {
     // The result JSON and real device metadata still ride along.
     assertEquals(250.0, payload.getDouble("decode_time_ms"), 0.0)
     assertEquals("Android", payload.getString("device_os_name"))
+    assertEquals("Android", payload.getString("device_os_family"))
+    assertEquals("arm64-v8a", payload.getString("device_cpu_arch"))
     assertTrue(payload.has("device_name"))
+  }
+
+  @Test
+  fun payloadOmitsTheCpuArchWhenThePlatformListsNoAbi() {
+    ShadowBuild.setSupportedAbis(emptyArray())
+    val payload = writeAndRead("LiquidAI/LFM2.5-350M-GGUF", "/models/LiquidAI/LFM2.5-350M-GGUF/LFM2.5-350M-Q4_0.gguf", null)
+    assertFalse("device_cpu_arch must be absent, not null", payload.has("device_cpu_arch"))
   }
 
   @Test

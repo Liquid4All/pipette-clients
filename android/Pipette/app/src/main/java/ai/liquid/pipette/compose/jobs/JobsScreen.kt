@@ -1,7 +1,3 @@
-// Jobs list surface. The wizard (Create a job) and per-job detail (Job progress) live in their own files —
-// CreateJobScreen.kt and JobDetailScreen.kt — and are wired as their own Navigation 3 destinations from
-// PipetteAppRoot (Route.CreateJob / Route.JobDetail / Route.CellDetail). The shell mirrors the JobsUiState
-// variant onto the backstack so predictive back and system back animate through Nav3.
 @file:Suppress("TooManyFunctions", "MagicNumber", "MaxLineLength")
 
 package ai.liquid.pipette.compose.jobs
@@ -56,10 +52,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/**
- * Root Jobs tab surface. Renders the job list; the wizard and detail live in [CreateJobScreen] and [JobDetailScreen] respectively and are pushed as
- * their own Nav3 destinations. When the state is a non-list variant this composable renders nothing (the pushed screen is what the user sees).
- */
+/** Renders nothing for non-list states: the wizard and detail are their own Nav3 destinations on top. */
 @Composable
 fun JobsScreen(state: JobsUiState, onIntent: (JobsIntent) -> Unit) {
   if (state is JobsUiState.JobList) JobListScaffold(state, onIntent)

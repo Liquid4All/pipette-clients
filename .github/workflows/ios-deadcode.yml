@@ -1,23 +1,22 @@
 name: iOS Dead Code
 
-# Unused-code (Periphery) report for the Pipette iOS app. A full index build is too
-# heavy to run on every PR, so this lives in its own workflow on a weekly schedule
-# plus manual dispatch, and only *reports* — it never blocks a merge. Findings are
-# written to the run summary. Once the backlog is triaged, tighten this to fail on
-# findings (drop `continue-on-error` and add `--strict` to the scan).
+# Weekly, not per PR: the full index build is too heavy. Report-only until the
+# backlog is triaged; then drop `continue-on-error` and add `--strict`.
 on:
   workflow_dispatch:
   schedule:
-    # Mondays 06:00 UTC.
     - cron: "0 6 * * 1"
 
 concurrency:
   group: ios-deadcode-${{ github.ref }}
   cancel-in-progress: true
 
-# Least-privilege default for GITHUB_TOKEN. See build.yml.
 permissions:
   contents: read
+
+env:
+  # Keep in step with SCCACHE_VERSION in build.yml.
+  SCCACHE_VERSION: v0.17.0
 
 jobs:
   ios-deadcode:
@@ -25,25 +24,30 @@ jobs:
     runs-on: macos-26
     continue-on-error: true
     env:
-      # Match ios-check's pinned toolchain (see build.yml for the rationale).
+      # Keep in step with ios-check in build.yml.
       DEVELOPER_DIR: /Applications/Xcode_26.4.app
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           submodules: recursive
 
-      - name: Set up sccache (C/C++ compiler launcher)
-        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Cache sccache binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/sccache
+          key: sccache-tool-${{ env.SCCACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
 
-      # Periphery drives its own xcodebuild; pre-build the llama static lib (as
-      # ios-check does) so the in-Xcode "Build llama.cpp" phase is skipped
-      # (PIPETTE_SKIP_BUILD_LLAMA below) rather than recompiled uncached.
+      - name: Set up sccache (C/C++ compiler launcher)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
+
+      # Pre-built with sccache so Periphery's xcodebuild can skip its uncached
+      # llama.cpp phase (PIPETTE_SKIP_BUILD_LLAMA below).
       - name: Build llama.cpp (static lib + bindings)
         env:
           SCCACHE_GHA_ENABLED: "true"
-          # Must match build.yml's value or this workflow keys into a namespace
-          # of its own and shares nothing with ios-check, which builds the same
-          # sim slice. See the note on ios-check's build-llama step in build.yml.
+          # Keep in step with SCCACHE_GHA_VERSION in build.yml.
           SCCACHE_GHA_VERSION: "2"
         run: ./ios/build-llama.sh sim
 
@@ -51,11 +55,8 @@ jobs:
         run: ./ios/gen-mlx-build-info.sh
 
       - name: Install Periphery (pinned)
-        # The version was pinned; the digest is what makes it one. Bump both vars
-        # together; the digest is the release asset's, from
-        # `gh api repos/peripheryapp/periphery/releases/tags/<v>`. The release also
-        # ships an `.artifactbundle.zip` whose digest differs from this plain zip.
-        # macOS runner, so `shasum -a 256`; coreutils sha256sum is absent.
+        # Bump both together; take the plain zip's digest (not the
+        # `.artifactbundle.zip`'s) from `gh api repos/peripheryapp/periphery/releases/tags/<v>`.
         env:
           PERIPHERY_VERSION: "3.7.4"
           PERIPHERY_SHA256: "f8283239a82c638a4d5cfb91c42519980462b7853299562f663eb33ce54c8dc6"
@@ -67,7 +68,7 @@ jobs:
           (cd "$RUNNER_TEMP" && echo "${PERIPHERY_SHA256}  periphery.zip" | shasum -a 256 -c -)
           unzip -oq "$RUNNER_TEMP/periphery.zip" -d "$RUNNER_TEMP/periphery"
 
-      # Scan reads ios/.periphery.yml (project/schemes/targets + sim build args).
+      # Config lives in ios/.periphery.yml.
       - name: Periphery scan (report only)
         working-directory: ios
         env:

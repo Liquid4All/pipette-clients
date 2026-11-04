@@ -1,0 +1,104 @@
+# Bundled onnxruntime-genai runtime catalog, keyed by `version` + `ep`: each
+# execution provider is a separate distribution. README.md beside this file
+# describes the columns, how to resolve a row, and why there is no DirectML row.
+#
+# A CUDA row carries the `nvidia-*` libraries (`onnxruntime-gpu[cuda,cudnn]`):
+# without them the CUDA provider fails at model load with a missing
+# `libcublasLt.so` on a host whose own toolkit is older than the wheel's. They
+# are CUDA 13, so the host needs NVIDIA driver 580 or newer (the host toolkit
+# version does not matter: verified on an H100 with driver 580.105.08 and
+# toolkit 12.8). `pipette-cli`'s GPU preflight (`assert_cuda_13_driver`)
+# enforces the driver floor.
+
+[[onnx_genai]]
+version = "0.16.0"
+ep = "cpu"
+requirements = '''
+flatbuffers==25.12.19
+numpy==2.4.6
+onnxruntime==1.30.0
+onnxruntime-genai==0.16.0
+packaging==26.3
+protobuf==7.36.1
+'''
+
+[[onnx_genai]]
+version = "0.16.0"
+ep = "cuda"
+requirements = '''
+flatbuffers==25.12.19
+numpy==2.4.6
+nvidia-cublas==13.7.0.27
+nvidia-cuda-nvrtc==13.4.59
+nvidia-cuda-runtime==13.4.49
+nvidia-cudnn-cu13==9.26.0.51
+nvidia-cufft==12.4.0.34
+nvidia-curand==10.4.4.49
+nvidia-nvjitlink==13.4.52
+onnxruntime-genai-cuda==0.16.0
+onnxruntime-gpu==1.30.0
+packaging==26.3
+protobuf==7.36.1
+'''
+
+[[onnx_genai]]
+version = "0.17.1"
+ep = "cpu"
+requirements = '''
+flatbuffers==25.12.19
+numpy==2.4.6
+onnxruntime==1.30.0
+onnxruntime-genai==0.17.1
+packaging==26.3
+protobuf==7.36.2
+'''
+
+[[onnx_genai]]
+version = "0.17.1"
+ep = "cuda"
+requirements = '''
+flatbuffers==25.12.19
+numpy==2.4.6
+nvidia-cublas==13.8.1.7
+nvidia-cuda-nvrtc==13.4.92
+nvidia-cuda-runtime==13.4.92
+nvidia-cudnn-cu13==9.27.0.42
+nvidia-cufft==12.4.0.43
+nvidia-curand==10.4.4.72
+nvidia-nvjitlink==13.4.92
+onnxruntime-genai-cuda==0.17.1
+onnxruntime-gpu==1.30.0
+packaging==26.3
+protobuf==7.36.2
+'''
+
+[[onnx_genai]]
+version = "0.18.0"
+ep = "cpu"
+requirements = '''
+flatbuffers==25.12.19
+numpy==2.4.6
+onnxruntime==1.31.1
+onnxruntime-genai==0.18.0
+packaging==26.3
+protobuf==7.36.2
+'''
+
+[[onnx_genai]]
+version = "0.18.0"
+ep = "cuda"
+requirements = '''
+flatbuffers==25.12.19
+numpy==2.4.6
+nvidia-cublas==13.8.2.12
+nvidia-cuda-nvrtc==13.4.92
+nvidia-cuda-runtime==13.4.92
+nvidia-cudnn-cu13==9.27.0.42
+nvidia-cufft==12.4.0.43
+nvidia-curand==10.4.4.72
+nvidia-nvjitlink==13.4.92
+onnxruntime-genai-cuda==0.18.0
+onnxruntime-gpu==1.31.1
+packaging==26.3
+protobuf==7.36.2
+'''

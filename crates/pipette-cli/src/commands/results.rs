@@ -1,22 +1,19 @@
-//! `results` — runtime-agnostic; spans every runtime. Each record carries a
-//! `runtime_descriptor` (canonical JSON of `pipette_plan_types::Runtime`); the
-//! `results list` renders it as a compact `cli_ref` in its RUNTIME column
-//! (falling back to the raw descriptor if it can't be parsed). Generic over any
-//! workspace [`ResultsStore`].
+//! `results`: list, show and delete stored results, whatever their runtime.
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
-use tabled::{settings::Style, Tabled};
+use tabled::Tabled;
 
 use pipette_plan_types::BenchmarkType;
 use pipette_plan_types::Runtime;
 
 use crate::benchmarks::SourcedBenchmarkId;
+use crate::commands::write_table_or;
+use crate::console::Console;
 use crate::results::{BenchmarkResultLocation, BenchmarkResultState, ResultsStore};
 
-/// Every location a result can live in. A result occupies exactly one at a time
-/// (submit/sync `fs::rename` it forward), so `find_result`'s first-match scan is
-/// unambiguous regardless of order.
+/// A result occupies exactly one location at a time (submit and sync rename it
+/// forward), so `find_result`'s first-match scan does not depend on order.
 const LOCATIONS: [BenchmarkResultLocation; 3] = [
     BenchmarkResultLocation::Local,
     BenchmarkResultLocation::RemotePending,
@@ -29,11 +26,9 @@ Show the stored files for one result.
 The command prints payload.json and, when present, extras.json and
 metrics.json.";
 
-/// Render a stored `runtime_descriptor` as a compact CLI ref for the RUNTIME
-/// column. The descriptor is canonical [`Runtime`] JSON; parse it and show
-/// [`Runtime::cli_ref`] (e.g. `b10094:macos-arm64`), falling back to the raw
-/// descriptor when it doesn't deserialize — a listing must never fail on one
-/// odd record.
+/// The RUNTIME column: [`Runtime::cli_ref`] (e.g. `b10094:macos-arm64`), or the
+/// raw descriptor when it does not parse, so one odd record cannot fail a
+/// listing.
 fn runtime_column(descriptor: Option<String>) -> String {
     let Some(descriptor) = descriptor else {
         return String::new();
@@ -41,16 +36,6 @@ fn runtime_column(descriptor: Option<String>) -> String {
     serde_json::from_str::<Runtime>(&descriptor)
         .map(|runtime| runtime.cli_ref())
         .unwrap_or(descriptor)
-}
-
-/// Render `rows` as a psql-style table, or print `empty_message` when there are
-/// none — so `list` handles the empty case the same way across CLIs.
-fn print_table_or<T: Tabled>(rows: &[T], empty_message: &str) {
-    if rows.is_empty() {
-        println!("{empty_message}");
-    } else {
-        println!("{}", tabled::Table::new(rows).with(Style::psql()));
-    }
 }
 
 /// List, inspect, and delete benchmark results
@@ -72,17 +57,17 @@ pub enum ResultsCommand {
 }
 
 impl ResultsArgs {
-    pub fn execute(self, results: &ResultsStore) -> anyhow::Result<()> {
-        self.command.execute(results)
+    pub fn execute(self, results: &ResultsStore, console: &mut dyn Console) -> anyhow::Result<()> {
+        self.command.execute(results, console)
     }
 }
 
 impl ResultsCommand {
-    pub fn execute(self, results: &ResultsStore) -> anyhow::Result<()> {
+    pub fn execute(self, results: &ResultsStore, console: &mut dyn Console) -> anyhow::Result<()> {
         match self {
-            ResultsCommand::List(args) => args.execute(results),
-            ResultsCommand::Show(args) => args.execute(results),
-            ResultsCommand::Delete(args) => args.execute(results),
+            ResultsCommand::List(args) => args.execute(results, console),
+            ResultsCommand::Show(args) => args.execute(results, console),
+            ResultsCommand::Delete(args) => args.execute(results, console),
         }
     }
 }
@@ -108,7 +93,8 @@ pub struct ResultsListArgs {
     pub benchmark: Option<SourcedBenchmarkId>,
 
     /// Filter by benchmark type: prefill-throughput, decode-throughput,
-    /// end-to-end-latency, max-memory-usage, eval, vl-throughput (the
+    /// end-to-end-latency, max-memory-usage, eval, vlm-eval, vl-throughput,
+    /// vl-max-memory, vl-spec-decode, asr-throughput, asr-max-memory (the
     /// underscore spellings are accepted too)
     #[arg(long = "type")]
     pub benchmark_type: Option<BenchmarkType>,
@@ -173,8 +159,8 @@ impl ResultsListArgs {
             .collect())
     }
 
-    pub fn execute(self, results: &ResultsStore) -> anyhow::Result<()> {
-        print_table_or(&self.rows(results)?, "No results.");
+    pub fn execute(self, results: &ResultsStore, console: &mut dyn Console) -> anyhow::Result<()> {
+        write_table_or(console.out(), &self.rows(results)?, "No results.")?;
         Ok(())
     }
 }
@@ -186,27 +172,29 @@ pub struct ResultShowArgs {
 }
 
 impl ResultShowArgs {
-    pub fn execute(self, results: &ResultsStore) -> anyhow::Result<()> {
+    /// Banners go to `err` so a redirect captures the JSON alone.
+    pub fn execute(self, results: &ResultsStore, console: &mut dyn Console) -> anyhow::Result<()> {
         let (location, _) = find_result(results, &self.result_id)?;
-        let payload_path = results.payload_path(location, &self.result_id);
-        let payload = std::fs::read_to_string(&payload_path)
-            .with_context(|| format!("failed to read {}", payload_path.display()))?;
-        println!("{payload}");
-        let extras_path = results.extras_path(location, &self.result_id);
-        if extras_path.exists() {
-            let extras = std::fs::read_to_string(&extras_path)
-                .with_context(|| format!("failed to read {}", extras_path.display()))?;
-            eprintln!("--- extras ---");
-            println!("{extras}");
-        }
-        let metrics_path = results.metrics_path(location, &self.result_id);
-        if metrics_path.exists() {
-            let metrics = std::fs::read_to_string(&metrics_path)
-                .with_context(|| format!("failed to read {}", metrics_path.display()))?;
-            eprintln!("--- metrics ---");
-            println!("{metrics}");
-        }
-        Ok(())
+        let read = |path: std::path::PathBuf| {
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))
+        };
+        writeln!(
+            console.out(),
+            "{}",
+            read(results.payload_path(location, &self.result_id))?
+        )?;
+        [
+            ("extras", results.extras_path(location, &self.result_id)),
+            ("metrics", results.metrics_path(location, &self.result_id)),
+        ]
+        .into_iter()
+        .filter(|(_, path)| path.exists())
+        .try_for_each(|(banner, path)| {
+            writeln!(console.err(), "--- {banner} ---")?;
+            writeln!(console.out(), "{}", read(path)?)?;
+            anyhow::Ok(())
+        })
     }
 }
 
@@ -217,11 +205,16 @@ pub struct ResultDeleteArgs {
 }
 
 impl ResultDeleteArgs {
-    pub fn execute(self, results: &ResultsStore) -> anyhow::Result<()> {
+    pub fn execute(self, results: &ResultsStore, console: &mut dyn Console) -> anyhow::Result<()> {
         let (location, dir) = find_result(results, &self.result_id)?;
         std::fs::remove_dir_all(&dir)
             .with_context(|| format!("failed to delete {}", dir.display()))?;
-        println!("deleted {} ({})", self.result_id, location.label());
+        writeln!(
+            console.out(),
+            "deleted {} ({})",
+            self.result_id,
+            location.label()
+        )?;
         Ok(())
     }
 }
@@ -239,9 +232,11 @@ fn find_result(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use serde_json::json;
 
     use super::*;
+    use crate::test_support::CapturedConsole;
 
     fn store(_prefix: &str) -> anyhow::Result<(tempfile::TempDir, ResultsStore)> {
         let tmp = tempfile::tempdir()?;
@@ -254,17 +249,38 @@ mod tests {
     fn seed_payload(
         results: &ResultsStore,
         location: BenchmarkResultLocation,
-        result_id: &str,
-        runtime_descriptor: &str,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        seed(
+            results,
+            location,
+            Seed {
+                id,
+                benchmark_id: "prefill_throughput_smoke",
+                submitted_at: "2026-03-26T00:00:00Z",
+            },
+        )
+    }
+
+    struct Seed<'a> {
+        id: &'a str,
+        benchmark_id: &'a str,
+        submitted_at: &'a str,
+    }
+
+    fn seed(
+        results: &ResultsStore,
+        location: BenchmarkResultLocation,
+        seed: Seed<'_>,
     ) -> anyhow::Result<()> {
         results
             .save_payload(
                 location,
-                result_id,
+                seed.id,
                 &json!({
-                    "benchmark_id": "prefill_throughput_smoke",
-                    "runtime_descriptor": runtime_descriptor,
-                    "submitted_at": "2026-03-26T00:00:00Z",
+                    "benchmark_id": seed.benchmark_id,
+                    "runtime_descriptor": RUNTIME_DESCRIPTOR,
+                    "submitted_at": seed.submitted_at,
                     "prefill_time_ms": 12.5
                 }),
             )
@@ -280,21 +296,46 @@ mod tests {
         }
     }
 
+    /// The RESULT column of what `results list` writes: the table is what the
+    /// operator reads, so the assertion reads it too.
+    fn listed(results: &ResultsStore, args: ResultsListArgs) -> anyhow::Result<Vec<String>> {
+        let mut captured = CapturedConsole::default();
+        args.execute(results, &mut captured)?;
+        Ok(result_column(&captured.out_text()))
+    }
+
+    fn result_column(table: &str) -> Vec<String> {
+        table
+            .lines()
+            .skip(2)
+            .filter_map(|line| line.split('|').next())
+            .map(|cell| cell.trim().to_owned())
+            .filter(|cell| !cell.is_empty())
+            .collect()
+    }
+
     #[test]
     fn list_renders_runtime_as_a_compact_ref() -> anyhow::Result<()> {
         let (_tmp, results) = store("runtime-column")?;
-        seed_payload(
-            &results,
-            BenchmarkResultLocation::Local,
-            "job-1",
-            RUNTIME_DESCRIPTOR,
-        )?;
-        let rows = list_args().rows(&results)?;
-        let row = rows
-            .iter()
-            .find(|r| r.result_id == "job-1")
+        seed_payload(&results, BenchmarkResultLocation::Local, "job-1")?;
+        let mut captured = CapturedConsole::default();
+        list_args().execute(&results, &mut captured)?;
+        let out = captured.out_text();
+        let row = out
+            .lines()
+            .find(|line| line.contains("job-1"))
             .context("seeded result should list")?;
-        assert_eq!(row.runtime, "b10094:macos-arm64");
+        assert!(row.contains("| b10094:macos-arm64 |"), "got {row}");
+        assert!(out.starts_with(" RESULT "), "got {out}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_store_lists_no_results() -> anyhow::Result<()> {
+        let (_tmp, results) = store("empty")?;
+        let mut captured = CapturedConsole::default();
+        list_args().execute(&results, &mut captured)?;
+        assert_eq!(captured.out_text(), "No results.\n");
         Ok(())
     }
 
@@ -308,24 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn list_filters_by_state() -> anyhow::Result<()> {
-        let (_tmp, results) = store("state-filter")?;
-        seed_payload(
-            &results,
-            BenchmarkResultLocation::Local,
-            "job-1",
-            RUNTIME_DESCRIPTOR,
-        )?;
-        let rows = ResultsListArgs {
-            state: Some(BenchmarkResultState::Scored),
-            ..list_args()
-        }
-        .rows(&results)?;
-        assert!(rows.is_empty(), "local result is not scored");
-        Ok(())
-    }
-
-    #[test]
     fn list_errors_on_corrupt_payload() -> anyhow::Result<()> {
         let (_tmp, results) = store("corrupt")?;
         let result_id = "broken-result";
@@ -336,8 +359,7 @@ mod tests {
             "{bad json\n",
         )
         .context("failed to seed broken payload")?;
-        let err = list_args()
-            .rows(&results)
+        let err = listed(&results, list_args())
             .err()
             .context("corrupt payload should fail listing")?;
         assert!(format!("{err:#}").contains("failed to parse"));
@@ -345,21 +367,140 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_result_dir() -> anyhow::Result<()> {
+    fn delete_removes_result_dir_and_says_so() -> anyhow::Result<()> {
         let (_tmp, results) = store("delete")?;
-        seed_payload(
-            &results,
-            BenchmarkResultLocation::Local,
-            "job-1",
-            RUNTIME_DESCRIPTOR,
-        )?;
+        seed_payload(&results, BenchmarkResultLocation::Local, "job-1")?;
         let dir = results.result_dir(BenchmarkResultLocation::Local, "job-1");
         assert!(dir.exists());
-        ResultDeleteArgs {
-            result_id: "job-1".to_string(),
+        let mut captured = CapturedConsole::default();
+        ResultsArgs {
+            command: ResultsCommand::Delete(ResultDeleteArgs {
+                result_id: "job-1".to_string(),
+            }),
         }
-        .execute(&results)?;
+        .execute(&results, &mut captured)?;
         assert!(!dir.exists(), "result dir should be gone after delete");
+        assert_eq!(captured.out_text(), "deleted job-1 (local)\n");
+        assert_eq!(listed(&results, list_args())?, Vec::<String>::new());
+        Ok(())
+    }
+
+    /// A bare `--benchmark <id>` means the remote catalog, so it must not match
+    /// the local record.
+    #[rstest]
+    #[case::scored_state(ResultsListArgs { state: Some(BenchmarkResultState::Scored), ..list_args() }, &[])]
+    #[case::submitted_state(ResultsListArgs { state: Some(BenchmarkResultState::Submitted), ..list_args() }, &["job-remote"])]
+    #[case::decode_type(ResultsListArgs { benchmark_type: Some(BenchmarkType::DecodeThroughput), ..list_args() }, &["job-decode"])]
+    #[case::local_ref(ResultsListArgs { benchmark: Some("local/prefill_throughput_smoke".parse()?), ..list_args() }, &["job-local"])]
+    #[case::bare_ref_is_remote(ResultsListArgs { benchmark: Some("prefill_throughput_smoke".parse()?), ..list_args() }, &["job-remote"])]
+    #[case::unmatched_ref(ResultsListArgs { benchmark: Some("local/decode_throughput_nowhere".parse()?), ..list_args() }, &[])]
+    fn list_filters_narrow_the_seeded_store(
+        #[case] args: ResultsListArgs,
+        #[case] expected: &[&str],
+    ) -> anyhow::Result<()> {
+        let (_tmp, results) = store("filters")?;
+        seed_payload(&results, BenchmarkResultLocation::Local, "job-local")?;
+        seed_payload(
+            &results,
+            BenchmarkResultLocation::RemoteSynced,
+            "job-remote",
+        )?;
+        seed(
+            &results,
+            BenchmarkResultLocation::Local,
+            Seed {
+                id: "job-decode",
+                benchmark_id: "decode_throughput_smoke",
+                submitted_at: "2026-03-26T00:00:00Z",
+            },
+        )?;
+        assert_eq!(listed(&results, args)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn list_orders_newest_first_and_truncates_to_the_limit() -> anyhow::Result<()> {
+        let (_tmp, results) = store("limit")?;
+        [
+            ("job-old", "2026-03-01T00:00:00Z"),
+            ("job-new", "2026-03-03T00:00:00Z"),
+            ("job-mid", "2026-03-02T00:00:00Z"),
+        ]
+        .into_iter()
+        .try_for_each(|(id, at)| {
+            seed(
+                &results,
+                BenchmarkResultLocation::Local,
+                Seed {
+                    id,
+                    benchmark_id: "prefill_throughput_smoke",
+                    submitted_at: at,
+                },
+            )
+        })?;
+        let args = ResultsListArgs {
+            limit: Some(2),
+            ..list_args()
+        };
+        assert_eq!(listed(&results, args)?, ["job-new", "job-mid"]);
+        Ok(())
+    }
+
+    #[test]
+    fn show_writes_the_payload_and_banners_each_present_companion() -> anyhow::Result<()> {
+        let (_tmp, results) = store("show")?;
+        let location = BenchmarkResultLocation::RemoteSynced;
+        seed_payload(&results, location, "job-1")?;
+        let show = || ResultShowArgs {
+            result_id: "job-1".to_string(),
+        };
+
+        let mut payload_only = CapturedConsole::default();
+        show().execute(&results, &mut payload_only)?;
+        assert!(payload_only.out_text().contains("prefill_throughput_smoke"));
+        assert_eq!(payload_only.err_text(), "");
+
+        std::fs::write(results.metrics_path(location, "job-1"), "{\"score\":1}")?;
+        let mut with_metrics = CapturedConsole::default();
+        show().execute(&results, &mut with_metrics)?;
+        assert!(with_metrics.out_text().ends_with("{\"score\":1}\n"));
+        assert_eq!(with_metrics.err_text(), "--- metrics ---\n");
+
+        std::fs::write(results.extras_path(location, "job-1"), "{\"extra\":1}")?;
+        let mut with_both = CapturedConsole::default();
+        show().execute(&results, &mut with_both)?;
+        assert_eq!(
+            with_both.err_text(),
+            "--- extras ---\n--- metrics ---\n",
+            "extras come before metrics whichever landed first"
+        );
+        assert!(
+            with_both
+                .out_text()
+                .contains("{\"extra\":1}\n{\"score\":1}\n")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn show_and_delete_fail_on_an_unknown_result() -> anyhow::Result<()> {
+        let (_tmp, results) = store("unknown")?;
+        let mut captured = CapturedConsole::default();
+        let shown = ResultShowArgs {
+            result_id: "nope".to_string(),
+        }
+        .execute(&results, &mut captured)
+        .err()
+        .context("show should fail for an unknown result")?;
+        assert!(format!("{shown:#}").contains("result nope not found"));
+        let deleted = ResultDeleteArgs {
+            result_id: "nope".to_string(),
+        }
+        .execute(&results, &mut captured)
+        .err()
+        .context("delete should fail for an unknown result")?;
+        assert!(format!("{deleted:#}").contains("result nope not found"));
+        assert_eq!(captured.out_text(), "", "a refusal writes nothing");
         Ok(())
     }
 }

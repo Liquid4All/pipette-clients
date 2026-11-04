@@ -1,371 +1,372 @@
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::Deserialize;
-use serde_json::Value;
 
-use pipette_ops::measurement;
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::{LlamacppFlashAttention, RuntimeFlagRef, RuntimeFlags};
-use pipette_subprocess::{argv, echo_info};
+use pipette_plan_types::{
+    EnvForward, LlamacppCliStockToolsExtraRuntimeConfiguration, LlamacppFlashAttention,
+    LlamacppLoadMode,
+};
 
-use crate::common::{deadline_error_message, spawn_timeout_killer, LLAMA_BENCH_TIMING_TIMEOUT};
-use crate::flags::{canonicalize_flag_order, has_flag, reject_reserved_flags};
+use crate::runtimes::{CommonKnobs, ResolvedLlamaBench, apply_launch_env, canonicalize_flag_order};
 
-/// One row of `llama-bench` JSON stdout.
-///
-/// Extra numeric fields are part of the upstream JSON shape and kept for
-/// round-trip fidelity even when a given path only reads `avg_ns` / dims.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct LlamaBenchRow {
+/// One rep of a timing cell, a `llama-bench` or `llama-batched-bench` run: a
+/// slow phone on a large model with a cold cache can take 20+ minutes, and a
+/// wedged GPU driver never returns.
+pub(crate) const TIMING_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// One row of `llama-bench` JSON stdout; fields we don't read are ignored.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct BenchRow {
     pub avg_ns: f64,
-    pub avg_ts: f64,
-    pub stddev_ns: f64,
-    pub stddev_ts: f64,
     pub n_prompt: u32,
     pub n_gen: u32,
     pub n_depth: u32,
 }
 
-/// llama-bench extra argv for a bench cell's resolved flags — the plan's entry
-/// with the benchmark's defaults already overlaid
-/// ([`crate::runtime_flags::for_bench`]). Reads the flat [`RuntimeFlagRef`]
-/// form rather than per-variant patterns, so the bench cells share one renderer.
-pub fn args_for(flags: &RuntimeFlags) -> LlamaBenchArgsBuilder {
-    let r = RuntimeFlagRef::from(flags.clone());
-    LlamaBenchArgsBuilder::new()
-        .threads(r.threads)
-        .gpu_layers(r.number_gpu_layers)
-        .flash_attention(r.flash_attention)
-        .mmap(r.mmap)
-        .raw(&r.raw)
+/// One llama-bench run. The knobs arrive resolved, the benchmark's defaults
+/// already overlaid ([`crate::runtimes::get_load_mode`]).
+#[derive(Debug, Clone)]
+pub struct BenchCommandBuilder {
+    program: ResolvedLlamaBench,
+    model: PathBuf,
+    workload: BenchWorkload,
+    threads: Option<u32>,
+    number_gpu_layers: Option<u32>,
+    mmap: Option<bool>,
+    load_mode: Option<LlamacppLoadMode>,
+    flash_attention: Option<LlamacppFlashAttention>,
+    raw: Vec<String>,
+    envs: Vec<EnvForward>,
+    client_config: Option<LlamacppCliStockToolsExtraRuntimeConfiguration>,
 }
 
-/// Builds llama-bench extra argv from common knobs; finalizes on [`Self::build`].
-///
-/// Reached through [`args_for`]; `build(reserved, label)` then adds the flags
-/// the benchmark fixes for every run.
-pub struct LlamaBenchArgsBuilder {
-    tokens: Vec<String>,
-}
-
-impl LlamaBenchArgsBuilder {
-    pub fn new() -> Self {
-        Self { tokens: Vec::new() }
+impl BenchCommandBuilder {
+    pub fn new(
+        program: ResolvedLlamaBench,
+        model: impl Into<PathBuf>,
+        workload: BenchWorkload,
+    ) -> Self {
+        Self {
+            program,
+            model: model.into(),
+            workload,
+            threads: None,
+            number_gpu_layers: None,
+            mmap: None,
+            load_mode: None,
+            flash_attention: None,
+            raw: Vec::new(),
+            envs: Vec::new(),
+            client_config: None,
+        }
     }
 
     pub fn threads(mut self, threads: Option<u32>) -> Self {
-        if let Some(t) = threads {
-            self.push_pair("-t", t.to_string());
-        }
+        self.threads = threads;
         self
     }
 
-    pub fn gpu_layers(mut self, gpu_layers: Option<u32>) -> Self {
-        if let Some(n) = gpu_layers {
-            self.push_pair("-ngl", n.to_string());
-        }
+    pub fn number_gpu_layers(mut self, number_gpu_layers: Option<u32>) -> Self {
+        self.number_gpu_layers = number_gpu_layers;
+        self
+    }
+
+    pub fn mmap(mut self, mmap: Option<bool>) -> Self {
+        self.mmap = mmap;
+        self
+    }
+
+    pub fn load_mode(mut self, load_mode: Option<LlamacppLoadMode>) -> Self {
+        self.load_mode = load_mode;
         self
     }
 
     pub fn flash_attention(mut self, flash_attention: Option<LlamacppFlashAttention>) -> Self {
-        if let Some(fa) = flash_attention {
-            self.push_pair("-fa", fa.as_str().to_string());
-        }
+        self.flash_attention = flash_attention;
         self
     }
 
-    /// llama-bench: `--mmap 0|1` (no bare `--no-mmap`).
-    pub fn mmap(mut self, mmap: Option<bool>) -> Self {
-        if let Some(on) = mmap {
-            self.push_pair("--mmap", if on { "1" } else { "0" }.to_string());
-        }
+    pub fn raw(mut self, raw: Vec<String>) -> Self {
+        self.raw = raw;
         self
     }
 
-    pub fn raw(mut self, raw: &[String]) -> Self {
-        self.tokens.extend(raw.iter().cloned());
+    pub fn envs(mut self, envs: Vec<EnvForward>) -> Self {
+        self.envs = envs;
         self
     }
 
-    /// Reject reserved flags, add the benchmark's fixed `-r 1`, canonicalize
-    /// order. Cell-level defaults (mmap) arrive typed, from `runtime_flags`.
-    pub fn build(mut self, reserved_list: &[&str], label: &str) -> anyhow::Result<Vec<String>> {
-        reject_reserved_flags(&self.tokens, reserved_list, label)?;
-        // One outer rep per invoke; multi-rep aggregation is `execute_reps`.
-        if !has_flag(&self.tokens, "-r") && !has_flag(&self.tokens, "--repetitions") {
-            self.tokens.push("-r".to_string());
-            self.tokens.push("1".to_string());
+    pub fn client_config(
+        mut self,
+        client_config: Option<LlamacppCliStockToolsExtraRuntimeConfiguration>,
+    ) -> Self {
+        self.client_config = client_config;
+        self
+    }
+
+    fn knobs(&self) -> CommonKnobs<'_> {
+        CommonKnobs {
+            threads: self.threads,
+            number_gpu_layers: self.number_gpu_layers,
+            mmap: self.mmap,
+            load_mode: self.load_mode,
+            flash_attention: self.flash_attention,
+            raw: &self.raw,
         }
-        Ok(canonicalize_flag_order(&self.tokens))
     }
 
-    fn push_pair(&mut self, flag: &str, val: String) {
-        self.tokens.push(flag.to_string());
-        self.tokens.push(val);
-    }
-}
-
-struct LlamaBenchExecution {
-    preview: Vec<String>,
-    stdout: String,
-    stderr: String,
-    rows: Vec<LlamaBenchRow>,
-}
-
-fn execute(mut command: Command) -> anyhow::Result<LlamaBenchExecution> {
-    let program = command.get_program().to_string_lossy().into_owned();
-    let preview = argv(&command);
-    echo_info(&command);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    // Process-group leader on Unix so a deadline SIGKILL takes any
-    // child llama-bench might exec (none today, but cheap insurance
-    // and matches the Android max_memory_usage path). No-op on
-    // Windows where TerminateProcess kills the whole subtree.
-    //
-    // Propagate the errno from `setpgid` rather than swallowing it.
-    // If setpgid fails (rare: session-leader, race) and we then send
-    // `kill(-pid, SIGKILL)`, we'd target whatever pgid happens to
-    // equal the child's pid — possibly an unrelated process group.
-    // Returning Err from `pre_exec` aborts the exec, which is the
-    // safe failure mode.
-    #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
+    /// The knobs in canonical order, then the workload: everything but the
+    /// output format and the model, which [`Self::build`] adds.
+    pub fn args(&self) -> Vec<String> {
+        let knobs = self.knobs();
+        let mut tokens = knobs.scalar_tokens();
+        // `--load-mode` wins; the deprecated `--mmap 0|1` renders only alone (llama-bench
+        // takes no bare `--no-mmap`). Never both: llama-bench runs a row per load flag it
+        // parses, and a single-row benchmark cannot tell the extra row apart.
+        match (knobs.load_mode, knobs.mmap) {
+            (Some(mode), _) => {
+                tokens.extend(["--load-mode".to_owned(), mode.as_cli_word().to_owned()]);
             }
-            Ok(())
-        });
+            (None, Some(on)) => tokens.extend(["--mmap".to_owned(), u8::from(on).to_string()]),
+            (None, None) => {}
+        }
+        tokens.extend(knobs.raw.iter().cloned());
+        // One rep per invoke; the reps are the typed entry's. `raw` cannot carry one:
+        // every bench cell reserves `--repetitions`.
+        tokens.extend(["--repetitions".to_owned(), "1".to_owned()]);
+        let mut argv = canonicalize_flag_order(&tokens);
+        argv.extend(self.workload.tokens());
+        argv
     }
 
-    let child = command
-        .spawn()
-        .with_context(|| format!("failed to spawn {program}"))?;
-    let pid = child.id();
-    // Register the pgid leader with the SIGINT/SIGTERM handler. The guard
-    // deregisters on Drop so every exit path (success, wait-error, the
-    // timeout-killer firing) leaves the registry empty for this pid.
-    let _cleanup_guard = pipette_subprocess::cleanup::Guard::for_process_group(pid);
-    let killer = spawn_timeout_killer(LLAMA_BENCH_TIMING_TIMEOUT, move || kill_pid(pid));
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to wait for {program}"))?;
-    let killer_fired = killer.fired();
-    drop(killer);
-
-    if killer_fired {
-        anyhow::bail!(
-            "{}",
-            deadline_error_message(
-                LLAMA_BENCH_TIMING_TIMEOUT,
-                &String::from_utf8_lossy(&output.stderr)
-            )
+    /// One run with [`Self::args`], printing its row as JSON.
+    pub fn build(&self) -> Command {
+        let mut command = Command::new(self.program.as_os_str());
+        apply_launch_env(
+            &mut command,
+            &self.program,
+            &self.envs,
+            self.client_config.as_ref(),
         );
+        command.arg("--output").arg("json");
+        command.arg("--model").arg(&self.model);
+        command.args(self.args());
+        command
     }
-    if !output.status.success() {
-        anyhow::bail!(
-            "llama-bench failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let stdout = String::from_utf8(output.stdout).context("llama-bench returned non-utf8 JSON")?;
-    let rows = parse_rows(&stdout)?;
-    Ok(LlamaBenchExecution {
-        preview,
-        stdout,
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        rows,
-    })
 }
 
-/// One llama-bench invocation per measurement rep, with a caller-supplied
-/// `before_rep` gate (typically readiness) between reps so each starts from
-/// a known thermal baseline. Aggregates the per-rep `avg_ns` from the
-/// selected row into mean + sample stddev — replacing llama-bench's
-/// internal `-r N` aggregation (which runs the reps back-to-back and bakes
-/// thermal drift into the reported numbers).
-///
-/// `before_rep` runs at the start of each rep. `build_cmd` returns a fresh
-/// [`Command`] each rep (including framework defaults such as `-r 1` from
-/// [`LlamaBenchArgsBuilder::build`]). `select` picks the rep's row from the
-/// JSON output (decode benchmarks return two rows; the caller filters to the
-/// one they're measuring).
-///
-/// Captures `preview` from the first invocation (argv is representative of
-/// the whole sequence) and `stdout` / `stderr` from the last (most relevant
-/// if anything went wrong at the end of the run).
-pub struct BenchRepSummary {
-    pub preview: Vec<String>,
-    pub stdout: String,
-    pub stderr: String,
-    pub mean_ms: f64,
-    pub stddev_ms: f64,
+/// What one llama-bench run processes, which llama-bench reports as one "test".
+#[derive(Debug, Clone, Copy)]
+pub enum BenchWorkload {
+    Prompt {
+        n_prompt: u32,
+    },
+    /// The generation alone, on `n_depth` tokens already in the KV cache.
+    Generation {
+        n_gen: u32,
+        n_depth: u32,
+    },
+    /// The generation right after the prompt, on its KV cache.
+    PromptThenGeneration {
+        n_prompt: u32,
+        n_gen: u32,
+    },
 }
 
-pub fn execute_reps(
-    label: &str,
-    readiness_gate: ReadinessGate,
-    observer: &RepObserver,
-    mut build_cmd: impl FnMut() -> anyhow::Result<Command>,
-    select: impl Fn(&[LlamaBenchRow]) -> anyhow::Result<&LlamaBenchRow>,
-) -> anyhow::Result<BenchRepSummary> {
-    let measured = measurement::run(
-        label,
-        readiness_gate,
-        observer,
-        // No untimed per-rep setup: the server holds no state a rep resets.
-        |_| Ok(()),
-        |_| {
-            let cmd = build_cmd()?;
-            execute(cmd)
-        },
-        |_, rep| Ok(select(&rep.value.rows)?.avg_ns / 1_000_000.0),
-    )?;
-    let stats = measured.stats();
-
-    // The preview is the first rep's argv — every rep runs the same command —
-    // and the logs are the last rep's, the one a failure would be about.
-    let preview = measured
-        .first()
-        .map(|execution| execution.preview.clone())
-        .unwrap_or_default();
-    let (stdout, stderr) = measured
-        .into_iter()
-        .next_back()
-        .map(|rep| (rep.value.stdout, rep.value.stderr))
-        .unwrap_or_default();
-
-    Ok(BenchRepSummary {
-        preview,
-        stdout,
-        stderr,
-        mean_ms: stats.mean_ms,
-        stddev_ms: stats.stddev_ms,
-    })
-}
-
-/// Best-effort kill of `pid`. Process-group SIGKILL on Unix
-/// (negative pid takes the whole group set up by `pre_exec`);
-/// `TerminateProcess` via a freshly-opened handle on Windows.
-fn kill_pid(pid: u32) {
-    #[cfg(unix)]
-    // SAFETY: `kill(2)` is signal-safe; targeting a non-existent
-    // pgid is benign (sets errno = ESRCH).
-    unsafe {
-        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-    }
-    #[cfg(windows)]
-    unsafe {
-        use windows_sys::Win32::{
-            Foundation::CloseHandle,
-            System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
+impl BenchWorkload {
+    /// The zeros turn off the pp512 and tg128 an unset flag adds.
+    fn tokens(self) -> Vec<String> {
+        let counts = |n_prompt: u32, n_gen: u32| {
+            vec![
+                "--n-prompt".to_owned(),
+                n_prompt.to_string(),
+                "--n-gen".to_owned(),
+                n_gen.to_string(),
+            ]
         };
-        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if !h.is_null() {
-            TerminateProcess(h, 1);
-            CloseHandle(h);
+        match self {
+            Self::Prompt { n_prompt } => counts(n_prompt, 0),
+            Self::Generation { n_gen, n_depth } => [
+                counts(0, n_gen),
+                vec!["--n-depth".to_owned(), n_depth.to_string()],
+            ]
+            .concat(),
+            // `--n-prompt` and `--n-gen` are two tests, each in its own context;
+            // `-pg` is one. With either count zero there is one test anyway.
+            Self::PromptThenGeneration { n_prompt, n_gen } if n_prompt > 0 && n_gen > 0 => [
+                counts(0, 0),
+                vec!["-pg".to_owned(), format!("{n_prompt},{n_gen}")],
+            ]
+            .concat(),
+            Self::PromptThenGeneration { n_prompt, n_gen } => counts(n_prompt, n_gen),
         }
     }
 }
 
-/// Parse llama-bench's JSON output into row records. Public to the
-/// per-OS measured runners under `max_memory_usage/`, which call
-/// `Command::output()` (or equivalent) directly and need the same
-/// row shape.
-fn parse_rows(stdout: &str) -> anyhow::Result<Vec<LlamaBenchRow>> {
-    let raw: Value = serde_json::from_str(stdout).context("failed to parse llama-bench JSON")?;
-    let rows = raw
-        .as_array()
-        .cloned()
-        .context("llama-bench returned a non-array JSON payload")?;
-    if rows.is_empty() {
-        anyhow::bail!("llama-bench returned no rows");
+/// The row a run printed for its one test.
+pub fn row(stdout: &str) -> anyhow::Result<BenchRow> {
+    let rows = serde_json::from_str::<Vec<BenchRow>>(stdout)
+        .context("failed to parse llama-bench JSON")?;
+    match rows.as_slice() {
+        [row] => Ok(*row),
+        [] => Err(anyhow::anyhow!("llama-bench printed no row")),
+        rows => Err(anyhow::anyhow!(
+            "llama-bench printed {} rows for one test; a comma list or -pg in the cell's \
+             flags adds tests",
+            rows.len()
+        )),
     }
-    rows.into_iter()
-        .map(|row| {
-            serde_json::from_value(row).context("failed to deserialize llama-bench result row")
-        })
-        .collect()
-}
-
-pub fn select_row<'a>(
-    rows: &'a [LlamaBenchRow],
-    description: &str,
-    predicate: impl Fn(&LlamaBenchRow) -> bool,
-) -> anyhow::Result<&'a LlamaBenchRow> {
-    let mut matches = rows.iter().filter(|row| predicate(row));
-    let first = matches
-        .next()
-        .with_context(|| format!("llama-bench returned no row matching {description}"))?;
-    if matches.next().is_some() {
-        anyhow::bail!("llama-bench returned multiple rows matching {description}");
-    }
-    Ok(first)
 }
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Context;
     use rstest::rstest;
 
+    use pipette_plan_types::{
+        LlamacppFlashAttention, LlamacppLoadMode, PrefillThroughputLlamacppCliStockToolsGgufText,
+        RuntimeFlags,
+    };
+
     use super::*;
+    use crate::runtimes::test_llama_bench;
 
-    fn bench_flags(
-        threads: Option<u32>,
-        mmap: Option<bool>,
-        raw: &[&str],
-    ) -> pipette_plan_types::RuntimeFlags {
-        pipette_plan_types::RuntimeFlags::PrefillLlamacppCliStockToolsGgufText {
-            threads,
-            number_gpu_layers: None,
-            mmap,
-            flash_attention: Some(LlamacppFlashAttention::On),
-            raw: raw.iter().map(|s| (*s).to_string()).collect(),
-        }
+    fn launch() -> BenchCommandBuilder {
+        BenchCommandBuilder::new(
+            test_llama_bench(),
+            "model.gguf",
+            BenchWorkload::Prompt { n_prompt: 512 },
+        )
     }
 
-    /// Every typed field reaches argv in canonical order, and `build` adds the
-    /// `-r 1` the benchmark fixes (cell defaults arrive already resolved).
-    #[rstest]
-    #[case::mmap_off(bench_flags(None, Some(false), &[]), &["--mmap", "0", "-fa", "on", "-r", "1"])]
-    #[case::mmap_on(bench_flags(None, Some(true), &[]), &["--mmap", "1", "-fa", "on", "-r", "1"])]
-    #[case::unset_mmap_emits_nothing(bench_flags(None, None, &[]), &["-fa", "on", "-r", "1"])]
-    #[case::threads_and_raw(
-        bench_flags(Some(8), Some(false), &["--poll", "0"]),
-        &["--mmap", "0", "--poll", "0", "-fa", "on", "-r", "1", "-t", "8"]
-    )]
-    fn args_for_renders_the_typed_fields(
-        #[case] flags: pipette_plan_types::RuntimeFlags,
-        #[case] expected: &[&str],
-    ) -> anyhow::Result<()> {
-        let got = args_for(&flags).build(&[], "test")?;
-        assert_eq!(got, expected);
-        Ok(())
-    }
-
-    /// `-r` is reserved from `raw`, so the builder's default is its only source.
+    /// Upstream's full row shape reads; `avg_ns` is an integer there.
     #[test]
-    fn build_adds_one_repetition() -> anyhow::Result<()> {
-        let got = args_for(&bench_flags(None, None, &[])).build(&[], "test")?;
-        assert_eq!(got.windows(2).filter(|w| w[0] == "-r").count(), 1);
+    fn a_row_reads_upstreams_json() -> anyhow::Result<()> {
+        let stdout = r#"[
+          {
+            "build_commit": "8f2e7b1", "build_number": 6500, "backends": "Metal,BLAS",
+            "model_filename": "m.gguf", "n_batch": 2048, "n_ubatch": 512, "flash_attn": 1,
+            "n_prompt": 0, "n_gen": 128, "n_depth": 512,
+            "test_time": "2026-09-23T10:00:00Z",
+            "avg_ns": 1250000000, "stddev_ns": 0, "avg_ts": 102.4, "stddev_ts": 0.0,
+            "samples_ns": [ 1250000000 ], "samples_ts": [ 102.4 ]
+          }
+        ]"#;
+        let row = row(stdout)?;
+        assert_eq!(
+            (row.n_prompt, row.n_gen, row.n_depth, row.avg_ns),
+            (0, 128, 512, 1_250_000_000.0)
+        );
         Ok(())
+    }
+
+    #[rstest]
+    #[case::prompt(BenchWorkload::Prompt { n_prompt: 512 }, &["--n-prompt", "512", "--n-gen", "0"])]
+    #[case::generation_at_a_depth(
+        BenchWorkload::Generation { n_gen: 128, n_depth: 512 },
+        &["--n-prompt", "0", "--n-gen", "128", "--n-depth", "512"]
+    )]
+    #[case::generation_on_an_empty_cache(
+        BenchWorkload::Generation { n_gen: 128, n_depth: 0 },
+        &["--n-prompt", "0", "--n-gen", "128", "--n-depth", "0"]
+    )]
+    #[case::generation_on_a_prompt(
+        BenchWorkload::PromptThenGeneration { n_prompt: 512, n_gen: 1 },
+        &["--n-prompt", "0", "--n-gen", "0", "-pg", "512,1"]
+    )]
+    #[case::no_prompt_leaves_the_generation(
+        BenchWorkload::PromptThenGeneration { n_prompt: 0, n_gen: 1 },
+        &["--n-prompt", "0", "--n-gen", "1"]
+    )]
+    fn a_workload_renders_as_one_test(#[case] workload: BenchWorkload, #[case] expected: &[&str]) {
+        assert_eq!(workload.tokens(), expected);
+    }
+
+    #[rstest]
+    #[case::not_json("not json", "failed to parse llama-bench JSON")]
+    #[case::no_row("[]", "llama-bench printed no row")]
+    #[case::a_row_per_value(
+        r#"[{"avg_ns": 1, "n_prompt": 512, "n_gen": 0, "n_depth": 0},
+            {"avg_ns": 2, "n_prompt": 512, "n_gen": 0, "n_depth": 0}]"#,
+        "printed 2 rows"
+    )]
+    fn anything_but_one_row_is_refused(
+        #[case] stdout: &str,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        let err = row(stdout)
+            .err()
+            .context("expected the row to be refused")?;
+        assert!(format!("{err:#}").contains(expected), "{err:#}");
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::nothing_set(launch(), &["--repetitions", "1"])]
+    #[case::mmap_off(launch().mmap(Some(false)), &["--mmap", "0", "--repetitions", "1"])]
+    #[case::mmap_on(launch().mmap(Some(true)), &["--mmap", "1", "--repetitions", "1"])]
+    #[case::raw_sorts_among_the_knobs(
+        launch().threads(Some(8)).mmap(Some(false)).raw(vec!["--poll".to_owned(), "0".to_owned()]),
+        &["--mmap", "0", "--poll", "0", "--repetitions", "1", "--threads", "8"]
+    )]
+    #[case::load_mode_alone(
+        launch().load_mode(Some(LlamacppLoadMode::MmapMlock)),
+        &["--load-mode", "mmap+mlock", "--repetitions", "1"]
+    )]
+    #[case::load_mode_beats_the_boolean(
+        launch().mmap(Some(true)).load_mode(Some(LlamacppLoadMode::Read)),
+        &["--load-mode", "none", "--repetitions", "1"]
+    )]
+    // Knobs that share a type, set apart so two cannot trade places.
+    #[case::every_knob_set(
+        launch()
+            .threads(Some(3))
+            .number_gpu_layers(Some(7))
+            .mmap(Some(false))
+            .flash_attention(Some(LlamacppFlashAttention::On)),
+        &[
+            "--flash-attn", "on", "--mmap", "0", "--n-gpu-layers", "7", "--repetitions", "1",
+            "--threads", "3",
+        ]
+    )]
+    fn args_render_the_knobs_then_the_workload(
+        #[case] launch: BenchCommandBuilder,
+        #[case] expected: &[&str],
+    ) {
+        assert_eq!(
+            launch.args(),
+            [expected, &["--n-prompt", "512", "--n-gen", "0"]].concat()
+        );
     }
 
     /// The repetition count is the benchmark's, not the cell's: it reaches argv
     /// but has no field to occupy in the submitted record.
     #[test]
-    fn the_fixed_repetition_count_stays_out_of_the_record() -> anyhow::Result<()> {
-        let flags = bench_flags(None, Some(false), &[]);
-        assert!(args_for(&flags).build(&[], "test")?.contains(&"-r".into()));
+    fn the_fixed_repetition_count_stays_out_of_the_record() {
+        let runtime_flags = PrefillThroughputLlamacppCliStockToolsGgufText {
+            threads: None,
+            number_gpu_layers: None,
+            mmap: Some(false),
+            load_mode: None,
+            flash_attention: Some(LlamacppFlashAttention::On),
+            envs: Vec::new(),
+            raw: Vec::new(),
+        };
+        let argv = launch()
+            .mmap(runtime_flags.mmap)
+            .flash_attention(runtime_flags.flash_attention)
+            .raw(runtime_flags.raw.clone())
+            .args();
+        assert!(argv.contains(&"--repetitions".into()));
 
-        let record = flags.submission_value();
+        let record = RuntimeFlags::PrefillThroughputLlamacppCliStockToolsGgufText(runtime_flags)
+            .submission_value();
         assert!(
             !record.to_string().contains("\"-r\""),
             "reserved flag reached the record: {record}"
         );
-        Ok(())
     }
 }

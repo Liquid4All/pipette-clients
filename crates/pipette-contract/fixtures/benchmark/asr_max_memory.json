@@ -1,0 +1,9 @@
+{
+  "benchmark_id": "asr_max_memory_15000ms_text1024_decode256",
+  "benchmark_type": "asr_max_memory",
+  "parameter_audio_channels": 1,
+  "parameter_audio_duration_ms": 15000,
+  "parameter_audio_sample_rate_hz": 16000,
+  "parameter_decode_tokens": 256,
+  "parameter_text_tokens": 1024
+}

@@ -1,17 +1,15 @@
-//! Wire types for management HTTP (`HttpRequest` / `HttpResponse`) and a
-//! leftover [`HttpTransport`] trait (tests / future hosts).
-//!
-//! Desktop [`crate::MgmtClient`] does **not** store a transport: each method
-//! takes [`pipette_http::HttpClient`] and runs the request on that shared
-//! blocking client. `User-Agent` is the client's default, not a mgmt header.
+//! Request and response types for management HTTP. Every endpoint call runs on
+//! the shared blocking [`pipette_http::HttpClient`] passed into it, whose
+//! default `User-Agent` it sends.
 
-/// HTTP verbs used by the management API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
     Post,
     Put,
     Patch,
+    Delete,
+    Head,
 }
 
 impl HttpMethod {
@@ -21,14 +19,14 @@ impl HttpMethod {
             HttpMethod::Post => "POST",
             HttpMethod::Put => "PUT",
             HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+            HttpMethod::Head => "HEAD",
         }
     }
 }
 
-/// A fully-formed request: URL, headers (including `Accept`, `User-Agent`,
-/// the signed auth headers, and any conditional `If-None-Match`), and a
-/// serialized JSON body. Carries no reqwest types so the core compiles
-/// without an HTTP stack.
+/// A request ready to send: URL, headers (`Accept`, the signed auth headers,
+/// any `If-None-Match`), and the encoded body.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
     pub method: HttpMethod,
@@ -37,8 +35,7 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
-/// The transport's reply: status code, response headers (the client only
-/// reads `ETag`), and the raw body to be JSON-decoded by the client.
+/// A response read whole: status, headers, and body.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status: u16,
@@ -47,8 +44,7 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
-    /// Case-insensitive header lookup (HTTP header names are
-    /// case-insensitive; native hosts may preserve original casing).
+    /// Case-insensitive, as HTTP header names are.
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -57,8 +53,8 @@ impl HttpResponse {
     }
 }
 
-/// A transport-level failure (connection refused, DNS, TLS, timeout, …).
-/// The message is surfaced through [`crate::Error::Transport`].
+/// A transport-level failure (connection refused, DNS, TLS, timeout),
+/// surfaced through [`crate::Error::Transport`].
 #[derive(Debug, Clone)]
 pub struct TransportError {
     pub message: String,
@@ -79,13 +75,3 @@ impl std::fmt::Display for TransportError {
 }
 
 impl std::error::Error for TransportError {}
-
-/// Performs a single HTTP request on behalf of [`crate::MgmtClient`].
-///
-/// Implementors handle only the wire exchange — connecting, sending the
-/// pre-built request, and returning status/headers/body. They do not
-/// touch signing, serialization, or status interpretation; that all
-/// stays in the client so every transport behaves identically.
-pub trait HttpTransport: Send + Sync {
-    fn execute(&self, request: HttpRequest) -> Result<HttpResponse, TransportError>;
-}

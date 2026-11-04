@@ -1,52 +1,45 @@
-//! Archive-download runtime install (llama.cpp), the runtime-side counterpart
-//! to [`crate::model::fetch`].
-//!
-//! "Pulling" means downloading a prebuilt release asset (or an archive URL) and
-//! unpacking it — there is no git build for llama.cpp. Entry point:
-//! [`install_llamacpp_archive`]. Docker / UV / MLX installs live beside this
-//! module and are routed by [`crate::ensure_runtime`].
+//! llama.cpp install: download a prebuilt release asset or archive and unpack
+//! it (no source build).
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use flate2::read::GzDecoder;
-use tar::Archive;
-use zip::ZipArchive;
 
 use pipette_http::HttpClient;
-use pipette_plan_types::{LlamacppCliStockTools, LlamacppCliStockToolsSource, Runtime};
+use pipette_http::retry::{Disposition, RetryPolicy, retrying};
+use pipette_plan_types::{
+    LlamacppCliStockTools, LlamacppCliStockToolsRelease, LlamacppCliStockToolsSource, Runtime,
+};
 
-use crate::progress::{copy_reporting, Reporter};
+use crate::archive::{extract_archive, infer_archive_kind};
+use crate::progress::{Reporter, copy_reporting};
+use crate::vault::{self, VaultAccess};
 
 /// Ceiling on the capacity a `content-length` may reserve up front. Well above
 /// any real llama.cpp archive (tens of MB), well below a size worth aborting on.
 const ARCHIVE_CAPACITY_HINT_CAP: u64 = 512 * 1024 * 1024;
 
-/// The two binaries every llama.cpp runtime archive must contain.
 const LLAMACPP_BINARIES: [&str; 2] = ["llama-bench", "llama-server"];
 
-/// Why an archive-based runtime install failed.
 #[derive(Debug, thiserror::Error)]
 pub enum LlamacppInstallError {
-    /// This runtime kind has no archive-download install path yet.
     #[error("{0}")]
     NotInstallable(String),
-    /// A `Custom` (or otherwise unknown) llama.cpp flavor has no upstream
-    /// release asset, so its download URL can't be derived.
+    /// The release names no `asset` and the flavor names none at its tag: a
+    /// `Custom` flavor, or one upstream stopped building.
     #[error(
-        "llama.cpp flavor `{0}` has no upstream release asset; install from an archive URL instead"
+        "llama.cpp flavor `{flavor}` has no upstream release asset at `{version}`; name the \
+         release file in `asset`, or install from an archive URL instead"
     )]
-    NoReleaseAsset(String),
-    /// Downloading the archive failed.
+    NoReleaseAsset { flavor: String, version: String },
     #[error("downloading runtime archive from {url} failed")]
     Http {
         url: String,
         #[source]
-        source: reqwest::Error,
+        source: pipette_http::Error,
     },
-    /// The archive body failed part-way through — distinct from `Http`, which is
-    /// the request never getting off the ground.
+    /// The body failed part-way, after the request succeeded.
     #[error("reading runtime archive from {url} failed")]
     Io {
         url: String,
@@ -55,15 +48,27 @@ pub enum LlamacppInstallError {
     },
 }
 
-/// Download + unpack a llama.cpp archive into store-owned `blobs_dir`.
+impl LlamacppInstallError {
+    /// Whether another download attempt can succeed: the request got no
+    /// answer or a `5xx` or `429`, or the body broke part-way. The body is
+    /// read into memory, so an `Io` is always the transfer's.
+    fn disposition(&self) -> Disposition {
+        match self {
+            Self::Http { source, .. } => source.disposition(),
+            Self::Io { .. } => Disposition::TRANSIENT,
+            Self::NotInstallable(_) | Self::NoReleaseAsset { .. } => Disposition::Permanent,
+        }
+    }
+}
+
+/// Download and unpack a llama.cpp archive into store-owned `blobs_dir`.
 ///
-/// A `GitHubRelease` source resolves to the **GitHub releases** asset layout
-/// (`https://<repo>/releases/download/<version>/<asset>`) — the upstream
-/// `github.com/ggml-org/llama.cpp` default and forks that mirror it. A custom
-/// repo that isn't GitHub-releases-hosted has no derivable asset URL; install
-/// those from the archive `url` form instead.
+/// A `GithubRelease` source assumes the GitHub releases URL layout; a repo
+/// hosted elsewhere must use the archive `url` form.
 pub(crate) fn install_llamacpp_archive(
     http: &HttpClient,
+    retry: &RetryPolicy,
+    vault: Option<&VaultAccess>,
     declared: &Runtime,
     blobs_dir: &Path,
     reporter: &mut Reporter,
@@ -76,33 +81,33 @@ pub(crate) fn install_llamacpp_archive(
         ))
         .into());
     };
-    install_llamacpp(http, rt, blobs_dir, reporter)
+    install_llamacpp(http, retry, vault, rt, blobs_dir, reporter)
 }
 
 fn install_llamacpp(
     http: &HttpClient,
+    retry: &RetryPolicy,
+    vault: Option<&VaultAccess>,
     rt: &LlamacppCliStockTools,
     blobs_dir: &Path,
     reporter: &mut Reporter,
 ) -> anyhow::Result<()> {
     let (url, kind) = match &rt.source {
-        LlamacppCliStockToolsSource::GithubRelease(repo) => {
-            let version = repo.repository_version.as_ref();
-            let asset = rt
-                .flavor
-                .release_asset_name(version)
-                .ok_or_else(|| LlamacppInstallError::NoReleaseAsset(rt.flavor.to_string()))?;
-            let url = format!(
-                "https://{}/releases/download/{version}/{asset}",
-                repo.repository_url
-            );
-            let kind = infer_archive_kind(&asset);
+        LlamacppCliStockToolsSource::GithubRelease(release) => {
+            let url = release_url(rt, release)?;
+            let kind = infer_archive_kind(&url);
             (url, kind)
         }
         LlamacppCliStockToolsSource::RemoteArchive { url } => {
-            let download = url.download_url();
+            let download = url.as_ref().to_owned();
             let kind = infer_archive_kind(&download);
             (download, kind)
+        }
+        // Verified against its record and unpacked in place; the kind is read
+        // off the bytes, since the path names no file.
+        LlamacppCliStockToolsSource::VaultRemoteArchive { url, .. } => {
+            vault::fetch_and_unpack(vault, http, retry, url, None, blobs_dir, reporter)?;
+            return check_binaries(blobs_dir);
         }
         LlamacppCliStockToolsSource::RelativeDir { dir } => {
             anyhow::bail!(
@@ -118,41 +123,78 @@ fn install_llamacpp(
         }
     };
 
-    // `blobs_dir` is the store-owned payload dir; extract straight into it.
-    let bytes = read_archive(http, &url, reporter)?;
-    extract_archive(&bytes, kind, blobs_dir)?;
-    // Structural "both present" check — tools are resolved later via
-    // RuntimeManifest::resolve_tool under install_dir.
-    for base in LLAMACPP_BINARIES {
-        find_binary(blobs_dir, &binary_name(base))?;
-    }
-    Ok(())
+    let start = reporter.mark();
+    let bytes = retrying(
+        retry,
+        &url,
+        |_| {
+            reporter.rewind(start);
+            read_archive(http, &url, reporter)
+        },
+        LlamacppInstallError::disposition,
+    )?;
+    extract_archive(Cursor::new(&bytes), kind, blobs_dir)?;
+    check_binaries(blobs_dir)
 }
 
-/// Download archive bytes over HTTPS (RemoteArchive is scheme-less host/path;
-/// callers pass `download_url()`).
-fn read_archive(http: &HttpClient, url: &str, reporter: &mut Reporter) -> anyhow::Result<Vec<u8>> {
-    let mut response = http
-        .client()
-        .get(url)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|source| LlamacppInstallError::Http {
+fn release_url(
+    rt: &LlamacppCliStockTools,
+    release: &LlamacppCliStockToolsRelease,
+) -> Result<String, LlamacppInstallError> {
+    let version = release.repository_version.as_ref();
+    let asset = rt
+        .release_asset()
+        .ok_or_else(|| LlamacppInstallError::NoReleaseAsset {
+            flavor: rt.flavor.to_string(),
+            version: version.to_owned(),
+        })?;
+    Ok(format!(
+        "https://{}/releases/download/{version}/{asset}",
+        release.repository_url
+    ))
+}
+
+/// An upstream llama.cpp release at `version`, naming `asset` when given.
+#[cfg(test)]
+pub(crate) fn upstream_release(
+    version: &str,
+    asset: Option<&str>,
+) -> anyhow::Result<LlamacppCliStockToolsRelease> {
+    use pipette_plan_types::{FileName, NonEmptyString, RepositoryUrl};
+
+    Ok(LlamacppCliStockToolsRelease {
+        repository_url: RepositoryUrl::new("github.com/ggml-org/llama.cpp"),
+        repository_version: NonEmptyString::try_new(version.to_owned())?,
+        asset: asset
+            .map(|asset| FileName::try_new(asset.to_owned()))
+            .transpose()?,
+    })
+}
+
+/// Presence only; tools are resolved later by `RuntimeManifest::resolve_tool`.
+fn check_binaries(blobs_dir: &Path) -> anyhow::Result<()> {
+    LLAMACPP_BINARIES
+        .iter()
+        .try_for_each(|base| find_binary(blobs_dir, &binary_name(base)).map(drop))
+}
+
+fn read_archive(
+    http: &HttpClient,
+    url: &str,
+    reporter: &mut Reporter,
+) -> Result<Vec<u8>, LlamacppInstallError> {
+    let mut response = pipette_http::send(http.client().get(url)).map_err(|source| {
+        LlamacppInstallError::Http {
             url: url.to_owned(),
             source,
-        })?;
-    // A release archive has no listing to size it beforehand, so the response is
-    // where the total comes from — and it is one file, so its length is the
-    // artifact's.
+        }
+    })?;
+    // An archive has no listing to size it beforehand; its one file's length is
+    // the artifact's.
     reporter.set_total_if_unknown(response.content_length());
-    // Buffered whole, as `extract_archive` needs it: an archive is tens of MB
-    // where a model is tens of GB, and streaming it would buy nothing but a
-    // temp file.
-    //
-    // `content-length` only *hints* the capacity, capped: it is a header from the
-    // far end, and a response claiming terabytes would otherwise abort the process
-    // on the reserve, before a byte had been read. The body is what actually grows
-    // the vector.
+    // Buffered whole for `extract_archive`: an archive is tens of MB, so
+    // streaming would only add a temp file. `content-length` is capped because
+    // a remote claiming terabytes would abort the process on the reserve.
     let hint = response
         .content_length()
         .unwrap_or(0)
@@ -168,75 +210,6 @@ fn read_archive(http: &HttpClient, url: &str, reporter: &mut Reporter) -> anyhow
     Ok(bytes)
 }
 
-/// The archive kind from a filename/URL: `.zip` → zip, else tar.gz.
-fn infer_archive_kind(name: &str) -> ArchiveKind {
-    if name.ends_with(".zip") {
-        ArchiveKind::Zip
-    } else {
-        ArchiveKind::TarGz
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ArchiveKind {
-    Zip,
-    TarGz,
-}
-
-/// Unpack `archive_bytes` into `destination`, restoring unix exec bits for zip
-/// entries so `llama-server` stays runnable. Ported from `pipette-llamacpp`.
-///
-/// Path-traversal safety: the zip path normalizes each entry via
-/// `mangled_name()`; the tar path relies on `tar::Archive::unpack`, which
-/// refuses to write outside `destination` (rejecting `..` components).
-fn extract_archive(
-    archive_bytes: &[u8],
-    kind: ArchiveKind,
-    destination: &Path,
-) -> anyhow::Result<()> {
-    match kind {
-        ArchiveKind::Zip => {
-            let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
-                .context("failed to read zip runtime archive")?;
-            for index in 0..archive.len() {
-                let mut entry = archive
-                    .by_index(index)
-                    .with_context(|| format!("failed to read zip entry #{index}"))?;
-                let out_path = destination.join(entry.mangled_name());
-                if entry.is_dir() {
-                    std::fs::create_dir_all(&out_path)
-                        .with_context(|| format!("failed to create {}", out_path.display()))?;
-                    continue;
-                }
-                if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("failed to create {}", parent.display()))?;
-                }
-                let mut out_file = std::fs::File::create(&out_path)
-                    .with_context(|| format!("failed to create {}", out_path.display()))?;
-                std::io::copy(&mut entry, &mut out_file)
-                    .with_context(|| format!("failed to extract {}", out_path.display()))?;
-                #[cfg(unix)]
-                if let Some(mode) = entry.unix_mode() {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode))
-                        .with_context(|| {
-                            format!("failed to set permissions on {}", out_path.display())
-                        })?;
-                }
-            }
-        }
-        ArchiveKind::TarGz => {
-            let mut archive = Archive::new(GzDecoder::new(Cursor::new(archive_bytes)));
-            archive
-                .unpack(destination)
-                .with_context(|| format!("failed to unpack into {}", destination.display()))?;
-        }
-    }
-    Ok(())
-}
-
-/// Recursively locate `expected_name` under `root`; errors if absent.
 fn find_binary(root: &Path, expected_name: &str) -> anyhow::Result<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -268,16 +241,24 @@ fn binary_name(base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use pipette_plan_types::{
-        DockerVllm, LlamaCppFlavor, NonEmptyString, RepositoryUrl, SourceRepository, VllmFlavor,
+        DockerVllm, LlamaCppFlavor, NonEmptyString, RemoteArchiveUrl, VllmFlavor,
     };
 
     use super::*;
+    use crate::archive::ArchiveKind;
+    use crate::scripted_server::{Reply, ScriptedServer};
 
-    #[test]
-    fn infer_archive_kind_from_name() {
-        assert!(matches!(infer_archive_kind("x.zip"), ArchiveKind::Zip));
-        assert!(matches!(infer_archive_kind("x.tar.gz"), ArchiveKind::TarGz));
+    #[rstest]
+    #[case::lower("llama-b1234-bin-win-cpu-x64.zip", ArchiveKind::Zip)]
+    #[case::upper("LLAMA.ZIP", ArchiveKind::Zip)]
+    #[case::url("https://example.com/llama-b1234.zip", ArchiveKind::Zip)]
+    #[case::tarball("llama-b1234-bin-ubuntu-x64.tar.gz", ArchiveKind::TarGz)]
+    #[case::zip_in_stem("zip-tools.tar.gz", ArchiveKind::TarGz)]
+    fn infer_archive_kind_cases(#[case] name: &str, #[case] want: ArchiveKind) {
+        assert_eq!(infer_archive_kind(name), want);
     }
 
     #[test]
@@ -289,10 +270,61 @@ mod tests {
             flavor: VllmFlavor::NvidiaGpu,
         });
         let tmp = tempfile::tempdir()?;
-        let err = install_llamacpp_archive(&http, &docker, tmp.path(), &mut Reporter::silent())
-            .err()
-            .context("docker runtime should not be fetchable")?;
+        let err = install_llamacpp_archive(
+            &http,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            &docker,
+            tmp.path(),
+            &mut Reporter::silent(),
+        )
+        .err()
+        .context("docker runtime should not be fetchable")?;
         assert!(err.to_string().contains("not yet implemented"));
+        Ok(())
+    }
+
+    /// The flavor names the file unless the release does, which is also how
+    /// a flavor upstream stopped building is still reached.
+    #[rstest]
+    #[case::flavor_names_it(
+        LlamaCppFlavor::LinuxX64Rocm,
+        None,
+        Some("llama-b11399-bin-ubuntu-rocm-10.0-x64.tar.gz")
+    )]
+    #[case::declared_wins(
+        LlamaCppFlavor::LinuxX64Rocm,
+        Some("llama-b11399-bin-ubuntu-vulkan-x64.tar.gz"),
+        Some("llama-b11399-bin-ubuntu-vulkan-x64.tar.gz")
+    )]
+    #[case::past_the_flavor(
+        LlamaCppFlavor::WindowsX64Cuda131,
+        Some("llama-b11399-bin-win-cuda-13.4-x64.zip"),
+        Some("llama-b11399-bin-win-cuda-13.4-x64.zip")
+    )]
+    #[case::nothing_names_it(LlamaCppFlavor::WindowsX64Cuda131, None, None)]
+    fn release_url_takes_the_declared_asset(
+        #[case] flavor: LlamaCppFlavor,
+        #[case] asset: Option<&str>,
+        #[case] file: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let release = upstream_release("b11399", asset)?;
+        let rt = LlamacppCliStockTools {
+            source: LlamacppCliStockToolsSource::GithubRelease(release.clone()),
+            flavor,
+        };
+        match (release_url(&rt, &release), file) {
+            (Ok(url), Some(file)) => assert_eq!(
+                url,
+                format!("https://github.com/ggml-org/llama.cpp/releases/download/b11399/{file}")
+            ),
+            (Err(err), None) => {
+                let message = err.to_string();
+                assert!(message.contains("`b11399`"), "{message}");
+                assert!(message.contains("`asset`"), "{message}");
+            }
+            (got, want) => anyhow::bail!("got {got:?}, want {want:?}"),
+        }
         Ok(())
     }
 
@@ -300,44 +332,27 @@ mod tests {
     fn a_custom_flavor_repository_reports_no_asset() -> anyhow::Result<()> {
         let http = HttpClient::new("pipette-test")?;
         let declared = Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
-            source: LlamacppCliStockToolsSource::GithubRelease(SourceRepository {
-                repository_url: RepositoryUrl::new("github.com/ggml-org/llama.cpp"),
-                repository_version: NonEmptyString::try_new("b1".to_owned())?,
-            }),
+            source: LlamacppCliStockToolsSource::GithubRelease(upstream_release("b1", None)?),
             flavor: LlamaCppFlavor::Custom("weird".to_owned()),
         });
         let tmp = tempfile::tempdir()?;
-        // No network: the error is raised while deriving the asset URL.
-        let err = install_llamacpp_archive(&http, &declared, tmp.path(), &mut Reporter::silent())
-            .err()
-            .context("custom flavor should have no release asset")?;
+        let err = install_llamacpp_archive(
+            &http,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            &declared,
+            tmp.path(),
+            &mut Reporter::silent(),
+        )
+        .err()
+        .context("custom flavor should have no release asset")?;
         assert!(err.to_string().contains("no upstream release asset"));
         Ok(())
     }
 
     #[test]
-    fn remote_archive_url_is_scheme_less_https_download() -> anyhow::Result<()> {
-        let url = pipette_plan_types::RemoteArchiveUrl::try_new(
-            "https://github.com/org/repo/releases/download/v1/llama.tar.gz".to_owned(),
-        )?;
-        assert_eq!(
-            url.as_ref(),
-            "github.com/org/repo/releases/download/v1/llama.tar.gz"
-        );
-        assert_eq!(
-            url.download_url(),
-            "https://github.com/org/repo/releases/download/v1/llama.tar.gz"
-        );
-        assert!(pipette_plan_types::RemoteArchiveUrl::try_new(
-            "file:///tmp/llama.tar.gz".to_owned()
-        )
-        .is_err());
-        Ok(())
-    }
-
-    #[test]
     fn extract_archive_records_binary_placements() -> anyhow::Result<()> {
-        use flate2::{write::GzEncoder, Compression};
+        use flate2::{Compression, write::GzEncoder};
 
         let mut tar_gz = Vec::new();
         {
@@ -360,10 +375,138 @@ mod tests {
         let tmp = tempfile::tempdir()?;
         let blobs = tmp.path().join("blobs");
         std::fs::create_dir_all(&blobs)?;
-        extract_archive(&tar_gz, ArchiveKind::TarGz, &blobs)?;
+        extract_archive(Cursor::new(&tar_gz), ArchiveKind::TarGz, &blobs)?;
 
         assert!(find_binary(&blobs, &binary_name("llama-bench")).is_ok());
         assert!(find_binary(&blobs, &binary_name("llama-server")).is_ok());
+        Ok(())
+    }
+
+    fn release_tar_gz() -> anyhow::Result<Vec<u8>> {
+        use flate2::{Compression, write::GzEncoder};
+
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        LLAMACPP_BINARIES.iter().try_for_each(|base| {
+            let payload = b"#!/bin/sh\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(
+                &mut header,
+                format!("build/bin/{}", binary_name(base)),
+                &payload[..],
+            )
+        })?;
+        Ok(tar.into_inner()?.finish()?)
+    }
+
+    fn install_from(url: &str) -> anyhow::Result<(tempfile::TempDir, anyhow::Result<()>)> {
+        let declared = Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
+            source: LlamacppCliStockToolsSource::RemoteArchive {
+                url: RemoteArchiveUrl::try_new(url.to_owned())?,
+            },
+            flavor: LlamaCppFlavor::Custom("archive".to_owned()),
+        });
+        let tmp = tempfile::tempdir()?;
+        let result = install_llamacpp_archive(
+            &HttpClient::new("pipette-test")?,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            &declared,
+            tmp.path(),
+            &mut Reporter::silent(),
+        );
+        Ok((tmp, result))
+    }
+
+    #[rstest]
+    #[case::dropped_connections(vec![Reply::Drop, Reply::Drop])]
+    #[case::unavailable(vec![Reply::status(503), Reply::status(503), Reply::status(503)])]
+    #[case::cut_body(vec![Reply::cut(&release_tar_gz()?, 10)])]
+    fn a_transient_failure_is_retried(#[case] failures: Vec<Reply>) -> anyhow::Result<()> {
+        let attempts = failures.len() + 1;
+        let script = failures
+            .into_iter()
+            .chain([Reply::ok(&release_tar_gz()?)])
+            .collect();
+        let server = ScriptedServer::start(script)?;
+        let (tmp, result) = install_from(&server.url("/llama.tar.gz"))?;
+        result?;
+        assert!(find_binary(tmp.path(), &binary_name("llama-server")).is_ok());
+        assert_eq!(server.requests().len(), attempts);
+        Ok(())
+    }
+
+    #[test]
+    fn a_not_found_is_not_retried() -> anyhow::Result<()> {
+        let server = ScriptedServer::start(vec![Reply::status(404), Reply::ok(b"")])?;
+        let (_tmp, result) = install_from(&server.url("/llama.tar.gz"))?;
+        let err = result.err().context("a 404 should fail the install")?;
+        assert!(format!("{err:#}").contains("HTTP 404"), "{err:#}");
+        assert_eq!(server.requests().len(), 1);
+        Ok(())
+    }
+
+    /// The error after the last attempt still names the cause under reqwest's
+    /// own message: here, the refused connect.
+    #[test]
+    fn a_refused_connection_keeps_its_cause() -> anyhow::Result<()> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        let (_tmp, result) = install_from(&format!("http://127.0.0.1:{port}/llama.tar.gz"))?;
+        let err = result
+            .err()
+            .context("a closed port should fail the install")?;
+        let cause = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .context("no io::Error in the chain")?;
+        assert!(format!("{err:#}").ends_with(&cause.to_string()), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_vault_archive_installs_and_is_checked_for_binaries() -> anyhow::Result<()> {
+        use httpmock::MockServer;
+
+        use crate::vault::test_support::{RESOURCE_ID, access, content_path, serve_bytes};
+
+        let mut tar = tar::Builder::new(Vec::new());
+        LLAMACPP_BINARIES.iter().try_for_each(|base| {
+            let payload = b"#!/bin/sh\n";
+            let mut header = tar::Header::new_ustar();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(
+                &mut header,
+                format!("bin/{}", binary_name(base)),
+                &payload[..],
+            )
+        })?;
+        let server = MockServer::start();
+        serve_bytes(&server, RESOURCE_ID, &tar.into_inner()?);
+        let declared = Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
+            source: LlamacppCliStockToolsSource::VaultRemoteArchive {
+                url: content_path(RESOURCE_ID)?,
+                principal_id: "org_1".parse()?,
+                custom_label: None,
+            },
+            flavor: LlamaCppFlavor::Custom("internal".to_owned()),
+        });
+        let tmp = tempfile::tempdir()?;
+        let http = HttpClient::new("pipette-test")?;
+        install_llamacpp_archive(
+            &http,
+            &RetryPolicy::IMMEDIATE,
+            Some(&access(&server)?),
+            &declared,
+            tmp.path(),
+            &mut Reporter::silent(),
+        )?;
+        assert!(find_binary(tmp.path(), &binary_name("llama-server")).is_ok());
         Ok(())
     }
 }

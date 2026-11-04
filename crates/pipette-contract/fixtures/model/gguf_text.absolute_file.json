@@ -1,0 +1,5 @@
+{
+  "path": "/var/lib/pipette/models/LFM2.5-350M-Q4_0.gguf",
+  "source": "absolute_file",
+  "type": "gguf_text"
+}

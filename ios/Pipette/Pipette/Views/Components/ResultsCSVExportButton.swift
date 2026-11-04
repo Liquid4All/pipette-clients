@@ -10,11 +10,9 @@ nonisolated struct ResultsCSVFile: Transferable {
     let filename: String
     let makeCSV: @MainActor @Sendable () -> String
 
-    /// Shared as a file rather than as bytes: a data representation only carries
-    /// a *suggested* name, leaving the destination to derive the extension from
-    /// the content type — and `.commaSeparatedText` conforms to
-    /// `public.plain-text`, so the CSV can land as a `.txt`. A file on disk
-    /// carries its own name, so every destination writes `…​.csv`.
+    /// Shared as a file, not bytes: a data representation only suggests a name and
+    /// `.commaSeparatedText` conforms to `public.plain-text`, so the CSV can land as
+    /// a `.txt`. A file on disk carries its own `.csv` name.
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(exportedContentType: .commaSeparatedText) { file in
             SentTransferredFile(try await file.writeToTemporaryFile())
@@ -67,10 +65,9 @@ struct CSVExportDocument: FileDocument {
 }
 #endif
 
-/// The results-export affordance on the completed-run page. iOS hands the CSV to
-/// the native share sheet — AirDrop, Mail, Messages, Save to Files — which is a
-/// superset of what a save panel offers. macOS keeps the file exporter, where
-/// picking a destination folder is the expected way to export.
+/// The results-export button on the completed-run page. iOS uses the share sheet,
+/// a superset of a save panel; macOS keeps the file exporter, where picking a
+/// folder is the expected way to export.
 struct ResultsCSVExportButton: View {
     let file: ResultsCSVFile
 

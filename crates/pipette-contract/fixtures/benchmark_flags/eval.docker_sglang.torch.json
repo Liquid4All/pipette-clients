@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "eval",
+  "model_type": "torch",
+  "runtime_type": "docker_sglang"
+}

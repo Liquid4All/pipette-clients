@@ -969,6 +969,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app), ShellActions {
       currentCellLabel = runnerState.currentCellLabel,
       progressText = runnerState.currentProgressText,
       coolingSinceMillis = runnerState.coolingSinceMillis,
+      coolingMaxMillis = runnerState.coolingMaxMillis,
     )
   }
 

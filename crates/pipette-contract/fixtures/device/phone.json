@@ -1,0 +1,11 @@
+{
+  "device_chip_model": "Apple A19 Pro",
+  "device_cpu_arch": "arm64",
+  "device_form_factor": "phone",
+  "device_name": "iPhone 17 Pro",
+  "device_os_build": "23C55",
+  "device_os_family": "iOS",
+  "device_os_name": "iOS",
+  "device_os_version": "26.2",
+  "device_ram_bytes": 12884901888
+}

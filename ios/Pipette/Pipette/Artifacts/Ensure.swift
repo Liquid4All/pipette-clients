@@ -1,129 +1,242 @@
 import Foundation
 
-// Find-or-fetch into the store — the crate's `pipette-artifacts/src/ensure.rs`.
+// Find-or-fetch into the store, after `crates/pipette-artifacts/src/ensure.rs`: admit,
+// fetch, publish, sweep (in `DownloadCoordinator.sweepAfterInstall`), return the bound
+// model. A cache hit neither admits nor sweeps.
 //
-// The order is the crate's: refuse an oversize artifact before any transfer starts, fetch,
-// publish, sweep back under the cap, return the bound model. Peak disk is the quota plus
-// this artifact, and a cache hit publishes nothing and therefore does not sweep.
-//
-// Where upstream calls `fetch_model` inline, this awaits `DownloadCoordinator`: the two
-// pre-flight and post-publish steps already live there (`startDownload`'s declared-size
-// refusal and `sweepAfterInstall`), so this supplies the wait and the store supplies
-// find/touch/publish/bind.
-//
-// The `progress` callback led upstream rather than following it: a phone had to show a
-// multi-gigabyte transfer moving long before `fetch_model` said anything. The CLI has since
-// grown the same shape — a `ProgressSink` on `ArtifactsContext`, reporting one artifact at
-// a time and summing its parts — so the two now agree on what a fetch reports, and
-// `TransferFormat` keeps them agreeing on how it reads.
+// Two divergences from the crate. Admission refuses before any byte moves unless the
+// whole model fits the quota and free space (the crate sweeps after publishing; see
+// `docs/storage-quota.md`). And the UI and a running job can want the same weights at
+// once, so the byte-adding half goes through `TransferRegistry`: one transfer, one grant,
+// any number of waiters.
 
-/// One report from a fetch in flight.
+/// The crate's `ensure_model`. Returns the bound model, so a caller gets launchable paths
+/// rather than a promise that a transfer was queued.
 ///
-/// `fraction` is what every transfer can answer. The byte counts are nil for an MLX
-/// directory pull, which reports an aggregate fraction and no bytes — so a caller renders
-/// bytes and a rate when they are there and a percentage when they are not, rather than
-/// inventing figures for the transfers that cannot supply them.
-nonisolated struct FetchProgress: Sendable {
-    let fraction: Double
-    let doneBytes: Int64?
-    let totalBytes: Int64?
-}
-
-/// The bound `Model` for `declared`, downloading it first if the store does not hold it —
-/// the crate's `ensure_model`.
+/// `familyId` / `quant` are the catalog labels the transfer is displayed under. A `nil`
+/// `declaredSizeBytes` is resolved from the vault records or the Hub on a miss, and a
+/// model nobody can size is refused.
 ///
-/// Returning the *bound* model is the contract: a caller gets launchable paths, not a
-/// promise that a transfer was queued.
-///
-/// The coordinator is passed rather than defaulted to its singleton, so a caller's
-/// dependency is visible and a test can supply its own.
-///
-/// `familyId` / `quant` are the catalog labels a transfer is displayed under, and
-/// `declaredSizeBytes` is what the quota gate refuses on before any bytes move — the
-/// crate's refuse-if-oversize step, which is why it belongs on this call and not only on
-/// the coordinator.
+/// `stallTimeout` bounds time without progress, not the whole fetch, so a slow link that
+/// keeps moving is never cut off.
 @MainActor
 func ensureModel(
     _ declared: Model,
-    storage: Storage,
+    ws: PipetteWorkspace,
     coordinator: DownloadCoordinator,
     familyId: String? = nil,
     quant: String? = nil,
     declaredSizeBytes: Int64? = nil,
-    timeout: Duration = .seconds(1800),
-    progress: ((FetchProgress) -> Void)? = nil
+    jobId: JobId? = nil,
+    stallTimeout: Duration = .seconds(600),
+    progress: ProgressSink? = nil
 ) async throws -> Model {
-    try await storage.modelStore.ensure(declared) { declared in
-        // Refused on the miss path only, so an arm that is already installed still
-        // resolves: `startDownload` declines a non-Hub coordinate without registering a
-        // transfer, and waiting on one would burn the whole window to learn what the
-        // type already says.
+    try await ws.models.ensure(declared) { declared in
+        // Checked on the miss path only, so an installed arm still resolves. Without it,
+        // the miss would surface later as an unsized admission or a declined start, not
+        // as `notFetchableHere`.
         guard declared.isFetchableHere else {
             throw ModelStoreError.notFetchableHere(declared.artifactName)
         }
-        coordinator.startDownload(declared, familyId: familyId, quant: quant,
-                                  declaredSizeBytes: declaredSizeBytes)
-        // A declined start — oversize for the quota, or bytes already on disk that the
-        // store could not resolve — enqueues nothing and leaves its reason behind. There
-        // is no transfer to wait on, so read the refusal now instead of at the deadline.
-        guard coordinator.hasTransfer(for: declared) else {
-            throw ModelStoreError.fetchFailed(
-                declared.artifactName,
-                reason: coordinator.errorMessage ?? "the download did not start")
+        guard let key = ModelStorageKey.of(declared) else {
+            throw ModelStoreError.notStorable(declared.description)
         }
-        try await awaitFetch(of: declared, storage: storage, coordinator: coordinator,
-                             timeout: timeout, progress: progress)
+        // Runs once per transfer in a task the registry owns, so a caller whose own task
+        // is cancelled only stops waiting and cannot hand back a budget still being spent.
+        do {
+            try await coordinator.transfers.join(key) {
+                try await fetchAndWait(declared, ws: ws, coordinator: coordinator,
+                                       familyId: familyId, quant: quant,
+                                       declaredSizeBytes: declaredSizeBytes, jobId: jobId,
+                                       stallTimeout: stallTimeout, progress: progress)
+            }
+        } catch is TransferCancelled {
+            // Distinct from `CancellationError`: this means the weights are not coming,
+            // that means only this caller left.
+            throw ModelStoreError.fetchCancelled(declared.artifactName)
+        }
     }
 }
 
-/// Wait until the store can resolve `declared`, the transfer fails or pauses, or the
-/// window closes.
+/// The byte-adding half, run once per transfer by `TransferRegistry`.
+@MainActor
+private func fetchAndWait(
+    _ declared: Model,
+    ws: PipetteWorkspace,
+    coordinator: DownloadCoordinator,
+    familyId: String?,
+    quant: String?,
+    declaredSizeBytes: Int64?,
+    jobId: JobId?,
+    stallTimeout: Duration,
+    progress: ProgressSink?
+) async throws {
+    // Only new work is admitted: an entry that already holds a grant would be budgeted
+    // twice, and resuming a paused download offline (no size readable) would be refused.
+    // `DownloadCoordinator` owns the grant and releases it when the entry's last row
+    // retires, so a paused transfer resumes on its grant and no competing download can
+    // take that budget in between.
+    //
+    // Retire failed rows before reading `hasTransfer`, or this call would skip admission,
+    // start nothing, and report the earlier failure again.
+    let retired = await coordinator.retireFailed(for: declared)
+    if !retired.isEmpty {
+        AppLog.storage.info(
+            "retired failed transfer(s) before a new fetch model=\(declared.artifactName) "
+                + "count=\(retired.count)")
+    }
+    let entry = ModelStorageKey.of(declared)
+    let admitted = entry.map { coordinator.hasReservation(for: $0) } ?? false
+    if !admitted, !coordinator.hasTransfer(for: declared) {
+        let reservation = try await admit(
+            declared, ws: ws, coordinator: coordinator,
+            declaredSizeBytes: declaredSizeBytes, jobId: jobId)
+        guard let entry else {
+            await coordinator.admission.release(reservation)
+            throw ModelStoreError.fetch(
+                model: declared.artifactName, source: "the model names no store entry")
+        }
+        coordinator.holdReservation(reservation, for: entry)
+    }
+    coordinator.startDownload(declared, familyId: familyId, quant: quant, jobId: jobId)
+    // A declined start enqueues nothing, so read its reason now instead of at the deadline.
+    guard coordinator.hasTransfer(for: declared) else {
+        if let entry { coordinator.releaseReservation(for: entry) }
+        throw ModelStoreError.fetch(
+            model: declared.artifactName,
+            source: coordinator.errorMessage ?? "the download did not start")
+    }
+    try await awaitFetch(of: declared, ws: ws, coordinator: coordinator,
+                         familyId: familyId, quant: quant,
+                         stallTimeout: stallTimeout, progress: progress)
+}
+
+/// The crate's `pre_fetch_size` plus admission. A vault model is sized from its records
+/// (`VaultFetch.admissionBytes`), anything else from the Hub. A failed record read throws
+/// the `VaultFetchError`, the same typed refusal the download would.
+@MainActor
+private func admit(
+    _ declared: Model,
+    ws: PipetteWorkspace,
+    coordinator: DownloadCoordinator,
+    declaredSizeBytes: Int64?,
+    jobId: JobId?
+) async throws -> Reservation {
+    let size: Int64?
+    if let declaredSizeBytes {
+        size = declaredSizeBytes
+    } else if let files = ModelFetch.vaultFiles(declared), let first = files.first {
+        let access = try VaultAccess.of(coordinator.vaultSession, path: first.path)
+        size = VaultFetch.admissionBytes(declared, records: try await VaultFetch.records(
+            files, access: access, http: coordinator.vaultHttpClient, jobId: jobId,
+            hooks: coordinator.retryHooks))
+    } else {
+        size = await ModelFetch.declaredSizeBytes(
+            declared, http: coordinator.downloadHttpClient)
+    }
+    guard let key = ModelStorageKey.of(declared) else {
+        throw ModelStoreError.notStorable(declared.description)
+    }
+    let request = AdmissionRequest(key: key, label: declared.description, declaredBytes: size)
+    do throws(AdmissionError) {
+        return try await coordinator.admission.admit(
+            request, pins: coordinator.sweepPins(justInstalled: nil))
+    } catch {
+        throw ModelStoreError.admission(error)
+    }
+}
+
+/// Wait until the store can resolve `declared`, the transfer fails, pauses or vanishes,
+/// or no byte arrives for `stallTimeout`.
 ///
-/// Polls the *store*, not a transfer row: a vision model is two transfers in one entry, so
-/// "both files have landed" is exactly what `bound` answers and no transfer alone does.
+/// Polls the store, not a transfer row: a vision model is two transfers in one entry.
 ///
-/// A user-paused transfer is reported immediately rather than waited out — nothing will
-/// advance it, so holding the caller until the window expires would just delay the same
-/// answer by half an hour.
+/// Pauses already in place when the wait starts predate the caller (interrupted before a
+/// relaunch) and are resumed. A later pause belongs to a person (`ModelsView` offers
+/// Pause) and is reported at once, unless the network raised it, which is lifted once more.
 ///
-/// `progress` fires only when the whole percent changes, so a caller can log or render
-/// every call without deduplicating: the poll is per-second but bytes move continuously,
-/// and no consumer displays finer than a percent.
+/// A fetch that inherited a pause gets one restart from scratch (`restartStalled`) if the
+/// resume ends in a failed or vanished transfer: the resume data can name a partial the
+/// server will not continue, and a CLI-driven phone has nobody to clear it by hand. A
+/// transfer that failed on its own (404, gated repo, full disk) is reported, not retried.
+///
+/// `progress` fires only when the whole percent changes, so callers need not deduplicate.
 @MainActor
 private func awaitFetch(
     of declared: Model,
-    storage: Storage,
+    ws: PipetteWorkspace,
     coordinator: DownloadCoordinator,
-    timeout: Duration,
-    progress: ((FetchProgress) -> Void)?
+    familyId: String?,
+    quant: String?,
+    stallTimeout: Duration,
+    progress: ProgressSink?
 ) async throws {
-    let deadline = ContinuousClock.now.advanced(by: timeout)
+    var deadline = ContinuousClock.now.advanced(by: stallTimeout)
+    // A directory pull reports a fraction and no bytes, so either one moving counts.
+    var lastMoved: (bytes: Int64?, fraction: Double?) = (nil, nil)
     var lastPercent = -1
     func report(_ fraction: Double) {
         let percent = Int((fraction * 100).rounded())
         guard percent != lastPercent else { return }
         lastPercent = percent
-        // Read alongside the fraction rather than derived from it: the fraction is an
-        // average across a model's rows, and bytes are a sum, so recovering one from the
-        // other would be wrong for exactly the multi-file models that need it.
+        // Not derived from the fraction: that is an average across rows and bytes are a
+        // sum, so the two disagree for multi-file models.
         let bytes = coordinator.transferred(for: declared)
-        progress?(FetchProgress(fraction: fraction,
+        progress?(FetchProgress(artifact: declared.description, fraction: fraction,
                                 doneBytes: bytes?.done,
                                 totalBytes: bytes?.total))
     }
 
+    // Before the loop, so only pauses that predate the wait are resumed; a person who
+    // pauses mid-wait is not overruled. One attempt is enough: `resume(key:)` leaves the
+    // row `.queued`, so a resume that takes is out of `.paused` before the first poll.
+    let inheritedAPause = await coordinator.resumePaused(for: declared)
+    // The network-pause resume applies however the transfer was found; the restart only
+    // to an inherited pause.
+    var mayResumeAgain = true
+    var mayRestart = inheritedAPause
+
+    /// False leaves the caller to report the stall: no inherited pause, already restarted,
+    /// offline, or refused.
+    func restartOnce() async -> Bool {
+        guard mayRestart else { return false }
+        mayRestart = false
+        return await coordinator.restartStalled(for: declared, familyId: familyId, quant: quant)
+    }
+
     while ContinuousClock.now < deadline {
-        if storage.modelStore.bound(declared) != nil {
+        if ws.models.bound(declared) != nil {
             report(1)
             return
         }
         if let reason = coordinator.failureReason(for: declared) {
-            throw ModelStoreError.fetchFailed(declared.artifactName, reason: reason)
+            // Typed, so the worker can tell whether every device would get the same refusal.
+            if let refusal = coordinator.vaultFailure(for: declared) { throw refusal }
+            if await restartOnce() { continue }
+            throw ModelStoreError.fetch(model: declared.artifactName, source: reason)
         }
         if coordinator.isPaused(declared) {
+            // A network pause is resumed, never restarted: its partial is worth keeping.
+            if mayResumeAgain, coordinator.isPausedByNetwork(declared) {
+                mayResumeAgain = false
+                if await coordinator.resumePaused(for: declared) { continue }
+            }
             throw ModelStoreError.fetchPaused(declared.artifactName)
         }
-        if let fraction = coordinator.fraction(for: declared) { report(fraction) }
+        // After the failure and pause arms, which need the row. A completion clears the
+        // row only once the store resolves it, so a vanished row here stopped short.
+        if !coordinator.hasTransfer(for: declared) {
+            if await restartOnce() { continue }
+            throw ModelStoreError.fetch(
+                model: declared.artifactName, source: "the transfer stopped without completing")
+        }
+        let fraction = coordinator.fraction(for: declared)
+        let moved = (bytes: coordinator.transferred(for: declared)?.done, fraction: fraction)
+        if moved != lastMoved {
+            deadline = ContinuousClock.now.advanced(by: stallTimeout)
+        }
+        lastMoved = moved
+        if let fraction { report(fraction) }
         try await Task.sleep(for: .seconds(1))
     }
     throw ModelStoreError.fetchTimedOut(declared.artifactName)

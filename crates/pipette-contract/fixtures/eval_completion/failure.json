@@ -1,0 +1,8 @@
+{
+  "completion": "",
+  "failed": true,
+  "failed_reason": "Engine error: decode failed.",
+  "id": "row-3#0",
+  "stop_detail": "Engine error: decode failed.",
+  "stop_reason": "failure"
+}

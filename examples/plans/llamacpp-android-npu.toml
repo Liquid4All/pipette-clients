@@ -1,0 +1,86 @@
+# Example plan: Qualcomm NPU (Hexagon HTP) vs CPU on one Snapdragon phone, same
+# model and benchmarks on both so the two are directly comparable.
+#
+# Upstream's `ggml-hexagon` backend runs prefill on the HTP and leaves decode on
+# the CPU, so a decode number here is NOT an NPU decode number.
+#
+# Two variants, not one with two runtimes: a `runtime_flags` row is keyed on
+# (benchmark_type, runtime_type, model_type) and both arms are
+# `llamacpp_cli_stock_tools`, so one variant could not give `--device HTP0` to
+# the NPU arm alone.
+#
+# The NPU build is upstream's Snapdragon release asset
+# (`llama-<tag>-bin-android-arm64-snapdragon.tar.gz`), published since `b11099`;
+# an earlier tag has no such asset and the download 404s. The client puts its
+# `lib/` on the library path and sets `ADSP_LIBRARY_PATH`, which FastRPC needs
+# to find the device-side `libggml-htp-v*.so`.
+#
+# Both arms pin the same tag so the comparison isolates the accelerator, not a
+# llama.cpp revision.
+
+plan_id = "llamacpp-android-npu-example"
+benchmarks = [
+  "prefill_throughput_512",
+  "decode_throughput_512_100",
+  "max_memory_usage_512",
+]
+
+[[transports]]
+client_id   = "s26-ultra"
+type        = "adb"
+serial      = "REPLACE_WITH_ADB_SERIAL"
+binary_path = "/data/local/tmp/pipette/pipette"
+work_dir    = "/data/local/tmp/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 5
+
+# --- NPU arm -----------------------------------------------------------------
+#
+# The Hexagon backend reads its knobs from `GGML_*` environment variables, not
+# flags, so they go in `envs`. `GGML_*` values are kept in the submitted record
+# (other forwards are redacted) because they change throughput.
+#
+# `GGML_HEXAGON_DEVICES` allocates the NPU sessions and `--device` picks one;
+# the two must agree. A `--device` naming a session that was never allocated
+# does not fail: llama.cpp falls through to the CPU or the Adreno GPU (also in
+# this package) and files that number under this NPU runtime.
+#
+# `-ub 1024` is the prefill micro-batch the Snapdragon backend is tuned for
+# (upstream's bench script uses it; llama.cpp's default is 512). It rides in
+# `raw` because the CLI cells declare no `n_ubatch` knob.
+#
+# `number_gpu_layers` is stated so the record says what ran; at 0 nothing
+# reaches the HTP.
+[[variants]]
+clients = ["s26-ultra"]
+models = [
+  { type = "gguf_text", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-1.2B-Instruct-GGUF", path = "LFM2.5-1.2B-Instruct-Q4_0.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", repository_version = "b11109", flavor = "android-arm64-snapdragon" },
+]
+runtime_flags = [
+  { benchmark_type = "prefill_throughput", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4, number_gpu_layers = 99, flash_attention = "on", envs = ["GGML_HEXAGON_DEVICES=HTP0"], raw = ["--device", "HTP0", "-ub", "1024"] },
+  { benchmark_type = "decode_throughput",  runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4, number_gpu_layers = 99, flash_attention = "on", envs = ["GGML_HEXAGON_DEVICES=HTP0"], raw = ["--device", "HTP0", "-ub", "1024"] },
+  { benchmark_type = "max_memory_usage",   runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4, number_gpu_layers = 99, flash_attention = "on", envs = ["GGML_HEXAGON_DEVICES=HTP0"], raw = ["--device", "HTP0", "-ub", "1024"] },
+]
+
+# --- CPU arm -----------------------------------------------------------------
+#
+# The stock Android build has no HTP backend compiled in, so this is a CPU
+# baseline by construction and cannot offload by accident.
+[[variants]]
+clients = ["s26-ultra"]
+models = [
+  { type = "gguf_text", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-1.2B-Instruct-GGUF", path = "LFM2.5-1.2B-Instruct-Q4_0.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", repository_version = "b11109", flavor = "android-arm64-v8a" },
+]
+runtime_flags = [
+  { benchmark_type = "prefill_throughput", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4, number_gpu_layers = 0, flash_attention = "on" },
+  { benchmark_type = "decode_throughput",  runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4, number_gpu_layers = 0, flash_attention = "on" },
+  { benchmark_type = "max_memory_usage",   runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4, number_gpu_layers = 0, flash_attention = "on" },
+]

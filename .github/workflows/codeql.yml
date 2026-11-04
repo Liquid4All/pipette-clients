@@ -1,0 +1,138 @@
+name: CodeQL
+
+# `swift` and `java-kotlin` are absent: neither extracts without a real build.
+#
+# Publishing is off: each leg keeps its SARIF as a run artifact. The `Analyze`
+# step names what to change to publish to code scanning.
+
+on:
+  push:
+    branches: [main]
+  # No `branches:` filter: it matches the PR base, so stacked PRs would skip. No
+  # `paths:`: a workflow that never starts leaves `codeql-complete` pending.
+  pull_request:
+  # New upstream queries surface only on a re-scan of `main`.
+  schedule:
+    - cron: "20 4 * * 1"
+  workflow_dispatch:
+
+# If a merge queue is added, merge-group runs need `upload: never`: GitHub
+# deletes the queue ref before a slow leg can POST its SARIF.
+
+permissions:
+  # Unused while `upload: never` holds; kept so restoring the publish is one edit.
+  security-events: write
+  contents: read
+  # The action reads the run's metadata.
+  actions: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # The schedule never cancels: a cancelled run reports as cancelled, not failed,
+  # so a missed weekly re-scan would go unnoticed.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+
+jobs:
+  changes:
+    name: codeql-changes
+    # With `upload: never` a leg reds only when CodeQL breaks, so a PR skips the
+    # languages it leaves untouched. `rust` omits `.rs` (broken source is only a
+    # warning, and a crash shows on `main`); restore `**/*.rs` with the publish.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # Filter names double as the matrix languages.
+      languages: ${{ steps.filter.outputs.changes }}
+    steps:
+      # No checkout: on a pull request the action lists files through the API.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - '.github/workflows/codeql.yml'
+            python:
+              - '**/*.py'
+              - '.github/workflows/codeql.yml'
+            actions:
+              - '.github/**'
+
+  analyze:
+    name: codeql (${{ matrix.language }})
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.languages != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(github.event_name == 'pull_request' && needs.changes.outputs.languages || '["rust","python","actions"]') }}
+    runs-on: ubuntu-24.04
+    # A hung leg would hold `codeql-complete` in progress for up to six hours.
+    timeout-minutes: 30
+    steps:
+      # No `submodules:`: keeps llama.cpp's own Python out of the `python` leg.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          # Separate analyses, so one leg failing does not read as the others'
+          # findings being fixed.
+          category: "/language:${{ matrix.language }}"
+
+          # Delete both to publish to code scanning, and revisit
+          # `changes` then (a skipped language would read as missing config).
+          # A refused `upload-database` retries for two minutes per leg.
+          upload: never
+          upload-database: false
+
+          # upload-artifact rejects the default `../results`, outside the workspace.
+          output: sarif-results
+
+      - name: Upload SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results/*.sarif
+          retention-days: 14
+
+  codeql-complete:
+    # The one required context, so adding a language needs no ruleset edit.
+    # `changes` is listed because its failure reaches `analyze` only as a skip.
+    needs: [changes, analyze]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify every leg succeeded
+        run: |
+          result='${{ join(needs.*.result, ',') }}'
+          echo "upstream results: $result"
+          case "$result" in
+            *failure*|*cancelled*)
+              echo "one or more upstream jobs did not succeed"
+              exit 1
+              ;;
+            # Expected only on a pull request that touches no scanned language;
+            # on any other event it means an `if:` misfired.
+            *skipped*)
+              if [[ '${{ github.event_name }}' != pull_request ]]; then
+                echo "a leg was skipped outside a pull request"
+                exit 1
+              fi
+              ;;
+          esac

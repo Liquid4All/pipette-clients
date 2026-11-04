@@ -1,0 +1,210 @@
+{
+  "prompt_seed_cases": [
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 0,
+      "expected_text": "",
+      "token_count": 0
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 1,
+      "expected_text": "T",
+      "token_count": 1
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 5,
+      "expected_text": "The h",
+      "token_count": 5
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 17,
+      "expected_text": "The history of sc",
+      "token_count": 17
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 32,
+      "expected_text": "The history of scientific inquir",
+      "token_count": 32
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 64,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical ob",
+      "token_count": 64
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 128,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hi",
+      "token_count": 128
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 256,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the",
+      "token_count": 256
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 512,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually",
+      "token_count": 512
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 1024,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually moved from treatments rooted in tradition toward approaches grounded in empirical evidence, though the transition took centuries and required overcoming deeply held beliefs.\n\nLanguage itself, the very medium through which these ideas were shared, has been a subject of study since antiquity. Ancient philosophers debated whether words carried meaning by convention or by some deeper correspondence with reality. Modern linguistics examines the structures common to all human languages while also cataloging the ",
+      "token_count": 1024
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 2048,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually moved from treatments rooted in tradition toward approaches grounded in empirical evidence, though the transition took centuries and required overcoming deeply held beliefs.\n\nLanguage itself, the very medium through which these ideas were shared, has been a subject of study since antiquity. Ancient philosophers debated whether words carried meaning by convention or by some deeper correspondence with reality. Modern linguistics examines the structures common to all human languages while also cataloging the extraordinary variety among them, from tonal systems to polysynthetic morphology. Computational methods now allow researchers to analyze patterns across thousands of texts simultaneously, revealing regularities that would have been impossible to detect through manual analysis alone.\n\nIn music, mathematics, and visual art, creators have long explored the boundary between structure and freedom. A composer writing in sonata form accepts certain constraints on how themes should be developed and recapitulated, but within those constraints enormous variety is possible. Painters working in a particular school inherit conventions regarding subject matter and technique, yet individual works remain distinct because each artist brings unique perceptions and choices to the canvas. Mathematicians pursuing proofs must follow rules of logical derivation, yet the choice of which conjectures to investigate and which approaches to try depends on taste and experience.\n\nEngineering applies scientific understanding to practical p",
+      "token_count": 2048
+    },
+    {
+      "tokenizer": "byte_count",
+      "target_tokens": 4096,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually moved from treatments rooted in tradition toward approaches grounded in empirical evidence, though the transition took centuries and required overcoming deeply held beliefs.\n\nLanguage itself, the very medium through which these ideas were shared, has been a subject of study since antiquity. Ancient philosophers debated whether words carried meaning by convention or by some deeper correspondence with reality. Modern linguistics examines the structures common to all human languages while also cataloging the extraordinary variety among them, from tonal systems to polysynthetic morphology. Computational methods now allow researchers to analyze patterns across thousands of texts simultaneously, revealing regularities that would have been impossible to detect through manual analysis alone.\n\nIn music, mathematics, and visual art, creators have long explored the boundary between structure and freedom. A composer writing in sonata form accepts certain constraints on how themes should be developed and recapitulated, but within those constraints enormous variety is possible. Painters working in a particular school inherit conventions regarding subject matter and technique, yet individual works remain distinct because each artist brings unique perceptions and choices to the canvas. Mathematicians pursuing proofs must follow rules of logical derivation, yet the choice of which conjectures to investigate and which approaches to try depends on taste and experience.\n\nEngineering applies scientific understanding to practical problems, and its achievements range from simple hand tools to systems that coordinate the activities of millions of people. A well-designed bridge balances load, wind, and temperature across its span, using materials whose properties have been characterized through extensive testing. A communication network moves information from one side of the planet to the other in fractions of a second, routing packets through equipment built and maintained by teams distributed across many organizations. Each of these accomplishments depends on accumulated knowledge and on the willingness of individuals to specialize deeply while collaborating broadly.\n\nEconomic systems coordinate the activities of producers and consumers, allocating scarce resources among competing uses through mechanisms that vary by place and period. Markets aggregate information about preferences and costs through the signals embedded in prices, though they can also produce outcomes that participants judge unfair or unsustainable. Governments intervene to provide public goods, mitigate harms, and enforce rules that make exchange possible in the first place. Debates about the proper balance among market forces, government action, and voluntary cooperation have persisted for centuries, shaped by evidence, experience, and differing views about what should be valued.\n\nEducation, at its best, does more than transmit information. Good teachers help students learn to think carefully, to examine their assumptions, and to engage productively with ideas that challenge their prior beliefs. Formal schooling is only one of many settings in which learning occurs; apprenticeship, self-directed study, community traditions, and workplace training all contribute to the ways individuals develop their capabilities. Technologies that expand access to instruction also raise new questions about how to preserve the mentorship, feedback, and human connection that seem essential to deep learning.\n\nMedicine has progressed dramatically over the past two centuries, extending lifespan",
+      "token_count": 4096
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 0,
+      "expected_text": "",
+      "token_count": 0
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 1,
+      "expected_text": "T",
+      "token_count": 1
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 5,
+      "expected_text": "The h",
+      "token_count": 5
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 17,
+      "expected_text": "The history of sc",
+      "token_count": 17
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 32,
+      "expected_text": "The history of scientific inquir",
+      "token_count": 32
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 64,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical ob",
+      "token_count": 64
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 128,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hi",
+      "token_count": 128
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 256,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the",
+      "token_count": 256
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 512,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually",
+      "token_count": 512
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 1024,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually moved from treatments rooted in tradition toward approaches grounded in empirical evidence, though the transition took centuries and required overcoming deeply held beliefs.\n\nLanguage itself, the very medium through which these ideas were shared, has been a subject of study since antiquity. Ancient philosophers debated whether words carried meaning by convention or by some deeper correspondence with reality. Modern linguistics examines the structures common to all human languages while also cataloging the ",
+      "token_count": 1024
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 2048,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually moved from treatments rooted in tradition toward approaches grounded in empirical evidence, though the transition took centuries and required overcoming deeply held beliefs.\n\nLanguage itself, the very medium through which these ideas were shared, has been a subject of study since antiquity. Ancient philosophers debated whether words carried meaning by convention or by some deeper correspondence with reality. Modern linguistics examines the structures common to all human languages while also cataloging the extraordinary variety among them, from tonal systems to polysynthetic morphology. Computational methods now allow researchers to analyze patterns across thousands of texts simultaneously, revealing regularities that would have been impossible to detect through manual analysis alone.\n\nIn music, mathematics, and visual art, creators have long explored the boundary between structure and freedom. A composer writing in sonata form accepts certain constraints on how themes should be developed and recapitulated, but within those constraints enormous variety is possible. Painters working in a particular school inherit conventions regarding subject matter and technique, yet individual works remain distinct because each artist brings unique perceptions and choices to the canvas. Mathematicians pursuing proofs must follow rules of logical derivation, yet the choice of which conjectures to investigate and which approaches to try depends on taste and experience.\n\nEngineering applies scientific understanding to practical p",
+      "token_count": 2048
+    },
+    {
+      "tokenizer": "char_count",
+      "target_tokens": 4096,
+      "expected_text": "The history of scientific inquiry demonstrates how methodical observation and careful reasoning can reveal truths that remain hidden to casual inspection. Early astronomers charted the movements of celestial bodies with tools no more sophisticated than the unaided eye, yet their patient records laid the groundwork for later theorists who proposed explanations that fundamentally changed humanity's understanding of its place in the universe. Similar progress unfolded in medicine, where practitioners gradually moved from treatments rooted in tradition toward approaches grounded in empirical evidence, though the transition took centuries and required overcoming deeply held beliefs.\n\nLanguage itself, the very medium through which these ideas were shared, has been a subject of study since antiquity. Ancient philosophers debated whether words carried meaning by convention or by some deeper correspondence with reality. Modern linguistics examines the structures common to all human languages while also cataloging the extraordinary variety among them, from tonal systems to polysynthetic morphology. Computational methods now allow researchers to analyze patterns across thousands of texts simultaneously, revealing regularities that would have been impossible to detect through manual analysis alone.\n\nIn music, mathematics, and visual art, creators have long explored the boundary between structure and freedom. A composer writing in sonata form accepts certain constraints on how themes should be developed and recapitulated, but within those constraints enormous variety is possible. Painters working in a particular school inherit conventions regarding subject matter and technique, yet individual works remain distinct because each artist brings unique perceptions and choices to the canvas. Mathematicians pursuing proofs must follow rules of logical derivation, yet the choice of which conjectures to investigate and which approaches to try depends on taste and experience.\n\nEngineering applies scientific understanding to practical problems, and its achievements range from simple hand tools to systems that coordinate the activities of millions of people. A well-designed bridge balances load, wind, and temperature across its span, using materials whose properties have been characterized through extensive testing. A communication network moves information from one side of the planet to the other in fractions of a second, routing packets through equipment built and maintained by teams distributed across many organizations. Each of these accomplishments depends on accumulated knowledge and on the willingness of individuals to specialize deeply while collaborating broadly.\n\nEconomic systems coordinate the activities of producers and consumers, allocating scarce resources among competing uses through mechanisms that vary by place and period. Markets aggregate information about preferences and costs through the signals embedded in prices, though they can also produce outcomes that participants judge unfair or unsustainable. Governments intervene to provide public goods, mitigate harms, and enforce rules that make exchange possible in the first place. Debates about the proper balance among market forces, government action, and voluntary cooperation have persisted for centuries, shaped by evidence, experience, and differing views about what should be valued.\n\nEducation, at its best, does more than transmit information. Good teachers help students learn to think carefully, to examine their assumptions, and to engage productively with ideas that challenge their prior beliefs. Formal schooling is only one of many settings in which learning occurs; apprenticeship, self-directed study, community traditions, and workplace training all contribute to the ways individuals develop their capabilities. Technologies that expand access to instruction also raise new questions about how to preserve the mentorship, feedback, and human connection that seem essential to deep learning.\n\nMedicine has progressed dramatically over the past two centuries, extending lifespan",
+      "token_count": 4096
+    }
+  ],
+  "repeat_token_cases": [
+    {
+      "seed": [
+        1,
+        2,
+        3
+      ],
+      "target_len": 7,
+      "expected": [
+        1,
+        2,
+        3,
+        1,
+        2,
+        3,
+        1
+      ]
+    },
+    {
+      "seed": [
+        1,
+        2
+      ],
+      "target_len": 0,
+      "expected": []
+    },
+    {
+      "seed": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "target_len": 3,
+      "expected": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "seed": [
+        42,
+        99,
+        101
+      ],
+      "target_len": 10,
+      "expected": [
+        42,
+        99,
+        101,
+        42,
+        99,
+        101,
+        42,
+        99,
+        101,
+        42
+      ]
+    }
+  ]
+}

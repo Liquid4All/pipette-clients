@@ -191,7 +191,13 @@ object CompletedResultsCsvExporter {
       return it
     }
     if (cell.modelName.contains("/")) {
-      return cell.modelName.substringAfterLast('/').removeSuffix("-GGUF").replace('-', ' ')
+      // Case-insensitive via `repoStem`: a case-sensitive strip left a stray "gguf" word
+      // in the grid and the exported CSV for a lowercase publisher, once the model was no
+      // longer in the catalog to be named from.
+      //
+      // Not display-only: `resultModelGroupKey` lowercases this into a grouping key on its
+      // blank-`modelPath` arm, so the strip also decides which rows merge.
+      return LocalStorage.repoStem(cell.modelName.substringAfterLast('/')).replace('-', ' ')
     }
     if (cell.modelName.endsWith(".gguf", ignoreCase = true)) {
       return LocalStorage.modelStem(File(cell.modelPath).name)

@@ -1,0 +1,24 @@
+[package]
+name = "gpu-keepalive"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Windows service that keeps a GPU from idling by dispatching one compute thread per pulse"
+
+# Standalone workspace: keeps this Windows-only tool out of `cargo build
+# --workspace` on Mac and Linux.
+[workspace]
+
+[dependencies]
+anyhow = "1.0.104"
+ash = { version = "0.38.0", default-features = false, features = ["loaded"] }
+clap = { version = "4.6.7", features = ["derive"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+chrono = { version = "0.4", default-features = false, features = ["now", "std"] }
+known-folders = "1.4.2"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Threading"] }
+windows-service = "0.8.1"
+winreg = "0.56.0"
+
+[build-dependencies]
+winresource = "0.1.34"

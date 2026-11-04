@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "end_to_end_latency",
+  "load_mode": "mlock",
+  "model_type": "gguf_text",
+  "runtime_type": "llamacpp_ios_pipette"
+}

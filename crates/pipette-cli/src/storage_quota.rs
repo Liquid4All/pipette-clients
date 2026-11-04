@@ -1,18 +1,14 @@
-//! Resolving the artifact-store disk cap (`docs/storage-quota.md`).
-//!
-//! Precedence: `--storage-quota` / `PIPETTE_STORAGE_QUOTA` (clap collapses the
-//! two) > `identity/settings.json` > [`DEFAULT_STORAGE_QUOTA_BYTES`]. The
-//! winning rung is carried alongside the value so `storage status` can name it.
+//! Resolving the artifact-store disk cap (`docs/storage-quota.md`), and which
+//! source set it, so `storage status` can name it.
 
 use anyhow::Context;
 
-use crate::identity::IdentityStore;
+use crate::identity::{ClientSettings, ClientSettingsStore};
 
 /// Built-in cap when nothing configures one. Bench boxes have room; phones do
 /// not, and iOS picks its own default.
 pub const DEFAULT_STORAGE_QUOTA_BYTES: u64 = 200 * 1024 * 1024 * 1024;
 
-/// Which rung of the precedence chain supplied the effective quota.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaSource {
     Arg,
@@ -31,19 +27,17 @@ impl QuotaSource {
     }
 }
 
-/// The cap this invocation enforces, and where it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageQuota {
     pub bytes: u64,
     pub source: QuotaSource,
 }
 
-/// Resolve the effective quota for this invocation.
-///
-/// `override_bytes` is already parsed, so nothing below the CLI has to know the
-/// `200GiB` syntax — and a malformed value fails before a workspace is opened.
+/// `--storage-quota` (or its env var), then `identity/settings.json`, then
+/// [`DEFAULT_STORAGE_QUOTA_BYTES`]. `override_bytes` arrives parsed, so a
+/// malformed value fails before a workspace is opened.
 pub fn resolve_storage_quota(
-    identity: &IdentityStore,
+    settings: &ClientSettingsStore,
     override_bytes: Option<u64>,
 ) -> anyhow::Result<StorageQuota> {
     if let Some(bytes) = override_bytes {
@@ -52,14 +46,17 @@ pub fn resolve_storage_quota(
             source: QuotaSource::Arg,
         });
     }
-    if let Some(settings) = identity.get_settings()? {
+    if let Some(ClientSettings {
+        storage_quota_bytes,
+    }) = settings.get()?
+    {
         anyhow::ensure!(
-            settings.storage_quota_bytes > 0,
+            storage_quota_bytes > 0,
             "identity/settings.json sets storage_quota_bytes to 0; \
              a zero quota can hold no artifact"
         );
         return Ok(StorageQuota {
-            bytes: settings.storage_quota_bytes,
+            bytes: storage_quota_bytes,
             source: QuotaSource::Settings,
         });
     }
@@ -70,8 +67,8 @@ pub fn resolve_storage_quota(
 }
 
 /// Plain bytes (`214748364800`) or an IEC suffix (`200GiB`, `512 MiB`, `4kib`).
-/// Case-insensitive, optional space. Rejects zero and anything overflowing
-/// `u64` — a quota that holds nothing is a typo, not a configuration.
+/// Case-insensitive, optional space. Rejects zero (a typo, not a configuration)
+/// and anything overflowing `u64`.
 pub fn parse_quota_bytes(raw: &str) -> anyhow::Result<u64> {
     const UNITS: [(&str, u64); 5] = [
         ("b", 1),
@@ -118,11 +115,18 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::identity::ClientSettings;
 
-    fn identity() -> anyhow::Result<(tempfile::TempDir, IdentityStore)> {
+    #[rstest]
+    #[case(QuotaSource::Arg, "PIPETTE_STORAGE_QUOTA")]
+    #[case(QuotaSource::Settings, "identity/settings.json")]
+    #[case(QuotaSource::Default, "default")]
+    fn each_source_names_where_to_change_it(#[case] source: QuotaSource, #[case] needle: &str) {
+        assert!(source.label().contains(needle), "{}", source.label());
+    }
+
+    fn settings() -> anyhow::Result<(tempfile::TempDir, ClientSettingsStore)> {
         let tmp = tempfile::tempdir()?;
-        let store = IdentityStore::new(tmp.path().join("identity"));
+        let store = ClientSettingsStore::new(tmp.path().join("identity"));
         Ok((tmp, store))
     }
 
@@ -153,8 +157,8 @@ mod tests {
 
     #[test]
     fn the_arg_wins_over_the_settings_file() -> anyhow::Result<()> {
-        let (_tmp, store) = identity()?;
-        store.put_settings(&ClientSettings {
+        let (_tmp, store) = settings()?;
+        store.put(&ClientSettings {
             storage_quota_bytes: 4096,
         })?;
         let resolved = resolve_storage_quota(&store, Some(parse_quota_bytes("1GiB")?))?;
@@ -165,8 +169,8 @@ mod tests {
 
     #[test]
     fn the_settings_file_wins_over_the_default() -> anyhow::Result<()> {
-        let (_tmp, store) = identity()?;
-        store.put_settings(&ClientSettings {
+        let (_tmp, store) = settings()?;
+        store.put(&ClientSettings {
             storage_quota_bytes: 4096,
         })?;
         let resolved = resolve_storage_quota(&store, None)?;
@@ -177,7 +181,7 @@ mod tests {
 
     #[test]
     fn an_unconfigured_client_gets_the_built_in_default() -> anyhow::Result<()> {
-        let (_tmp, store) = identity()?;
+        let (_tmp, store) = settings()?;
         let resolved = resolve_storage_quota(&store, None)?;
         assert_eq!(resolved.bytes, DEFAULT_STORAGE_QUOTA_BYTES);
         assert_eq!(resolved.source, QuotaSource::Default);
@@ -186,8 +190,8 @@ mod tests {
 
     #[test]
     fn a_zero_quota_in_the_settings_file_is_refused() -> anyhow::Result<()> {
-        let (_tmp, store) = identity()?;
-        store.put_settings(&ClientSettings {
+        let (_tmp, store) = settings()?;
+        store.put(&ClientSettings {
             storage_quota_bytes: 0,
         })?;
         let err = resolve_storage_quota(&store, None)

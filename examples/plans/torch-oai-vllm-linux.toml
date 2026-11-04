@@ -1,35 +1,34 @@
-# Example plan: unified pipette client, vLLM Docker runtime over SSH.
-#
-# State written to
-# .pipette-plan/plans/torch-oai-vllm-linux-example/state.jsonl.
+# Example plan: vLLM in Docker on a Linux GPU host over ssh.
 
 plan_id = "torch-oai-vllm-linux-example"
-benchmarks = ["eval_smoke"]
+benchmarks = ["prefill_throughput_512", "decode_throughput_512_100", "eval_smoke"]
 
 [[transports]]
-client_id   = "edge-ci-linux1"
+client_id   = "linux-gpu-1"
 type        = "ssh"
-host        = "edge-ci-linux1"
-user        = "yuri"
-binary_path = "/home/yuri/bin/pipette"
-work_dir    = "/home/yuri/pipette"
+host        = "linux-gpu-1"
+user        = "eval"
+binary_path = "/home/eval/bin/pipette"
+work_dir    = "/home/eval/pipette"
 shell       = "posix"
 
 [retry]
 max_consecutive_failures = 5
 
 [[variants]]
-clients = ["edge-ci-linux1"]
+clients = ["linux-gpu-1"]
 models = [
   { type = "torch", source = "huggingface", org = "Qwen", repo_name = "Qwen2.5-0.5B-Instruct" },
 ]
 runtimes = [
   { type = "docker_vllm", image_name = "vllm/vllm-openai", image_tag = "v0.21.0", flavor = "nvidia_gpu" },
 ]
+# The timing cells derive `max_model_len` from their shape (prompt plus
+# generation); eval's 4096 is a pin.
 runtime_flags = [
   { benchmark_type = "eval", runtime_type = "docker_vllm", model_type = "torch", max_model_len = 4096 },
 ]
-# Model-generation flags, keyed on (benchmark, model); eval-only.
+# Model-generation flags are keyed on (benchmark, model); a torch model takes them on eval only.
 model_flags = [
   { benchmark_type = "eval", model_type = "torch", enable_thinking = true },
 ]

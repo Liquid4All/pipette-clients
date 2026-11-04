@@ -1,27 +1,32 @@
 //! Workspace artifact cache: models and runtimes under `models/` / `runtimes/`.
 //!
-//! - [`ArtifactsContext`] — host download HTTP client + lazy tool executables
-//! - [`ensure_model`] / [`ensure_runtime`] — find-or-fetch into the stores
-//! - [`model`] / [`runtime`] — store layout, fetch/materialize, installers
-//! - [`quota`] — disk cap accounting and the post-publish sweep
-//!
-//! Where an artifact lands is the stores' answer to give: callers read a path
-//! off a manifest rather than rebuilding the layout, so `entry` — the
-//! directory-entry constants and the atomic stage/publish engine — stays
-//! internal.
+//! Callers read an artifact's path off a manifest rather than rebuilding the
+//! layout, so `entry` (the directory-entry constants and the atomic
+//! stage/publish engine) stays internal; only its [`sync_file`] and
+//! [`sync_dir`] durability helpers are exported.
 
+mod archive;
 mod context;
+mod digest;
 mod entry;
+mod io_kind;
+mod resume;
 
 pub mod ensure;
 pub mod model;
 pub mod progress;
 pub mod quota;
 pub mod runtime;
+#[cfg(test)]
+mod scripted_server;
+#[cfg(test)]
+mod test_support;
+pub mod vault;
 
 pub use context::ArtifactsContext;
 pub use ensure::{
-    ensure_model, ensure_runtime, model_download_size, resolve_python_executable,
-    runtime_download_size, runtime_tool,
+    ensure_model, ensure_runtime, model_download_size, runtime_download_size, runtime_tool,
 };
+pub use entry::{sync_dir, sync_file};
 pub use progress::{FetchProgress, ProgressSink};
+pub use vault::{VaultAccess, VaultFetchError};

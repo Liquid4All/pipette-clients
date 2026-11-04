@@ -1,0 +1,56 @@
+# Example plan: llama.cpp vision-language accuracy evals on macOS.
+#
+# vlm_eval entries are server-defined: the mgmt catalog pins the lmms-eval
+# task, dataset version, prompt profile and sample corpus, and the client
+# resolves the entry ids from its synced catalog. An entry is one benchmark for
+# one model family; a cell running a model its recipe does not cover is refused
+# at ingestion and by the client. The entries are org-private, so run the plan
+# against an organization that holds them. The GGUF model entry names the
+# projector (`mmproj`) beside the main weights.
+
+plan_id = "llamacpp-macos-vlm-eval-example"
+benchmarks = [
+  "vlm_eval_mmstar_lfm2_5_vl_3b",
+  "vlm_eval_ocrbench_lfm2_5_vl_3b",
+  "vlm_eval_realworldqa_lfm2_5_vl_3b",
+]
+
+[[transports]]
+client_id   = "macstudio"
+type        = "ssh"
+host        = "lab-east-macstudio"
+user        = "pipette"
+port        = 22
+binary_path = "/Users/pipette/pipette/pipette"
+work_dir    = "/Users/pipette/pipette"
+
+[retry]
+max_consecutive_failures = 5
+
+[[variants]]
+clients = ["macstudio"]
+models = [
+  { type = "gguf_vision", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-VL-3B-GGUF", model = "LFM2.5-VL-3B-Q4_K_M.gguf", mmproj = "mmproj-LFM2.5-VL-3B-BF16.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", repository_version = "b10142", flavor = "macos-arm64" },
+]
+runtime_flags = [
+  { benchmark_type = "vlm_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", threads = 4, flash_attention = "on" },
+]
+# LFM2.5-VL has no reasoning mode, so the cell declares none. A reasoning model
+# (Qwen3.5, Gemma 4, MiniCPM-V; InternVL3.5 with its internvl_r1 prompt
+# profile) declares it as a model flag:
+# model_flags = [
+#   { benchmark_type = "vlm_eval", model_type = "gguf_vision", enable_thinking = true },
+# ]
+# The thermal gate runs once, best-effort, before the server starts, since the
+# vision tower then runs thousands of images back-to-back.
+#
+# http_timeout_seconds is generous because an MCQ request is one non-streamed
+# response that must fit the full image prefill (phone CPUs measured 65s TTFT
+# at 512x512); size it for the slowest device in the cell. For streamed
+# free-form requests it bounds the gap between SSE events, floored at 1800s.
+benchmark_flags = [
+  { benchmark_type = "vlm_eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 1200, readiness = { max_wait_secs = 1800 } },
+]

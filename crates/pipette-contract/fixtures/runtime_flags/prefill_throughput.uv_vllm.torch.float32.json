@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "prefill_throughput",
+  "dtype": "float32",
+  "model_type": "torch",
+  "runtime_type": "uv_vllm"
+}

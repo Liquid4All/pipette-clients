@@ -1,0 +1,38 @@
+{
+  "benchmark_id": "asr_eval_fleurs_nl_nl_2026.10.1_voxtral",
+  "benchmark_type": "asr_eval",
+  "dataset": {
+    "adapter": "evals-server@1",
+    "bytes": 225000448,
+    "digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "format": "asr-eval-corpus/1",
+    "upstream": {
+      "dataset_version": "2026.10.1",
+      "eval_id": "asr_fleurs_nl_nl",
+      "identity": "2222222222222222222222222222222222222222222222222222222222222222",
+      "prompt_profile": "voxtral",
+      "source": "evals_server"
+    },
+    "url": "/datasets/asr_eval_fleurs_nl_nl_2026.10.1_voxtral"
+  },
+  "parameter_asr_task": "asr_fleurs_nl_nl",
+  "parameter_dataset_version": "2026.10.1",
+  "parameter_max_tokens": 500,
+  "parameter_prompt_profile": "voxtral",
+  "parameter_sample_count": 364,
+  "recipe": {
+    "enable_thinking": false,
+    "family": "Voxtral Mini 3B",
+    "models": [
+      {
+        "repo": "ggml-org/Voxtral-Mini-3B-2507-GGUF"
+      },
+      {
+        "repo": "bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF"
+      }
+    ],
+    "sources": [
+      "https://huggingface.co/mistralai/Voxtral-Mini-3B-2507/blob/3060fe34b35ba5d44202ce9ff3c097642914f8f3/README.md"
+    ]
+  }
+}

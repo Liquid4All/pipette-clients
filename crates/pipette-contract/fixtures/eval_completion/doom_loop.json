@@ -1,0 +1,6 @@
+{
+  "completion": "the the the",
+  "completion_tokens": 4096,
+  "id": "row-4#0",
+  "stop_reason": "doom_loop"
+}

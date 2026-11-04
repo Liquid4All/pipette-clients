@@ -1,0 +1,59 @@
+{
+  "benchmark_id": "decode_throughput_512_128",
+  "decode_time_ms": 1176.5220009999998,
+  "decode_time_ms_stddev": 23.331444555007806,
+  "device_android_thermal_headroom_after": [
+    0.43662115931510925,
+    0.43956056237220764,
+    0.44132423400878906,
+    0.44238248467445374,
+    0.4430173933506012
+  ],
+  "device_android_thermal_headroom_before": [
+    0.43662115931510925,
+    0.43662115931510925,
+    0.43956056237220764,
+    0.44132423400878906,
+    0.44238248467445374
+  ],
+  "device_android_thermal_status_after": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+  ],
+  "device_android_thermal_status_before": [
+    "none",
+    "none",
+    "none",
+    "none",
+    "none"
+  ],
+  "runtime_thread_count": 6,
+  "model_name": "LiquidAI/LFM2.5-350M-GGUF",
+  "model_quant": "Q4_0",
+  "model_descriptor": "{\"org\":\"LiquidAI\",\"path\":\"LFM2.5-350M-Q4_0.gguf\",\"repo_name\":\"LFM2.5-350M-GGUF\",\"source\":\"huggingface\",\"type\":\"gguf_text\"}",
+  "submitted_at": "2026-09-08T00:00:00Z",
+  "client_version": "dev-reference",
+  "runtime_name": "llamacpp_apk_pipette",
+  "runtime_version": "876a43211",
+  "runtime_descriptor": "{\"flavor\":\"android-arm64-v8\",\"repository_url\":\"github.com/ggml-org/llama.cpp\",\"repository_version\":\"876a43211\",\"type\":\"llamacpp_apk_pipette\"}",
+  "runtime_flags": "{\"ctx_size\":640,\"load_mode\":\"none\",\"n_ubatch\":512,\"number_gpu_layers\":99}",
+  "benchmark_flags": "{\"readiness\":{\"max_wait_secs\":300,\"skip_thermal\":false}}",
+  "runtime_cpu_variant": "arm_fma,dotprod,fp16_va,matmul_int8,neon,repack,sve",
+  "device_name": "Google Pixel 10 Pro Fold",
+  "device_form_factor": "phone",
+  "device_os_name": "Android",
+  "device_os_version": "17",
+  "device_os_build": "15828068",
+  "device_os_security_patch": "2026-08-05",
+  "device_chip_model": "Tensor G5",
+  "device_ram_bytes": 16331776000,
+  "device_battery_level": 100,
+  "device_power_state": "plugged_in",
+  "device_power_save_mode": false,
+  "device_android_cpuset": "/top-app",
+  "device_android_cpu_affinity_list": "0-7",
+  "device_android_cpu_affinity_excludes_top_tier": false
+}
