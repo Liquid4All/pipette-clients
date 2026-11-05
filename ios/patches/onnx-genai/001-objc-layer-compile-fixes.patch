@@ -1,0 +1,145 @@
+Fix the Objective-C layer so it compiles. Written at 2b363be4 (0.16.0-dev on
+main); still needed at 83de55a1 (0.17.1).
+
+Four defects, all of which stop `src/objectivec` building for iOS. Together they
+say upstream does not compile this layer in CI at either commit.
+
+1. `ort_genai_objc.h` declares `processImages:images:error:`,
+   `processAudios:audios:error:` and `processImagesAndAudios:images:audios:error:`
+   twice each, once taking `NSString*` and once `NSArray<NSString*>*`. An
+   Objective-C selector does not carry parameter types, so the two forms are one
+   selector and the second is a duplicate declaration. The array-taking forms are
+   renamed to `…WithPrompts:` rather than deleted, so the capability survives.
+
+2. `oga_multi_modal_processor.mm` reads `prompt_strings` where the surrounding
+   code declares `prompts_strings`.
+
+3. `oga_tokenizer.mm` assigns `Tokenizer::GetEosTokenIds()` to a
+   `std::vector<int32_t>`, but under C++20 the C++ core returns
+   `std::span<const int32_t>` (`ort_genai.h`, `OGA_USE_SPAN`). The Objective-C
+   layer is out of step with the core it ships beside.
+
+4. Three methods carry `NS_SWIFT_NAME(name())` while taking an `NSError**`, so the
+   Swift name declares no parameter for a method that has one. Clang rejects each.
+   The parameter is added to the attribute rather than the attribute removed, which
+   keeps the Swift spelling upstream evidently wanted.
+
+Retire this whole patch on a version bump that fixes them upstream; if it stops
+applying, that is the signal to check.
+
+--- a/src/objectivec/include/ort_genai_objc.h
++++ b/src/objectivec/include/ort_genai_objc.h
+@@ -259,7 +259,7 @@
+  * @param error Optional error information set if an error occurs.
+  * @return The count of sequences, or size_t(-1) if an error occurs.
+  */
+-- (size_t)getCountWithError:(NSError**)error NS_SWIFT_NAME(count());
++- (size_t)getCountWithError:(NSError**)error NS_SWIFT_NAME(count(error:));
+ 
+ /**
+  * Retrieve the sequence data at the given index.
+@@ -464,8 +464,8 @@
+                                        shape:(NSArray<NSNumber*>*)shape
+                                         type:(OGAElementType)elementType
+                                        error:(NSError**)error;
+-- (OGAElementType)getTypeWithError:(NSError**)error NS_SWIFT_NAME(type());
+-- (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer());
++- (OGAElementType)getTypeWithError:(NSError**)error NS_SWIFT_NAME(type(error:));
++- (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer(error:));
+ 
+ @end
+ 
+@@ -501,7 +501,7 @@
+                                     images:(OGAImages*)images
+                                      error:(NSError**)error;
+ 
+-- (nullable OGANamedTensors*)processImages:(NSArray<NSString*>*)prompts
++- (nullable OGANamedTensors*)processImagesWithPrompts:(NSArray<NSString*>*)prompts
+                                     images:(OGAImages*)images
+                                      error:(NSError**)error;
+ 
+@@ -509,7 +509,7 @@
+                                     audios:(OGAAudios*)audios
+                                      error:(NSError**)error;
+ 
+-- (nullable OGANamedTensors*)processAudios:(NSArray<NSString*>*)prompts
++- (nullable OGANamedTensors*)processAudiosWithPrompts:(NSArray<NSString*>*)prompts
+                                     audios:(OGAAudios*)audios
+                                      error:(NSError**)error;
+ 
+@@ -518,7 +518,7 @@
+                                              audios:(OGAAudios*)audios
+                                               error:(NSError**)error;
+ 
+-- (nullable OGANamedTensors*)processImagesAndAudios:(NSArray<NSString*>*)prompts
++- (nullable OGANamedTensors*)processImagesAndAudiosWithPrompts:(NSArray<NSString*>*)prompts
+                                              images:(OGAImages*)images
+                                              audios:(OGAAudios*)audios
+                                               error:(NSError**)error;
+--- a/src/objectivec/oga_multi_modal_processor.mm
++++ b/src/objectivec/oga_multi_modal_processor.mm
+@@ -33,7 +33,7 @@
+   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+ }
+ 
+-- (nullable OGANamedTensors*)processImages:(NSArray<NSString*>*)prompts
++- (nullable OGANamedTensors*)processImagesWithPrompts:(NSArray<NSString*>*)prompts
+                                     images:(OGAImages*)images
+                                      error:(NSError**)error {
+   try {
+@@ -45,7 +45,7 @@
+     for (NSString* prompt in prompts) {
+       std::string prompt_str = [prompt UTF8String];
+       prompts_strings.push_back(std::move(prompt_str));
+-      prompts_.push_back(prompt_strings.back().c_str());
++      prompts_.push_back(prompts_strings.back().c_str());
+     }
+ 
+     OGANamedTensors* result = [[OGANamedTensors alloc]
+@@ -68,7 +68,7 @@
+   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+ }
+ 
+-- (nullable OGANamedTensors*)processAudios:(NSArray<NSString*>*)prompts
++- (nullable OGANamedTensors*)processAudiosWithPrompts:(NSArray<NSString*>*)prompts
+                                     audios:(OGAAudios*)audios
+                                      error:(NSError**)error {
+   try {
+@@ -80,7 +80,7 @@
+     for (NSString* prompt in prompts) {
+       std::string prompt_str = [prompt UTF8String];
+       prompts_strings.push_back(std::move(prompt_str));
+-      prompts_.push_back(prompt_strings.back().c_str());
++      prompts_.push_back(prompts_strings.back().c_str());
+     }
+ 
+     OGANamedTensors* result = [[OGANamedTensors alloc]
+@@ -105,7 +105,7 @@
+   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+ }
+ 
+-- (nullable OGANamedTensors*)processImagesAndAudios:(NSArray<NSString*>*)prompts
++- (nullable OGANamedTensors*)processImagesAndAudiosWithPrompts:(NSArray<NSString*>*)prompts
+                                              images:(OGAImages*)images
+                                              audios:(OGAAudios*)audios
+                                               error:(NSError**)error {
+@@ -118,7 +118,7 @@
+     for (NSString* prompt in prompts) {
+       std::string prompt_str = [prompt UTF8String];
+       prompts_strings.push_back(std::move(prompt_str));
+-      prompts_.push_back(prompt_strings.back().c_str());
++      prompts_.push_back(prompts_strings.back().c_str());
+     }
+ 
+     OGANamedTensors* result = [[OGANamedTensors alloc]
+--- a/src/objectivec/oga_tokenizer.mm
++++ b/src/objectivec/oga_tokenizer.mm
+@@ -30,7 +30,7 @@
+ 
+ - (nullable NSArray<NSNumber*>*)getEosTokenIds:(NSError**)error {
+   try {
+-    std::vector<int32_t> eos_ids = _tokenizer->GetEosTokenIds();
++    auto eos_ids = _tokenizer->GetEosTokenIds();
+     NSMutableArray<NSNumber*>* result = [NSMutableArray arrayWithCapacity:eos_ids.size()];
+     if (!result) {
+       return nil;

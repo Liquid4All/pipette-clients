@@ -71,6 +71,9 @@ class BenchmarkActivity : Activity() {
   // Latest status line inputs, so the 1s ticker can re-render a live cooldown
   // countdown ("Cooling m:ss / max") without another IPC push.
   @Volatile private var coolingSinceMillis: Long? = null
+
+  // Paired with the anchor above: the caption renders "elapsed / max" and the max is the run's, not the shared constant.
+  @Volatile private var coolingMaxMillis: Long = Readiness.COOLDOWN_MAX_MILLIS
   @Volatile private var lastStatusText: String = "Running…"
 
   // Once the user pauses, pin the status line to "Pausing…" until the terminal
@@ -96,6 +99,21 @@ class BenchmarkActivity : Activity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // A restored instance has no run to show, so leave instead of asserting one.
+    //
+    // This screen only ever finishes from [render], on a snapshot carrying running=false pushed from the main process. That is edge-triggered, and
+    // the edge cannot arrive here: the platform restores this task after `:benchmark` has died, which is precisely what ending a job does, and the
+    // recreated process's [BenchmarkProgressBus] holds no state with nobody left to push to it. Worse, [beginNewRunUi] below would assert a run is
+    // starting. The result was a screen reading "Benchmarking in progress" indefinitely while pinning `:benchmark` at top-app with nothing running,
+    // seen on a Pixel 10 Pro Fold after a cpuset demotion stopped a job and the device was later unlocked.
+    //
+    // Restoration is the right signal because a configuration change does not recreate this activity: the manifest hands it every change it can
+    // (see the comment there), so a create carrying saved state means the process this screen belonged to is gone, and the run went with it.
+    if (savedInstanceState != null) {
+      Log.i(CPUSET_TAG, "[:benchmark activity] restored with no run in flight; finishing rather than showing a job that is not running")
+      finish()
+      return
+    }
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     setContentView(buildContentView())
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerBackGuard()
@@ -192,6 +210,9 @@ class BenchmarkActivity : Activity() {
 
   override fun onResume() {
     super.onResume()
+    // A restored instance finished itself in onCreate before building any views, and still runs the rest of its lifecycle on the way out. Observing
+    // or ticking here would work against null views, and the cpuset line below would claim a top-app promotion for a screen that is leaving.
+    if (isFinishing) return
     // Resumed + focused → this (:benchmark) process should now be top-app.
     Log.i(CPUSET_TAG, "[:benchmark activity onResume] ${CpuAffinityProbe.snapshot().summary()}")
     BenchmarkProgressBus.observe(::render)
@@ -230,6 +251,7 @@ class BenchmarkActivity : Activity() {
     // progress text (mirrors the Compose pocket's JobLiveActivity second line).
     lastStatusText = snapshot.statusText
     coolingSinceMillis = snapshot.coolingSinceMillis
+    coolingMaxMillis = snapshot.coolingMaxMillis
     applyStatusLine()
     // Cool wash while the readiness gate is cooling the device (mirrors the Compose pocket card).
     card?.background = cardBackground(cooling = snapshot.cooling)
@@ -250,7 +272,7 @@ class BenchmarkActivity : Activity() {
     val since = coolingSinceMillis
     statusLabel?.apply {
       if (since != null) {
-        text = coolingCaption(since, System.currentTimeMillis())
+        text = coolingCaption(since, System.currentTimeMillis(), coolingMaxMillis)
         setTextColor(COOL_ACCENT)
         setTypeface(null, Typeface.BOLD)
         visibility = View.VISIBLE
@@ -496,7 +518,6 @@ class BenchmarkActivity : Activity() {
   private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
   companion object {
-    private const val CPUSET_TAG = "pipette-cpuset"
     private const val THERMAL_POLL_MS = 1_000L
     private val BG = Color.rgb(0x0A, 0x0A, 0x0A)
     private val CARD = Color.rgb(0x17, 0x17, 0x17)

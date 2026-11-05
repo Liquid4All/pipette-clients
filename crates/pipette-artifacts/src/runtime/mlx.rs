@@ -1,12 +1,6 @@
-//! MLX (macOS) runtime install for the shared store.
-//!
-//! Creates a relocatable `uv` venv under the store-owned `blobs/` payload dir
-//! and returns a single `python` placement — the same layout UV uses
-//! (`blobs/venv`). Apple Silicon only; other platforms fail at fetch time.
-//!
-//! Requirements come from the declared [`Runtime`]'s
-//! [`UvRuntimeSource`](pipette_plan_types::UvRuntimeSource) (catalog text or
-//! inline pip requirements). The fetcher does not read a catalog itself.
+//! MLX (macOS) runtime install: a `uv` venv under the store-owned `blobs/`
+//! payload dir, the same layout as [`crate::runtime::uv`]. Apple Silicon only;
+//! other platforms fail at install time.
 
 use std::path::Path;
 
@@ -15,17 +9,21 @@ use anyhow::Context;
 
 use pipette_plan_types::Runtime;
 
-/// Default Python for auto-provisioned mlx-lm venvs (matches the historical
-/// private MLX installer). Gated with the install body that reads it: off
-/// macOS this module only bails.
+/// The plan's MLX variant pins no Python version, unlike the uv runtimes.
 #[cfg(target_os = "macos")]
 const DEFAULT_PYTHON_VERSION: &str = "3.12";
 
 /// Install a desktop MLX runtime into store-owned `blobs_dir` via `uv`.
-pub fn install_mlx_runtime(uv: &Path, declared: &Runtime, blobs_dir: &Path) -> anyhow::Result<()> {
+/// `wheelhouse` is the unpacked vault wheelhouse for that source arm.
+pub fn install_mlx_runtime(
+    uv: &Path,
+    declared: &Runtime,
+    blobs_dir: &Path,
+    wheelhouse: Option<&Path>,
+) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (uv, declared, blobs_dir);
+        let _ = (uv, declared, blobs_dir, wheelhouse);
         anyhow::bail!(
             "installing `{}` runtimes requires macOS (Apple Silicon MLX)",
             declared.headless_token()
@@ -33,17 +31,36 @@ pub fn install_mlx_runtime(uv: &Path, declared: &Runtime, blobs_dir: &Path) -> a
     }
     #[cfg(target_os = "macos")]
     {
-        install_mlx_into_blobs(uv, declared, blobs_dir)
+        install_mlx_into_blobs(uv, declared, blobs_dir, wheelhouse)
     }
 }
 
 #[cfg(target_os = "macos")]
-fn install_mlx_into_blobs(uv: &Path, declared: &Runtime, blobs_dir: &Path) -> anyhow::Result<()> {
-    use pipette_venv::{install_venv, VenvInstall};
+fn install_mlx_into_blobs(
+    uv: &Path,
+    declared: &Runtime,
+    blobs_dir: &Path,
+    wheelhouse: Option<&Path>,
+) -> anyhow::Result<()> {
+    use pipette_venv::{VenvInstall, install_venv};
 
     let source = match declared {
         Runtime::MlxMacosPipette(rt) => &rt.source,
-        other => anyhow::bail!(
+        other @ (Runtime::LlamacppCliStockTools(_)
+        | Runtime::LlamacppApkPipette(_)
+        | Runtime::LlamacppIosPipette(_)
+        | Runtime::MlxIosPipette(_)
+        | Runtime::OnnxGenaiIosPipette(_)
+        | Runtime::DockerVllm(_)
+        | Runtime::DockerSglang(_)
+        | Runtime::UvVllm(_)
+        | Runtime::UvSglang(_)
+        | Runtime::UvOpenvino(_)
+        | Runtime::UvOnnxGenai(_)
+        | Runtime::Ovms(_)
+        | Runtime::TrtEdgellm(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
+        | Runtime::AppleFoundation(_)) => anyhow::bail!(
             "install_mlx_runtime only installs mlx_macos_pipette, got `{}`",
             other.headless_token()
         ),
@@ -53,8 +70,7 @@ fn install_mlx_into_blobs(uv: &Path, declared: &Runtime, blobs_dir: &Path) -> an
         uv,
         blobs_dir,
         VenvInstall {
-            // MLX pins no python version in its plan variant, unlike
-            // uv_vllm / uv_sglang.
+            wheelhouse,
             python_version: DEFAULT_PYTHON_VERSION,
             source,
             compile_lockfile: false,
@@ -93,7 +109,7 @@ mod tests {
             image_tag: NonEmptyString::try_new("v0.1".to_owned())?,
             flavor: pipette_plan_types::VllmFlavor::Cpu,
         });
-        let Err(err) = install_mlx_runtime(&uv, &docker, Path::new("/tmp")) else {
+        let Err(err) = install_mlx_runtime(&uv, &docker, Path::new("/tmp"), None) else {
             anyhow::bail!("docker should not be MLX-fetchable");
         };
         let msg = format!("{err:#}");
@@ -114,7 +130,7 @@ mod tests {
                 dir: RelativePath::try_new("venv".to_owned())?,
             },
         });
-        let Err(err) = install_mlx_runtime(&uv, &rt, Path::new("/tmp")) else {
+        let Err(err) = install_mlx_runtime(&uv, &rt, Path::new("/tmp"), None) else {
             anyhow::bail!("preinstalled is not fetchable");
         };
         let msg = format!("{err:#}");
@@ -127,8 +143,6 @@ mod tests {
 
     #[test]
     fn catalog_declared_is_accepted_shape() -> anyhow::Result<()> {
-        // Shape-only: we don't run uv here. Confirms PipRequirementsText is the
-        // installable form (parity with URI parse filling requirements_text).
         let _ = mlx_catalog()?;
         Ok(())
     }

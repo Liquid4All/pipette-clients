@@ -2,8 +2,8 @@ name: CI
 
 on:
   push:
-    # Inert until a release branch exists: a push runs the workflow file as
-    # it stands on the pushed branch.
+    # A push to release/** publishes (github-release); main and pull requests
+    # run CI only. The release version also reaches the binaries only there.
     branches: [main, 'release/**']
   # No base-branch filter: stacked PRs target intermediate heads, not only main.
   pull_request:
@@ -15,24 +15,22 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
-# Least-privilege default for GITHUB_TOKEN; without it every job inherits the
-# repository-wide default. A job-scoped block replaces this one rather than
-# merging, so a job needing more must restate `contents: read` (see `changes`).
+# A job-level block replaces this rather than merging, so it must restate `contents: read`.
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned: with no `version:`, sccache-action installs the latest release, and a new
+  # one invalidates every cache entry at once. Each call site also caches the runner
+  # tool cache, which the action checks first, so a hit skips the github.com download
+  # (a single point of failure that broke every job during a release-asset outage).
+  SCCACHE_VERSION: v0.17.0
 
 jobs:
   changes:
-    # Detect what changed so PRs that don't touch Rust/iOS code can skip
-    # the expensive compile jobs. Push events (main) always run everything
-    # so releases keep building regardless of which paths changed.
     runs-on: ubuntu-24.04
-    # paths-filter reads a pull_request's files via `pulls.listFiles`, which needs
-    # `pull-requests: read`. Granted only here; `contents: read` is restated
-    # because a job block replaces the top-level default.
+    # paths-filter lists a PR's files via `pulls.listFiles`, which needs `pull-requests: read`.
     permissions:
       contents: read
       pull-requests: read
@@ -41,9 +39,16 @@ jobs:
       ios: ${{ steps.filter.outputs.ios }}
       python: ${{ steps.filter.outputs.python }}
       android: ${{ steps.filter.outputs.android }}
+      adbconnector: ${{ steps.filter.outputs.adbconnector }}
+      gpukeepalive: ${{ steps.filter.outputs.gpukeepalive }}
+      coreaiswift: ${{ steps.filter.outputs.coreaiswift }}
+    # PR-only: nothing else reads the outputs, and a dispatch has no `before` SHA to diff.
+    # Gated per step because a skipped job would skip every job needing it.
     steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: github.event_name == 'pull_request'
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        if: github.event_name == 'pull_request'
         id: filter
         with:
           filters: |
@@ -51,83 +56,106 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
-              # The license allow-list, so a PR that loosens it re-runs the
-              # gate that enforces it.
+              # So a PR that loosens the license allow-list re-runs the gate.
               - 'deny.toml'
-              # Native sources compiled via build.rs / cc::Build (e.g.
-              # llama_shim.cpp, peakmtl.m, future Metal shaders). Scoped
-              # positively to the dirs that link into Rust: under the
-              # filter's default "some" quantifier, a `!ios/**` negation
-              # matches every non-ios file and fires these jobs on
-              # docs-only PRs. ios/** stays out by never being included.
+              # rust-check installs cargo-deny through it.
+              - 'ci/install-tool.sh'
+              # Native sources built via build.rs, listed positively: under the filter's
+              # default "some" quantifier a `!ios/**` negation matches every non-ios file.
               - 'crates/**/*.{c,cc,cpp,cxx,h,hh,hpp,hxx,m,mm,metal}'
-              - 'native/**'
+              - 'android/native/**'
               - 'cmake/**'
               - '.gitmodules'
               - '.github/**'
+              # JSON fixtures pipette-contract's `contract` test reads.
+              - 'crates/pipette-contract/fixtures/**'
+              # Compiled in with `include_str!`: bundled catalogs, the prompt seed.
+              - 'crates/**/*.toml'
+              - 'crates/**/*.txt'
+              # Compiled in with `include_str!` by pipette-coreai's sidecar module, which
+              # checks them against the files on disk. Only the macos leg compiles it.
+              - 'crates/pipette-coreai/swift/**'
+              # Parsed by pipette-ctl's `example_plans` and pipette-plan-types' tests.
+              - 'examples/plans/**'
+              # Read by pipette-ios-proxy's test of the release manifest.
+              - 'ios/release-manifest.py'
+              - 'ios/Pipette/Pipette/Generated/*/*BuildInfo.json'
+              - 'ios/Pipette/Pipette/Commands/RuntimesCommands.swift'
             ios:
               - 'ios/**'
               - '.github/**'
+              # A llama.cpp pin bump moves the gitlink and the tag, not .gitmodules.
+              - 'vendor/llama.cpp'
+              - 'vendor/llama.cpp.tag'
+              - 'vendor/llamacpp-*'
+              # The ONNX pins feed OnnxGenaiBuildInfo; a bump moves only the gitlinks and tags.
+              - 'vendor/onnxruntime'
+              - 'vendor/onnxruntime-genai'
+              - 'vendor/onnxruntime*.tag'
+              # ContractTests round-trips the fixtures even when no Swift changed.
+              - 'crates/pipette-contract/fixtures/**'
             python:
               - '**/*.py'
               - 'ruff.toml'
               - '.github/**'
             android:
-              # The app, the native bridge crate + shared kernel it builds, the
-              # library that kernel compiles against, and submodule bumps that
-              # change the bundled llama.cpp/ggml.
               - 'android/**'
               - 'crates/pipette-android/**'
               - 'crates/pipette-ops/**'
-              - 'native/**'
               - '.gitmodules'
-              # The Rust crates linked into libpipette_android.so are part of the
-              # bundled attribution file, and a dependency add/drop shows up only
-              # in the lockfile — so a Cargo.lock-only PR would leave
-              # ThirdPartyLicenses.json stale with this job skipped, surfacing
-              # later as a release-blocking failure on an unrelated PR.
+              - 'vendor/llama.cpp'
+              - 'vendor/llama.cpp.tag'
+              # Rust deps feed the bundled ThirdPartyLicenses.json, and a dep change
+              # can touch only the lockfile; skipping here leaves it stale.
               - 'Cargo.lock'
               - '**/Cargo.toml'
-              # The license gate and the attribution generator must re-run when
-              # their own logic changes — otherwise a PR that loosens the gate is
-              # never checked by it.
+              # So a PR that loosens the license gate is checked by it.
               - 'ci/android-*.py'
+              - '.github/**'
+            adbconnector:
+              # Standalone Gradle build (no Rust, NDK or submodules), so not folded into `android`.
+              # '.github/**' in every filter: a PR that edits a job must exercise it.
+              - 'tools/adb-connector-apk/**'
+              - '.github/**'
+            gpukeepalive:
+              # Standalone Windows-only cargo workspace, kept apart from the rust matrix.
+              - 'tools/gpu-keepalive/**'
+              - '.github/**'
+            coreaiswift:
+              # The Core AI sidecar package, which pipette-coreai builds on first use.
+              - 'crates/pipette-coreai/swift/**'
               - '.github/**'
 
   release-metadata:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0 # ci/version.sh needs the history behind the branch point
 
       - name: Compute release metadata
         id: version
         env:
-          # On `pull_request` the checkout is the merge commit GitHub built for
-          # the run, and its sha is in neither branch — a version naming it
-          # would point at nothing. Name the PR's head commit, the one the
-          # commit list and `git log` show. Empty on every other event, where
-          # ci/version.sh falls back to HEAD.
+          # On `pull_request` the checkout is a merge commit that is in neither
+          # branch, so name the PR's head commit. Empty on every other event,
+          # where ci/version.sh falls back to HEAD.
           PIPETTE_VERSION_SHA: ${{ github.event.pull_request.head.sha }}
+        # Assign first: `echo "v=$(cmd)"` succeeds even when cmd fails.
+        # The version code is the UTC hour, so it only increases.
         run: |
-          # Assign first: `echo "v=$(cmd)"` succeeds even when cmd fails, and
-          # the default shell is `bash -e` with no pipefail, so piping the echo
-          # straight into tee would swallow the failure and emit an empty
-          # version.
           set -euo pipefail
           version="$(ci/version.sh)"
+          version_code="$(date -u +'%y%m%d%H')"
           echo "version=${version}" | tee -a "$GITHUB_OUTPUT"
+          echo "version_code=${version_code}" | tee -a "$GITHUB_OUTPUT"
 
   conventions:
-    # Lightweight repo-convention checks (see ci/README.md). Its own job so a
-    # failure shows up as a distinct `conventions` status, not buried in
-    # rust-check; needs no Rust toolchain, so it stays fast and parallel.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Convention checks
         run: ./ci/lint.sh
 
@@ -143,131 +171,125 @@ jobs:
           - os: linux
             runner: ubuntu-24.04
             fmt: true
-            # Both cargo-deny gates read the dependency graph for every target in
-            # deny.toml, so their result is identical on all three runners.
+            # deny.toml names every target, so one leg suffices. Advisories, bans
+            # and sources are the `security` workflow's.
             deny: true
           - os: macos
             runner: macos-26
           - os: windows
-            # rust-check on Windows recompiles the whole workspace every run
-            # (cache-bin: false), so it's the CPU-bound leg of the matrix.
             runner: windows-2025
     steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
+      # No submodules: pipette-android's build script skips vendor/ off Android.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
         with:
           components: ${{ matrix.fmt && 'clippy, rustfmt' || 'clippy' }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
-          key: rust-check-${{ matrix.os }}-v3
+          key: rust-check-${{ matrix.os }}-v4
           cache-bin: false
-          # The target-dir cache is the only build cache here and carries
-          # rust-check (warm restore lands linux ~1.5min, windows ~2.5min).
-          # sccache (RUSTC_WRAPPER) was measured on this job and removed: ~38%
-          # Rust hit on Linux, ~2% on Windows (with cache write errors), while
-          # forcing CARGO_INCREMENTAL=0. It stays on build-artifact, where it
-          # caches the llama.cpp/ggml C/C++ compiles at ~100%.
-          # cache-workspace-crates keeps the ~dozen `pipette-*` crates that
-          # rust-cache drops by default; cargo fingerprinting still recompiles
-          # any crate whose sources changed, so no stale artifacts.
-          cache-workspace-crates: true
-          # Only main writes. Restore is unchanged, every branch still reads
-          # main's entry; this just stops a branch that missed from saving its
-          # own copy under its own ref. That is how the repo ended up holding
-          # rust-check-linux-v3 twice at 782 MB, and three more entries twice
-          # over, against a 10 GB ceiling. Cost: the first PR after a Cargo.lock
-          # bump compiles cold, because the refreshed entry only lands once the
-          # bump reaches main. Worth it while eviction is the binding
-          # constraint, since a warm cache that gets evicted is worth less than
-          # a slightly staler one that survives.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # No sccache here: measured ~38% hit on Linux, ~2% on Windows, and it forces
+          # CARGO_INCREMENTAL=0. Dependencies only: a fresh checkout's new mtimes
+          # rebuild workspace crates anyway, and they were ~75% of the cache.
+          cache-workspace-crates: false
 
       - name: Format
         if: matrix.fmt
         run: cargo fmt --all --check
 
-      - name: Install cargo-deny
+      - name: Install cargo-deny (pinned, checksum-verified)
         if: matrix.deny
-        uses: taiki-e/install-action@cargo-deny
+        # The security workflow's pinned build, so both read deny.toml with one version.
+        run: ci/install-tool.sh cargo-deny
 
       - name: Licenses
         if: matrix.deny
-        # Fails on any dependency license outside deny.toml's allow-list. Placed
-        # before the compile steps because it only reads cargo metadata — a
-        # rejected license turns the job red in seconds instead of after a full
-        # workspace build.
-        #
-        # Only the Rust graph. The Android app's shipping dependencies have their
-        # own gate (ci/android-licenses.py, in the android-app job); the iOS
-        # SwiftPM graph is hand-audited at review time — see docs/licensing.md.
+        # Before compiling: it reads only cargo metadata, so it fails in seconds.
+        # Rust graph only; Android has ci/android-licenses.py, iOS see docs/licensing.md.
         run: cargo deny check licenses
 
-      - name: Advisories
-        if: matrix.deny
-        # Own step so the step name says which gate went red; licenses and
-        # advisories are acted on differently. Policy lives in deny.toml, which
-        # also covers why this one can go red with no change here.
-        run: cargo deny check advisories
-
       - name: Clippy
-        # Lint levels (deny-on-warnings) come from `[workspace.lints]` in the
-        # root Cargo.toml, so no `-- -D warnings` here.
-        # Nothing is excluded. pipette-android compiles the shared `native/`
-        # kernel against pipette-ops, and the android-app job that would
-        # otherwise catch a break is gated on a path filter that never matches
-        # a pipette-ops-only change. pipette-mlx is `cfg(target_os = "macos")`
-        # with macOS-scoped dependencies, so off-Mac it resolves to an empty
-        # crate and costs nothing; the macos leg is what actually lints it.
+        # Lint levels come from `[workspace.lints]`, so no `-- -D warnings` here.
+        # pipette-android stays in: android-app's path filter misses pipette-ops-only changes.
         run: cargo clippy --workspace --all-targets
 
       - name: Docs
-        # `[`Type`]` links are how the doc prose connects plan-types to the
-        # engines and the CLI, and nothing in build/clippy/test reads one — so
-        # 20 dead links had accumulated before this step existed. Lint levels
-        # come from `[workspace.lints]`, same as Clippy above.
-        #
-        # Here rather than in `conventions` for two reasons: that job
-        # deliberately needs no Rust toolchain, and doc breakage is
-        # platform-specific — the uv server (Linux-only) and
-        # pipette-memprobe-metal (macOS-only) each hide links the other
-        # platform never resolves. This matrix is what covers both.
+        # Nothing else checks intra-doc links. In this matrix, not `conventions`:
+        # some links resolve on only one platform.
         run: cargo doc --workspace --no-deps
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+        with:
+          tool: nextest
 
       - name: Test
-        # `shell: bash` is load-bearing, not style. Windows defaults `run:` to
-        # pwsh, which does not abort on a failing native command and exits with
-        # the *last* one's status — so `cargo nextest` could fail and the step
-        # still went green on the strength of `cargo test --doc` behind it. A
-        # Windows-only failure in `pipette-artifacts` rode that gap. bash gets
-        # `-e -o pipefail`, which is what the other two legs were already using.
+        # Load-bearing: pwsh does not abort on a failing native command, so a red
+        # nextest went green behind `--doc`. bash gets `-e -o pipefail`.
         shell: bash
-        # `--no-fail-fast` so one run reports every failure. nextest's default
-        # cancels on the first, which costs a push per failing test to enumerate
-        # a break that only reproduces on one platform — the leg a contributor
-        # cannot run locally is the one where the full list is worth most. The
-        # extra runtime is only spent on an already-red run.
-        #
-        # nextest runs the test binaries in parallel but does not execute
-        # doctests, so keep a `--doc` pass to preserve that coverage.
-        # Nothing is excluded, matching Clippy above.
-        # pipette-mlx's tests run on the macos leg (empty crate elsewhere); its
-        # `#[ignore]`d tests — the ~1GB uv installs and the reaper's
-        # process-signalling check — stay ignored and are unaffected.
-        # pipette-android's tests need no device or NDK: its build script
-        # early-returns off Android, and the covered code (the shared
-        # `native/benchmarks.rs` prompt-seed kernel, memory-peak arithmetic)
-        # is pure logic that stubs tokenization.
+        # --no-fail-fast: one red run reports every failure. nextest skips doctests,
+        # hence the `--doc` pass.
         run: |
           cargo nextest run --workspace --no-fail-fast
           cargo test --doc --workspace
+
+  rust-coverage:
+    # Separate from rust-check: an instrumented build shares no artifacts with it.
+    # Doctests are not instrumented (needs nightly).
+    name: rust-coverage
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          # Its own key: instrumented artifacts would evict rust-check's.
+          key: rust-coverage-linux-v2
+          cache-bin: false
+          # Dependencies only: `llvm-cov report` merges every test binary in the target
+          # dir, so a cached one from an older commit shows as uncovered lines.
+          cache-workspace-crates: false
+
+      - name: Install nextest and cargo-llvm-cov
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+        with:
+          tool: nextest,cargo-llvm-cov
+
+      - name: Coverage
+        shell: bash
+        run: |
+          cargo llvm-cov nextest --workspace --no-fail-fast --no-report
+          cargo llvm-cov report --lcov --output-path lcov.info
+          {
+            echo '## Rust line coverage'
+            echo
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate pipette-cli
+        shell: bash
+        # The floor sits under the measured number to absorb platform cfg
+        # differences; raise it as the number climbs.
+        run: cargo llvm-cov report -p pipette-cli --summary-only --fail-under-lines 90
+
+      - name: Upload lcov
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rust-lcov
+          path: lcov.info
+          retention-days: 14
 
   python-check:
     name: python-check
@@ -275,87 +297,93 @@ jobs:
     if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Lint
-        uses: astral-sh/ruff-action@v4.0.0
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
         with:
           args: "check ."
 
       - name: Format
-        uses: astral-sh/ruff-action@v4.0.0
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
         with:
           args: "format --check ."
 
-      # Each crate owns its Python tests + dev deps; CI calls them
-      # explicitly (one line per crate).
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.12"
 
       - name: Test pipette-mlx
         run: ./crates/pipette-mlx/test-python.sh
 
+      - name: Test pipette-onnx-genai
+        run: ./crates/pipette-onnx-genai/test-python.sh
+
+      - name: Test pipette-openvino
+        run: ./crates/pipette-openvino/test-python.sh
+
   ios-check:
     name: ios-check
     needs: [changes]
-    # The iOS app links no Rust (native-Swift llama.cpp via build-llama.sh), so
-    # it keys only on iOS changes. `changes.ios` already covers ios/** + .github/**.
+    # The iOS app links no Rust, so it keys only on iOS changes.
     if: github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true'
     runs-on: macos-26
     env:
-      # Pin the toolchain instead of taking the image default (26.2): the
-      # project's deployment target is 26.4 (beyond 26.2's supported range),
-      # and 26.2's Swift compiler miscompiles async code in the result-
-      # uploader drain path — stack-canary SIGABRT inside
-      # swift::runJobInEstablishedExecutorContext (PR #431). Applies to
-      # xcrun in build-llama.sh too, so the static lib and app share one SDK.
+      # Not the image default 26.2: the deployment target is 26.4, and 26.2's Swift
+      # miscompiles async code (stack-canary SIGABRT). Also applies to build-llama.sh's xcrun.
       DEVELOPER_DIR: /Applications/Xcode_26.4.app
+      # Job-scoped so the cache key can name the version. Bump both together; the
+      # digest is from `gh api repos/realm/SwiftLint/releases/tags/<v>`.
+      SWIFTLINT_VERSION: "0.65.0"
+      SWIFTLINT_SHA256: "d6cb0aa7a2f5f1ef306fc9e37bcb54dc9a26facc8f7784ac0c3dd3eccf5c6ba6"
     steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      # Source-only style/correctness lint — no build, so it fails fast before the
-      # heavy compile below. Compiler warnings are separately hard-gated via
-      # SWIFT_TREAT_WARNINGS_AS_ERRORS on the app target (see project.pbxproj).
+      # sentry-native and kleidiai are Android-only.
+      - name: Check out the vendored sources
+        run: git -c protocol.version=2 submodule update --init --depth=1 --recursive vendor/llama.cpp vendor/onnxruntime vendor/onnxruntime-genai
+
+      # Cached to avoid the github.com release download (see SCCACHE_VERSION). What
+      # lands in the cache was digest-verified when first fetched, below.
+      - name: Cache SwiftLint
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/swiftlint
+          key: swiftlint-${{ env.SWIFTLINT_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: SwiftLint (strict)
-        # Without the digest this executes whatever the release URL serves. Bump
-        # both vars together; the digest is the release asset's, from
-        # `gh api repos/realm/SwiftLint/releases/tags/<v>`.
         # macOS runner, so `shasum -a 256`; coreutils sha256sum is absent.
-        env:
-          SWIFTLINT_VERSION: "0.65.0"
-          SWIFTLINT_SHA256: "d6cb0aa7a2f5f1ef306fc9e37bcb54dc9a26facc8f7784ac0c3dd3eccf5c6ba6"
         run: |
           set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/swiftlint.zip" \
-            "https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/portable_swiftlint.zip"
-          # cd so a temp path with spaces cannot misparse the checksum line.
-          (cd "$RUNNER_TEMP" && echo "${SWIFTLINT_SHA256}  swiftlint.zip" | shasum -a 256 -c -)
-          unzip -oq "$RUNNER_TEMP/swiftlint.zip" -d "$RUNNER_TEMP/swiftlint"
+          # Testing the binary rather than the cache-hit output so a partial
+          # restore still self-heals by downloading.
+          if [ ! -x "$RUNNER_TEMP/swiftlint/swiftlint" ]; then
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+              -o "$RUNNER_TEMP/swiftlint.zip" \
+              "https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/portable_swiftlint.zip"
+            # cd so a temp path with spaces cannot misparse the checksum line.
+            (cd "$RUNNER_TEMP" && echo "${SWIFTLINT_SHA256}  swiftlint.zip" | shasum -a 256 -c -)
+            unzip -oq "$RUNNER_TEMP/swiftlint.zip" -d "$RUNNER_TEMP/swiftlint"
+          fi
           cd ios && "$RUNNER_TEMP/swiftlint/swiftlint" lint --strict --config .swiftlint.yml
 
-      - name: Set up sccache (C/C++ compiler launcher)
-        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Cache sccache binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/sccache
+          key: sccache-tool-${{ env.SCCACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
 
-      # Cache the resolved SwiftPM checkouts AND their compiled products. The
-      # ~90s app+test build is dominated by recompiling the dependency graph
-      # (swift-syntax macros, mlx-swift, clerk-ios, …) cold every run. Xcode's
-      # own compilation cache (26.4) explicitly EXCLUDES SPM dependencies, so
-      # the only way to reuse that work across runs is to persist DerivedData's
-      # Build tree and let xcodebuild incrementally rebuild just the changed app
-      # sources on top of it. SourcePackages stays at its default location (the
-      # LicenseList build-tool plugin expects it there; relocating via
-      # -clonedSourcePackagesDirPath breaks it). Keyed on the lockfile so a deps
-      # bump busts the key; restore-keys reuses the prior tree and rebuilds the
-      # delta. We persist Build/ + SourcePackages but not Index.noindex/Logs
-      # (large, unneeded for a build). PROTOTYPE: Xcode incremental builds can
-      # occasionally go stale — if a warm run fails to build, bump the `-v1`
-      # suffix to force one clean rebuild.
+      - name: Set up sccache (C/C++ compiler launcher)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
+
+      # Xcode's compilation cache excludes SPM dependencies, so persisting DerivedData's
+      # Build tree is the only cross-run reuse. SourcePackages stays at its default path:
+      # the LicenseList plugin breaks if relocated. If a warm run builds stale, bump `-v1`.
       - name: Cache DerivedData (SwiftPM products + sources)
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/DerivedData/Build
@@ -364,94 +392,73 @@ jobs:
           restore-keys: |
             spm-dd-v1-${{ runner.os }}-
 
-      # Kick off the simulator's ~30s cold boot now so it overlaps the llama +
-      # app build below, instead of stalling the test step (which otherwise
-      # pays the full boot before a single test runs). `simctl boot` returns as
-      # soon as the boot is initiated; the device finishes booting in the
-      # background and is warm by the time test-without-building attaches. The
-      # test step pins -parallel-testing-enabled NO so it reuses THIS booted
-      # device rather than cloning a fresh, unbooted one. Non-fatal: if the
-      # name doesn't resolve, the test step just boots on demand as before.
+      # The ~30s cold boot overlaps the build; the test step reuses this device.
+      # Non-fatal: the test step boots on demand otherwise.
       - name: Pre-boot simulator
         run: xcrun simctl boot "iPhone 17" 2>/dev/null || true
 
-      # Pre-build the vendored llama.cpp static lib + module map into
-      # Generated/Llama/ so Xcode's synchronized root group picks up
-      # LlamaCppBuildInfo.swift (and the app can `import llama`) when the project
-      # is parsed. build-llama.sh drives llama.cpp's own CMake and routes the
-      # ggml/llama C/C++ compiles through sccache (CMAKE_*_COMPILER_LAUNCHER),
-      # backed by the GHA cache via SCCACHE_GHA_ENABLED. Swift sources compiled
-      # later by xcodebuild can't use sccache, but the app target has no
-      # C/C++/ObjC sources of its own.
-      # The two SCCACHE_GHA_* settings below are repeated at every sccache step
-      # in this repo; this is the copy that carries the reasoning.
-      #
-      # SCCACHE_GHA_VERSION selects the namespace every object is keyed into,
-      # and bumping it abandons the previous one. v2 exists because v1's
-      # android-app objects became unwritable: the main push in run 31493653710
-      # recorded 336 write errors against 336 objects, every one an HTTP 409
-      # `already_exists` from CreateCacheEntry, while that same run read-missed
-      # all 336. An entry a write collides with but a read cannot find is one
-      # that was reserved and never finalized, so those keys were poisoned for
-      # good and no later run on main could reseed them. Bump again if that
-      # pattern returns. Note this variable also implies SCCACHE_GHA_ENABLED,
-      # which is why it is set per-step beside it rather than workflow-wide.
-      #
-      # Deliberately NOT paired with SCCACHE_GHA_RW_MODE: READ_ONLY off main.
-      # Every other cache here is main-writes-only, and sccache was tried the
-      # same way and measured worse. It is the opposite shape: many small
-      # objects rather than one blob, so a PR's copy holds only what that PR
-      # compiled instead of duplicating main's, and it is what lets a second run
-      # on the same PR reuse the first (android-app's native build went 8m10s
-      # cold to 2m37s warm that way). Restricting it cost roughly ten minutes
-      # per PR run across the iOS and Android jobs to reclaim 239 MB, 2.4% of
-      # the ceiling, in entries GitHub deletes when the PR closes. It also
-      # pinned cache_write_errors at one-per-object on every non-main run, which
-      # is the counter used to detect the poisoning described above.
-      - name: Build llama.cpp (static lib + bindings)
+      # Before xcodebuild parses the project, so its synchronized group picks up
+      # Generated/Llama/. The C/C++ compiles go through sccache.
+      - name: Build llama.cpp (framework + headers)
         env:
           SCCACHE_GHA_ENABLED: "true"
+          # v2: this repository's v1 namespace holds reserved entries that were
+          # never finalized, so every v1 write fails with `already_exists`.
           SCCACHE_GHA_VERSION: "2"
         run: ./ios/build-llama.sh sim
 
-      # Regenerate Generated/MLX/MLXBuildInfo.swift from Package.resolved (the
-      # llama pre-build above already regenerated LlamaCppBuildInfo.swift from the
-      # submodule commit). Both files are committed; the next step fails if
-      # regeneration changed them.
-      - name: Generate MLX build info
-        run: ./ios/gen-mlx-build-info.sh
+      # The cache key below must move when a pin moves. `.gitmodules` cannot say so: it
+      # carries paths and URLs, and the pinned commits are gitlinks in the tree.
+      - name: Read the ONNX submodule pins
+        id: onnx-pins
+        run: |
+          echo "sha=$(git -C vendor/onnxruntime rev-parse HEAD)-$(git -C vendor/onnxruntime-genai rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Freshness gate: the runtime_version the app submits is baked from these
-      # committed stamps, so a forgotten regen after a dependency or submodule
-      # bump would ship a stale version the collector can't recognize. Both
-      # generators just ran; if either stamp differs from what's committed, fail
-      # and tell the contributor to commit the regenerated file.
+      # The outputs, not the build tree: the script skips only when its `.slice`
+      # stamp and archives exist; a restored build tree still recompiled everything.
+      - name: Cache the ONNX Runtime GenAI build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ios/Pipette/Pipette/Generated/OnnxGenai
+          key: onnx-genai-out-sim-${{ runner.os }}-${{ steps.onnx-pins.outputs.sha }}-${{ hashFiles('ios/patches/onnx-genai/*.patch', 'ios/build-onnx-genai.sh') }}
+
+      # build-onnx-genai.sh needs uv when the cache above missed.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      - name: Build ONNX Runtime GenAI (static libs + Objective-C surface)
+        run: ./ios/build-onnx-genai.sh sim
+
+      # ONNX is regenerated here because build-onnx-genai.sh does so only when it
+      # builds, not on a cache hit.
+      - name: Generate MLX and ONNX GenAI build info
+        run: |
+          ./ios/gen-mlx-build-info.sh
+          ./ios/gen-onnx-genai-build-info.sh
+
+      # The app's runtime_version is baked from these stamps; a stale one ships a
+      # version the collector can't recognize.
       - name: Verify build-info stamps are committed and current
         run: |
           if ! git diff --exit-code -- \
-              ios/Pipette/Pipette/Generated/Llama/LlamaCppBuildInfo.swift \
-              ios/Pipette/Pipette/Generated/MLX/MLXBuildInfo.swift; then
-            echo "::error::Generated build-info is stale. Run ./ios/build-llama.sh and ./ios/gen-mlx-build-info.sh, then commit LlamaCppBuildInfo.swift / MLXBuildInfo.swift."
+              ios/Pipette/Pipette/Generated/MLX/MLXBuildInfo.swift \
+              ios/Pipette/Pipette/Generated/MLX/MLXBuildInfo.json \
+              ios/Pipette/Pipette/Generated/OnnxGenai/OnnxGenaiBuildInfo.swift \
+              ios/Pipette/Pipette/Generated/OnnxGenai/OnnxGenaiBuildInfo.json; then
+            echo "::error::Generated build-info is stale. Run ./ios/gen-mlx-build-info.sh and ./ios/gen-onnx-genai-build-info.sh, then commit the BuildInfo .swift and .json files they write."
             exit 1
           fi
 
-      # Build the app + test bundle once, then run without rebuilding, so the
-      # SwiftPM graph (Clerk, mlx-swift, Nuke, …) compiles a single time. Both
-      # invocations share one concrete simulator destination + DerivedData.
       - name: Build iOS app + tests (Simulator)
-        # PIPETTE_SKIP_BUILD_LLAMA: the pre-build step already ran build-llama.sh
-        # under sccache; an in-Xcode re-run wouldn't inherit SCCACHE_GHA_ENABLED
+        # Already built above; an in-Xcode re-run wouldn't inherit SCCACHE_GHA_ENABLED
         # and would recompile every ggml/llama source uncached.
         env:
           PIPETTE_SKIP_BUILD_LLAMA: "1"
+          PIPETTE_SKIP_BUILD_ONNX_GENAI: "1"
         run: |
-          # ARCHS=arm64 + ONLY_ACTIVE_ARCH: build-llama.sh sim emits only an
-          # arm64 slice, so match it. Build the scheme, not the bare target —
-          # the target build path plans SwiftPM products outside the app's
-          # product dir and breaks ClerkKitUI's transitive imports (Nuke,
-          # NukeUI, PhoneNumberKit). Don't pass -sdk iphonesimulator: it forces
-          # build tool plugin executables into the wrong products dir and fails
-          # the LicenseList plugin; -destination already selects the platform.
+          # ARCHS=arm64: build-llama.sh sim emits only arm64. The scheme, not the
+          # target: the target path breaks ClerkKitUI's transitive imports. No
+          # -sdk iphonesimulator: it breaks the LicenseList plugin.
           xcodebuild build-for-testing \
             -project ios/Pipette/Pipette.xcodeproj \
             -scheme Pipette \
@@ -466,25 +473,11 @@ jobs:
 
       - name: Run iOS unit tests (Simulator)
         run: |
-          # -parallel-testing-enabled NO: run on the iPhone 17 we pre-booted
-          # above instead of cloning a fresh simulator and paying its ~30s cold
-          # boot. These are fast unit tests (~8s total), so sharded parallelism
-          # buys nothing here — the clone's boot was pure overhead.
-          # -collect-test-diagnostics never: on the runner the post-run request
-          # for the simulator's log bundle is never answered, so xcodebuild sat
-          # out its hard 600s timeout after every green run (14s of tests, 10m
-          # of waiting) and collected nothing anyway.
-          #
-          # Run from the .xctestrun spec that build-for-testing just wrote
-          # rather than from -project/-scheme. The spec already names the built
-          # products and the settings they were built with, so xcodebuild never
-          # opens the project — which drops a ~6s re-plan of the SwiftPM graph
-          # that resolved nothing new, and makes the project-only flags
-          # (package validation, ARCHS, code signing) moot here.
-          #
-          # Newest match, not the only one: the DerivedData cache carries specs
-          # from earlier runs, and the simulator runtime in the filename shifts
-          # whenever the pinned Xcode moves.
+          # -parallel-testing-enabled NO: reuse the pre-booted simulator, not a cold clone.
+          # -collect-test-diagnostics never: the log-bundle request is never answered,
+          # so xcodebuild waited out its 600s timeout after every green run.
+          # The .xctestrun spec skips a ~6s re-plan of the SwiftPM graph. Newest match:
+          # the cached DerivedData carries specs from earlier runs and Xcode versions.
           products="$RUNNER_TEMP/DerivedData/Build/Products"
           xctestrun=$(ls -t "$products"/Pipette_*_iphonesimulator*.xctestrun 2>/dev/null | head -n1)
           if [[ -z "$xctestrun" ]]; then
@@ -500,13 +493,9 @@ jobs:
             -collect-test-diagnostics never
 
   ios-archive:
+    # One app carrying every llama.cpp pin. ci/checks/llamacpp-variants.py keeps its
+    # checkout, build steps and PIPETTE_LLAMA_PINS in step with .gitmodules.
     name: ios-archive
-    # Same gate as ios-check. A reviewer still gets an installable build of any
-    # commit that could change the app; on a PR that touches no iOS path the
-    # archive would be byte-for-byte what main already published, and building
-    # it costs six minutes of a macOS runner. Everything that is not a PR still
-    # archives unconditionally — pushes to main, and the workflow_dispatch that
-    # github-release publishes from.
     needs: [release-metadata, changes]
     if: github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true'
     runs-on: macos-26
@@ -514,28 +503,30 @@ jobs:
       # Same toolchain pin as ios-check — see the note there.
       DEVELOPER_DIR: /Applications/Xcode_26.4.app
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Check out the vendored sources
+        run: |
+          git -c protocol.version=2 submodule update --init --depth=1 --recursive \
+            vendor/llama.cpp vendor/llamacpp-prismml vendor/llamacpp-lfm3 \
+            vendor/onnxruntime vendor/onnxruntime-genai
+
+      - name: Cache sccache binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          submodules: recursive
+          path: ${{ runner.tool_cache }}/sccache
+          key: sccache-tool-${{ env.SCCACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Set up sccache (C/C++ compiler launcher)
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
-      # Its own cache key: this is a Release build for arm64 *device*, so it shares
-      # no products with ios-check's Debug simulator tree. One key per shape keeps
-      # the two from evicting each other.
-      #
-      # Not `Build`: `xcodebuild archive` recompiles every source file on every
-      # run regardless of what is in that tree — measured by archiving the same
-      # commit twice in a row on one machine, which produced an identical 342
-      # CompileC / 49 SwiftCompile / 56 Ld both times. Restoring it cost ~13s
-      # and a gigabyte of the repo's cache quota to be overwritten.
-      #
-      # ModuleCache.noindex is the part that does survive: it took explicit
-      # module builds from 303 to 19 across those two runs. It sits beside
-      # `Build`, not inside it, so it was never covered before.
+      # Its own key: a Release device build shares no products with ios-check's tree.
+      # Not `Build`: `xcodebuild archive` recompiles every source regardless of it.
+      # ModuleCache.noindex is what survives (explicit module builds 303 -> 19).
       - name: Cache DerivedData (SwiftPM sources + module cache)
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ${{ runner.temp }}/DerivedData-archive/SourcePackages
@@ -544,49 +535,67 @@ jobs:
           restore-keys: |
             spm-dd-archive-v2-${{ runner.os }}-
 
-      # `device`, not `sim`: the archive is arm64-for-iPhone, and the two write the
-      # same libllama.a, so the slice built here has to be the one the app links.
-      - name: Build llama.cpp (static lib + bindings, device slice)
+      # `device`: the archive's "Embed llama.cpp" phase takes each pin from
+      # ios/.build-llama/frameworks/iphoneos. Only main's build writes the headers
+      # the app compiles against.
+      - name: Build llama.cpp (main)
         env:
           SCCACHE_GHA_ENABLED: "true"
-          # See the note on ios-check's build-llama step.
           SCCACHE_GHA_VERSION: "2"
         run: ./ios/build-llama.sh device
 
-      - name: Generate MLX build info
-        run: ./ios/gen-mlx-build-info.sh
+      - name: Build llama.cpp (prismml)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_GHA_VERSION: "2"
+          PIPETTE_LLAMA_VARIANT: prismml
+        run: ./ios/build-llama.sh device
 
-      # Three settings here carry a decision each:
-      #
-      # CODE_SIGNING_*: unsigned. Signing would need a certificate and profile in CI
-      #   secrets and would fix the device UDIDs at build time — a phone added later
-      #   could not run the asset, and the file would carry the fleet's identifiers.
-      #   Whoever installs it signs with their own identity (docs/pipette-ios/build.md).
-      #
-      # -configuration Release: pins the Swift side rather than inheriting the scheme's
-      #   ArchiveAction, so an edit there cannot quietly ship an unoptimized archive.
-      #   The llama half is already Release — build-llama.sh pins CMAKE_BUILD_TYPE.
-      #
-      # PIPETTE_PRIVATE_THERMAL: without the private SoC read the readiness gate falls
-      #   back to thermalState, and the numbers stop being comparable with the fleet's.
-      #   The repository is private and the asset is side-loaded onto registered devices,
-      #   which is what the flag's doc sanctions; its rule is "never TestFlight or App
-      #   Store", and this is neither. Set here rather than via ios/build.sh because this
-      #   archives xcodebuild directly, and both halves are needed: the ObjC read keys off
-      #   GCC_PREPROCESSOR_DEFINITIONS, the Swift collection path off
-      #   SWIFT_ACTIVE_COMPILATION_CONDITIONS.
-      - name: Archive iOS app (Release, unsigned, private-thermal)
+      - name: Build llama.cpp (lfm3)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_GHA_VERSION: "2"
+          PIPETTE_LLAMA_VARIANT: lfm3
+        run: ./ios/build-llama.sh device
+
+      - name: Read the ONNX submodule pins
+        id: onnx-pins
+        run: |
+          echo "sha=$(git -C vendor/onnxruntime rev-parse HEAD)-$(git -C vendor/onnxruntime-genai rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the ONNX Runtime GenAI build (device slice)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ios/Pipette/Pipette/Generated/OnnxGenai
+          key: onnx-genai-out-device-${{ runner.os }}-${{ steps.onnx-pins.outputs.sha }}-${{ hashFiles('ios/patches/onnx-genai/*.patch', 'ios/build-onnx-genai.sh') }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      - name: Build ONNX Runtime GenAI (device slice)
+        run: ./ios/build-onnx-genai.sh device
+
+      # The ONNX stamp too, so the archive carries one generated from this checkout
+      # rather than the copy the cache restored.
+      - name: Generate MLX and ONNX GenAI build info
+        run: |
+          ./ios/gen-mlx-build-info.sh
+          ./ios/gen-onnx-genai-build-info.sh
+
+      # Unsigned: signing would need CI certs and pin device UDIDs at build time;
+      #   installers sign with their own identity (docs/pipette-ios/build.md).
+      # -configuration Release: so an edit to the scheme's ArchiveAction can't ship
+      #   an unoptimized archive.
+      # PIPETTE_PRIVATE_*: private-API reads that keep numbers comparable with the
+      #   fleet; allowed only because this asset never goes to TestFlight or the App
+      #   Store. THERMAL needs both the GCC define (ObjC) and the Swift condition.
+      # PIPETTE_LLAMA_PINS: every pin built above; unset, the app carries main's alone.
+      - name: Archive iOS app (Release, unsigned, internal)
         env:
           PIPETTE_SKIP_BUILD_LLAMA: "1"
-          # Read by the `Stamp git commit` build phase (ios/stamp-git-commit.sh),
-          # which writes it into the BUILT Info.plist as `PipetteBuildVersion`.
-          # Without it the archive carried only the project's hardcoded
-          # CFBundleVersion `1`, so `client_version` named the release nowhere —
-          # the version below reached the asset's filename and stopped there.
-          #
-          # Unconditional, unlike the Rust/Android equivalents: xcodebuild
-          # recompiles this archive from scratch every run regardless (see the
-          # DerivedData cache note above), so there is no cache to protect.
+          PIPETTE_SKIP_BUILD_ONNX_GENAI: "1"
+          # Stamped into the built Info.plist; without it `client_version` is just `1`.
+          # Unconditional: the archive recompiles from scratch, so there is no cache to protect.
           PIPETTE_BUILD_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
           xcodebuild archive \
@@ -603,40 +612,47 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
+            'PIPETTE_LLAMA_PINS=llamacpp llamacpp-prismml llamacpp-lfm3' \
             'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) PIPETTE_PRIVATE_THERMAL=1' \
-            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) PIPETTE_PRIVATE_THERMAL'
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) PIPETTE_PRIVATE_THERMAL PIPETTE_PRIVATE_MEMORY'
 
-      # Probe a capability to conclude the build is internal, mirroring `BuildFlavor`:
-      # the suffix is derived from what is actually in the product, never restated, since
-      # an asset named for a flag it does not carry is worse than an unmarked one. A
-      # second internal-only capability would grow this check, not replace it.
-      #
-      # Checked by string, not by symbol. `pipette_soc_temp` exists either way — the
-      # macro gates its *body*, not its declaration — and Release strips the symbol
-      # table, so `nm` sees nothing on either build. What the flag actually adds is the
-      # `dlsym` lookups of the IOHID private API, and those literals are only compiled
-      # in when it is on. Verified both ways locally: present with the flag, absent
-      # without.
-      - name: Confirm the private-thermal flag took
+      # An unsigned binary carries no entitlements, and `xcodebuild -exportArchive`, the
+      # fleet's signing path, keeps only the ones the binary carries: without this its
+      # builds lost increased-memory-limit and got iOS's default per-app memory ceiling.
+      - name: Ad-hoc sign the archive with the app's entitlements
+        run: ./ios/adhoc-sign-archive.sh "$RUNNER_TEMP/Pipette.xcarchive" "$RUNNER_TEMP/DerivedData-archive"
+
+      # The `-internal` suffix is derived from what the product carries, never restated.
+      # By string, not symbol: Release strips symbols, and only these `dlsym` literals
+      # are compiled in solely when a flag is on.
+      - name: Confirm the private-API flags took
         run: |
           app="$RUNNER_TEMP/Pipette.xcarchive/Products/Applications/Pipette.app/Pipette"
-          if strings -a "$app" | grep -q "IOHIDEventSystemClientCreate"; then
-            echo "flavor=-internal" >> "$GITHUB_ENV"
-          else
+          found="$RUNNER_TEMP/pipette-strings.txt"
+          strings -a "$app" > "$found"
+          if ! grep -q "IOHIDEventSystemClientCreate" "$found"; then
             echo "::error::PIPETTE_PRIVATE_THERMAL did not take — the archive has no IOHID lookups, so its readiness gate would fall back to thermalState"
             exit 1
           fi
+          if ! grep -q "proc_reset_footprint_interval" "$found"; then
+            echo "::error::PIPETTE_PRIVATE_MEMORY did not take — the archive has no footprint-interval lookup, so max_memory_usage would be the 20 ms sample alone"
+            exit 1
+          fi
+          echo "flavor=-internal" >> "$GITHUB_ENV"
 
-      # `ditto`, not `zip`: it preserves the symlinks and extended attributes in the .app
-      # bundle, which a plain zip would flatten and a later re-sign would then reject.
-      #
-      # The note ships *inside* the zip rather than only in the release body, so the
-      # caveats travel with the artifact when someone copies it onto a share or a device
-      # host.
-      #
-      # Its heredoc is quoted, and the one interpolated value is printed separately: an
-      # unquoted delimiter would make every backtick in the Markdown a command
-      # substitution, so the note could only stay correct while each one was hand-escaped.
+      # The archive cannot run here, so the script restates its runtimes from source
+      # and from the llama.cpp frameworks it carries.
+      - name: Write the build manifest
+        run: |
+          ver='${{ needs.release-metadata.outputs.version }}'
+          out="$RUNNER_TEMP/pipette-ios-${ver}${flavor}.json"
+          ./ios/release-manifest.py "${ver}${flavor}" --private-thermal --private-memory \
+            --frameworks "$RUNNER_TEMP/Pipette.xcarchive/Products/Applications/Pipette.app/Frameworks" > "$out"
+          echo "manifest_json=${out}" >> "$GITHUB_ENV"
+          cat "$out"
+
+      # `ditto`, not `zip`: zip flattens symlinks and xattrs, which a re-sign then rejects.
+      # Quoted heredoc: unquoted, every Markdown backtick would be a command substitution.
       - name: Package the archive
         run: |
           ver='${{ needs.release-metadata.outputs.version }}'
@@ -645,15 +661,16 @@ jobs:
           ditto "$RUNNER_TEMP/Pipette.xcarchive" "$stage/Pipette.xcarchive"
           { printf '# Pipette iOS %s\n\n' "${ver}${flavor}"; cat <<'EOF'
           **Not distributable.** A Release arm64 archive for on-device benchmarking on
-          registered development devices. It contains a private Apple API (below), so
+          registered development devices. It contains private Apple APIs (below), so
           it must never reach TestFlight or the App Store.
 
-          ## Unsigned
+          ## Not signed for any device
 
           Sign it with your own identity before installing; see
-          `docs/pipette-ios/build.md`, "Installing a released archive". It carries no
-          provisioning profile, so it is not tied to any device list and does not
-          expire — but it will not launch until you sign it.
+          `docs/pipette-ios/build.md`, "Installing a released archive". It carries an
+          ad-hoc signature with the app's entitlements and no provisioning profile, so
+          it is not tied to any device list and does not expire, but it will not
+          launch until you sign it.
 
           ## Thermals: private SoC read is ON
 
@@ -663,14 +680,28 @@ jobs:
           - The readiness gate waits on a real SoC die temperature between measured
             reps, rather than falling back to `ProcessInfo.thermalState` plus the
             calibrated IMU estimate.
-          - `device_apple_soc_temp_c_*` is populated on submitted results.
+          - `device_hardware_readings` carries every IOHID temperature sensor
+            on submitted results.
+          - The log carries each measured rep's CPU-cluster and GPU clock-state
+            residency, read through the private IOReport library.
           - The build says so about itself: the version carries `-internal`, so
             `client_version` on every submitted row identifies how it was gated.
             Confirm on a device with `headlessrun version`.
 
+          ## Memory: kernel footprint peak and reclaim-ring flush are ON
+
+          Built **with** `PIPETTE_PRIVATE_MEMORY`: `max_memory_usage` reports the
+          kernel's exact footprint peak over each measured bracket (a private libproc
+          read) when it exceeds the 20 ms sample, which can miss a short spike such as
+          MLX's prefill. It also flushes libmalloc's reclaim ring (`mach_vm_reclaim_*`)
+          before each bracket, so a cell does not inherit memory that earlier cells in
+          the process freed.
+
           > **Never submit this build to TestFlight or the App Store.** It reads the
-          > SoC die temperature through a private API, which App Review rejects. It
-          > is for side-loading onto registered development devices only — see
+          > SoC die temperature and the kernel's footprint peak, and flushes libmalloc's
+          > reclaim ring, through private APIs,
+          > which App Review rejects. It is for side-loading onto registered
+          > development devices only — see
           > `docs/pipette-ios/private-thermal-release-build.md`.
           EOF
           } > "$stage/INTERNAL-BUILD.md"
@@ -680,11 +711,13 @@ jobs:
           ls -lh "$out"
 
       - name: Upload iOS archive
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           # `pipette-*` so github-release's download pattern picks it up.
           name: pipette-ios-archive
-          path: ${{ env.archive_zip }}
+          path: |
+            ${{ env.archive_zip }}
+            ${{ env.manifest_json }}
           if-no-files-found: error
 
   android-app:
@@ -693,234 +726,142 @@ jobs:
     if: github.event_name != 'pull_request' || needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
     env:
-      # The APK this job uploads is the one github-release publishes, and
-      # `BuildConfig.BUILD_VERSION` is what it submits as `client_version`. With
-      # nothing injected, build.gradle.kts falls back to "dev" — every release
-      # reporting the same thing as every local build.
-      #
-      # Same release-path-only gating as PIPETTE_CLI_BUILD_VERSION below: the
-      # version changes every commit and lands in BuildConfig, so injecting it
-      # on ordinary CI runs would defeat the gradle build cache for no gain.
-      #
-      # PIPETTE_VERSION_CODE is deliberately NOT set here. It is the
-      # Play/Firebase monotonic counter owned by android-release-distribution
-      # .yml, and setting it is what makes build.gradle.kts treat the build as
-      # an official distribution (verifyReleaseSentryDsn would then fail this
-      # job on a fork with no SENTRY_DSN secret).
+      # Release path only: a per-commit value in BuildConfig defeats the gradle build cache.
+      # PIPETTE_VERSION_CODE is deliberately unset: it marks an official distribution
+      # (android-release-distribution.yml), and verifyReleaseSentryDsn would then fail forks.
       PIPETTE_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/heads/release/') && needs.release-metadata.outputs.version || '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          submodules: recursive
           lfs: true
 
+      # What the APK builds from, not onnxruntime (iOS-only). kleidiai stays for
+      # its license file, which the attribution check reads unconditionally.
+      - name: Check out the vendored sources
+        run: git -c protocol.version=2 submodule update --init --depth=1 --recursive vendor/llama.cpp vendor/sentry-native vendor/kleidiai
+
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
         with:
           distribution: temurin
           java-version: "17"
 
-      # Persists ~/.gradle (dependency cache, artifact transforms, and the local
-      # build cache enabled in gradle.properties) across runs. Gradle's own
-      # action rather than setup-java's `cache: gradle`, which its docs say not
-      # to combine with. Two reasons beyond it being the official action:
-      #
-      #   - cache-read-only defaults to true off the default branch, so PR runs
-      #     restore main's entry and write nothing. setup-java's actions/cache
-      #     wrote a fresh branch-scoped copy on every run, which is why this repo
-      #     was holding three byte-identical ~1 GB copies of this cache (main,
-      #     release/2026.08.1, refs/pull/4/merge) against a 10 GB ceiling, and
-      #     paying 16-18s per run in the post step to upload each one.
-      #   - It prunes to what the build actually used rather than re-uploading a
-      #     monolithic tarball.
-      #
-      # cache-provider is pinned because the default ('enhanced') routes the
-      # cache through a commercial third-party service; 'basic' keeps it on the
-      # GitHub Actions cache, matching what setup-java did.
-      #
-      # Not wired yet: cache-encryption-key, which is what would let the Gradle
-      # configuration cache survive across runs (this job stores an entry every
-      # run and then reports none available on the next). It needs a repo secret.
+      # Not setup-java's `cache: gradle`, which its docs say not to combine with this.
+      # cache-provider: the default 'enhanced' routes through a third-party service.
+      # Without cache-encryption-key no configuration cache is saved at all; an empty
+      # secret (fork PR) only disables that.
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb  # v6.3.0
         with:
           cache-provider: basic
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
       - name: Set up Android SDK
-        # Installs cmdline-tools and accepts licenses; AGP auto-downloads the
-        # compileSdk platform + build-tools on first build.
-        #
-        # packages: the action's default is `tools platform-tools`, and the
-        # legacy `tools` package pulls the Android Emulator in as a dependency
-        # (~14s of this step). Nothing in CI boots an emulator, so ask for
-        # platform-tools alone.
-        uses: android-actions/setup-android@v3
+        # The default legacy `tools` package pulls in the emulator (~14s), which CI never boots.
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd  # v4.0.4
         with:
           packages: platform-tools
 
-      # Cache the pinned NDK so sdkmanager restores it instead of re-downloading
-      # (~1 GB) each run; on a hit the install below is a no-op verify.
-      #
-      # Restore everywhere, save only on main. The key is content-invariant (it
-      # names an exact NDK version), so a branch can never hold anything main
-      # does not already have. On a miss, though, actions/cache would save a
-      # branch-scoped copy anyway, and this repo accumulated three identical
-      # 589 MB copies that way. Splitting restore from save means PR and release
-      # branches read main's entry and never write one.
-      - name: Restore Android NDK
-        id: ndk-cache
-        uses: actions/cache/restore@v4
+      - name: Cache Android NDK
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           key: android-ndk-27.2.12479018-${{ runner.os }}
 
       - name: Install Android NDK + native build tools
         run: |
-          # build-rust-android.sh auto-detects the NDK under $ANDROID_HOME/ndk and
-          # needs cmake + ninja on PATH to cross-build llama.cpp/ggml for arm64.
           yes | sdkmanager --install "ndk;27.2.12479018" >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build cmake
-
-      # Seed the entry every other branch restores from. Only on main, and only
-      # when the restore above missed; see the restore step for why.
-      - name: Save Android NDK
-        if: github.ref == 'refs/heads/main' && steps.ndk-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
-          key: android-ndk-27.2.12479018-${{ runner.os }}
+          # Install before any `apt-get update`: the image's indexes are current, and a
+          # dead package mirror once hung the update for 30min. The timeouts bound
+          # both paths so a stalled mirror fails over in seconds or fails the job.
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10)
+          sudo timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends ninja-build cmake || {
+            sudo timeout 300 apt-get "${apt_opts[@]}" update
+            sudo timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends ninja-build cmake
+          }
 
       - name: Install Rust (Android target)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
         with:
           targets: aarch64-linux-android
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: android-app-v1
           cache-bin: false
-          # Only main writes; see the note on rust-check's rust-cache above.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # sccache caches the llama.cpp/ggml C/C++ cross-compile (the bulk of the
-      # gradle build), routed in via build-rust-android.sh's compiler launchers.
+      - name: Cache sccache binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/sccache
+          key: sccache-tool-${{ env.SCCACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      # Used by build-rust-android.sh's compiler launchers for the llama.cpp/ggml cross-compile.
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Build debug + release APKs + run unit tests
         working-directory: android/Pipette
         env:
-          # Clerk publishable keys come from repo secrets (public by design, kept
-          # out of VCS — see app/build.gradle.kts). Missing secrets are tolerated:
-          # the build still succeeds (empty key → debug stays gate-bypassable).
-          # debug uses the development Clerk instance; release uses production.
+          # Public by design, kept out of VCS; an empty key is tolerated (debug stays
+          # gate-bypassable).
           CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY }}
           CLERK_PUBLISHABLE_KEY_DEBUG: ${{ secrets.CLERK_PUBLISHABLE_KEY_DEBUG }}
-          # Sentry DSN. Supplying it is what turns crash reporting on at all:
-          # app/build.gradle.kts compiles sentry-native into the :benchmark engine,
-          # applies the Sentry Gradle plugin, and populates io.sentry.dsn only when a
-          # DSN is present. An unset secret is an empty string, never a failure, which
-          # is what keeps a fork's run green and telemetry-free.
+          # Its presence is what turns crash reporting on; empty keeps a fork's run
+          # green and telemetry-free.
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          # PostHog product analytics. Same public-by-design, same tolerated-empty
-          # handling. POSTHOG_HOST is a repo VARIABLE, not a secret: it is the plain
-          # ingest hostname and the build falls back to the US cloud default when unset.
+          # POSTHOG_HOST is a repo variable, not a secret; unset falls back to the US cloud.
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
-          # Enables sccache's GHA backend for the native compiles (see the
-          # compiler launchers in build-rust-android.sh).
           SCCACHE_GHA_ENABLED: "true"
-          # See the note on ios-check's build-llama step. This is the job whose
-          # v1 namespace was poisoned, so it is the one v2 is meant to rescue.
           SCCACHE_GHA_VERSION: "2"
-          # Diagnostic, temporary. sccache reports a write failure only as a
-          # counter in `--show-stats`; the reason goes to its server log, which
-          # is off by default. This job needs that reason: it has been recording
-          # 0% cache hits with writes failing, 336 of 336 on the main push in run
-          # 31493653710, and because GitHub scopes cache reads to your own ref
-          # plus the default branch, main failing to write is what leaves every
-          # other ref with no Android objects to restore. `warn` is enough to
-          # capture the backend error without logging a line per cache key.
-          #
-          # These must sit on this step rather than at job level: the sccache
-          # server is started lazily by the first client call, which happens
-          # here, and it captures the environment it was started with.
-          SCCACHE_ERROR_LOG: ${{ runner.temp }}/sccache-error.log
-          SCCACHE_LOG: warn
-        # assemble first so the APKs exist even if a later unit test fails (the job
-        # still goes red, but the artifacts are uploaded for inspection). Release is
-        # signed with the real release keystore when configured (RELEASE_* secrets),
-        # else falls back to the shared debug keystore so it's installable for testing.
-        # assembleRelease runs the PIP-391 guard (verifyReleaseClerkKey, see build.gradle.kts):
-        # the release APK must ship a usable Clerk publishable key or the build fails fast.
-        run: ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --no-daemon --stacktrace
-
-      # Companion to SCCACHE_ERROR_LOG above, and temporary with it. `always()`
-      # because a red build is exactly when the log is worth reading, and
-      # if-no-files-found: ignore because sccache only creates the file when it
-      # has something to say.
-      - name: Upload sccache server log
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: sccache-error-log-android-app
-          path: ${{ runner.temp }}/sccache-error.log
-          if-no-files-found: ignore
+        # assemble first so the APKs exist for upload even if a unit test fails. Without
+        # RELEASE_* secrets, release is signed with the shared debug keystore.
+        run: ./gradlew :app:assembleKotlinEngineDebug :app:assembleKotlinEngineRelease :app:testKotlinEngineDebugUnitTest --no-daemon --stacktrace
 
       - name: Verify computed native libs 16 KB page-size compatibility
         working-directory: android/Pipette
-        run: ../../ci/android-16kb-page-size.sh app/build/generated/rustJniLibs
+        run: ../../ci/android-16kb-page-size.sh app/build/generated/kotlinJniLibs
 
       - name: Verify release APK 16 KB page-size compatibility
         working-directory: android/Pipette
-        run: ../../ci/android-16kb-page-size.sh app/build/outputs/apk/release/app-release.apk
+        run: ../../ci/android-16kb-page-size.sh app/build/outputs/apk/kotlinEngine/release/app-kotlinEngine-release.apk
 
       - name: Licenses (shipping dependencies)
-        # Gates releaseRuntimeClasspath — what actually lands in the APK/AAB —
-        # against the permissive allow-list in the script. Build-time and
-        # test-only configurations are deliberately not gated; they carry
-        # copyleft artifacts (detekt→trove4j LGPL-2.1, lint→JNA, JUnit EPL-1.0)
-        # that are never distributed. See the script header.
-        #
-        # Runs after the build so every POM it needs is already in ~/.gradle
-        # (it falls back to fetching from Maven, but the cache makes it instant).
-        # `if: always()` so a failing unit test above doesn't mask a license
-        # regression — the two are independent problems.
+        # always(): a failing unit test above must not mask a license regression.
         if: always()
         run: |
           ./ci/android-licenses.py --selftest
           ./ci/android-licenses.py
 
       - name: Attribution file up to date
-        # The bundled ThirdPartyLicenses.json must name every dependency the APK
-        # ships, and only those. It is generated from the resolved graphs, so the
-        # fix for a failure here is to regenerate rather than to edit:
-        # `./ci/android-attribution.py --write`, then commit.
+        # Generated: fix with `./ci/android-attribution.py --write`, then commit.
         if: always()
         run: ./ci/android-attribution.py --check
 
       - name: Upload debug APK
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pipette-debug-apk
-          path: android/Pipette/app/build/outputs/apk/debug/app-debug.apk
+          path: android/Pipette/app/build/outputs/apk/kotlinEngine/debug/app-kotlinEngine-debug.apk
           if-no-files-found: warn
 
       - name: Upload release APK
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pipette-release-apk
-          path: android/Pipette/app/build/outputs/apk/release/*.apk
+          path: android/Pipette/app/build/outputs/apk/kotlinEngine/release/*.apk
           if-no-files-found: warn
 
       - name: APK summary
         if: always()
         run: |
-          DEBUG_APK=android/Pipette/app/build/outputs/apk/debug/app-debug.apk
-          RELEASE_APK="$(ls android/Pipette/app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)"
+          DEBUG_APK=android/Pipette/app/build/outputs/apk/kotlinEngine/debug/app-kotlinEngine-debug.apk
+          RELEASE_APK="$(ls android/Pipette/app/build/outputs/apk/kotlinEngine/release/*.apk 2>/dev/null | head -1)"
           row() { # <label> <path> <artifact-name>
             if [ -f "$2" ]; then
               printf '| %s | `%s` | %s | `%s` | `%s` |\n' \
@@ -941,98 +882,291 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   android-lint:
-    # Kotlin format + lint gate for the Android app: ktfmt (Google style) via
-    # :app:ktfmtCheck and detekt static analysis via :app:detekt. Its own job so a
-    # style/lint failure shows up as a distinct `android-lint` status with fast
-    # red/green, independent of the heavy native APK build in android-app. Needs
-    # only the JDK + Android SDK to configure the AGP project — no NDK/Rust/
-    # submodules/LFS — so it stays quick. Mirrors leap-android-sdk's gateway job.
     name: android-lint
     needs: [changes]
     if: github.event_name != 'pull_request' || needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
         with:
           distribution: temurin
           java-version: "17"
 
-      # This job had no Gradle cache at all, so every run resolved the whole
-      # plugin and dependency graph from cold Maven: ~53s of "Calculating task
-      # graph as no cached configuration is available" inside a ~2min step that
-      # ends up executing two tasks. Same action and same reasoning as
-      # android-app above, and the same ~/.gradle key, so the two jobs share one
-      # entry rather than each holding its own.
+      # Same settings as android-app so both share one entry. The configuration cache
+      # matters most here: 85s of a 93s build was task-graph calculation.
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb  # v6.3.0
         with:
           cache-provider: basic
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
       - name: Set up Android SDK
-        # AGP needs the SDK to configure the :app project (compileSdk resolution),
-        # even though ktfmtCheck/detekt only read source files. platform-tools
-        # alone, to skip the emulator the default `tools` package drags in (see
-        # android-app).
-        uses: android-actions/setup-android@v3
+        # AGP needs the SDK to configure :app, even though ktfmt/detekt only read sources.
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd  # v4.0.4
         with:
           packages: platform-tools
 
       - name: Check Kotlin format (ktfmt) + lint (detekt)
         working-directory: android/Pipette
-        # ktfmt and detekt both can't discover AGP-9 built-in-Kotlin source sets, so
-        # :app:ktfmtCheck and :app:detekt are wired to explicit source tasks over
-        # app/src (see app/build.gradle.kts). Fix locally with `:app:ktfmtFormat`;
-        # detekt findings must be fixed or (rarely) baselined via `:app:detektBaseline`.
+        # Neither tool discovers AGP-9 built-in-Kotlin source sets; see app/build.gradle.kts.
+        # Fix with `:app:ktfmtFormat`; baseline detekt (rarely) with `:app:detektBaseline`.
         run: ./gradlew :app:ktfmtCheck :app:detekt --no-daemon --stacktrace
+
+  adb-connector:
+    name: adb-connector
+    needs: [changes, release-metadata]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.adbconnector == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        # Not setup-java's `cache: gradle`: its key hashes `**/*.gradle*` repo-wide, so an
+        # android/Pipette edit would bust this job's cache.
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb  # v6.3.0
+        with:
+          cache-provider: basic
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd  # v4.0.4
+        with:
+          packages: platform-tools
+
+      - name: Check Kotlin format (ktfmt)
+        working-directory: tools/adb-connector-apk
+        run: ./gradlew :app:ktfmtCheck --no-daemon --stacktrace
+
+      - name: Build APK
+        working-directory: tools/adb-connector-apk
+        env:
+          # versionCode is the build's UTC hour, so the farm's `adb install -r` never meets a downgrade.
+          PIPETTE_ADB_CONNECTOR_VERSION_NAME: ${{ needs.release-metadata.outputs.version }}
+          PIPETTE_ADB_CONNECTOR_VERSION_CODE: ${{ needs.release-metadata.outputs.version_code }}
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Name the APK for release
+        working-directory: tools/adb-connector-apk
+        # github-release merges every `pipette-*` artifact into one flat dir, where
+        # app-debug.apk would collide with android-app's.
+        run: mv app/build/outputs/apk/debug/app-debug.apk pipette-adb-connector.apk
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pipette-adb-connector-apk
+          path: tools/adb-connector-apk/pipette-adb-connector.apk
+          if-no-files-found: error
+
+  gpu-keepalive:
+    # The runner has no GPU: the smoke test covers packaging, the service protocol and
+    # the CLI, not the idle-eviction workaround itself.
+    name: gpu-keepalive
+    needs: [changes, release-metadata]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.gpukeepalive == 'true'
+    runs-on: windows-2025
+    env:
+      # WiX v5 is MS-RL. v6 introduced the Open Source Maintenance Fee, which is a
+      # licensing decision rather than a build one, so the major version is pinned.
+      WIX_VERSION: "5.0.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Compute versions
+        id: version
+        shell: pwsh
+        run: |
+          # MSI ProductVersion caps at 255.255.65535, so the train 2026.09.1 becomes
+          # 26.9.1; the binary carries the full string. A build with no train
+          # (`dev-<n>-g<sha>`) packages as 0.0.0.
+          $build = '${{ needs.release-metadata.outputs.version }}'
+          if ($build -match '^20(\d{2})\.(\d{2})\.(\d+)-') {
+            $numeric = '{0}.{1}.{2}' -f [int]$Matches[1], [int]$Matches[2], [int]$Matches[3]
+          } elseif ($build -match '^dev-') {
+            $numeric = '0.0.0'
+          } else {
+            throw "unexpected release version '$build'"
+          }
+          "numeric=$numeric" >> $env:GITHUB_OUTPUT
+          "build=$build" >> $env:GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: tools/gpu-keepalive
+          key: gpu-keepalive-v1
+
+      # A standalone workspace that rust-check never sees, so its gates run here.
+      - name: Lint and test
+        working-directory: tools/gpu-keepalive
+        shell: pwsh
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { throw "cargo fmt --check failed" }
+          cargo clippy --all-targets --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed" }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
+
+      - name: Build
+        working-directory: tools/gpu-keepalive
+        shell: pwsh
+        env:
+          # Passed as environment rather than arguments: PowerShell splits a bare
+          # `--flag=26.9.11` at the first dot.
+          GPU_KEEPALIVE_VERSION: ${{ steps.version.outputs.numeric }}
+          GPU_KEEPALIVE_BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install wix --version $env:WIX_VERSION --tool-path "$env:RUNNER_TEMP\wix"
+          if ($LASTEXITCODE -ne 0) { throw "installing wix failed" }
+          & "$env:RUNNER_TEMP\wix\wix.exe" extension add -g "WixToolset.Util.wixext/$env:WIX_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "adding the wix Util extension failed" }
+
+      - name: Package MSI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $version = '${{ steps.version.outputs.numeric }}'
+          # Built twice: the second package carries the same version but its own
+          # ProductCode, which is what the smoke test upgrades with.
+          foreach ($output in "dist\pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi", "$env:RUNNER_TEMP\upgrade.msi") {
+            & "$env:RUNNER_TEMP\wix\wix.exe" build tools/gpu-keepalive/package/Package.wxs `
+              -arch x64 `
+              -ext WixToolset.Util.wixext `
+              -d "Version=$version" `
+              -d "BinDir=tools/gpu-keepalive/target/release" `
+              -o $output
+            if ($LASTEXITCODE -ne 0) { throw "wix build failed for $output" }
+          }
+
+      - name: Smoke test (install, toggle, upgrade, uninstall)
+        shell: pwsh
+        run: |
+          ./tools/gpu-keepalive/package/smoke-test.ps1 `
+            -Msi "dist\pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi" `
+            -UpgradeMsi "$env:RUNNER_TEMP\upgrade.msi"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi
+          path: dist/pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi
+          # github-release publishes this path; a missing file must fail here
+          # rather than become an empty release asset.
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          # Deliberately not named pipette-*: github-release downloads that prefix.
+          name: gpu-keepalive-smoke-logs
+          path: |
+            ${{ runner.temp }}/msi-*.log
+            ${{ runner.temp }}/service-*.txt
+
+  ios-proxy:
+    # rust-check lints and tests it; this only builds the archive the farm installs.
+    name: ios-proxy
+    needs: [changes, release-metadata]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    runs-on: macos-26
+    env:
+      PIPETTE_IOS_PROXY_VERSION: ${{ startsWith(github.ref, 'refs/heads/release/') && needs.release-metadata.outputs.version || 'dev' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          key: ios-proxy-v1
+
+      - name: Build
+        run: cargo build --release --locked -p pipette-ios-proxy
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          test "$(./target/release/pipette-ios-proxy --version)" = "pipette-ios-proxy ${PIPETTE_IOS_PROXY_VERSION}"
+          staging="$(mktemp -d)"
+          cp target/release/pipette-ios-proxy \
+            tools/pipette-ios-proxy/pipette-ios-proxy.toml.example \
+            tools/pipette-ios-proxy/package/ai.liquid.pipette.ios-proxy.plist \
+            "$staging/"
+          mkdir -p dist
+          tar -C "$staging" -czf dist/pipette-ios-proxy-aarch64-apple-darwin.tar.gz .
+          tar -tzf dist/pipette-ios-proxy-aarch64-apple-darwin.tar.gz
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          # `pipette-` prefix so github-release downloads it.
+          name: pipette-ios-proxy-aarch64-apple-darwin.tar.gz
+          path: dist/pipette-ios-proxy-aarch64-apple-darwin.tar.gz
+          if-no-files-found: error
+
+  coreai-swift:
+    # The only build of the sidecar package before a benchmark host runs it.
+    name: coreai-swift
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.coreaiswift == 'true'
+    # The package imports the CoreAI framework, which only the macOS 27 SDK has.
+    # `xcode-27` is GitHub's image with that SDK.
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the sidecar
+        working-directory: crates/pipette-coreai/swift
+        # The command pipette-coreai runs, plus --force-resolved-versions: a
+        # Package.resolved out of step with Package.swift fails here.
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app
+          xcodebuild -version
+          swift build -c release --force-resolved-versions
 
   build-artifact:
     needs: [changes, release-metadata]
     if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.runner }}
     env:
-      # Every build stamps its own version — `2026.08.1-3-ga1b2c3d4ab` on the
-      # release path, `2026.08.1-dev-3-g323eeda3ab` elsewhere (ci/version.sh). A
-      # binary taken off a PR run therefore names the release it descends from
-      # and the commit it is, which is the whole reason someone pastes
-      # `--version` into a bug report; the bare `dev` this used to pass on
-      # non-release runs named nothing.
-      #
-      # It does change every commit, so the two crates that bake it in via
-      # `env!` recompile and the binaries relink on each run. That cost is
-      # confined to this job: `rust-check` never sets the variable, so the
-      # clippy/test caches — the ones a PR loop actually waits on — are
-      # untouched.
-      PIPETTE_CLI_BUILD_VERSION: ${{ needs.release-metadata.outputs.version }}
-      # Compiler-level cache: reuse unchanged compilation units (including
-      # workspace crates, which the target-dir cache drops) across runs. Biggest
-      # effect on the CPU-bound Windows targets.
+      # Release path only: a per-commit version baked in via `env!` would invalidate
+      # the crate on every build.
+      PIPETTE_CLI_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/heads/release/') && needs.release-metadata.outputs.version || 'dev' }}
+      # Also reuses workspace crates, which the target-dir cache drops.
       SCCACHE_GHA_ENABLED: "true"
-      # See the note on ios-check's build-llama step.
       SCCACHE_GHA_VERSION: "2"
       RUSTC_WRAPPER: sccache
     strategy:
       fail-fast: false
       matrix:
-        # Per-entry fields:
-        #   target            Rust target triple to build for.
-        #   runner            CI runner the entry executes on.
-        #   archive           Archive format: 'tar.gz' (unix) or 'zip' (windows).
-        #   packages          Cargo packages compiled in ONE `cargo build`.
-        #                     Listing several here shares the dependency compile.
-        #   binaries          Binaries packaged into `asset_name` (and signed on
-        #                     macOS). A subset of what `packages` produces.
-        #   asset_name        Filename of the main artifact uploaded + released.
-        #   plan_asset_name   Optional. When set, `pipette-plan` (which must also
-        #                     be in `packages`) is packaged + uploaded under THIS
-        #                     name as its own artifact — built alongside the main
-        #                     binary but shipped separately, not bundled into
-        #                     `asset_name`. Omit it to not ship a plan artifact.
+        #   packages          Compiled in ONE `cargo build`, sharing the dependency compile.
+        #   binaries          Packaged into `asset_name`; a subset of what `packages` produces.
+        #   ctl_asset_name    Optional: ship `pipette-ctl` (must be in `packages`) as its
+        #                     own artifact under this name.
+        #   glibc_max         Optional, linux-gnu only: the build fails if a shipped binary
+        #                     needs a newer GLIBC_x.y.
         include:
-          # Android: the unified pipette client, pushed to devices via adb.
-          # pipette-plan is not shipped for Android, so no plan_asset_name here.
           - target: aarch64-linux-android
             runner: ubuntu-24.04
             asset_name: pipette-cli-aarch64-linux-android.tar.gz
@@ -1040,71 +1174,72 @@ jobs:
             android: true
             packages: pipette-cli
             binaries: pipette
-            # target_clippy: lints the target_os="android" branches (in
-            # pipette-ops and the runtime libraries) that no rust-check host
-            # compiles. See the Clippy step below.
+            # Lints the target_os="android" branches no rust-check host compiles.
             target_clippy: true
-          # pipette-cli: the unified single-binary client (PIP-336). Cross-builds
-          # for every desktop target (its llama.cpp/docker/mlx runtime deps are
-          # subprocess/download-based, not native compiles). Ships the `pipette`
-          # binary, and carries pipette-plan as its own `plan_asset_name` artifact
-          # on each desktop target (the runner ships alongside the client).
+          # Load-bearing 22.04, not 24.04: the runner's glibc is the release's floor,
+          # and 24.04-built assets died on the 22.04 (glibc 2.35) H100 farm nodes.
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            runner: ubuntu-22.04
+            glibc_max: "2.35"
             asset_name: pipette-cli-x86_64-unknown-linux-gnu.tar.gz
             archive: tar.gz
-            packages: pipette-cli pipette-plan
+            packages: pipette-cli pipette-ctl
             binaries: pipette
-            plan_asset_name: pipette-plan-x86_64-unknown-linux-gnu.tar.gz
+            ctl_asset_name: pipette-ctl-x86_64-unknown-linux-gnu.tar.gz
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            runner: ubuntu-22.04
+            # 22.04 gives 2.35 here too; the Debian 12 boards (2.36) leave a
+            # little headroom, the H100 nodes none.
+            glibc_max: "2.35"
             asset_name: pipette-cli-aarch64-unknown-linux-gnu.tar.gz
             archive: tar.gz
             cross_packages: gcc-aarch64-linux-gnu
             cross_linker: aarch64-linux-gnu-gcc
-            packages: pipette-cli pipette-plan
+            packages: pipette-cli pipette-ctl
             binaries: pipette
-            plan_asset_name: pipette-plan-aarch64-unknown-linux-gnu.tar.gz
+            ctl_asset_name: pipette-ctl-aarch64-unknown-linux-gnu.tar.gz
           - target: aarch64-apple-darwin
             runner: macos-26
             asset_name: pipette-cli-aarch64-apple-darwin.tar.gz
             archive: tar.gz
-            # pipette-mlx is a pipette-cli dependency (only `pipette` ships), so
-            # it's listed for the release build but not in `binaries`. Its lint
-            # and test coverage comes from the macos rust-check leg, which no
-            # longer excludes it.
-            packages: pipette-cli pipette-plan pipette-mlx
+            # pipette-mlx is a pipette-cli dependency, built here but not shipped.
+            packages: pipette-cli pipette-ctl pipette-mlx
             binaries: pipette
-            plan_asset_name: pipette-plan-aarch64-apple-darwin.tar.gz
+            ctl_asset_name: pipette-ctl-aarch64-apple-darwin.tar.gz
           - target: x86_64-pc-windows-msvc
             runner: windows-2025
             asset_name: pipette-cli-x86_64-pc-windows-msvc.zip
             archive: zip
-            packages: pipette-cli pipette-plan
+            packages: pipette-cli pipette-ctl
             binaries: pipette
-            plan_asset_name: pipette-plan-x86_64-pc-windows-msvc.zip
+            ctl_asset_name: pipette-ctl-x86_64-pc-windows-msvc.zip
           - target: aarch64-pc-windows-msvc
             runner: windows-2022
             asset_name: pipette-cli-aarch64-pc-windows-msvc.zip
             archive: zip
-            packages: pipette-cli pipette-plan
+            packages: pipette-cli pipette-ctl
             binaries: pipette
-            plan_asset_name: pipette-plan-aarch64-pc-windows-msvc.zip
+            ctl_asset_name: pipette-ctl-aarch64-pc-windows-msvc.zip
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          submodules: recursive
-          # Nothing needs it at the moment: the toybox binary whose `include_bytes!`
-          # required LFS is gone, and the Android measurement path now samples
-          # `/proc` directly. `.gitattributes` stays the list to check if an
-          # LFS-tracked asset is added back.
-          lfs: true
+          # Nothing needs LFS today; scoped to Android so the other legs skip the fetch.
+          lfs: ${{ matrix.android || false }}
+
+      # Keyed on the runner, not matrix.target: the arm64 Windows leg cross-compiles on x64.
+      - name: Cache sccache binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/sccache
+          key: sccache-tool-${{ env.SCCACHE_VERSION }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
         with:
           targets: ${{ matrix.target }}
           components: clippy
@@ -1112,15 +1247,12 @@ jobs:
       - name: Install cross-compilation toolchain
         if: matrix.cross_packages
         run: |
-          # Skip `apt-get update` on the fast path: the runner image ships
-          # current indexes, so these base-pool packages install straight from
-          # them. A full refresh here instead blocks ~3min on the un-mirrored
-          # security.ubuntu.com repo (78 kB/s), which was the dominant cost of
-          # this whole job. Fall back to a refresh and retry only if the direct
-          # install hits a stale index.
-          sudo apt-get install -y ${{ matrix.cross_packages }} || {
-            sudo apt-get update
-            sudo apt-get install -y ${{ matrix.cross_packages }}
+          # Skip `apt-get update` on the fast path: a refresh blocks ~3min on the
+          # un-mirrored security.ubuntu.com. Bounded like android-app's NDK step.
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10)
+          sudo timeout 300 apt-get "${apt_opts[@]}" install -y ${{ matrix.cross_packages }} || {
+            sudo timeout 300 apt-get "${apt_opts[@]}" update
+            sudo timeout 300 apt-get "${apt_opts[@]}" install -y ${{ matrix.cross_packages }}
           }
 
       - name: Set cross-compilation linker
@@ -1131,10 +1263,8 @@ jobs:
 
       - name: Set up Android NDK
         if: matrix.android
-        # This toolchain compiles the shipped Android native code, so an
-        # unverified archive reaches the artifact. dl.google.com publishes no
-        # sha256, so this digest came from hashing the archive and matching its
-        # SHA-1 to the entry in repository2-3.xml. Re-verify that way when bumping.
+        # dl.google.com publishes no sha256: this digest was hashed locally and its SHA-1
+        # matched to repository2-3.xml. Re-verify that way when bumping.
         env:
           ANDROID_NDK_VERSION: "r27c"
           ANDROID_NDK_SHA256: "59c2f6dc96743b5daf5d1626684640b20a6bd2b1d85b13156b90333741bad5cc"
@@ -1150,32 +1280,19 @@ jobs:
           echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
 
-      # Two complementary caches. sccache (job env + setup above) caches the
-      # llama.cpp/ggml C/C++ compiles (~100% hit); the target-dir cache below
-      # caches the Rust crate graph, which sccache barely helps (~38% Rust hit,
-      # measured on rust-check). Without it the ~200-crate dependency graph
-      # recompiled from scratch every run (~1min). Per-asset key: each entry
-      # keeps its own target dir; cache-workspace-crates keeps the `pipette-*`
-      # crates rust-cache drops by default.
+      # sccache barely helps the Rust graph (~38% hit), so the target dir is cached too.
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         continue-on-error: true
         with:
-          key: build-artifact-${{ matrix.asset_name }}-v3
+          # Bump on a runner image change: cargo's fingerprint omits the host C compiler,
+          # so it would reuse C objects built against another glibc.
+          key: build-artifact-${{ matrix.asset_name }}-v4
           cache-bin: false
           cache-workspace-crates: true
-          # Only main writes; see the note on rust-check's rust-cache above.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Per-target clippy, only where it covers a rust-check blind spot
-      # (target_clippy entries): the android target lints target_os="android"
-      # branches no rust-check host compiles. Everything else is already
-      # linted by the host rust-check jobs (no target_arch cfg exists, so x86
-      # vs aarch64 makes no difference), and the release build below still
-      # compile-checks every target's cfg regardless. --release shares the
-      # llama.cpp/ggml C++ build with that build step; no --all-targets since
-      # cross tests/benches can't run here. Deny-on-warnings comes from
-      # [workspace.lints].
+      # --release shares the C++ build with the build step; no --all-targets since
+      # cross tests can't run here.
       - name: Clippy
         if: ${{ matrix.target_clippy }}
         run: |
@@ -1186,23 +1303,46 @@ jobs:
 
       - name: Build release binary
         run: |
-          # One cargo invocation with every -p flag, mirroring the Clippy step:
-          # a separate `cargo build -p` per package resolves features per-package
-          # and recompiles shared workspace crates once per package. A single
-          # invocation unifies features so each crate compiles once.
+          # One invocation: per-package builds resolve features separately and
+          # recompile shared crates once per package.
           pkgs=""
           for pkg in ${{ matrix.packages }}; do pkgs="$pkgs -p $pkg"; done
           cargo build --release $pkgs --target ${{ matrix.target }}
         shell: bash
 
+      - name: Check glibc floor
+        if: matrix.glibc_max
+        run: |
+          set -euo pipefail
+          bins='${{ matrix.binaries }}'
+          if [ -n '${{ matrix.ctl_asset_name }}' ]; then
+            bins="$bins pipette-ctl"
+          fi
+          # readelf, not objdump: it reads any ELF arch, so it serves the cross-built leg.
+          rc=0
+          for bin in $bins; do
+            path="target/${{ matrix.target }}/release/$bin"
+            floor="$(readelf --wide --dyn-syms "$path" | grep -o 'GLIBC_[0-9.]*' | sed 's/^GLIBC_//' | sort -Vu | tail -n1)"
+            if [ -z "$floor" ]; then
+              echo "::error::$bin: no GLIBC_ symbol versions found — not a dynamically linked glibc binary?"
+              rc=1
+            elif [ "$(printf '%s\n%s\n' "$floor" '${{ matrix.glibc_max }}' | sort -V | tail -n1)" != '${{ matrix.glibc_max }}' ]; then
+              echo "::error::$bin requires glibc $floor, above the ${{ matrix.glibc_max }} floor this asset promises. Was the runner moved off 22.04?"
+              readelf --wide --dyn-syms "$path" | grep "GLIBC_$floor" || true
+              rc=1
+            else
+              echo "$bin: glibc floor $floor (max ${{ matrix.glibc_max }})"
+            fi
+          done
+          exit $rc
+        shell: bash
+
       - name: Ad-hoc sign macOS release binaries
         if: contains(matrix.target, 'apple-darwin')
         run: |
-          # pipette-plan is built alongside the main binary but packaged into
-          # its own artifact, so sign it here too when this entry produces one.
           bins='${{ matrix.binaries }}'
-          if [ -n '${{ matrix.plan_asset_name }}' ]; then
-            bins="$bins pipette-plan"
+          if [ -n '${{ matrix.ctl_asset_name }}' ]; then
+            bins="$bins pipette-ctl"
           fi
           for bin in $bins; do
             path="target/${{ matrix.target }}/release/$bin"
@@ -1230,53 +1370,41 @@ jobs:
           $paths = $binaries | ForEach-Object { "target/${{ matrix.target }}/release/$_.exe" }
           Compress-Archive -Path $paths -DestinationPath "dist/${{ matrix.asset_name }}"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ matrix.asset_name }}
           path: dist/${{ matrix.asset_name }}
 
-      # pipette-plan is compiled in the same build as the main binary (so it
-      # shares the dependency compile), but shipped as its own artifact rather
-      # than bundled into the llamacpp/mlx archive.
-      - name: Package pipette-plan artifact (tar.gz)
-        if: matrix.plan_asset_name && matrix.archive == 'tar.gz'
+      - name: Package pipette-ctl artifact (tar.gz)
+        if: matrix.ctl_asset_name && matrix.archive == 'tar.gz'
         run: |
           mkdir -p dist
-          tar -C "target/${{ matrix.target }}/release" -czf "dist/${{ matrix.plan_asset_name }}" pipette-plan
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/${{ matrix.ctl_asset_name }}" pipette-ctl
         shell: bash
 
-      - name: Package pipette-plan artifact (zip)
-        if: matrix.plan_asset_name && matrix.archive == 'zip'
+      - name: Package pipette-ctl artifact (zip)
+        if: matrix.ctl_asset_name && matrix.archive == 'zip'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path "target/${{ matrix.target }}/release/pipette-plan.exe" -DestinationPath "dist/${{ matrix.plan_asset_name }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/pipette-ctl.exe" -DestinationPath "dist/${{ matrix.ctl_asset_name }}"
 
-      - uses: actions/upload-artifact@v6
-        if: matrix.plan_asset_name
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: matrix.ctl_asset_name
         with:
-          name: ${{ matrix.plan_asset_name }}
-          path: dist/${{ matrix.plan_asset_name }}
+          name: ${{ matrix.ctl_asset_name }}
+          path: dist/${{ matrix.ctl_asset_name }}
 
   build-complete:
-    # Single aggregate gate so branch protection can require just one check
-    # instead of every matrix expansion of rust-check / build-artifact.
-    # Always runs so a failed/cancelled upstream still fails this job;
-    # skipped upstreams (PRs gated out by paths-filter) are tolerated.
-    #
-    # The list spans the whole graph, prerequisites included. A job that fails
-    # takes its dependents down as `skipped`, which this gate tolerates, so
-    # `changes` and `release-metadata` are named directly — otherwise their
-    # failure arrives here as a graph of skips and the gate reports success.
-    needs: [changes, release-metadata, conventions, rust-check, python-check, build-artifact, ios-check, ios-archive, android-app, android-lint]
+    # The one required check. A failed job skips its dependents and skips are
+    # tolerated, so prerequisites are listed too or their failure reads as green.
+    needs: [changes, release-metadata, conventions, rust-check, rust-coverage, python-check, build-artifact, ios-check, ios-archive, android-app, android-lint, adb-connector, gpu-keepalive, ios-proxy, coreai-swift]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - name: Verify all builds succeeded
         run: |
-          # Treat 'skipped' as OK: compile jobs are gated by path filters
-          # on PRs that don't touch Rust/iOS code. Only real failures or
-          # cancellations should fail the aggregate gate.
+          # 'skipped' is OK (path-filtered on PRs); cancelled must fail like failure.
           result='${{ join(needs.*.result, ',') }}'
           echo "upstream results: $result"
           case "$result" in
@@ -1299,7 +1427,7 @@ jobs:
       contents: write
     steps:
       # The version carries the commit, so this only fires when the same
-      # commit is published twice — a re-run. It never blocks a real push.
+      # commit is published twice, as in a re-run.
       - name: Skip if this release already exists
         id: guard
         env:
@@ -1308,16 +1436,14 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "${VER}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "::notice::release ${VER} already exists — not republishing"
+            echo "::notice::release ${VER} already exists, not republishing"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "publishing ${VER}"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Pinned: this is the only job with a repo-write token, so a moved tag here
-      # could publish a release. Read-only jobs above still ride tags.
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         if: steps.guard.outputs.skip != 'true'
         with:
           pattern: "pipette-*"
@@ -1326,59 +1452,72 @@ jobs:
 
       - name: Stage Android release APK (versioned)
         if: steps.guard.outputs.skip != 'true'
-        # The android-app job uploads the production APK as `pipette-release-apk`
-        # (file: app-release.apk), which the download above flattens into dist/.
-        # Rename it to a versioned asset so the release carries `pipette-<ver>.apk`
-        # rather than a generic name. The debug APK rides along in the same
-        # download; drop it so it is neither published nor checksummed.
+        # The debug APK rides along in the download; drop it so it is neither
+        # published nor checksummed.
         run: |
-          set -euo pipefail
           ver='${{ needs.release-metadata.outputs.version }}'
-          rm -f dist/app-debug.apk
-          if [[ -f dist/app-release.apk ]]; then
-            mv dist/app-release.apk "dist/pipette-${ver}.apk"
-            echo "staged dist/pipette-${ver}.apk"
+          rm -f dist/app-debug.apk dist/app-*-debug.apk
+          APK_SRC="$(ls dist/app-kotlinEngine-release.apk dist/app-*-release.apk dist/app-release.apk 2>/dev/null | head -1)"
+          if [ -n "$APK_SRC" ] && [ -f "$APK_SRC" ]; then
+            mv "$APK_SRC" "dist/pipette-${ver}.apk"
+            echo "staged dist/pipette-${ver}.apk from $APK_SRC"
           else
-            echo "::warning::dist/app-release.apk not found — Android APK will not be attached"
+            echo "::warning::dist/app-*-release.apk not found: Android APK will not be attached"
             ls -la dist || true
+          fi
+
+      - name: Stage ADB Connector APK (versioned)
+        if: steps.guard.outputs.skip != 'true'
+        # Warns rather than failing the release of everything else.
+        run: |
+          ver='${{ needs.release-metadata.outputs.version }}'
+          if [ -f dist/pipette-adb-connector.apk ]; then
+            mv dist/pipette-adb-connector.apk "dist/pipette-adb-connector-${ver}.apk"
+            echo "staged dist/pipette-adb-connector-${ver}.apk"
+          else
+            echo "::warning::dist/pipette-adb-connector.apk not found — ADB Connector APK will not be attached"
           fi
 
       - name: Checksum release assets
         if: steps.guard.outputs.skip != 'true'
-        # One `<asset>.sha256` beside each file, matching pipette-mgmt's layout.
-        # This proves a download arrived intact; it is not a signature, since
-        # anyone able to replace an asset can replace its checksum too.
+        # Proves integrity, not authenticity: whoever can replace an asset can
+        # replace its checksum.
         run: |
           set -euo pipefail
           cd dist
           for f in *; do
-            [[ -f "$f" ]] || continue
+            [ -f "$f" ] || continue
             sha256sum "$f" > "${f}.sha256"
           done
           ls -1
 
       - name: Create GitHub release
         if: steps.guard.outputs.skip != 'true'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           tag_name: ${{ needs.release-metadata.outputs.version }}
           name: ${{ needs.release-metadata.outputs.version }}
           generate_release_notes: true
-          # Archives are listed explicitly so nothing unexpected in dist/ can
+          # Assets are listed explicitly so nothing unexpected in dist/ can
           # ship. The `*.sha256` glob is safe because the staging step removed
           # the only file that must not be published.
           files: |
             dist/pipette-${{ needs.release-metadata.outputs.version }}.apk
+            dist/pipette-adb-connector-${{ needs.release-metadata.outputs.version }}.apk
             dist/pipette-ios-${{ needs.release-metadata.outputs.version }}-internal.xcarchive.zip
-            dist/pipette-plan-x86_64-unknown-linux-gnu.tar.gz
-            dist/pipette-plan-aarch64-unknown-linux-gnu.tar.gz
-            dist/pipette-plan-aarch64-apple-darwin.tar.gz
-            dist/pipette-plan-x86_64-pc-windows-msvc.zip
-            dist/pipette-plan-aarch64-pc-windows-msvc.zip
+            dist/pipette-ios-${{ needs.release-metadata.outputs.version }}-internal.json
+            dist/pipette-ctl-x86_64-unknown-linux-gnu.tar.gz
+            dist/pipette-ctl-aarch64-unknown-linux-gnu.tar.gz
+            dist/pipette-ctl-aarch64-apple-darwin.tar.gz
+            dist/pipette-ctl-x86_64-pc-windows-msvc.zip
+            dist/pipette-ctl-aarch64-pc-windows-msvc.zip
             dist/pipette-cli-x86_64-unknown-linux-gnu.tar.gz
             dist/pipette-cli-aarch64-unknown-linux-gnu.tar.gz
             dist/pipette-cli-aarch64-apple-darwin.tar.gz
             dist/pipette-cli-x86_64-pc-windows-msvc.zip
             dist/pipette-cli-aarch64-pc-windows-msvc.zip
             dist/pipette-cli-aarch64-linux-android.tar.gz
+            dist/pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi
+            dist/pipette-ios-proxy-aarch64-apple-darwin.tar.gz
             dist/*.sha256
+

@@ -1,25 +1,27 @@
 import Foundation
 import MLX
 
-/// Process-wide memory introspection shared by both benchmark runtimes.
+/// `max_memory_usage` is the process physical footprint, the counter jetsam kills on,
+/// rather than an allocator's high-water mark, so the figure compares across engines.
 ///
-/// `max_memory_usage` reports the process **physical footprint**
-/// (`task_vm_info.phys_footprint`) — the same counter iOS jetsam kills on — rather
-/// than an allocator-specific high-water mark (Metal device alloc for llama.cpp,
-/// MLX's own buffer cache for MLX). One runtime-agnostic figure that's both
-/// comparable across engines and meaningful for OOM analysis. Each runtime brackets
-/// its fresh-load + work with a `MemoryPeakSampler` over `physFootprintBytes` and
-/// reports the high-water mark.
-///
-/// Because iOS runs every benchmark cell in **one long-lived process**, the
-/// footprint carries over between cells: a prior (large) model's un-reclaimed pages
-/// would be counted as the next model's peak. `settleToFloor()` closes that gap —
-/// it drains caches and waits for the footprint to fall back to a clean floor
-/// before a measurement starts.
+/// Every cell runs in one long-lived process, so a prior model's unreclaimed pages would
+/// count toward the next peak. `settleToFloor()` narrows that; only an internal build
+/// closes it (`flushReclaimRing`), and on a public build only a process's first cell is
+/// exact (`hasRunEngineWork`).
 nonisolated enum ProcessMemory {
-    /// Current process physical footprint in bytes, or 0 if the kernel query fails.
-    /// `task_vm_info.phys_footprint` is the resident + compressed memory iOS
-    /// attributes to the process and jetsam-kills on — not an allocator counter.
+    private static let engineWorkLock = NSLock()
+    nonisolated(unsafe) private static var engineWorkRan = false
+
+    /// Only a relaunch clears it. Why it matters: `MemoryFreshness`.
+    static var hasRunEngineWork: Bool {
+        engineWorkLock.withLock { engineWorkRan }
+    }
+
+    static func markEngineWork() {
+        engineWorkLock.withLock { engineWorkRan = true }
+    }
+
+    /// 0 if the kernel query fails.
     static func physFootprintBytes() -> UInt64 {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
@@ -32,28 +34,16 @@ nonisolated enum ProcessMemory {
         return kr == KERN_SUCCESS ? UInt64(info.phys_footprint) : 0
     }
 
-    /// Return freed weight/activation buffers to the OS. Dropping a model — llama
-    /// *or* MLX — hands its buffers back to MLX's Metal buffer cache, **not** to the
-    /// OS, so `phys_footprint` stays elevated until the cache is drained. Called
-    /// runtime-agnostically (the llama path drains it too) because a prior MLX cell
-    /// can leave a cache behind that inflates a following llama measurement.
+    /// A dropped MLX model's buffers go back to MLX's cache, not the OS, so every runtime
+    /// drains it: a prior MLX cell would inflate a following llama measurement.
     static func drainCaches() {
         MLX.Memory.clearCache()
+        flushReclaimRing()
     }
 
-    /// Settle the process footprint to a clean floor before a `max_memory_usage`
-    /// sample, and return the floor reached.
-    ///
-    /// iOS runs every cell in one process, so a prior model's not-yet-reclaimed
-    /// pages would otherwise be counted as this model's peak (a small model right
-    /// after a large one inherits the large one's footprint). This drains caches,
-    /// then polls `phys_footprint` until it stops falling (plateaus for
-    /// `stableSamples` consecutive polls) or `timeoutMs` elapses.
-    ///
-    /// The reported figure is **not** reduced by this floor — the absolute peak is
-    /// still what jetsam counts. The floor is returned so the caller can log it and
-    /// flag a run whose floor never fell back to the harness level (contamination
-    /// the platform couldn't reclaim in time).
+    /// Drains caches and waits for the footprint to plateau, returning the floor. The peak
+    /// is not reduced by it (jetsam counts the absolute figure); it is logged so a run that
+    /// never settled back is visible.
     @discardableResult
     static func settleToFloor(pollIntervalMs: UInt32 = 50,
                               stableSamples: Int = 3,
@@ -63,19 +53,12 @@ nonisolated enum ProcessMemory {
                       sleepMs: { usleep($0 * 1000) })
     }
 
-    /// Injectable core of `settleToFloor` — the plateau loop with the cache drain,
-    /// footprint source, and sleep passed in so the settling logic is unit-testable
-    /// with scripted footprints (no device, no real timing). `sample` is read once
-    /// after `drain`, then after every `sleepMs(pollIntervalMs)`; the loop returns
-    /// the last sample once it stops falling for `stableSamples` polls or `timeoutMs`
-    /// elapses.
+    /// Injectable for tests.
     static func settleToFloor(pollIntervalMs: UInt32, stableSamples: Int, timeoutMs: UInt32,
                               drain: () -> Void, sample: () -> UInt64,
                               sleepMs: (UInt32) -> Void) -> UInt64 {
         drain()
-        // "Not falling" tolerance: a poll that drops less than this counts as a
-        // plateau. Small enough to ignore rounding, large enough not to wait out
-        // slow trailing reclamation forever.
+        // A smaller drop counts as a plateau, so slow trailing reclamation isn't waited out.
         let epsilon: UInt64 = 1 << 20  // 1 MiB
         var last = sample()
         var stable = 0
@@ -84,9 +67,6 @@ nonisolated enum ProcessMemory {
             sleepMs(pollIntervalMs)
             elapsed += pollIntervalMs
             let now = sample()
-            // Plateau = footprint neither rose nor fell meaningfully since the last
-            // poll. A still-falling footprint (reclamation in progress) or a rise
-            // resets the streak so we keep waiting for it to settle.
             if last >= now, last - now < epsilon {
                 stable += 1
             } else {
@@ -97,47 +77,131 @@ nonisolated enum ProcessMemory {
         return last
     }
 
-    /// Bracket a fresh model load + drive with the process-footprint peak sampler
-    /// and report `max_memory_usage`. Both runtimes call this with their own
-    /// load-and-drive closure and a log `label` (`"llama"` / `"mlx"`), so the
-    /// sampling, floor settling, logging, and result packaging live in one place —
-    /// the two engines stay structural twins here by construction.
+    /// Samples across the whole load and drive, since a blocking C load can only be
+    /// observed from another thread. An internal build (`PIPETTE_PRIVATE_MEMORY`) also
+    /// reads the kernel's interval high-water mark, which catches a spike shorter than the
+    /// poll (MLX's prefill).
     ///
-    /// Sampling starts *before* the load so a blocking C load is observed off the
-    /// poll thread, and brackets the whole load + drive so the peak captures
-    /// resident weights + activations — the true jetsam-relevant high-water mark.
-    /// `settleToFloor()` runs first so a small model right after a large one doesn't
-    /// inherit un-reclaimed pages as its peak; the floor is logged, not subtracted
-    /// (jetsam counts the absolute footprint), so a run that never settled back is
-    /// detectable. `gpu`/`npu` bytes are nil: the footprint is one host figure.
+    /// `counter` is the footprint unless a runtime holds memory it does not bill (ONNX's
+    /// mapped weights).
     static func maxMemoryBracket(
-        label: String, work: () async throws -> Void
-    ) async throws -> BenchmarkResult {
+        label: String, counter: () -> () -> UInt64 = { physFootprintBytes },
+        work: () async throws -> Void
+    ) async throws -> MaxMemoryMeasurementReading {
         let enter = physFootprintBytes()
+        let fresh = !hasRunEngineWork
         let floor = settleToFloor()
-        let sampler = MemoryPeakSampler(source: physFootprintBytes)
+        let resetRc = resetKernelFootprintPeak()
+        let sampler = MemoryPeakSampler(source: counter())
         sampler.start()
         do {
             try await work()
         } catch {
-            // Stop the poll thread before propagating; a load that throws (e.g. the
-            // OOM this benchmark courts) would otherwise leak it for the process life.
+            // Or the poll thread leaks for the process's life.
             _ = sampler.stop()
             throw error
         }
-        let peak = sampler.stop()
-        AppLog.memory.info(String(
-            format: "%@ max_memory: enter=%.0fMB floor=%.0fMB peak=%.0fMB",
-            label, Double(enter) / 1_048_576, Double(floor) / 1_048_576, Double(peak) / 1_048_576))
-        return .maxMemoryUsage(hostBytes: peak, gpuBytes: nil, npuBytes: nil)
+        let sampled = sampler.stop()
+        let kernel = kernelFootprintPeak()
+        let peak = reportedPeak(sampled: sampled, resetRc: resetRc, kernel: kernel)
+        func mb(_ bytes: UInt64) -> String { String(format: "%.0fMB", Double(bytes) / 1_048_576) }
+        // `off`: a public build, which has only the sampler.
+        let kernelField = resetRc.map { "\(kernel.map(mb) ?? "na") reset_rc=\($0)" } ?? "off"
+        AppLog.memory.info(
+            "\(label) max_memory: enter=\(mb(enter)) floor=\(mb(floor)) peak=\(mb(peak)) "
+                + "sampled=\(mb(sampled)) kernel=\(kernelField) fresh=\(fresh ? "yes" : "no")")
+        if !fresh, !BuildFlavor.hasPrivateMemory {
+            AppLog.memory.warning(
+                "\(label) max_memory ran after other work in this app process; a build without "
+                    + "PIPETTE_PRIVATE_MEMORY cannot flush what that work freed, so the peak can "
+                    + "read high. Run each memory benchmark first in a fresh launch.")
+        }
+        return MaxMemoryMeasurementReading(maxHostBytes: peak, maxGpuBytes: nil, maxNpuBytes: nil)
+    }
+
+    /// The kernel peak counts only if its interval was reset for this bracket; otherwise
+    /// an earlier bracket's peak would be charged here.
+    static func reportedPeak(sampled: UInt64, resetRc: Int32?, kernel: UInt64?) -> UInt64 {
+        guard resetRc == 0, let kernel else { return sampled }
+        return max(sampled, kernel)
+    }
+
+    // Private libproc and mach_vm_reclaim calls (no iOS header), resolved with dlsym and
+    // compiled in only on an internal build so a public binary carries no trace of their names.
+    // `bitPattern: -2` is RTLD_DEFAULT, a cast macro Swift cannot import.
+
+    /// `proc_reset_footprint_interval(getpid())`: its return code (-1 with errno on a
+    /// refused call), -2 if the symbol is missing, nil on a public build.
+    private static func resetKernelFootprintPeak() -> Int32? {
+        #if PIPETTE_PRIVATE_MEMORY
+        typealias Reset = @convention(c) (pid_t) -> Int32
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
+                              "proc_reset_footprint_interval") else { return -2 }
+        return unsafeBitCast(sym, to: Reset.self)(getpid())
+        #else
+        return nil
+        #endif
+    }
+
+    /// `ri_interval_max_phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V4)`: the
+    /// footprint's exact high-water mark since the last reset, nil if unavailable.
+    private static func kernelFootprintPeak() -> UInt64? {
+        #if PIPETTE_PRIVATE_MEMORY
+        typealias PidRusage = @convention(c) (pid_t, Int32, UnsafeMutableRawPointer) -> Int32
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
+                              "proc_pid_rusage") else { return nil }
+        var info = rusage_info_v4()
+        let rc = withUnsafeMutableBytes(of: &info) {
+            unsafeBitCast(sym, to: PidRusage.self)(getpid(), RUSAGE_INFO_V4, $0.baseAddress!)
+        }
+        return rc == 0 ? info.ri_interval_max_phys_footprint : nil
+        #else
+        return nil
+        #endif
+    }
+
+    /// Empty libmalloc's deferred-reclaim ring. iOS 27 parks freed blocks there, still
+    /// counted in `phys_footprint`, until the kernel trims it, so a cell would otherwise
+    /// inherit what earlier work freed (about 300 MB after an ONNX Runtime cell). The
+    /// flush's code, -2 if the calls are missing, -3 if the task has no ring, nil on a
+    /// public build.
+    @discardableResult
+    static func flushReclaimRing() -> Int32? {
+        #if PIPETTE_PRIVATE_MEMORY
+        typealias GetRings = @convention(c) (
+            mach_port_t, UnsafeMutableRawPointer, UnsafeMutablePointer<UInt32>) -> kern_return_t
+        typealias Capacity = @convention(c) (
+            UnsafeMutableRawPointer, UnsafeMutablePointer<UInt32>) -> kern_return_t
+        typealias Flush = @convention(c) (UnsafeMutableRawPointer, UInt32) -> kern_return_t
+        let rc = { () -> Int32 in
+            let rtld = UnsafeMutableRawPointer(bitPattern: -2)
+            guard let getRings = dlsym(rtld, "mach_vm_reclaim_get_rings_for_task"),
+                  let capacity = dlsym(rtld, "mach_vm_reclaim_ring_capacity"),
+                  let flush = dlsym(rtld, "mach_vm_reclaim_ring_flush") else { return -2 }
+            var ref: (addr: UInt64, size: UInt64) = (0, 0)
+            var count: UInt32 = 1
+            let kr = withUnsafeMutableBytes(of: &ref) {
+                unsafeBitCast(getRings, to: GetRings.self)(mach_task_self_, $0.baseAddress!, &count)
+            }
+            guard kr == KERN_SUCCESS else { return kr }
+            guard count > 0, let ring = UnsafeMutableRawPointer(bitPattern: UInt(ref.addr)) else {
+                return -3
+            }
+            var entries: UInt32 = 0
+            let capacityKr = unsafeBitCast(capacity, to: Capacity.self)(ring, &entries)
+            guard capacityKr == KERN_SUCCESS else { return capacityKr }
+            return unsafeBitCast(flush, to: Flush.self)(ring, entries)
+        }()
+        if rc != KERN_SUCCESS { AppLog.memory.warning("reclaim ring flush failed: rc=\(rc)") }
+        return rc
+        #else
+        return nil
+        #endif
     }
 }
 
-/// Samples a byte counter on a background thread to capture a high-water mark, for
-/// `max_memory_usage` (the work between `start()`/`stop()` is a blocking C call, so
-/// the peak can't be observed inline). Both runtimes bracket their fresh-load +
-/// drive with one of these over `ProcessMemory.physFootprintBytes`. Peer of the Rust
-/// `PhysFootprintPoller`.
+/// On a background thread because the measured work is a blocking C call. Peer of
+/// `pipette_memprobe::Sampler`.
 nonisolated final class MemoryPeakSampler: @unchecked Sendable {
     private let source: () -> UInt64
     private let intervalMs: UInt32
@@ -145,10 +209,8 @@ nonisolated final class MemoryPeakSampler: @unchecked Sendable {
     private var peak: UInt64 = 0
     private var running = false
     private var thread: Thread?
-    /// Signalled by the poll loop on exit so `stop()` can wait on it before reading
-    /// the peak. On the signalled path this rules out a `source()` call racing past
-    /// the return; the wait is bounded, so a thread that never started (no signal)
-    /// falls through on timeout instead.
+    /// So `stop()` reads the peak only after the last `source()` call. The wait is
+    /// bounded, so a thread that never started falls through on timeout.
     private let finished = DispatchSemaphore(value: 0)
 
     init(source: @escaping () -> UInt64, intervalMs: UInt32 = 20) {
@@ -156,7 +218,6 @@ nonisolated final class MemoryPeakSampler: @unchecked Sendable {
         self.intervalMs = intervalMs
     }
 
-    /// Capture the first sample as the initial peak and begin polling.
     func start() {
         let first = source()
         lock.lock(); peak = first; running = true; lock.unlock()
@@ -172,16 +233,8 @@ nonisolated final class MemoryPeakSampler: @unchecked Sendable {
         thread = t
     }
 
-    /// Stop polling, best-effort wait for the poll thread to exit, take a final
-    /// sample, and return the captured peak. On the normal (signalled) path the wait
-    /// returns once the background loop has exited (no more `source()` calls) before
-    /// we read the high-water mark; the wait is bounded, so on timeout `stop()`
-    /// proceeds without that guarantee. A timeout is only expected when the thread
-    /// never started (e.g. `stop()` without `start()`).
     func stop() -> UInt64 {
         lock.lock(); running = false; lock.unlock()
-        // Bounded wait for the poll loop to exit. The timeout keeps `stop()` from
-        // hanging if the thread never started (e.g. `stop()` without `start()`).
         _ = finished.wait(timeout: .now() + .milliseconds(Int(intervalMs) * 4 + 200))
         observe(source())
         lock.lock(); defer { lock.unlock() }

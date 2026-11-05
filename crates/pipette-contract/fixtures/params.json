@@ -1,0 +1,173 @@
+{
+  "benchmark/asr_eval.asr-eval-corpus_1.evals-server@1.evals_server.json": {
+    "asr_task": "asr_fleurs_nl_nl",
+    "benchmark_type": "asr_eval",
+    "dataset_version": "2026.10.1",
+    "max_tokens": 500,
+    "prompt_profile": "voxtral",
+    "sample_count": 364
+  },
+  "benchmark/asr_eval.beams.json": {
+    "asr_task": "asr_esb_librispeech_test_clean",
+    "beam_length_penalty": 1.0,
+    "beam_repetition_penalty": 1.2,
+    "benchmark_type": "asr_eval",
+    "dataset_version": "2026.10.1",
+    "max_tokens": 128,
+    "num_beams": 3,
+    "prompt_profile": "minicpm_o",
+    "sample_count": 2620
+  },
+  "benchmark/asr_eval.json": {
+    "asr_task": "asr_fleurs_nl_nl",
+    "benchmark_type": "asr_eval",
+    "dataset_version": "2026.10.1",
+    "max_tokens": 500,
+    "prompt_profile": "voxtral",
+    "sample_count": 364,
+    "temperature": 0.0
+  },
+  "benchmark/asr_max_memory.json": {
+    "audio_channels": 1,
+    "audio_duration_ms": 15000,
+    "audio_sample_rate_hz": 16000,
+    "benchmark_type": "asr_max_memory",
+    "decode_tokens": 256,
+    "text_tokens": 1024
+  },
+  "benchmark/asr_throughput.json": {
+    "audio_channels": 1,
+    "audio_duration_ms": 15000,
+    "audio_sample_rate_hz": 16000,
+    "benchmark_type": "asr_throughput",
+    "decode_tokens": 256,
+    "text_tokens": 1024
+  },
+  "benchmark/decode_throughput.json": {
+    "batch_size": 1,
+    "benchmark_type": "decode_throughput",
+    "decode_tokens": 128,
+    "prefill_tokens": 512
+  },
+  "benchmark/end_to_end_latency.json": {
+    "batch_size": 4,
+    "benchmark_type": "end_to_end_latency",
+    "decode_tokens": 256,
+    "prefill_tokens": 512
+  },
+  "benchmark/eval.json": {
+    "benchmark_type": "eval",
+    "dataset_name": "2026.06.1",
+    "eval_id": "math_500",
+    "max_tokens": 8192,
+    "temperature": 0.6
+  },
+  "benchmark/eval.max_context.json": {
+    "benchmark_type": "eval",
+    "dataset_name": "2026.06.1",
+    "eval_id": "math_500",
+    "max_context": 32768,
+    "max_tokens": 32768,
+    "temperature": 0.6
+  },
+  "benchmark/eval.pinned.json": {
+    "benchmark_type": "eval",
+    "dataset_name": "2026.06.1",
+    "eval_id": "gpqa_diamond",
+    "max_tokens": 1,
+    "mcq_choices": [
+      "A",
+      "B",
+      "C",
+      "D"
+    ],
+    "min_p": 0.05,
+    "seed": 7,
+    "temperature": 1.0,
+    "top_k": 64,
+    "top_p": 0.95
+  },
+  "benchmark/eval.seed_at_cap.json": {
+    "benchmark_type": "eval",
+    "dataset_name": "2026.06.1",
+    "eval_id": "ifbench",
+    "max_tokens": 2048,
+    "seed": 4294967295,
+    "temperature": 0.6
+  },
+  "benchmark/eval.unknown_id.json": {
+    "benchmark_type": "eval",
+    "dataset_name": "2026.06.1",
+    "eval_id": "future_eval",
+    "max_tokens": 1024,
+    "temperature": 0.0
+  },
+  "benchmark/max_memory_usage.json": {
+    "benchmark_type": "max_memory_usage",
+    "prefill_tokens": 1024
+  },
+  "benchmark/prefill_throughput.json": {
+    "batch_size": 1,
+    "benchmark_type": "prefill_throughput",
+    "prefill_tokens": 512
+  },
+  "benchmark/vl_max_memory.decode256.json": {
+    "benchmark_type": "vl_max_memory",
+    "decode_tokens": 256,
+    "image_height": 256,
+    "image_width": 256,
+    "num_images": 5,
+    "text_tokens": 1024
+  },
+  "benchmark/vl_max_memory.json": {
+    "benchmark_type": "vl_max_memory",
+    "image_height": 336,
+    "image_width": 224,
+    "num_images": 2,
+    "text_tokens": 0
+  },
+  "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.json": {
+    "batch_size": 1,
+    "benchmark_type": "vl_spec_decode",
+    "draft_length": 8,
+    "max_tokens": 2048,
+    "temperature": 0.0
+  },
+  "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.sampled.json": {
+    "batch_size": 1,
+    "benchmark_type": "vl_spec_decode",
+    "draft_length": 8,
+    "max_tokens": 2048,
+    "temperature": 0.8
+  },
+  "benchmark/vl_throughput.json": {
+    "benchmark_type": "vl_throughput",
+    "decode_tokens": 64,
+    "image_height": 336,
+    "image_width": 224,
+    "num_images": 1,
+    "text_tokens": 8
+  },
+  "benchmark/vlm_eval.system.user.assistant.user.json": {
+    "benchmark_type": "vlm_eval",
+    "dataset_version": "2026.07.1",
+    "lmms_task": "mmstar",
+    "max_tokens": 1024,
+    "sample_count": 1
+  },
+  "benchmark/vlm_eval.user.json": {
+    "benchmark_type": "vlm_eval",
+    "dataset_version": "2026.07.1",
+    "lmms_task": "mmstar",
+    "max_tokens": 1024,
+    "sample_count": 1
+  },
+  "benchmark/vlm_eval.vlm-eval-corpus_1.evals-server@1.evals_server.json": {
+    "benchmark_type": "vlm_eval",
+    "dataset_version": "2026.10.1",
+    "lmms_task": "mmstar",
+    "max_tokens": 32768,
+    "prompt_profile": "qwen3_5",
+    "sample_count": 1500
+  }
+}

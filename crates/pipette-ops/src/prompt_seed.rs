@@ -1,19 +1,36 @@
-//! Shared natural-language passage used by every benchmark client to
-//! build synthetic prompts of an exact token count.
-//!
-//! Each runtime feeds a tokenizer callback into [`build_prompt_text`],
-//! which returns a string that tokenizes to exactly `target_tokens`.
-//! The string is sent to the inference API as a prompt, so server-side
-//! tokenization remains inside the timed window for end-to-end latency.
+//! Synthetic prompts of an exact token count, built from a shared
+//! natural-language passage with the runtime's own tokenizer
+//! ([`build_prompt_text`]). The result is sent as a string so server-side
+//! tokenization stays inside the timed window for end-to-end latency.
 
-/// The seed passage. Embedded at compile time so binaries are
-/// self-contained and benchmark runs reproduce regardless of the
-/// surrounding filesystem.
+/// Embedded so runs reproduce regardless of the surrounding filesystem.
 pub const PROMPT_SEED_TEXT: &str = include_str!("prompt_seed.txt");
 
-/// Cap on `count` callback invocations per build. The expected shape is
-/// one calibration call, a handful of pool-extension calls, logarithmic
-/// bisection, and a short tail-growth pass.
+/// The seed's line endings are part of every prompt built from it: CRLF (Git
+/// on Windows' default checkout) yields a different prompt for the same token
+/// count. `.gitattributes` pins the file to LF; this rejects a working tree
+/// checked out before that rule rather than build a binary that measures
+/// something other than CI did.
+const _: () = assert!(
+    !has_carriage_return(PROMPT_SEED_TEXT),
+    "prompt_seed.txt was checked out with CRLF line endings. Restore it with \
+     `git checkout -- crates/pipette-ops/src/prompt_seed.txt` to pick up the \
+     LF rule in .gitattributes."
+);
+
+const fn has_carriage_return(text: &str) -> bool {
+    let mut rest = text.as_bytes();
+    while let [first, tail @ ..] = rest {
+        if *first == b'\r' {
+            return true;
+        }
+        rest = tail;
+    }
+    false
+}
+
+/// Cap on `count` callback invocations per build: one calibration call, a
+/// few pool extensions, a logarithmic bisection and a short tail pass.
 const TOKENIZE_BUDGET: u32 = 64;
 const PREFIX_SCAN_WINDOW_CHARS: usize = 32;
 
@@ -33,6 +50,15 @@ where
     build_prompt_text_from(PROMPT_SEED_TEXT, target_tokens, count)
 }
 
+#[expect(
+    clippy::string_slice,
+    reason = "cut points come from `clamp_char_boundary`"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the initial pool size is an estimate; a saturating cast is fine"
+)]
 fn build_prompt_text_from<F>(seed: &str, target_tokens: u32, mut count: F) -> anyhow::Result<String>
 where
     F: FnMut(&str) -> anyhow::Result<usize>,
@@ -65,12 +91,11 @@ where
         return Ok(pool);
     }
 
-    if target <= PREFIX_SCAN_WINDOW_CHARS {
-        if let PrefixScan::Done(text) =
+    if target <= PREFIX_SCAN_WINDOW_CHARS
+        && let PrefixScan::Done(text) =
             scan_prefix_window(&pool, 0, target, &mut budget, &mut count)?
-        {
-            return Ok(text);
-        }
+    {
+        return Ok(text);
     }
 
     let mut lo = 0usize;
@@ -139,6 +164,10 @@ enum PrefixScan {
     Under(PrefixCandidate),
 }
 
+#[expect(
+    clippy::string_slice,
+    reason = "cut points come from `next_char_boundary`"
+)]
 fn scan_prefix_window<F>(
     pool: &str,
     start: usize,
@@ -261,7 +290,7 @@ pub fn repeat_token_sequence(seed: &[u32], target_len: usize) -> anyhow::Result<
     if seed.is_empty() {
         anyhow::bail!("seed token list must not be empty");
     }
-    Ok((0..target_len).map(|idx| seed[idx % seed.len()]).collect())
+    Ok(seed.iter().copied().cycle().take(target_len).collect())
 }
 
 #[cfg(test)]
@@ -389,7 +418,8 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let text = build_prompt_text(50, count_bytes(&calls))?;
         assert_eq!(text.len(), 50);
-        assert!(PROMPT_SEED_TEXT.contains(&text[..text.len().min(20)]));
+        let head: String = text.chars().take(20).collect();
+        assert!(PROMPT_SEED_TEXT.contains(&head));
         Ok(())
     }
 }

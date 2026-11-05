@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "prefill_throughput",
+  "generate_hint": "best-perf",
+  "model_type": "openvino",
+  "runtime_type": "uv_openvino"
+}

@@ -4,6 +4,10 @@ __tasks/
 
 # iOS llama.cpp build copy + CMake build dirs (ios/build-llama.sh)
 ios/.build-llama/
+# The same for ONNX Runtime GenAI (ios/build-onnx-genai.sh): both source trees'
+# CMake builds, the assembled ort_home, the patched genai copy, and the Python
+# venv its build scripts need.
+ios/.build-onnx-genai/
 
 # Local-only development logs
 devlog/
@@ -82,22 +86,26 @@ adb.log
 # the suffixed ones above because it holds the client's identity keypair.
 .pipette/
 
-# UniFFI generated bindings and static library
+# Native build outputs the iOS build phases write (build-llama.sh, build-onnx-genai.sh)
 ios/Pipette/Pipette/Generated/*
 !ios/Pipette/Pipette/Generated/.gitkeep
 # Track the generated build-info version stamps (but not the heavy build
-# artifacts — libllama.a, headers, module maps). These record the exact
-# llama.cpp commit and mlx-swift / mlx-swift-lm / swift-transformers pins the
-# app reports as its runtime_version. Committing them means a forgotten regen
+# artifacts: static libraries, headers). These record the mlx-swift /
+# mlx-swift-lm / swift-transformers pins and
+# the onnxruntime / onnxruntime-genai pins the app reports as its
+# runtime_version, as Swift for the app and as JSON for
+# ios/release-manifest.py. Committing them means a forgotten regen
 # after a dependency or submodule bump shows up as a diff, and CI's freshness
 # check (git diff --exit-code) forces the correct version to be committed —
 # otherwise a stale runtime_version ships and the collector can't recognize it.
-!ios/Pipette/Pipette/Generated/Llama/
-ios/Pipette/Pipette/Generated/Llama/*
-!ios/Pipette/Pipette/Generated/Llama/LlamaBuildInfo.swift
 !ios/Pipette/Pipette/Generated/MLX/
 ios/Pipette/Pipette/Generated/MLX/*
 !ios/Pipette/Pipette/Generated/MLX/MLXBuildInfo.swift
+!ios/Pipette/Pipette/Generated/MLX/MLXBuildInfo.json
+!ios/Pipette/Pipette/Generated/OnnxGenai/
+ios/Pipette/Pipette/Generated/OnnxGenai/*
+!ios/Pipette/Pipette/Generated/OnnxGenai/OnnxGenaiBuildInfo.swift
+!ios/Pipette/Pipette/Generated/OnnxGenai/OnnxGenaiBuildInfo.json
 
 # Signing material and private keys. These live in GitHub secrets and are
 # materialized outside the checkout at build time; none belongs in the tree.

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
 # Xcode Cloud `ci_post_clone` hook, run before package resolution and the build.
-# Sets up two things the runner needs but doesn't provide out of the box:
-#   1. CMake + Ninja, which ci_pre_xcodebuild.sh uses to build vendored
-#      llama.cpp (`cmake -G Ninja`).
-#   2. Package plugin / macro fingerprint trust. Xcode Cloud generates its own
-#      `xcodebuild archive` command, so it can't pass the `-skipPackagePlugin-
-#      Validation` / `-skipMacroValidation` flags ios/build.sh uses locally.
-#      Without them the build stops on the interactive "Trust & Enable" prompt
-#      for the LicenseList build-tool plugin and the swift-syntax macros, which
-#      a headless runner can't answer. These defaults are the flags' equivalent.
+# Sets up what the runner lacks:
+#   1. CMake + Ninja for ci_pre_xcodebuild.sh's llama.cpp build, and uv for the
+#      Python that drives build-onnx-genai.sh's onnxruntime build.
+#   2. Package plugin and macro fingerprint trust. Xcode Cloud owns the
+#      `xcodebuild archive` command, so it can't pass the
+#      `-skipPackagePluginValidation` / `-skipMacroValidation` flags ios/build.sh
+#      uses, and a headless runner can't answer the "Trust & Enable" prompt for
+#      the LicenseList plugin and swift-syntax macros. These defaults are the
+#      flags' equivalent.
 
 set -euo pipefail
 
-echo "==> ci_post_clone: installing native build toolchain (cmake, ninja)"
+echo "==> ci_post_clone: installing native build toolchain (cmake, ninja, uv)"
 
-brew install cmake ninja
+brew install cmake ninja uv
 
 echo "==> ci_post_clone: trusting SPM plugins + macros for headless archive"
 # Apple's key really is spelled "Validatation" (double -ta-); it is NOT a typo here.

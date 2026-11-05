@@ -1,0 +1,43 @@
+[package]
+name = "pipette-onnx-genai"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Stands in for the Python server in `tests/server_cells.rs`, copied to where
+# the venv's interpreter would be.
+[[bin]]
+name = "fake_onnx_genai_server"
+path = "tests/bin/fake_onnx_genai_server.rs"
+test = false
+bench = false
+doc = false
+
+# Not platform-gated. onnxruntime-genai ships CPU wheels for macOS, Linux and
+# Windows, and the CUDA wheels for Linux and Windows, so this crate compiles
+# everywhere and refuses at run time on a host the chosen execution provider
+# does not support.
+[dependencies]
+anyhow.workspace = true
+pipette-completions.workspace = true
+pipette-http.workspace = true
+pipette-memprobe.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
+pipette-venv.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pipette-programs.workspace = true
+pipette-completions = { workspace = true, features = ["test-support"] }
+httpmock.workspace = true
+rstest.workspace = true
+tempfile.workspace = true

@@ -254,9 +254,7 @@ class DownloadCoordinator(context: Context, private val storage: LocalStorage, p
         val suffix = trimmed.substring(colonIndex + 1).trim()
         require(repo.isNotBlank() && suffix.isNotBlank()) { "Use org/repo-GGUF:quant, org/repo-GGUF:file.gguf, org/repo/file.gguf, or a full URL" }
         val repoName = repo.substringAfterLast('/')
-        // Case-insensitive: not every publisher uppercases the suffix
-        // (`prism-ml/Bonsai-27B-gguf`), and the file layout is the same either way.
-        val stem = if (repoName.endsWith("-GGUF", ignoreCase = true)) repoName.dropLast("-GGUF".length) else repoName
+        val stem = LocalStorage.repoStem(repoName)
         val filename = if (suffix.endsWith(".gguf", ignoreCase = true)) suffix else "$stem-$suffix.gguf"
         val parsedRepo = HfRepo.parseSlug(repo)
         GgufFilename.parse(filename)

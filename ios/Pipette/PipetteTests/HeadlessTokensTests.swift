@@ -6,10 +6,8 @@ import Testing
 /// The split into verbs and options that lets `key=value` and `--key value` reach one
 /// declared command tree.
 ///
-/// One table, because every case asks the same question of the same function: given these
-/// tokens, what routes and what is a parameter. The cases that matter are the ones where a
-/// token is not what it looks like — an `=` inside a *value*, a verb written after a
-/// parameter, an empty value — each of which routed wrongly at some point.
+/// The cases that matter are tokens that are not what they look like: an `=` inside a
+/// *value*, a verb written after a parameter, an empty value.
 struct HeadlessTokensTests {
     struct Split: Sendable, CustomTestStringConvertible {
         let why: String
@@ -30,6 +28,9 @@ struct HeadlessTokensTests {
         Split(why: "a dashed key with a space-separated value",
               tokens: ["bench", "--model", "X"],
               verbs: ["bench"], options: ["--model", "X"]),
+        Split(why: "a positional is hoisted with the verbs, past an option's value",
+              tokens: ["results", "show", "--frob", "x", "job-1/cell-2"],
+              verbs: ["results", "show", "job-1/cell-2"], options: ["--frob", "x"]),
         Split(why: "split on the first `=` only, so the value keeps its own",
               tokens: ["model=mlx://repo=o/r"],
               verbs: [], options: ["--model=mlx://repo=o/r"]),

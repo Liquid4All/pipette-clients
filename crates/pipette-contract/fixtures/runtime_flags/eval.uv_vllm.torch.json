@@ -1,0 +1,10 @@
+{
+  "benchmark_type": "eval",
+  "model_type": "torch",
+  "repetition_detection": {
+    "max_pattern_size": 128,
+    "min_count": 10,
+    "min_pattern_size": 2
+  },
+  "runtime_type": "uv_vllm"
+}

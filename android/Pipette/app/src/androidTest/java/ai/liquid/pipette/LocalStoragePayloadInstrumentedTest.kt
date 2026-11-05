@@ -32,8 +32,7 @@ class LocalStoragePayloadInstrumentedTest {
       modelName = "LiquidAI/LFM2.5-350M-GGUF",
       modelPath = "/models/LiquidAI/LFM2.5-350M-GGUF/LFM2.5-350M-Q4_0.gguf",
       mmprojPath = null,
-      nGpuLayers = 99,
-      contextSize = 4096,
+      runtimeFlags = RuntimeFlagRef(numberGpuLayers = 99, ctxSize = 4096, nUbatch = 512, loadMode = LlamacppLoadMode.READ),
       runtimeVersion = "b8683",
       runtimeCpuBackend = "dotprod,neon",
       benchmarkType = BenchmarkType.DECODE_THROUGHPUT,
@@ -50,7 +49,8 @@ class LocalStoragePayloadInstrumentedTest {
       """{"flavor":"android-arm64-v8","repository_url":"github.com/ggml-org/llama.cpp","repository_version":"b8683","type":"llamacpp_apk_pipette"}""",
       payload.getString("runtime_descriptor"),
     )
-    assertEquals("-ngl 99 -c 4096", payload.getString("runtime_flags"))
+    // The resolved load knobs as canonical JSON, matching the Robolectric twin in LocalStoragePayloadTest.
+    assertEquals("""{"ctx_size":4096,"load_mode":"none","n_ubatch":512,"number_gpu_layers":99}""", payload.getString("runtime_flags"))
     // `SubmissionRef.canonical` renders every scalar itself rather than through
     // JSONObject.toString(), so these bytes are platform-independent by design;
     // this asserts the field lands in the real artifact, not that the framework

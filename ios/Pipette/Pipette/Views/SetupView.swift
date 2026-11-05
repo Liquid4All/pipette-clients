@@ -1,16 +1,11 @@
 import SwiftUI
 import UIKit
 
-/// Initial registration view shown once before the main app.
-///
-/// Collects organization and contact email, then calls pipette-ios's
-/// registration service to generate a CryptoKit signing keypair and register with
-/// the management server.
-/// - Note: `onSignOut` is the only way off this screen. It sits between a live
-///   Clerk session and the app, so once signed in there is otherwise nothing to
-///   press but Register: no back, and Settings is on the far side of the
-///   registration being asked for. Without an exit, the account that signed in
-///   is the account the device is stuck with.
+/// Registration screen shown once before the main app: collects organization and
+/// contact email, then registers a new signing key with the management server.
+/// - Note: `onSignOut` is the only way off this screen: there is no back, and Settings
+///   is behind the registration. Without it, the account that signed in is the account
+///   the device is stuck with.
 struct SetupView: View {
     @Binding var isRegistered: Bool
     let clerkUserId: String?
@@ -18,7 +13,7 @@ struct SetupView: View {
     let clerkPrimaryEmail: String?
     let onSignOut: () -> Void
 
-    @Environment(\.storage) private var storage
+    @Environment(\.ws) private var ws
     @State private var collectorEndpointOption: CollectorEndpointOption = .production
     @State private var customCollectorURL = ""
     @State private var organization = ""
@@ -77,9 +72,7 @@ struct SetupView: View {
                         }
 
                         VStack(spacing: 12) {
-                            // Only ask for an email when Clerk hasn't provided
-                            // one; otherwise registration uses the signed-in
-                            // account's email directly.
+                            // Otherwise registration uses the Clerk account's email.
                             if clerkPrimaryEmail == nil {
                                 PipetteTextField(
                                     placeholder: "Email",
@@ -136,10 +129,9 @@ struct SetupView: View {
                                         .padding(.horizontal, 6)
                                 }
 
-                                // Custom only: the Liquid collector approves a device on its own
-                                // side, so a key has nothing to admit there. Optional even here —
-                                // blank registers exactly as before, and a self-hosted deployment
-                                // that issues keys can skip the manual approval hop.
+                                // Custom only: the Liquid collector approves devices on its own
+                                // side. A self-hosted deployment that issues keys can use one to
+                                // skip the manual approval hop.
                                 PipetteTextField(
                                     placeholder: "Pre-auth key (optional)",
                                     text: $preauthKey,
@@ -187,9 +179,8 @@ struct SetupView: View {
                                 .padding(.top, 18)
                         }
 
-                        // Only when there is a session to end. A gate that reached
-                        // here without Clerk has nothing to sign out of, and a dead
-                        // control is worse than none.
+                        // Without a Clerk session there is nothing to sign out of, and a
+                        // dead control is worse than none.
                         if clerkPrimaryEmail != nil {
                             Button("Sign out", action: onSignOut)
                                 .font(.system(size: 15, weight: .medium))
@@ -212,11 +203,9 @@ struct SetupView: View {
                 if option == .custom {
                     focusedField = .customCollectorURL
                 } else {
-                    // Drop the key but keep the URL. A key typed under Custom and then
-                    // abandoned would otherwise still be sent to Liquid's collector,
-                    // which is the one thing hiding the field promises won't happen. The
-                    // URL is inert by comparison — `serverURL(customURL:)` ignores it on
-                    // `.production` — so keeping it means toggling back doesn't retype it.
+                    // Drop the key so one typed under Custom is never sent to Liquid's
+                    // collector. Keep the URL: `serverURL(customURL:)` ignores it on
+                    // `.production`, and toggling back then needs no retyping.
                     preauthKey = ""
                     if focusedField == .customCollectorURL || focusedField == .preauthKey {
                         focusedField = nil
@@ -259,28 +248,38 @@ struct SetupView: View {
         // Capture @State values for the detached task
         let org = organization.trimmingCharacters(in: .whitespacesAndNewlines)
         let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Passed straight to the register request; never written to disk,
-        // Keychain, or logs. An empty field means keyless registration.
+        // Never written to disk, Keychain, or logs. Empty means keyless registration.
         let trimmedPreauthKey = preauthKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = trimmedPreauthKey.isEmpty ? nil : trimmedPreauthKey
 
-        // Use Task.detached so the synchronous Rust FFI call runs off the
-        // main thread — a plain Task inherits @MainActor from the View.
-        let storage = storage
+        // Detached so `register`'s synchronous store and Keychain work stays off the main
+        // thread; a plain Task would inherit @MainActor from the View.
+        let ws = ws
         Task.detached {
             do {
-                let result = try await RegistrationService.register(
-                    serverUrl: ServerURL(url),
+                let server = try ServerUrl(url)
+                // Typed here, as the crate types them, so a mistyped address is refused
+                // before a keypair is minted or a pre-auth key spent.
+                let input = RegisterInput(
                     organization: org,
-                    contactEmail: email,
-                    preauthKey: key,
+                    contactEmail: try ContactEmail(email),
+                    // The form has no field for it, so the probed name stands.
+                    clientDetails: detectDeviceName(),
+                    preauthKey: try key.map { try ClientPreauthKey($0) },
                     clerkUserId: clerkUserId,
                     clerkSessionId: clerkSessionId,
-                    clerkPrimaryEmail: clerkPrimaryEmail,
-                    storage: storage
-                )
+                    clerkPrimaryEmail: clerkPrimaryEmail)
+                discardOrphanedSigningKey(ws: ws)
+                let registration = try await Pipette.register(
+                    registrationStore: ws.registration, device: ws.device, server: server,
+                    input: input)
+                // Fire-and-forget: the catalog is public, so pulling it must not hold up
+                // registration. No stale catalog from another server can remain: `ensureEmpty`
+                // required no identity, and `auth reset` clears synced benchmarks with the identity.
+                BenchmarkSyncCoordinator.syncBestEffortInBackground(
+                    serverUrl: server, ws: ws, reason: "registration", clearCacheFirst: false)
                 await MainActor.run {
-                    registrationResult = (result.clientId.value, result.status)
+                    registrationResult = (registration.clientId.value, registration.status)
                     isRegistered = true
                 }
             } catch {

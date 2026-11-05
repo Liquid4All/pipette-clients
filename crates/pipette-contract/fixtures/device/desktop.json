@@ -1,0 +1,12 @@
+{
+  "device_chip_model": "AMD Ryzen 9 7950X",
+  "device_cpu_arch": "x86_64",
+  "device_form_factor": "desktop",
+  "device_gpu_model": "NVIDIA GeForce RTX 4090",
+  "device_gpu_vram_bytes": 25769803776,
+  "device_name": "bench-01",
+  "device_os_family": "linux",
+  "device_os_name": "Ubuntu",
+  "device_os_version": "22.04",
+  "device_ram_bytes": 137438953472
+}

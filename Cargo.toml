@@ -1,106 +1,206 @@
 [workspace]
 members = [
     "crates/pipette-device",
-    "crates/pipette-doomloop",
     "crates/pipette-http",
-    "crates/pipette-memprobe-metal",
+    "crates/pipette-memprobe",
     "crates/pipette-mgmt-client",
-    "crates/pipette-plan-types",
+    "crates/pipette-contract",
     "crates/pipette-readiness",
+    "crates/pipette-ssh",
+    "crates/pipette-wait",
     "crates/pipette-subprocess",
+    "crates/pipette-programs",
     "crates/pipette-venv",
     "crates/pipette-workspace",
+    "crates/pipette-artifacts-catalog",
     "crates/pipette-artifacts",
+    "crates/pipette-vl-spec-decode-corpus",
     "crates/pipette-ops",
-    "crates/pipette-plan",
+    "crates/pipette-completions",
+    "crates/pipette-ctl",
     "crates/pipette-llamacpp",
     "crates/pipette-mlx",
     "crates/pipette-coreai",
     "crates/pipette-openvino",
+    "crates/pipette-onnx-genai",
+    "crates/pipette-ovms",
+    "crates/pipette-trt-edgellm",
     "crates/pipette-android",
     "crates/pipette-torch-oai",
     "crates/pipette-cli",
+    "tools/pipette-ios-proxy",
 ]
-# pipette-android is a mobile-only cdylib: on the host it compiles to stubs and
-# is never shipped from CI (the Android app builds it via `cargo build -p
-# pipette-android --target aarch64-linux-android` from Gradle). Keep it a member
-# so `-p` resolves, but leave it out of default builds so plain
-# `cargo build`/`clippy`/`test` — and CI, which also passes
-# `--exclude pipette-android` — don't compile it on the host.
+# pipette-android is the Android engine cdylib (the root CMakeLists.txt runs
+# `cargo build -p pipette-android`); on the host it compiles to stubs. A member so
+# `-p` resolves, left out of default-members so plain `cargo build`/`clippy`/`test`
+# skip it. `--workspace` still includes it.
 default-members = [
     "crates/pipette-device",
-    "crates/pipette-doomloop",
     "crates/pipette-http",
-    "crates/pipette-memprobe-metal",
+    "crates/pipette-memprobe",
     "crates/pipette-mgmt-client",
-    "crates/pipette-plan-types",
+    "crates/pipette-contract",
     "crates/pipette-readiness",
+    "crates/pipette-ssh",
+    "crates/pipette-wait",
     "crates/pipette-subprocess",
+    "crates/pipette-programs",
     "crates/pipette-venv",
     "crates/pipette-workspace",
+    "crates/pipette-artifacts-catalog",
     "crates/pipette-artifacts",
+    "crates/pipette-vl-spec-decode-corpus",
     "crates/pipette-ops",
-    "crates/pipette-plan",
+    "crates/pipette-ctl",
     "crates/pipette-llamacpp",
     "crates/pipette-mlx",
     "crates/pipette-coreai",
     "crates/pipette-openvino",
+    "crates/pipette-onnx-genai",
+    "crates/pipette-ovms",
+    "crates/pipette-trt-edgellm",
     "crates/pipette-torch-oai",
     "crates/pipette-cli",
+    "tools/pipette-ios-proxy",
 ]
 resolver = "2"
 
-# Single source of truth for lint policy. Each member opts in with
-# `[lints] workspace = true`, so local `cargo clippy` enforces the same
-# gate as CI — which is why the CI clippy steps no longer pass `-D warnings`.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Each member opts in with `[lints] workspace = true`, so a local `cargo clippy`
+# enforces the same gate as CI.
 [workspace.lints.rust]
 warnings = "deny"
 
-# `warnings = "deny"` covers rustdoc too, so `cargo doc` is a gate (ci/lint.sh
-# runs it). One lint is opted out of deliberately: nothing here is published to
-# crates.io, so a doc comment pointing at a crate-internal item is a working
-# cross-reference for the only readers there are, not a dead link in a
-# published page. Broken and ambiguous links stay denied — those are rot.
+# `warnings = "deny"` covers rustdoc too, so `cargo doc` (build.yml) is a gate.
+# Nothing is published, so a link to a crate-internal item works for every
+# reader there is. Broken and ambiguous links stay denied.
 [workspace.lints.rustdoc]
 private_intra_doc_links = "allow"
 
-# Panicking constructs are banned. A reachable failure must return a typed
-# `Result` — tests included: they should be `-> anyhow::Result<()>` and use `?`
-# to propagate. An unreachable case should be made unrepresentable in the types,
-# not asserted at runtime.
+# A reachable failure returns a typed `Result`, in tests too (`-> anyhow::Result<()>`
+# with `?`). An unreachable case is made unrepresentable in the types, not asserted.
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"
 unreachable = "deny"
+unimplemented = "deny"
+# `.get(i).unwrap()` is an index that `indexing_slicing` does not see.
+get_unwrap = "deny"
+# Slicing a `str` off a char boundary, or indexing past the end, panics.
+string_slice = "deny"
+indexing_slicing = "deny"
+# A suppression carries its justification: `#[expect(lint, reason = "...")]`,
+# which also fails once the lint it silences stops firing.
+allow_attributes_without_reason = "deny"
+
+# Picked from `pedantic` one at a time: the group grows with every toolchain
+# release and CI tracks stable, so enabling it whole would break CI on a release
+# day with no change here.
+#
+# Considered and left off:
+# - `cast_precision_loss`: every hit was a count turned into an `f64` for a rate
+#   or a mean, where the loss starts past 2^53.
+# - `unnecessary_wraps`: flags the `-> anyhow::Result<()>` tests the rule above
+#   asks for.
+# - `redundant_closure_for_method_calls`: its rewrite spells out full paths,
+#   `std::string::ToString::to_string` for `|s| s.to_string()`.
+# - `match_same_arms`: matches here are tables on purpose, one row per case.
+# - `needless_pass_by_value`: most hits must own their argument (a `nutype`
+#   sanitizer, a handle being freed, a JNI local), the rest are churn.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+case_sensitive_file_extension_comparisons = "deny"
+items_after_statements = "deny"
+manual_let_else = "deny"
+bool_to_int_with_if = "deny"
+checked_conversions = "deny"
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+large_futures = "deny"
+large_stack_arrays = "deny"
+large_types_passed_by_value = "deny"
+manual_assert = "deny"
+match_wildcard_for_single_variants = "deny"
+range_plus_one = "deny"
+unused_async = "deny"
+wildcard_imports = "deny"
+
+# From `nursery`, same one-at-a-time rule.
+future_not_send = "deny"
+needless_pass_by_ref_mut = "deny"
+or_fun_call = "deny"
+
+# A `_` arm on an enum silently absorbs a new variant; listing the variants
+# makes adding one a compile error at every site that must decide. Remaining
+# `_` arms are on other crates' `#[non_exhaustive]` enums.
+#
+# Considered and left off:
+# - `let_underscore_must_use`: every hit is a deliberate best-effort discard
+#   (`child.kill()` before `wait()`, `handle.join()` in a `Drop`, `write!` to
+#   stderr), and the lint has no idiom clearer than `let _ =`.
+wildcard_enum_match_arm = "deny"
+
+# From `restriction`: every `unsafe` block states why it is sound, one
+# operation per block so the `SAFETY:` comment covers exactly one claim, and
+# pointer casts say which of type or mutability they change.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_doc = "deny"
+borrow_as_ptr = "deny"
+ptr_as_ptr = "deny"
+ptr_cast_constness = "deny"
+fn_to_numeric_cast_any = "deny"
+# Also from `restriction`, each a bug class that has no legitimate use here.
+# `HashMap` order changes run to run, and benchmark output must not.
+iter_over_hash_type = "deny"
+dbg_macro = "deny"
+mem_forget = "deny"
+infinite_loop = "deny"
+try_err = "deny"
+lossy_float_literal = "deny"
+float_cmp_const = "deny"
+mixed_read_write_in_expression = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+mutex_atomic = "deny"
+verbose_file_reads = "deny"
 
 [workspace.dependencies]
-# First-party crates, kept in their own block for the reason `ci/lint.sh` keeps
-# `pipette_*` its own `use` group: the internal graph is worth reading apart from
-# the third-party one. Declaring the paths here means a member states only *that*
-# it depends on a crate, never where that crate lives, so moving one is a single
-# edit. No `version` on any of them — nothing here is published.
-#
-# Only crates something depends on are listed. `pipette-cli` (binary),
-# `pipette-android` (cdylib) and `pipette-plan` have no dependents, so an entry
-# would declare an edge that does not exist.
+# First-party crates, in their own block so the internal graph reads apart from
+# the third-party one. Paths live only here, so moving a crate is one edit. No
+# `version`: nothing is published. Members nothing depends on are not listed.
 pipette-artifacts = { path = "crates/pipette-artifacts" }
+pipette-artifacts-catalog = { path = "crates/pipette-artifacts-catalog" }
+pipette-completions = { path = "crates/pipette-completions" }
 pipette-device = { path = "crates/pipette-device" }
-pipette-doomloop = { path = "crates/pipette-doomloop" }
 pipette-http = { path = "crates/pipette-http" }
 pipette-llamacpp = { path = "crates/pipette-llamacpp" }
-pipette-memprobe-metal = { path = "crates/pipette-memprobe-metal" }
+pipette-memprobe = { path = "crates/pipette-memprobe" }
 pipette-mgmt-client = { path = "crates/pipette-mgmt-client" }
 pipette-mlx = { path = "crates/pipette-mlx" }
 pipette-coreai = { path = "crates/pipette-coreai" }
+pipette-onnx-genai = { path = "crates/pipette-onnx-genai" }
 pipette-openvino = { path = "crates/pipette-openvino" }
 pipette-ops = { path = "crates/pipette-ops" }
-pipette-plan-types = { path = "crates/pipette-plan-types" }
+pipette-ovms = { path = "crates/pipette-ovms" }
+# Owned by the management server, pipette-mgmt.
+pipette-plan-types = { git = "https://github.com/Liquid4All/pipette-mgmt.git", rev = "06daa58f389407370cad7f4d6478bfbf61f0e901" }
+pipette-programs = { path = "crates/pipette-programs" }
 pipette-readiness = { path = "crates/pipette-readiness" }
+pipette-ssh = { path = "crates/pipette-ssh" }
 pipette-subprocess = { path = "crates/pipette-subprocess" }
 pipette-torch-oai = { path = "crates/pipette-torch-oai" }
+pipette-trt-edgellm = { path = "crates/pipette-trt-edgellm" }
 pipette-venv = { path = "crates/pipette-venv" }
+pipette-vl-spec-decode-corpus = { path = "crates/pipette-vl-spec-decode-corpus" }
+pipette-wait = { path = "crates/pipette-wait" }
 pipette-workspace = { path = "crates/pipette-workspace" }
 
 android_logger = "0.15"
@@ -108,37 +208,49 @@ anyhow = "1"
 base64 = "0.23"
 cc = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "string"] }
+core-foundation = "0.10"
+crc32fast = "1"
 ctrlc = { version = "3", features = ["termination"] }
 ed25519-dalek = { version = "3" }
-env_logger = "0.11"
+fastrand = "2"
 flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hex = "0.4"
-httpmock = "0.7"
+hmac = "0.13"
+httpmock = "0.9"
 jni = "0.22"
 libc = "0.2"
 log = "0.4"
-nutype = { version = "0.7", features = ["serde", "regex"] }
+minijinja = { version = "3", features = ["serde"] }
+nutype = { version = "0.8", features = ["serde", "regex"] }
+plist = "1"
+# `serialize`: S3 answers in XML, read through serde. `plist` already links it.
+quick-xml = { version = "0.42", features = ["serialize"] }
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
-rstest = { version = "0.26.1", default-features = false }
+rstest = { version = "0.28.0", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustix = { version = "1", features = ["process", "system"] }
 webpki-roots = "1"
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 strum = { version = "0.28", features = ["derive"] }
 serde_json = "1"
 shlex = "2"
-tabled = "0.21"
+tabled = "0.22"
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known"] }
 tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 toml = "1"
+unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+wait-timeout = "0.2"
+windows-sys = { version = "0.61", features = ["Wdk_Graphics_Direct3D", "Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }

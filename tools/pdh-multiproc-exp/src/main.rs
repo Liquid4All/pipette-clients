@@ -1,24 +1,7 @@
-// Empirical test: does the ~33 MB "driver overhead" double when two
-// llama-bench processes use the GPU simultaneously, or is some of it
-// shared / amortized?
-//
-// Approach:
-//   1. Sample adapter-wide `Total Committed` baseline (with nothing
-//      else running) — the idle floor from DWM, drivers etc.
-//   2. Spawn N llama-bench instances concurrently.
-//   3. Poll all three at 20 ms:
-//        - Each spawned PID's `\GPU Process Memory(...)\Total Committed`
-//        - The adapter's `\GPU Adapter Memory(*)\Total Committed`
-//      Track per-PID peaks and the adapter's *delta from baseline*
-//      (= physically attributable to our processes).
-//   4. After all children exit, compare:
-//        - Σ per-PID peaks (what PDH attributes to each, summed)
-//        - Adapter Δ (what physically appeared on the GPU above
-//          the baseline)
-//      If they agree, accounting is straightforward per-process and
-//      driver overhead truly doubles. If adapter Δ < Σ per-PID, the
-//      driver is sharing pages and PDH double-counts. If adapter Δ >
-//      Σ per-PID, something else is showing up.
+// Experiment: does the ~33 MB per-process GPU "driver overhead" double when N
+// llama-bench processes share the GPU? Compares the sum of each PID's PDH
+// `Total Committed` peak with the adapter-wide peak above its idle baseline: a
+// ratio above 1 means PDH double-counts shared pages.
 
 use std::{
     ffi::c_void,
@@ -41,8 +24,8 @@ type PdhCounter = *mut c_void;
 const PDH_MORE_DATA: u32 = 0x800007D2;
 const POLL_MS: u64 = 20;
 
-const LLAMA_BENCH: &str = r"C:\Users\yuri\mem-test\llama-b9058\llama-bench.exe";
-const MODEL: &str = r"C:\Users\yuri\mem-test\LFM2-350M-Q4_K_M.gguf";
+const LLAMA_BENCH: &str = r"C:\mem-test\llama-b9058\llama-bench.exe";
+const MODEL: &str = r"C:\mem-test\LFM2-350M-Q4_K_M.gguf";
 
 fn main() {
     let n_proc: u32 = std::env::args()
@@ -58,16 +41,14 @@ fn main() {
 
     eprintln!(">>> n_processes={n_proc} n_prompt={ctx}");
 
-    // 1. Open a query first; sample adapter baseline before spawning
-    //    anything so we can subtract the idle floor.
+    // The baseline is sampled before spawning so the idle floor can be subtracted.
     let mut query: PdhQuery = std::ptr::null_mut();
     let rc = unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) };
     assert_eq!(rc, ERROR_SUCCESS, "PdhOpenQueryW");
 
     let adapter_counter = add_counter(query, r"\GPU Adapter Memory(*)\Total Committed");
 
-    // Settle the adapter counter. Two collects, because the first
-    // sample of a PDH query is sometimes empty.
+    // Two collects: the first sample of a PDH query is sometimes empty.
     let mut buf = Vec::with_capacity(65_536);
     for _ in 0..2 {
         unsafe {
@@ -82,7 +63,6 @@ fn main() {
         adapter_baseline as f64 / 1_048_576.0
     );
 
-    // 2. Spawn N llama-bench processes concurrently.
     let mut children: Vec<std::process::Child> = (0..n_proc)
         .map(|_| {
             Command::new(LLAMA_BENCH)
@@ -109,7 +89,6 @@ fn main() {
     let pids: Vec<u32> = children.iter().map(|c| c.id()).collect();
     eprintln!(">>> spawned pids: {pids:?}");
 
-    // Per-PID counters.
     let pid_counters: Vec<PdhCounter> = pids
         .iter()
         .map(|pid| {
@@ -120,7 +99,6 @@ fn main() {
         })
         .collect();
 
-    // 3. Poll until all children exit.
     let mut pid_peaks = vec![0u64; pids.len()];
     let mut adapter_peak: u64 = 0;
     let mut adapter_peak_delta: u64 = 0;
@@ -161,7 +139,6 @@ fn main() {
         let _ = PdhCloseQuery(query);
     }
 
-    // 4. Report.
     println!();
     println!("=== n_processes={n_proc} n_prompt={ctx} samples={samples} ===");
     for (i, pid) in pids.iter().enumerate() {

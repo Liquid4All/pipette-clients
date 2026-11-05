@@ -1,9 +1,10 @@
 # Pipette Clients
 
-Benchmark runners for evaluating LLM inference engines on edge devices,
-from host-native CLIs to native iOS and Android apps. The CLIs and the Android
-app share a common Rust core (the iOS app is native Swift). Remote runs can
-submit results to the [pipette management
+Benchmark runners for evaluating large language model (LLM) inference engines
+on edge devices,
+from host-native CLIs to native iOS and Android apps. The CLIs are Rust; the iOS
+app is native Swift and the Android app defaults to Kotlin over llama.cpp. Remote runs
+can submit results to the [pipette management
 server](https://collector.pipette.liquid.ai); local runs stay local.
 
 ## What's in this repository
@@ -13,20 +14,19 @@ The **clients** are the benchmark runners you build and run.
 ### Clients: host-native CLIs
 
 Command-line benchmark runners that run on the host machine. They share one
-operating workflow: init → register → install runtime → run/sync, plus an
+operating workflow: init → register → install a runtime → run → sync, plus an
 optional planner claim loop (`pipette worker`) that pulls jobs from the
 management server.
 
-| CLI | Inference backends | Build |
-|-----|--------------------|-------|
-| `pipette`      | `llama.cpp`, MLX, OpenVINO, vLLM, SGLang | `cargo build --release -p pipette-cli` |
-| `pipette-plan` | orchestrates `pipette` across remote devices | `cargo build --release -p pipette-plan` |
+| CLI | Role | Build |
+|-----|------|-------|
+| `pipette`      | runs benchmarks on the host; the engines it drives are listed in [docs/README.md](docs/README.md#two-kinds-of-client) | `cargo build --release -p pipette-cli` |
+| `pipette-ctl` | drives `pipette` across remote devices, or files the same matrix with the management server for workers to claim | `cargo build --release -p pipette-ctl` |
 
 ### Clients: native mobile apps
 
 Mobile clients run benchmarks on-device with engines compiled into the app.
-The Android app shares the Rust workspace; the iOS app is native Swift. Linked
-engines are platform-specific. See
+The linked engines differ per platform; see
 [docs/README.md](docs/README.md#two-kinds-of-client). Each app has its own
 build pipeline:
 
@@ -35,11 +35,15 @@ build pipeline:
 | iOS     | `ios/Pipette/`     | [docs/pipette-ios/build.md](docs/pipette-ios/build.md) |
 | Android | `android/Pipette/` | [docs/pipette-android/build.md](docs/pipette-android/build.md) |
 
+iPhones in a device lab run jobs through `pipette-ios-proxy`; see
+[On the farm](docs/pipette-ios/build.md#on-the-farm-pipette-ios-proxy).
+
 ### Shared workspace
 
-Not a client itself. `crates/` holds the shared Rust workspace for host CLIs,
-runtime libraries, artifact stores, plan types, management client, execution
-helpers, and the Android native core.
+`crates/` is not a client. It holds the shared Rust workspace for host CLIs,
+runtime libraries, artifact stores, management client, execution helpers, and
+the Android `rustEngine` core. Plan types come from pipette-mgmt
+`crates/pipette-plan-types` by git (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Quick start
 
@@ -54,8 +58,6 @@ install a runtime → run → sync). Mobile app builds are linked in the table a
 ## Docs
 
 Full index and documentation convention: [docs/README.md](docs/README.md).
-Architecture lives in [docs/architecture.md](docs/architecture.md); benchmark
-measurement rules in [docs/methodology/README.md](docs/methodology/README.md).
 
 ## Contributing
 

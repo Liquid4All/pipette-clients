@@ -3,14 +3,14 @@ set -euo pipefail
 
 # Submit pipette invocation commands to SLURM, one job per line.
 #
-# Reads commands from stdin (the output of `pipette-plan commands`) and
+# Reads commands from stdin (the output of `pipette-ctl commands`) and
 # wraps each in an `sbatch` submission. Blank lines and lines starting
 # with `#` are skipped.
 #
 # Usage:
 #   cat jobs | ./scripts/slurm/schedule
 #   ./scripts/slurm/schedule < jobs
-#   pipette-plan commands --plan plan.toml | ./scripts/slurm/schedule
+#   pipette-ctl commands --plan plan.toml | ./scripts/slurm/schedule
 #   ./scripts/slurm/run-plans.sh ... | ./scripts/slurm/schedule
 #
 # Tunables (env vars; unset resource knobs fall back to cluster defaults):

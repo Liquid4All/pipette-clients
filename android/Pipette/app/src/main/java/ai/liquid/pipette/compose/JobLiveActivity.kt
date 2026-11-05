@@ -30,6 +30,7 @@ fun JobLiveActivity(
   currentCellLabel: String,
   progressText: String,
   coolingSinceMillis: Long?,
+  coolingMaxMillis: Long,
   colors: JobActivityColors,
   modifier: Modifier = Modifier,
 ) {
@@ -56,7 +57,7 @@ fun JobLiveActivity(
     }
     // Cooling wins the second line when active (emphasized), else the raw progress text.
     val cooling = coolingSinceMillis != null
-    val secondLine = if (cooling) coolingCaption(coolingSinceMillis, now) else progressText
+    val secondLine = if (cooling) coolingCaption(coolingSinceMillis, now, coolingMaxMillis) else progressText
     if (secondLine.isNotBlank()) {
       Text(
         secondLine,

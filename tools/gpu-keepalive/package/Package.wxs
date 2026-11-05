@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The MSI installs one file, registers the PipetteGpuKeepalive service and puts
+  the CLI on the system PATH. It deliberately does not own the configuration in
+  HKLM\SOFTWARE\Pipette\GpuKeepalive: an upgrade or repair would otherwise undo
+  a `gpu-keepalive disable`. Built by the gpu-keepalive job in build.yml.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+    <Package Name="Pipette GPU Keepalive"
+             Manufacturer="Liquid AI, Inc."
+             Version="$(var.Version)"
+             UpgradeCode="{AACA0788-2CD7-4AF3-BF14-B7897405D681}"
+             Scope="perMachine">
+        <!-- Releases are date-stamped, so two builds a day share a version. -->
+        <MajorUpgrade AllowSameVersionUpgrades="yes"
+                      DowngradeErrorMessage="A newer Pipette GPU Keepalive is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- "#0" once an operator has run `gpu-keepalive disable`; unset on a fresh box. -->
+        <Property Id="KEEPALIVE_ENABLED">
+            <RegistrySearch Root="HKLM" Key="SOFTWARE\Pipette\GpuKeepalive" Name="Enabled" Type="raw"
+                            Bitness="always64" />
+        </Property>
+
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="VendorFolder" Name="Pipette">
+                <Directory Id="INSTALLFOLDER" Name="GPU Keepalive">
+                    <Component Id="Service">
+                        <File Id="GpuKeepaliveExe" Source="$(var.BinDir)\gpu-keepalive.exe" KeyPath="yes" />
+                        <ServiceInstall Id="ServiceInstall"
+                                        Name="PipetteGpuKeepalive"
+                                        DisplayName="Pipette GPU Keepalive"
+                                        Description="Dispatches a four-byte GPU pulse at a fixed interval so the display driver does not evict an inference server's allocations while idle."
+                                        Type="ownProcess"
+                                        Start="auto"
+                                        ErrorControl="normal"
+                                        Account="LocalSystem"
+                                        Arguments="service"
+                                        Vital="yes">
+                            <!-- Delayed start replaces the scheduled task's 30-second boot delay.
+                                 failedToStopOrReturnedError makes the restart cover a clean stop
+                                 that reports a service-specific error, which is how this service
+                                 reports a GPU or configuration failure. -->
+                            <ServiceConfig DelayedAutoStart="yes"
+                                           FailureActionsWhen="failedToStopOrReturnedError"
+                                           OnInstall="yes" OnReinstall="yes" />
+                            <!-- The Util extension rather than the built-in
+                                 ServiceConfigFailureActions: Windows Installer's own
+                                 op calls ChangeServiceConfig2(SERVICE_CONFIG_FAILURE_ACTIONS)
+                                 without enabling SeShutdownPrivilege, which fails with
+                                 ACCESS_DENIED and error 1939 on a fresh Windows Server
+                                 image. This extension's custom action enables it. -->
+                            <util:ServiceConfig FirstFailureActionType="restart"
+                                                SecondFailureActionType="restart"
+                                                ThirdFailureActionType="restart"
+                                                RestartServiceDelayInSeconds="60"
+                                                ResetPeriodInDays="1" />
+                        </ServiceInstall>
+                        <ServiceControl Id="StopAndRemove" Name="PipetteGpuKeepalive"
+                                        Stop="both" Remove="uninstall" Wait="yes" />
+                        <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]"
+                                     Part="last" Action="set" System="yes" />
+                    </Component>
+
+                    <!-- Starting here, rather than in the component above, keeps the
+                         install from starting a service an operator has disabled. The
+                         wait means a box where the pulse cannot run fails the install
+                         and rolls back instead of leaving a dead service behind. -->
+                    <Component Id="StartService" Guid="{86411D1C-80D9-4212-96C6-BE722478BEF4}"
+                               Condition="KEEPALIVE_ENABLED &lt;&gt; &quot;#0&quot;">
+                        <ServiceControl Id="Start" Name="PipetteGpuKeepalive" Start="install" Wait="yes" />
+                    </Component>
+                </Directory>
+            </Directory>
+        </StandardDirectory>
+    </Package>
+</Wix>

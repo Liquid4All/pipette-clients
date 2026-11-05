@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 #
-# Enforce the anyhow import convention. This repo pairs anyhow with per-crate
-# typed errors (e.g. `pipette_ops::error::Result`), so a bare `use anyhow::Result;`
-# silently shadows the crate-local Result and hides which Result a signature
-# returns. Rule: import only the `anyhow::Context` trait (needed in scope for
-# `.context()`); write Result / bail! / anyhow! / Error `anyhow::`-qualified at
-# the use site. The only allowed anyhow import is `use anyhow::Context;`.
+# Only `use anyhow::Context;` may import from anyhow. Crates here have their own
+# typed `Result`, so a bare `use anyhow::Result;` would shadow it and hide which
+# Result a signature returns; write anyhow items `anyhow::`-qualified instead.
 #
-# Statement-aware: joins multi-line `use anyhow::{ ... };` before judging.
-# Limitation: an anyhow item in a combined `use { anyhow::Result, ... }` tree
-# isn't parsed — rustfmt never emits that form.
+# Joins multi-line `use` statements before judging. A combined
+# `use { anyhow::Result, ... }` tree is not parsed; rustfmt never emits that form.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -25,13 +21,13 @@ violations=$(awk '
   FNR == 1 { inuse = 0; buf = ""; startln = 0 }
   {
     line = $0
-    sub(/\/\/.*/, "", line)                       # drop // line comments
+    sub(/\/\/.*/, "", line)
     if (inuse) {
       buf = buf " " line
     } else if (line ~ /^[[:space:]]*(pub[[:space:]]+)?use[[:space:]]/) {
       buf = line; startln = FNR; inuse = 1
     }
-    if (inuse && index(buf, ";") > 0) {           # full statement collected
+    if (inuse && index(buf, ";") > 0) {
       norm = buf; gsub(/[[:space:]]/, "", norm)
       if (norm ~ /^(pub)?useanyhow(::|;)/ &&
           norm != "useanyhow::Context;" &&

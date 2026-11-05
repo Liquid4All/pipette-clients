@@ -1,92 +1,96 @@
 import CryptoKit
 import Foundation
 
-// Canonical descriptor form and the digest that addresses it — the Swift counterpart of
+// Canonical descriptor JSON and its digest: pipette-mgmt's
 // `crates/pipette-plan-types/src/descriptor.rs`.
 //
-// A descriptor is the full typed value rendered as JSON. `digest` hashes its *canonical*
-// form — object keys sorted recursively, no insignificant whitespace — so the id survives
-// a client formatting its payload differently, or a type reordering its fields.
-//
-// The rule is shared with `pipette-mgmt`'s `canonical_json`, which is what the warehouse
-// stores as `model_descriptor_sha256`. Reproducing it here means a prefix read off this
-// client addresses the same artifact the warehouse groups by, rather than a second,
-// private id.
+// Must match the crate's `canonical_json` byte for byte: the warehouse stores its hash as
+// `model_descriptor_sha256`, so a digest from this client addresses the same artifact.
+// The server hashes a model without a vault source's `custom_label`, so
+// `modelDescriptorDigest` clears it first.
 
-nonisolated enum Descriptor {
-    /// How many leading hex chars a listing shows.
-    static let digestDisplayLength = 12
-    /// The shortest prefix accepted when addressing an artifact by digest. 32 bits is far
-    /// past collision range for a local store, and shorter reads as a typo.
-    static let digestMinPrefixLength = 8
+/// The crate's `DIGEST_DISPLAY_LEN`.
+nonisolated let digestDisplayLen = 12
 
-    /// Canonical, compact JSON: object keys sorted recursively, no insignificant
-    /// whitespace. Array order is preserved — it is semantically significant.
-    static func canonicalize(_ value: Any) -> String {
-        var out = ""
-        write(value, into: &out)
-        return out
-    }
+/// Compact JSON with object keys sorted recursively; array order is kept.
+nonisolated func canonicalJson(_ value: Any) -> String {
+    var out = ""
+    write(value, into: &out)
+    return out
+}
 
-    /// Hex SHA-256 over the canonical form of `value`.
-    static func digest(_ value: some Encodable) throws -> String {
-        let data = try JSONEncoder().encode(value)
-        let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-        return sha256Hex(canonicalize(object))
-    }
+nonisolated func descriptorDigest(_ value: some Encodable) throws -> String {
+    let data = try JSONEncoder().encode(value)
+    let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    return sha256Hex(canonicalJson(object))
+}
 
-    /// Hex SHA-256 of a string — the hash `digest` applies, exposed so a test can anchor
-    /// on it the way the crate's does.
-    static func sha256Hex(_ value: String) -> String {
-        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
+/// Exposed so a test can anchor on it, as the crate's does.
+nonisolated func sha256Hex(_ value: String) -> String {
+    SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+}
 
-    /// `digest` truncated for display.
-    static func shortDigest(_ digest: String) -> String {
-        String(digest.prefix(digestDisplayLength))
-    }
+nonisolated func shortDigest(_ digest: String) -> String {
+    String(digest.prefix(digestDisplayLen))
+}
 
-    private static func write(_ value: Any, into out: inout String) {
-        switch value {
-        case let object as [String: Any]:
-            out += "{"
-            for (index, key) in object.keys.sorted().enumerated() {
-                if index > 0 { out += "," }
-                out += jsonString(key) + ":"
-                write(object[key] ?? NSNull(), into: &out)
-            }
-            out += "}"
-        case let array as [Any]:
-            out += "["
-            for (index, item) in array.enumerated() {
-                if index > 0 { out += "," }
-                write(item, into: &out)
-            }
-            out += "]"
-        case let string as String:
-            out += jsonString(string)
-        case is NSNull:
-            out += "null"
-        case let number as NSNumber:
-            // `NSNumber` is how `JSONSerialization` hands back both bools and numbers, and
-            // only its ObjC type tells them apart — a bool written as `1` would hash
-            // differently from the same descriptor on the Rust side.
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
-                out += number.boolValue ? "true" : "false"
-            } else {
-                out += number.stringValue
-            }
-        default:
-            out += jsonString(String(describing: value))
+private nonisolated func write(_ value: Any, into out: inout String) {
+    switch value {
+    case let object as [String: Any]:
+        out += "{"
+        for (index, key) in object.keys.sorted().enumerated() {
+            if index > 0 { out += "," }
+            out += jsonString(key) + ":"
+            write(object[key] ?? NSNull(), into: &out)
         }
+        out += "}"
+    case let array as [Any]:
+        out += "["
+        for (index, item) in array.enumerated() {
+            if index > 0 { out += "," }
+            write(item, into: &out)
+        }
+        out += "]"
+    case let string as String:
+        out += jsonString(string)
+    case is NSNull:
+        out += "null"
+    case let number as NSNumber:
+        // `JSONSerialization` returns bools as `NSNumber` too; only the CF type tells them
+        // apart, and a bool written as `1` would hash differently from the Rust side.
+        if CFGetTypeID(number) == CFBooleanGetTypeID() {
+            out += number.boolValue ? "true" : "false"
+        } else if CFNumberIsFloatType(number as CFNumber) {
+            out += float(number.doubleValue)
+        } else {
+            out += number.stringValue
+        }
+    default:
+        out += jsonString(String(describing: value))
     }
+}
 
-    private static func jsonString(_ value: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: [value],
-                                                     options: [.withoutEscapingSlashes]),
-              let array = String(data: data, encoding: .utf8)
-        else { return "\"\(value)\"" }
-        // `["…"]` → `"…"`, so the escaping rules come from the encoder rather than here.
-        return String(array.dropFirst().dropLast())
-    }
+/// A float as `serde_json` writes one: `NSNumber.stringValue` would hash `1.0` as `1`.
+/// Swift's shortest form keeps the `.0`; the exponent is respelled from `1e+20` / `1e-07`
+/// to serde's `1e20` / `1e-7`. The libraries switch to an exponent at slightly different
+/// magnitudes, which descriptors (almost entirely strings) do not reach.
+private nonisolated func float(_ value: Double) -> String {
+    // serde_json writes a non-finite float as `null`.
+    guard value.isFinite else { return "null" }
+    let shortest = "\(value)"
+    guard let e = shortest.firstIndex(where: { $0 == "e" || $0 == "E" }) else { return shortest }
+    var exponent = shortest[shortest.index(after: e)...]
+    let negative = exponent.first == "-"
+    if exponent.first == "+" || negative { exponent = exponent.dropFirst() }
+    let digits = exponent.drop(while: { $0 == "0" })
+    return shortest[..<e] + "e" + (negative ? "-" : "") + (digits.isEmpty ? "0" : digits)
+}
+
+private nonisolated func jsonString(_ value: String) -> String {
+    guard let data = try? JSONSerialization.data(withJSONObject: [value],
+                                                 options: [.withoutEscapingSlashes]),
+          let array = String(data: data, encoding: .utf8)
+    else { return "\"\(value)\"" }
+    // Strip `[` `]` so the escaping rules come from the encoder rather than here.
+    return String(array.dropFirst().dropLast())
 }

@@ -1,33 +1,40 @@
-//! `SourcedBenchmarkId` — location-qualified catalog address: `local/<id>` or `remote/<id>`.
+//! `SourcedBenchmarkId`: a catalog address, `local/<id>` or `remote/<id>`.
 
 use std::fmt;
 
 use thiserror::Error;
 
-use pipette_plan_types::BenchmarkId;
+use pipette_plan_types::{BenchmarkId, BenchmarkIdError, BenchmarkSource};
 
-use pipette_plan_types::benchmark::BenchmarkSource;
-
-/// A reference that names no benchmark: an unknown catalog side, or an id that
-/// is empty, holds whitespace, or is itself addressed (`local/remote/foo`).
-///
-/// One case rather than one per prefix — the accepted forms are the useful part
-/// of the message, and the offending reference is echoed whole.
+/// A reference that names no benchmark. The offending reference is echoed whole,
+/// escaped.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("`{0}` is not a benchmark reference: expected `<id>`, `local/<id>` or `remote/<id>`")]
-pub struct SourcedBenchmarkIdError(String);
+pub enum SourcedBenchmarkIdError {
+    /// An unknown catalog side or a nested address (`local/remote/foo`), where
+    /// the accepted forms are the useful part of the message.
+    #[error(
+        "\"{}\" is not a benchmark reference: expected `<id>`, `local/<id>` or `remote/<id>`",
+        .0.escape_default()
+    )]
+    Shape(String),
+    /// A well-shaped reference whose id the catalog grammar refuses.
+    #[error("\"{}\" is not a benchmark reference: {reason}", .reference.escape_default())]
+    Id {
+        reference: String,
+        reason: BenchmarkIdError,
+    },
+}
 
 /// A location-qualified benchmark id (`local/<id>` or `remote/<id>`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourcedBenchmarkId {
-    /// `local/<id>` — the on-disk local catalog.
+    /// The on-disk local catalog.
     Local(BenchmarkId),
-    /// `remote/<id>` — the synced server catalog.
+    /// The synced server catalog.
     Remote(BenchmarkId),
 }
 
 impl SourcedBenchmarkId {
-    /// Build from catalog source + validated id.
     pub fn new(source: BenchmarkSource, id: BenchmarkId) -> Self {
         match source {
             BenchmarkSource::Local => Self::Local(id),
@@ -35,14 +42,12 @@ impl SourcedBenchmarkId {
         }
     }
 
-    /// The id without the location prefix.
     pub fn id(&self) -> &BenchmarkId {
         match self {
             Self::Local(id) | Self::Remote(id) => id,
         }
     }
 
-    /// Catalog side implied by this address.
     pub fn source(&self) -> BenchmarkSource {
         match self {
             Self::Local(_) => BenchmarkSource::Local,
@@ -54,25 +59,28 @@ impl SourcedBenchmarkId {
 impl std::str::FromStr for SourcedBenchmarkId {
     type Err = SourcedBenchmarkIdError;
 
-    /// Parse a bare id, `local/<id>`, or `remote/<id>`.
-    ///
     /// A bare id means the synced catalog: that is the form plans and claims
-    /// carry, so the distributed case needs no prefix. `local/` stays as the
-    /// explicit opt-in for a definition only this machine has.
+    /// carry. `local/` is the opt-in for a definition only this machine has.
     ///
-    /// The one entry point, so clap takes `--benchmark` as this type and a bad
-    /// reference is a usage error rather than a failure inside `execute`.
+    /// clap takes `--benchmark` as this type, so a bad reference is a usage
+    /// error rather than a failure inside `execute`.
     fn from_str(reference: &str) -> Result<Self, Self::Err> {
-        let invalid = || SourcedBenchmarkIdError(reference.to_string());
+        let shape = || SourcedBenchmarkIdError::Shape(reference.to_string());
         let (source, raw) = match reference.split_once('/') {
             Some(("local", raw)) => (BenchmarkSource::Local, raw),
             Some(("remote", raw)) => (BenchmarkSource::Remote, raw),
-            // `BenchmarkId` rejects a `/`, so a nested address or an unknown
-            // side lands here rather than becoming part of the id.
-            Some(_) => return Err(invalid()),
+            Some(_) => return Err(shape()),
             None => (BenchmarkSource::Remote, reference),
         };
-        let id = BenchmarkId::try_new(raw.to_string()).map_err(|_| invalid())?;
+        if raw.contains('/') {
+            return Err(shape());
+        }
+        let id = BenchmarkId::try_new(raw.to_string()).map_err(|reason| {
+            SourcedBenchmarkIdError::Id {
+                reference: reference.to_string(),
+                reason,
+            }
+        })?;
         Ok(Self::new(source, id))
     }
 }
@@ -87,55 +95,89 @@ impl fmt::Display for SourcedBenchmarkId {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod tests {
     use rstest::rstest;
 
     use super::*;
 
-    fn bid(s: &str) -> BenchmarkId {
-        BenchmarkId::try_new(s.to_string()).expect("test id")
+    fn bid(s: &str) -> anyhow::Result<BenchmarkId> {
+        Ok(BenchmarkId::try_new(s.to_string())?)
     }
 
-    /// A bare id is the distributed form and means the synced catalog; a prefix
-    /// is an explicit override; anything else names no benchmark.
     #[rstest]
-    #[case::bare("foo", Some(SourcedBenchmarkId::Remote(bid("foo"))))]
-    #[case::local("local/foo", Some(SourcedBenchmarkId::Local(bid("foo"))))]
-    #[case::remote("remote/foo", Some(SourcedBenchmarkId::Remote(bid("foo"))))]
-    #[case::nested_address("local/remote/foo", None)]
-    #[case::unknown_side("elsewhere/foo", None)]
-    #[case::empty_after_local("local/", None)]
-    #[case::empty_after_remote("remote/", None)]
-    #[case::empty("", None)]
-    #[case::whitespace("foo bar", None)]
+    #[case::bare("foo", BenchmarkSource::Remote)]
+    #[case::local("local/foo", BenchmarkSource::Local)]
+    #[case::remote("remote/foo", BenchmarkSource::Remote)]
     fn parse_accepts_bare_ids_and_explicit_sides(
         #[case] reference: &str,
-        #[case] expected: Option<SourcedBenchmarkId>,
+        #[case] source: BenchmarkSource,
+    ) -> anyhow::Result<()> {
+        assert_eq!(
+            reference.parse(),
+            Ok(SourcedBenchmarkId::new(source, bid("foo")?))
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::nested_address("local/remote/foo", None)]
+    #[case::unknown_side("elsewhere/foo", None)]
+    #[case::empty_after_local("local/", Some(BenchmarkIdError::Empty))]
+    #[case::empty_after_remote("remote/", Some(BenchmarkIdError::Empty))]
+    #[case::empty("", Some(BenchmarkIdError::Empty))]
+    #[case::whitespace("foo bar", Some(BenchmarkIdError::InvalidChar(' ')))]
+    #[case::colon("local/foo:bar", Some(BenchmarkIdError::InvalidChar(':')))]
+    #[case::leading_dot("remote/.hidden", Some(BenchmarkIdError::InvalidFirst('.')))]
+    fn a_refusal_says_whether_the_shape_or_the_id_is_wrong(
+        #[case] reference: &str,
+        #[case] reason: Option<BenchmarkIdError>,
     ) {
-        match expected {
-            Some(parsed) => assert_eq!(reference.parse(), Ok(parsed)),
-            None => assert_eq!(
-                reference.parse::<SourcedBenchmarkId>(),
-                Err(SourcedBenchmarkIdError(reference.to_string()))
-            ),
-        }
+        let expected = match reason {
+            None => SourcedBenchmarkIdError::Shape(reference.to_string()),
+            Some(reason) => SourcedBenchmarkIdError::Id {
+                reference: reference.to_string(),
+                reason,
+            },
+        };
+        assert_eq!(reference.parse::<SourcedBenchmarkId>(), Err(expected));
+    }
+
+    /// The reference is escaped so an invisible or look-alike character shows.
+    #[rstest]
+    #[case::shape(
+        "elsewhere/a\nb\u{200B}\u{430}",
+        r#""elsewhere/a\nb\u{200b}\u{430}" is not a benchmark reference: expected `<id>`, `local/<id>` or `remote/<id>`"#
+    )]
+    #[case::id(
+        "local/a\nb\u{200B}\u{430}",
+        r#""local/a\nb\u{200b}\u{430}" is not a benchmark reference: benchmark id contains '\n'; allowed: [A-Za-z0-9][A-Za-z0-9_.-]*"#
+    )]
+    fn a_refusal_escapes_the_reference(#[case] reference: &str, #[case] expected: &str) {
+        assert_eq!(
+            reference
+                .parse::<SourcedBenchmarkId>()
+                .err()
+                .map(|e| e.to_string())
+                .as_deref(),
+            Some(expected)
+        );
     }
 
     #[test]
-    fn display_round_trips_through_parse() {
+    fn display_round_trips_through_parse() -> anyhow::Result<()> {
         for reference in [
-            SourcedBenchmarkId::Local(bid("foo")),
-            SourcedBenchmarkId::Remote(bid("foo")),
+            SourcedBenchmarkId::Local(bid("foo")?),
+            SourcedBenchmarkId::Remote(bid("foo")?),
         ] {
             let wire = reference.to_string();
             assert_eq!(wire.parse(), Ok(reference));
         }
+        Ok(())
     }
 
     #[test]
-    fn new_matches_source() {
-        let id = bid("x");
+    fn new_matches_source() -> anyhow::Result<()> {
+        let id = bid("x")?;
         assert_eq!(
             SourcedBenchmarkId::new(BenchmarkSource::Local, id.clone()),
             SourcedBenchmarkId::Local(id.clone())
@@ -144,17 +186,19 @@ mod tests {
             SourcedBenchmarkId::new(BenchmarkSource::Remote, id.clone()),
             SourcedBenchmarkId::Remote(id)
         );
+        Ok(())
     }
 
     #[test]
-    fn source_matches_variant() {
+    fn source_matches_variant() -> anyhow::Result<()> {
         assert!(matches!(
-            SourcedBenchmarkId::Local(bid("x")).source(),
+            SourcedBenchmarkId::Local(bid("x")?).source(),
             BenchmarkSource::Local
         ));
         assert!(matches!(
-            SourcedBenchmarkId::Remote(bid("x")).source(),
+            SourcedBenchmarkId::Remote(bid("x")?).source(),
             BenchmarkSource::Remote
         ));
+        Ok(())
     }
 }

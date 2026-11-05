@@ -1,0 +1,9 @@
+{
+  "python_version": "3.11",
+  "server_version": "2026.4.1",
+  "source": {
+    "dir": "/opt/pipette/venvs/openvino",
+    "type": "absolute_preinstalled"
+  },
+  "type": "uv_openvino"
+}

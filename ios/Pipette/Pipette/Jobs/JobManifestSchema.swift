@@ -2,18 +2,14 @@ import Foundation
 
 /// Versioned decoding for persisted job manifests.
 ///
-/// Purely additive changes (a new optional field) never need a version bump —
-/// Codable already handles them in both directions. Bump `currentVersion` and
-/// add a `migrationStep` case when the shape changes incompatibly (a rename,
-/// split, or type change), so manifests already on user devices are upgraded
-/// on load instead of failing to decode. Each step is a plain JSON-dictionary
-/// transform, unit-testable against string fixtures of the old shape.
+/// An additive change (a new optional field) needs no version bump. Bump `currentVersion`
+/// and add a `migrationStep` case for an incompatible one (a rename, split, or type change)
+/// so manifests already on devices still load. Version 1 (2026-06) is the baseline, and a
+/// manifest with no version reads as version 1.
 ///
-/// Version 1 (2026-06) is the compatibility baseline: manifests written before
-/// versioning existed owe no migration support, but every shape change from
-/// version 1 onward must keep older versions loading.
+/// Version 2 (2026-09) splits a cell's catalog reference into the id/side pair.
 nonisolated enum JobManifestSchema {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     /// Decode a persisted manifest, upgrading older schema versions first.
     /// Throws when the data isn't a manifest at any known version.
@@ -40,8 +36,38 @@ nonisolated enum JobManifestSchema {
     /// version N+1. Add a case here when bumping `currentVersion`.
     private static func migrationStep(from version: Int, _ json: [String: Any]) -> [String: Any] {
         switch version {
+        case 1:
+            return splittingCellBenchmarkReferences(json)
         default:
             return json
         }
+    }
+
+    /// Version 1 to 2: an older build wrote the whole `source/id` reference into
+    /// `benchmarkId`. `BenchmarkId` refuses the `/`, and every id-keyed lookup expects the
+    /// bare form.
+    ///
+    /// The side is recovered too: an absent `benchmarkSource` reads as `remote`, so an
+    /// unsplit `local/` cell would submit a result the server never sanctioned. A side
+    /// already recorded wins. Any other `benchmarkId` is left as it was.
+    private static func splittingCellBenchmarkReferences(
+        _ json: [String: Any]
+    ) -> [String: Any] {
+        guard let cells = json["cells"] as? [[String: Any]] else { return json }
+        var json = json
+        json["cells"] = cells.map { cell -> [String: Any] in
+            guard let stored = cell["benchmarkId"] as? String, stored.contains("/"),
+                  let reference = try? SourcedBenchmarkId(parsing: stored)
+            else { return cell }
+            var cell = cell
+            cell["benchmarkId"] = reference.id.value
+            // `as? String`, not a nil-key check: a `null` here deserializes to `NSNull`,
+            // which is not absent to a dictionary but is to `decodeIfPresent`.
+            if cell["benchmarkSource"] as? String == nil {
+                cell["benchmarkSource"] = reference.source.rawValue
+            }
+            return cell
+        }
+        return json
     }
 }

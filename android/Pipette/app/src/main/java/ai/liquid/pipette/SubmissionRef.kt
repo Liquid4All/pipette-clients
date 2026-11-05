@@ -20,10 +20,7 @@ object SubmissionRef {
    */
   const val ANDROID_FLAVOR = "android-arm64-v8"
 
-  /**
-   * The canonical upstream llama.cpp repo, scheme-less per the plan-types `RepositoryUrl` sanitizer — matches
-   * `pipette_plan_types::default_repository_url` and iOS `SubmissionRef.llamaCppRepositoryUrl`.
-   */
+  /** The canonical upstream llama.cpp repo, scheme-less per the plan-types `RepositoryUrl` sanitizer — matches iOS `LlamaPins.main.repositoryUrl`. */
   const val LLAMACPP_REPOSITORY_URL = "github.com/ggml-org/llama.cpp"
 
   /**
@@ -68,12 +65,23 @@ object SubmissionRef {
     )
 
   /**
-   * `runtime_flags`: the llama.cpp load knobs as the `llama-bench`/`llama-cli` CLI-flag string, the cheap grouping/display companion the server
-   * stores verbatim (never interpreted) alongside `runtime_descriptor`. Byte-identical to the iOS client (`PayloadBuilder.swift`: `-ngl <n> -c
-   * <ctx>`) so the warehouse `runtime_flags` column stays consistent across platforms. `n_ubatch` is intentionally not recorded here (iOS omits it
-   * too).
+   * `runtime_flags`: the llama.cpp load knobs as the cell resolved them, in the flat wire form of `pipette_plan_types::RuntimeFlagRef`. This is what
+   * the payload's `runtime_flags` field is documented to carry: "canonical JSON of the run's RuntimeFlags in its flat wire form ... plan entry plus
+   * whatever the client derived".
+   *
+   * The same form iOS submits (`PayloadBuilder` -> `RuntimeFlags.submissionValue()`), but not the same key set: an Android cell carries
+   * `number_gpu_layers` / `ctx_size` / `n_ubatch` / `load_mode`, where an iOS one also carries `threads` and `swa_full`. That is the engines
+   * differing, not the encoders: this one derives its thread count from the usable compute cores and has no sliding-window override, so plan-types
+   * declares neither knob for `llamacpp_apk_pipette` and a cell authoring one is refused. Key order also differs, which the server settles by
+   * canonicalizing before it stores.
+   *
+   * Resolved rather than authored, and that is the whole point: a knob this engine defaulted (every one of them, for a cell composed in the app) is
+   * indistinguishable in the record from a knob a cell asked for, so a reader can reproduce the run without knowing which client version chose what.
+   * This replaced a `"-ngl <n> -c <ctx>"` summary that named two knobs and silently omitted `n_ubatch` and the load mode.
+   *
+   * Axis keys are absent: they identify the cell, which the payload already names through its descriptors and benchmark id.
    */
-  fun runtimeFlags(nGpuLayers: Int, contextSize: Int): String = "-ngl $nGpuLayers -c $contextSize"
+  fun runtimeFlags(flags: RuntimeFlagRef): String = canonical(flags.toJson())
 
   /**
    * `benchmark_flags`: what the *harness* ran under, as opposed to `runtime_flags` (how the engine was loaded). Canonical JSON matching
@@ -89,9 +97,9 @@ object SubmissionRef {
    * variant, so the CLI emits whichever of its knobs were authored (`{}` when none were), while max-memory has none and is omitted outright. So only
    * max-memory is a true match. The divergence is unobservable for now, since `BenchmarkCatalog.SELECTABLE_TYPES` offers no eval cell to run.
    *
-   * Caveat worth knowing before extending this: `BenchmarkFlags` models no `llamacpp_apk_pipette` variant at all yet, so `try_from` would answer
-   * `NoSuchCombination` for *every* Android cell, not just the two elided here. What this emits is shape-compatible with the schema without being
-   * typed by it. Adding the mobile variants is the same change for iOS and belongs with PIP-429.
+   * Caveat worth knowing before extending this: `BenchmarkFlags` now models the four apk timing cells, so `try_from` answers `NoSuchCombination` only
+   * for the two elided here — but this still *emits* hand-built JSON rather than being typed by that schema, so the two can drift without anything
+   * failing. The sweep that would catch it is `benchmark_flags.rs`'s `CELLS` table, which no Kotlin test reads.
    */
   fun benchmarkFlagsOrNull(benchmarkType: BenchmarkType, policy: ReadinessPolicy): String? {
     val gates =
@@ -99,7 +107,8 @@ object SubmissionRef {
         BenchmarkType.PREFILL_THROUGHPUT,
         BenchmarkType.DECODE_THROUGHPUT,
         BenchmarkType.END_TO_END_LATENCY,
-        BenchmarkType.VL_THROUGHPUT -> true
+        BenchmarkType.VL_THROUGHPUT,
+        BenchmarkType.VLM_EVAL -> true
         BenchmarkType.EVAL,
         BenchmarkType.MAX_MEMORY_USAGE -> false
       }

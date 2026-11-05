@@ -23,8 +23,8 @@ object BenchmarkCatalog {
   val all: List<BenchmarkDefinition>
     get() = _catalog.value
 
-  // The benchmark types the New Job picker offers. `eval` and `vl_throughput` are excluded — they don't run on this client's ladder path. Matches
-  // iOS `BenchmarkCatalog.selectableTypes` exactly.
+  // The benchmark types the New Job picker offers. `eval`, `vl_throughput`, and `vlm_eval` are excluded — they don't run on this client's ladder
+  // path. Matches iOS `BenchmarkCatalog.selectableTypes` exactly.
   private val SELECTABLE_TYPES =
     setOf(BenchmarkType.PREFILL_THROUGHPUT, BenchmarkType.DECODE_THROUGHPUT, BenchmarkType.END_TO_END_LATENCY, BenchmarkType.MAX_MEMORY_USAGE)
 
@@ -97,7 +97,8 @@ object BenchmarkContextSize {
         val text = params.optLongCompat("parameter_text_tokens")
         saturatingAdd(saturatingAdd(imageTokens, text), decode)
       }
-      "eval" -> saturatingAdd(EVAL_PROMPT_BUDGET, maxTokens)
+      "eval",
+      "vlm_eval" -> saturatingAdd(EVAL_PROMPT_BUDGET, maxTokens)
       else -> null
     }
   }

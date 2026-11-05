@@ -3,310 +3,362 @@
 ## Measured Quantity
 
 Decode throughput is the speed of autoregressive token generation after a
-prompt context already exists. The benchmark measures the decode phase for a
-fixed number of generated tokens while conditioning on a fixed prompt depth.
+prompt context already exists. The `decode_throughput` benchmark times the
+decode phase for a fixed number of generated tokens at a fixed prompt depth.
 
-In pipette, this metric is reported by the `decode_throughput` benchmark
-family.
-
-The submitted result is an elapsed time, not a token-rate field:
+The submitted result is an elapsed time, not a token rate:
 
 - `decode_time_ms`: mean time to generate the requested decode tokens.
-- `decode_time_ms_stddev`: sample standard deviation across measured
+- `decode_time_ms_stddev`: sample standard deviation across the five measured
   repetitions.
 
-A token-per-second rate can be derived as
-`parameter_decode_tokens * 1000 / decode_time_ms`. Pipette stores the time
-field because the benchmark shape already carries the decode-token count, and
-elapsed time keeps the submitted payload aligned with the latency benchmarks.
+Lower is better. Pipette stores the time because the benchmark shape already
+carries the decode-token count, and elapsed time keeps the payload aligned with
+the latency benchmarks. The management service derives the token rate; the
+formula is in
+[pipette-mgmt docs/benchmarks.md §2.2](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/benchmarks.md#22-decode-throughput).
 
-Runtime installation, model download, model load, server startup, benchmark
-warmup, platform readiness waits, prompt-context setup, and result
-sync/upload are outside the decode timing.
-
-The scope is model decode work for a fixed number of generated tokens at a
-fixed prompt depth. It is not TTFT, end-to-end request latency, or streaming
-API latency.
+Runtime installation, model download, model load, server startup, warm-up,
+readiness waits, prompt-context setup and result upload are outside the decode
+timing. The scope is model decode work, not TTFT, end-to-end request latency or
+streaming API latency.
 
 ## Measurement Challenges and Controls
 
-Decode cost depends on both generated-token count and existing context length.
-A model generating 100 tokens after an 8-token prompt is doing different work
-from the same model generating 100 tokens after a 512-token prompt. The
-benchmark therefore treats both prompt depth and decode count as the comparison
-key.
+The controls every timing cell shares (a fresh runtime state per repetition,
+five repetitions, the readiness gate before each) are written once in
+[prefill-throughput.md](prefill-throughput.md#measurement-challenges-and-controls).
+The readiness criteria per platform are in
+[end-to-end-latency.md](end-to-end-latency.md#system-readiness-control). Decode
+adds three controls of its own.
 
-The main methodological requirement is to keep prefill outside the timed
-window. Each runtime must establish the requested prompt context first, then
-time only the generated-token loop.
+Decode cost depends on both the generated-token count and the existing context
+length: 100 tokens after an 8-token prompt is different work from 100 tokens
+after a 512-token prompt. Prompt depth and decode count are both part of the
+comparison key, and each runtime establishes the prompt context outside the
+timed window, then times only the generated tokens.
 
-Models can stop early when they emit EOS or another end-of-generation token.
-Early stop would shorten the measured decode workload and inflate the apparent
-throughput. Implementations therefore use benchmark-native token counts or an
-ignore-EOS path and fail when the runtime reports a different decode-token
-count.
+Models can stop early on EOS or another end-of-generation token, which would
+shorten the workload and inflate the apparent rate. Each path therefore forces
+the count (a benchmark-native count, an ignore-EOS request, or a fixed-step
+loop) and fails when the runtime reports a different decode-token count.
 
-Warmup and thermal state can dominate repeated decode timings. The CLI runners
-separate warmup from measured samples and run the platform readiness gate
-before each measured repetition. Individual samples can still be affected by
-scheduler noise, runtime caches, or transient background load, so the benchmark
-reports both mean and sample standard deviation across five repetitions.
-
-Cached state can also distort decode timings. A measured decode that reused the
-previous repetition's KV cache would be doing different work from a fresh
-decode at the requested depth. Each measured repetition therefore starts from a
-fresh runtime state: the llama.cpp CLI path runs one `llama-bench` process per
-sample (the per-process `n_depth` pass rebuilds the prompt context before the
-timed block), the iOS app resets the llama context and sampler before every
-iteration, and the MLX sidecar calls `mlx_lm.stream_generate` without a
-`prompt_cache` argument so no KV state carries across requests within the
-long-lived sidecar process.
+On a server the first token is sampled off the prefill pass, so the server
+paths time the interval after the first token and scale it to the full count
+(see [Benchmark Shape](#benchmark-shape-and-reported-fields)).
 
 ## Measurement Protocol
 
-The benchmark has a shared measurement contract:
-
 1. Resolve `parameter_prefill_tokens` and `parameter_decode_tokens`.
 2. Prepare the runtime and model.
-3. Run the backend's warmup path outside the submitted measurement.
-4. For each measured repetition, establish the requested prompt context outside
-   the timed window.
+3. Run the backend's warm-up outside the submitted measurement.
+4. For each measured repetition, wait on the readiness gate, then establish the
+   requested prompt context outside the timed window.
 5. Time generation of the requested decode-token count.
-6. Before each measured CLI repetition, run the platform readiness check.
-7. Validate the decode token count when the runtime reports it.
-8. Report the mean and sample standard deviation of the five measured decode
-   times.
+6. Validate the decode token count when the runtime reports it.
+7. Report the mean and sample standard deviation of the five decode times.
 
 The timed window starts immediately before the backend's decode operation and
-ends immediately after the requested decode operation completes. Runtime
-startup, model load, warmup, readiness checks, prompt-context setup, result
-serialization, and sync are outside that window.
-
-The exact implementation of the timed window is runtime-specific. llama.cpp
-uses `llama-bench` depth to set up the prompt context before the timed block.
-MLX reports generation tokens per second from the Python sidecar and the Rust
-runner converts that rate back to milliseconds. The iOS app measures elapsed
-time around the native-Swift llama decode call after prefill.
+ends when the requested decode completes. llama.cpp uses `llama-bench` depth to
+set up the context before its timed block. MLX, torch-oai, OpenVINO and ONNX
+GenAI stream a `<D>`-token generation from the server's `/v1/completions` (OVMS
+from its `/v3/completions`) and report the after-first-token wall time scaled
+to `<D>`, as Apple Foundation does with its response stream. The in-process
+iOS llama.cpp, iOS MLX and Android engines time the decode call after an
+untimed prefill. iOS ONNX GenAI reports its mean per-token interval after the
+first token, times `<D>`. Core AI reports the sidecar's first-token-to-last-token
+span without the scaling to `<D>` (see [Core AI](#core-ai)).
 
 ## Benchmark Shape and Reported Fields
 
-Concrete benchmark definitions use two token-count fields:
-
-- `parameter_prefill_tokens`: prompt depth used before decode timing starts.
+- `parameter_prefill_tokens`: prompt depth before decode timing starts.
 - `parameter_decode_tokens`: number of generated tokens to time.
+- `parameter_batch_size`: requests kept in flight at once. Optional, default
+  `1`; see [Batched](#batched).
 
-The standard ladder uses IDs such as `decode_throughput_512_100`, meaning
-100 generated tokens after a 512-token prompt context. The local smoke
-benchmark uses 8 prompt tokens and 8 generated tokens. The benchmark requires
-`parameter_prefill_tokens >= 1` because decode is defined as autoregressive
-generation conditioned on an existing prompt context; a depth of zero is the
-TTFT shape and is not in scope here.
+The standard ladder uses IDs such as `decode_throughput_512_100`, 100 generated
+tokens after a 512-token prompt; a batched entry carries the count as a
+`_bs<n>` suffix, `decode_throughput_512_100_bs4`. The local smoke benchmark,
+`decode_throughput_smoke`, uses 8 prompt tokens and 8 generated tokens. The
+server catalog also has a depth-zero entry, `decode_throughput_0_32`, which
+generates from an empty cache. Only `llama-bench` and the in-process engines
+can run it: the server paths need `parameter_prefill_tokens >= 1`, because a
+request carries at least one prompt token.
 
-The submitted result reports:
+The server paths also require `parameter_decode_tokens >= 2`. There the first
+token is sampled off the prefill pass, so `<D>` generated tokens hold `<D> - 1`
+decode steps and a one-token cell holds none: its only reading is TTFT, which
+is the prefill benchmark under another name. Those paths time the `<D> - 1`
+steps after the first token and scale to `<D>`, the same quantity
+`llama-bench` and the iOS llama.cpp engine time directly: `<D>` single-token
+steps after a depth pass that samples nothing.
 
-- `decode_time_ms`: mean decode time across measured repetitions.
-- `decode_time_ms_stddev`: sample standard deviation across measured
-  repetitions.
+## Batched
 
-Lower `decode_time_ms` is better. If a report presents this benchmark as
-tokens per second, higher is better after applying the derived-rate conversion.
+At `parameter_batch_size` `N` above `1` the same request is measured under
+load, each request on its own slot of the one server. The repetition's value is
+the per-request mean over the `N` readings, not the batch's wall clock, so
+`decode_time_ms` stays one stream's decode time. On llama.cpp,
+`llama-batched-bench` generates on the `N` sequences in lockstep, so the one
+time it reports is each stream's (see [llama.cpp](#llamacpp)).
 
-The token-rate metric is derived by the management service:
-
-```text
-decode_throughput = parameter_decode_tokens / decode_time_ms * 1000
-value_stddev(decode_throughput) =
-    decode_throughput * decode_time_ms_stddev / decode_time_ms
-```
-
-For measured times `t_1..t_5`, `decode_time_ms` is `sum(t_i) / 5`, and
-`decode_time_ms_stddev` is `sqrt(sum((t_i - mean)^2) / 4)`.
+Server sizing, gating, warm-up, validation and which engines refuse a batched
+entry are shared by the three timing cells:
+[end-to-end-latency.md](end-to-end-latency.md#batched).
 
 ## Token Control
 
-The prompt-depth and decode-token counts define the work. The current
-implementations use the most direct token-control path available for each
-runtime:
+- llama.cpp: `llama-bench --n-prompt 0 --n-gen <D> --n-depth <P>`, and for a
+  batch of `N`, `llama-batched-bench -npp <P> -ntg <D> -npl <N>,<N>`. Both
+  generate exactly the requested tokens regardless of EOS.
+- MLX: a prompt string the server tokenizes to exactly `<P>` tokens, EOS ids
+  suppressed via `logit_bias`.
+- torch-oai, OVMS, OpenVINO and ONNX GenAI: the same kind of prompt string,
+  with `ignore_eos: true`.
+- iOS llama.cpp: the shared seed passage (`PromptSeed.promptSeedText`, the
+  bundled copy of `crates/pipette-ops/src/prompt_seed.txt`) tiled to exactly
+  `<P>` tokens, then `<D>` tokens fed through the decoder with no sampler, as
+  `llama-bench`'s `test_gen` does. The context window is
+  `parameter_prefill_tokens + parameter_decode_tokens`, from
+  `LlamaRuntimeFlags.ctxSize(for:)`.
+- iOS MLX: `<P>` synthetic token ids prefilled, then a fixed loop of `<D>`
+  greedy steps.
+- iOS ONNX GenAI: minimum and maximum total length both `<P> + <D>`.
+- Android app: the seed passage tiled to `<P>` tokens, then `<D>` greedy tokens
+  with end-of-generation ignored.
+- Core AI: `<P>` deterministic pseudo-random token ids, with no EOS id among
+  them, then a greedy generation capped at `<D>` tokens. The sidecar reports
+  the count that it generated, and a count other than `<D>` fails the run.
 
-- llama.cpp uses `llama-bench --n-prompt 0 --n-gen <D> --n-depth <P>`.
-- MLX builds a deterministic token sequence of length `<P>` and calls the
-  sidecar generation path for `<D>` tokens.
-- The iOS app tokenizes an app-local seed prompt, prefills that context, then
-  runs a native-Swift ignore-EOG decode for `<D>` tokens.
-
-The invariant for the CLI runners is the requested decode-token count at the
-requested prompt depth. A run is invalid if the selected `llama-bench` row has
-the wrong `n_prompt`, `n_gen`, or `n_depth` shape, if the MLX sidecar returns
-the wrong `decode_tokens`, or if the reported throughput value is missing,
-non-finite, or non-positive.
-
-`llama-bench` itself generates exactly `n_gen` tokens regardless of EOS, so
-the CLI path does not need an explicit ignore-EOS flag. The MLX sidecar
-suppresses EOS before calling `mlx_lm.stream_generate`, and the iOS app uses
-its native-Swift `Inference.decodeIgnoringEoG` primitive. Each path keeps the
-measured decode length equal to the requested count.
-
-The iOS app builds the prompt context differently from the CLI runners. It
-tiles an app-local seed corpus (`PromptSeed.corpus`) and takes the first
-`parameter_prefill_tokens` tokens. The required context window (
-`parameter_prefill_tokens + parameter_decode_tokens`) is computed from the
-benchmark shape and validated up front by `check_ctx_size` before the model
-loads, so a context too small for the benchmark fails with a readable error
-instead of running at a shorter depth. iOS results should still be compared only
-against other iOS results, because the prompt is a repeated filler string rather
-than the shared seed sequence and the app does not use the shared readiness
-gate.
-
-## System Readiness Control
-
-The CLI runners use the same platform readiness infrastructure as
-`end_to_end_latency`. Android, Linux, macOS, and Windows wait for host or
-device readiness before measured repetitions; unsupported platforms use the
-no-op fallback from `pipette_readiness`. See the platform deadline,
-thermal, and CPU criteria table in
-[`end-to-end-latency.md`](end-to-end-latency.md#system-readiness-control).
-
-Readiness checks are outside the timed window. Their purpose is to make each
-measured repetition start from a comparable thermal and CPU-load state. If the
-host or device fails to reach readiness before the platform deadline, the run
-fails rather than submitting a decode timing from an unstable condition.
-
-The iOS app path currently runs its own in-process measurements and does not
-use the shared `pipette_readiness` gate.
+A run is invalid if `llama-bench` prints anything but one row or its row has
+the wrong `n_gen` or `n_depth`, if `llama-batched-bench` prints anything but
+its two rows or its reading's `pl × pp` and `pl × tg` are not `N × P` and
+`N × D`, if a server reports the wrong counts in the stream's trailing `usage`
+block or a `finish_reason` other than `"length"`, if an in-process engine
+decodes a different count, or if the measured time is missing, non-finite or
+non-positive.
 
 ## Runtime Details
 
-The current client implementations use these paths:
-
 | Path | Workload | Timing source | Notes |
 | --- | --- | --- | --- |
-| llama.cpp CLI | `llama-bench --output json --model <path> --n-prompt 0 --n-gen <D> --n-depth <P> -r 1` per measured repetition | selected row `avg_ns`, converted to milliseconds | The depth run establishes context before the timed generation block. |
-| MLX CLI | Python sidecar `/decode_throughput` with `prompt_tokens = <P>` and `decode_tokens = <D>` | sidecar `generation_tps`, converted to milliseconds | Warmup runs the benchmark's own shape. |
-| iOS app | native-Swift llama prefill followed by ignore-EOG decode | Swift-side elapsed time around decode only | One warmup plus five measured repetitions inside the app process. |
+| llama.cpp CLI | `llama-bench --output json --model <path> --n-prompt 0 --n-gen <D> --n-depth <P> --repetitions 1` per measured repetition, after one untimed run of the same command | row `avg_ns`, converted to milliseconds | The depth run establishes context before the timed block. The untimed run keeps a shape's first kernel builds out of rep 1. |
+| llama.cpp CLI, batch of `N` | `llama-batched-bench --output-format jsonl --model <path> --ctx-size <N × (P + D)> -npp <P> -ntg <D> -npl <N>,<N>` per measured repetition | second row's `t_tg`, converted to milliseconds | The first row warms the process at the cell's shape; the prompts are prefilled untimed. |
+| MLX CLI | streamed `/v1/completions`, `<P>`-token prompt, `max_tokens = <D>` | first-token-to-last-token wall time, scaled to `<D>` | Warm-up at the cell's shape; server prompt cache disabled. |
+| torch-oai (vLLM / SGLang, docker or uv) | streamed `/v1/completions`, `<P>`-token prompt, `max_tokens = <D>`, `ignore_eos` | first-token-to-last-token wall time, scaled to `<D>` | Warm-up at the cell's shape; prefix caching disabled at launch. |
+| OVMS | streamed `/v3/completions`, `<P>`-token prompt, `<D>` tokens, `ignore_eos` | first chunk to finish chunk, scaled to `<D>` | See [ovms.md](../ovms.md#readings). |
+| OpenVINO | in-house server, streamed `/v1/completions`, `<P>`-token prompt, `max_tokens = <D>`, `ignore_eos` | first-token-to-last-token wall time, scaled to `<D>` | Pipeline compiled before the server listens; warm-up at the cell's shape; SDPA backend off NPU. |
+| ONNX GenAI | in-house server, streamed `/v1/completions`, `<P>`-token prompt, `max_tokens = <D>`, `ignore_eos` | first-token-to-last-token wall time, scaled to `<D>` | Model loaded before the server listens; warm-up at the cell's shape. |
+| iOS llama.cpp | in-process prefill, then `<D>` sampler-free decode steps | Swift-side elapsed time around the decode only | Context and sampler reset per repetition; one untimed warm-up. |
+| iOS MLX | in-process prefill into a fresh KV cache, then `<D>` greedy steps | Swift-side elapsed time around the decode only | One untimed warm-up. |
+| iOS ONNX GenAI | in-process generation of `<P> + <D>` total tokens | mean per-token interval after the first token, times `<D>` | One untimed warm-up. |
+| Apple Foundation (iOS app) | streamed greedy `LanguageModelSession` response to a `<P>`-token prompt ending in a counting seed, `maximumResponseTokens = <D>` | first-snapshot-to-last-snapshot wall time, scaled to `<D>` | One-token warm-up, then a fresh session per repetition; needs `<D> >= 2`, as the server paths do. |
+| Android app | in-process llama.cpp prefill, then `<D>` greedy tokens ignoring end-of-generation | elapsed time around the decode only | Context reset and re-prefilled untimed per repetition; one untimed warm-up; refuses a batched entry. |
+| Core AI (macOS CLI) | Swift sidecar, `POST /decode_throughput` with `<P>` token ids and `<D>` tokens | sidecar's first-token-to-last-token span, **not** scaled to `<D>` | One untimed warm-up; KV reset untimed per repetition; needs `<D> >= 2`; does not refuse a batched entry. See [Core AI](#core-ai). |
+
+### OpenVINO and ONNX GenAI
+
+Both runtimes are measured through pipette's in-house OpenAI-compatible
+server, one per cell, with the same request, reading and checks as
+[torch-oai](#torch-oai). The server streams one chunk per generated token, text
+or not, flushed as the token exists, so the first and last stamps fall on those
+tokens. OpenVINO generates through a token-level streamer and, off NPU, on
+GenAI's SDPA backend, because detokenizing each token on the default
+paged-attention backend stalls generation. ONNX GenAI forces the count with
+equal minimum and maximum total lengths, both `<P> + <D>`. The measurements
+behind these choices are in
+[OpenVINO measurement](../openvino-measurement.md) and
+[ONNX GenAI measurement](../onnx-genai-measurement.md).
 
 ### llama.cpp
 
-`pipette-llamacpp` runs one `llama-bench` process per measured sample and
-passes `-r 1`. `llama-bench` warmup remains enabled by default unless the user
-explicitly changes it through runtime flags; warmup is not part of the selected
-row's `avg_ns`.
+`pipette-llamacpp` runs one `llama-bench` process per measured sample with
+`--repetitions 1`. Before the five it runs the same command once more,
+ungated; its row is checked and dropped. The run must print exactly one JSON
+row (`n_prompt == 0`), with `n_gen == parameter_decode_tokens` and
+`n_depth == parameter_prefill_tokens`. `n_depth` runs a prompt pass before the
+timed block (none at depth zero), the timed block generates `n_gen` tokens, and
+the row's `avg_ns` is converted to milliseconds.
 
-The runner selects exactly one JSON row matching:
+The extra run is the cell's warm-up. `llama-bench` warms each process itself
+(`--no-warmup` is reserved), but for a decode that warm-up is one generated
+token on an empty cache, so a kernel that only the cell's depth selects is
+built inside the timed generation. For example, on Metal the attention kernel is
+tuned per KV length from 1,024 cells up. A shape's first run on a machine
+builds it from scratch and later runs take it from the system's shader cache,
+so without the extra run, rep 1 alone pays the cold build. Measured with
+`llama-bench` b11228 on an M3 Ultra (macOS 27.0.1), depth 4,096, 128 tokens:
+six one-repetition runs in a row of a shape that build had not run there
+before, reduced without the extra run (runs 1 to 5) and with it (runs 2 to 6):
 
-- `n_prompt == 0`.
-- `n_gen == parameter_decode_tokens`.
-- `n_depth == parameter_prefill_tokens`.
+| Model, KV cache | Run 1 minus the median of the rest | Runs 1 to 5 | Runs 2 to 6 |
+| --- | --- | --- | --- |
+| gemma-4-E4B Q4_0, `q8_0` | +356 ms | 1,638.8 ± 158.8 ms | 1,566.7 ± 3.4 ms |
+| gemma-3-1b Q4_K_M, `q4_0` | +307 ms | 818.9 ± 137.7 ms | 759.4 ± 5.3 ms |
+| LFM2-350M Q4_K_M, `q8_0` | +24 ms | 308.2 ± 20.0 ms | 305.0 ± 16.1 ms |
 
-In the vendored `llama-bench` implementation, `n_depth` runs a prompt pass
-before the timed block. The timed block then runs generation for `n_gen`
-tokens. The row's `avg_ns` is converted to milliseconds for that sample, and
-five samples are aggregated by the Rust harness.
+With the default `f16` cache the first build cost 35 to 58 ms (Qwen3.5-0.8B,
+gemma-4-E4B). Run again, the same shapes showed no first-run cost, and neither
+did a CPU-only build, which compiles nothing: there the extra run only costs
+time.
 
-The runner controls these workload-shaping flags and rejects user overrides for
-them: `--output`, `-o`, `--model`, `-m`, `--n-prompt`, `-p`, `--n-gen`, `-n`,
-`--n-depth`, `-d`, `--repetitions`, and `-r`.
+The cached build still happens inside each sample. Taking it out would need a
+second decode in the same process, which reads slower for a reason of its own:
+with `--repetitions 2` on the same machine, LFM2-350M's second sample ran about
+30% slower than its first.
 
-The runner adds `--mmap 0` by default unless the user supplies an mmap flag.
-User runtime flags that are not reserved remain part of the runtime condition
-and must be kept identical across compared runs.
+At `parameter_batch_size` `N` above 1 the runner uses `llama-batched-bench`,
+still one process per measured sample:
+
+```
+llama-batched-bench --output-format jsonl --model <path> <knobs> \
+  --ctx-size <N × (P + D)> -npp <P> -ntg <D> -npl <N>,<N>
+```
+
+As for [prefill](prefill-throughput.md#llamacpp), the batch is listed twice:
+the first row warms the process at the cell's shape and the second is the
+reading. The tool prefills the `N` prompts, untimed for this cell, then runs `D`
+decode steps, each taking one token from every sequence; its `t_tg` is
+converted to milliseconds. A batch needs a prompt: at
+`parameter_prefill_tokens = 0` the cell is refused by name before the tool
+runs, since the totals carry a positive prompt count and the tool's rate over
+an empty prompt can print `nan`, which is not JSON.
+
+The reserved `llama-bench` and `llama-batched-bench` flags and the default
+`--load-mode none` are listed once in
+[prefill-throughput.md](prefill-throughput.md#llamacpp).
 
 ### MLX
 
-`pipette-mlx` starts a local Python HTTP sidecar, then sends one warmup request
-to `/decode_throughput` at the benchmark's own `prompt_tokens` and
-`decode_tokens`, so kernel selection is paid before the first measured rep.
-
-For each measured repetition, the Rust runner waits for platform readiness and
-then sends:
+`pipette-mlx` starts `mlx_lm.server` and warms it up as for
+[prefill](prefill-throughput.md#mlx), with one warm-up request at the cell's own
+shape. Each measured repetition streams:
 
 ```json
-{
-  "prompt_tokens": "<P>",
-  "decode_tokens": "<D>"
-}
+{ "model": "default_model", "prompt": "<P-token text>", "max_tokens": <D>,
+  "temperature": 0.0, "logit_bias": {"<eos>": -100.0},
+  "stream": true, "stream_options": {"include_usage": true} }
 ```
 
-The sidecar repeats the benchmark prompt-seed token IDs until it has `<P>`
-tokens, suppresses EOS, calls `mlx_lm.stream_generate` with
-`max_tokens = <D>`, and returns:
+The prompt is built from the benchmark prompt seed and sized with the venv's
+tokenizer so the server counts exactly `<P>` tokens. The sample is the
+streamed wall time from the first token to the last, scaled from that
+`<D> - 1` interval to `<D>`; the trailing `usage` chunk, `[DONE]` and the body
+close are outside it. `mlx_lm.server` sends a chunk only for a step with text,
+so a first token whose text its detokenizer held back (an incomplete UTF-8
+sequence, a lone space) would start the interval a token late and read the
+rate high. On the prompt seed it does not happen: probed on eight fleet models
+at 16 to 8192 prompt tokens, the first token always carried text.
 
-- `generation_tps`: MLX generation throughput for that call. This is
-  `mlx_lm`'s decode-phase rate (generated tokens divided by generation time);
-  it excludes the prompt-processing phase, which `mlx_lm` reports separately as
-  `prompt_tps`. Reading `generation_tps` is therefore what isolates decode from
-  prefill on the MLX path, the same separation the llama.cpp path gets from the
-  `--n-prompt 0 --n-depth <P>` row.
-- `decode_tokens`: the decode-token count used by the sidecar.
+### torch-oai
 
-The Rust runner validates `decode_tokens`, checks that `generation_tps` is
-finite and positive, converts `generation_tps` to milliseconds, and aggregates
-five converted samples.
+`pipette-torch-oai` launches the vLLM or SGLang server with prefix caching off,
+as for [prefill](prefill-throughput.md#torch-oai), then sends one warm-up
+request at the cell's own shape. Each measured repetition streams:
+
+```json
+{ "model": "<model>", "prompt": "<P-token text>", "max_tokens": <D>,
+  "temperature": 0.0, "ignore_eos": true,
+  "stream": true, "stream_options": {"include_usage": true} }
+```
+
+The prompt is sized with the server's own `/tokenize`. Neither engine reports a
+per-request generation time on the OpenAI surface, so the sample is the
+client-measured wall time from the first streamed token to the last, scaled
+from `<D> - 1` to `<D>`. Both servers send a chunk per decode step, text or
+not, so the interval starts at the first token even when its text is held
+back.
+
+vLLM's `--max-model-len`, when the cell does not pin it, is `<P> + <D>`.
+SGLang's context length is left to the operator (`--context-length` in `raw`).
 
 ### iOS
 
-The iOS app path loads the GGUF model, resets the llama context and sampler for
-each repetition, prefills the prompt context, and then times the native-Swift
-`Inference.decodeIgnoringEoG` decode primitive. The ignore-EOG decode path is used so the
-timed section covers the requested token count instead of stopping early on a
-repetitive dummy prompt. The app runs one warmup iteration and five measured
-iterations, then reports the same result fields as the CLI runners.
+The iOS llama.cpp engine loads the GGUF model with a context of `<P> + <D>`,
+resets the context and sampler for each repetition, prefills the seed prompt,
+then times `<D>` sampler-free decode steps, the same work as `llama-bench`'s
+timed block. The iOS app waits on its own device-side readiness gate before
+each repetition rather than the CLI's `pipette_readiness` gate (see
+[end-to-end-latency.md](end-to-end-latency.md#ios)), so compare iOS results
+only against other iOS results.
 
-This path is useful for app-integrated measurements, but it should be compared
-in its own runtime context because it does not use the shared CLI readiness
-gate.
+### Core AI
 
-## Unsupported Runtime Paths
+The Core AI runner (`pipette-coreai`, macOS 27 or later) drives a Swift sidecar
+over local HTTP. The sidecar loads the model before it prints its ready marker,
+so load and specialization are outside every window
+([Core AI specialization cache](coreai-specialization.md)). The runner gates
+readiness once before it starts the sidecar, then sends one untimed warm-up
+request at the cell's shape and checks its count. Each measured repetition
+then runs in this order:
 
-`pipette-torch-oai` currently rejects `decode_throughput` benchmarks. The
-OpenAI-compatible Docker and uv runners support `end_to_end_latency`,
-`max_memory_usage`, and `eval` today, but not prefill/decode throughput.
+1. The readiness gate.
+2. An untimed `POST /prepare`, which resets the KV cache and waits 50 ms.
+3. `POST /decode_throughput` with `prompt_tokens = <P>` and
+   `decode_tokens = <D>`.
+
+The sidecar builds the prompt from `<P>` deterministic pseudo-random token ids
+and generates greedily up to `<D>` tokens. It stamps the first streamed token
+and the end of the stream on its own clock. It reports
+`generation_tps = (<D> - 1) / span`. The runner converts the rate back to the
+span: `decode_time_ms = (<D> - 1) / generation_tps × 1000`.
+
+The Core AI value is therefore the `<D> - 1` steps after the first token,
+**not** scaled to `<D>`. Every other server path scales the same interval to
+`<D>`. A Core AI row reads lower than a scaled row of the same work by the
+factor `(<D> - 1) / <D>`, for example 1% lower at `<D> = 100`. Compare Core AI
+decode rows only with other Core AI rows.
+
+Core AI needs `<D> >= 2`. A generation that stops early fails the count check.
+The runner does not read `parameter_batch_size`, so a batched entry runs one
+request per repetition under the batched ID.
 
 ## Result Validity and Comparability
 
-A run is invalid if the selected runtime row is missing or duplicated, a
-reported token count differs from the benchmark shape, a throughput value is
-non-finite or non-positive, the backend fails, the timing deadline elapses, or
-the readiness probe fails.
+The shared validity and comparability rules are in
+[prefill-throughput.md](prefill-throughput.md#result-validity-and-comparability).
+For decode, also compare only results with the same prompt depth and
+decode-token count, and treat flags that affect the KV cache or sampling as
+part of the benchmark condition.
 
-To compare `decode_throughput` results:
+Some stored rows come from client versions that timed decode another way.
+They do not compare with rows that the client times on its stream clock:
 
-- Use the same benchmark ID, model, runtime, quantization, and relevant runtime
-  flags.
-- Compare only results with the same prompt depth and decode-token count.
-- Compare submitted `decode_time_ms` values directly, or convert all compared
-  values to tokens per second with the same formula.
-- Treat runtime flags that affect KV cache, batch sizing, thread count,
-  accelerator placement, sampling behavior, or memory placement as part of the
-  benchmark condition.
-- Use the mean and sample standard deviation together; a large standard
-  deviation means the run is noisy even when the mean looks plausible.
-- Keep CLI and iOS app results separate unless the runtime boundary and device
-  readiness conditions are intentionally being compared.
+- OpenVINO and ONNX GenAI rows whose `client_version` is dated before
+  2026-09-25. A per-process driver timed them.
+- MLX rows dated before 2026-09-19. They read the in-process `generation_tps`
+  sidecar.
+- MLX rows dated 2026-09-19, and some MLX rows dated 2026-09-20. Their interval
+  ran to `[DONE]`, so they carry that tail and read slightly high.
 
-The result artifacts preserve enough context to audit the run later:
-
-- Benchmark ID and resolved benchmark parameters.
-- Model name, quantization, runtime name, and runtime version.
-- Effective runtime flags when the runtime exposes configurable flags.
-- Command preview or runtime request context when recorded.
-- Captured benchmark stdout or stderr when the runner records it.
+The `client_version` of a row tells the methods apart.
 
 ## Code References
 
-The benchmark definition and result fields are implemented in
-[`pipette_plan_types::benchmark`](../../crates/pipette-plan-types/src/benchmark/mod.rs) and
+The benchmark definition and result fields are in
+[`pipette_plan_types::benchmark`](https://github.com/Liquid4All/pipette-mgmt/blob/main/crates/pipette-plan-types/src/benchmark/mod.rs);
+the standard ladder is
 [`pipette_cli::benchmarks`](../../crates/pipette-cli/src/benchmarks).
 
-The llama.cpp runner is implemented in
-[`pipette-llamacpp decode_throughput`](../../crates/pipette-llamacpp/src/execute/decode_throughput.rs)
-and the shared `llama-bench` repetition helper is
-[`bench`](../../crates/pipette-llamacpp/src/bench.rs).
+The reps, warm-up, checks and reduction are the typed entry
+[`pipette_ops::measurement::decode`](../../crates/pipette-ops/src/measurement/decode.rs),
+which every CLI runner calls from its crate's `execute/decode_throughput.rs`.
+The Core AI runner
+[`pipette-coreai execute::decode_throughput`](../../crates/pipette-coreai/src/execute/decode_throughput.rs)
+calls `pipette_ops::measurement::run` instead. The llama.cpp runner is
+[`pipette-llamacpp execute::decode_throughput`](../../crates/pipette-llamacpp/src/execute/decode_throughput.rs),
+through [`bench`](../../crates/pipette-llamacpp/src/bench.rs) or, for a batch,
+[`batched_bench`](../../crates/pipette-llamacpp/src/batched_bench.rs). The MLX
+request is in
+[`pipette-mlx completions`](../../crates/pipette-mlx/src/completions.rs) and the
+stream is read by
+[`pipette-completions`](../../crates/pipette-completions/src/lib.rs).
 
-The MLX runner and sidecar endpoint are implemented in
-[`pipette-mlx decode_throughput`](../../crates/pipette-mlx/src/execute/decode_throughput.rs)
-and
-[`pipette_mlx_server.py`](../../crates/pipette-mlx/src/python/pipette_mlx_server.py).
-
-The iOS app implementation is
-[`LlamaBenchmark`](../../ios/Pipette/Pipette/Runtimes/Llama/LlamaBenchmark.swift)
-(native Swift).
+The iOS llama.cpp implementation is
+[`LlamaExecute.decodeThroughput`](../../ios/Pipette/Pipette/Runtimes/Llama/Execute/LlamaDecodeThroughput.swift),
+through the entry's Swift port, `BenchmarkMeasurement.decode`. The Android app
+implementation is `runDecodeThroughputImpl` in
+[`LlamaBenchmark.kt`](../../android/Pipette/app/src/kotlinEngine/java/ai/liquid/pipette/llama/LlamaBenchmark.kt)
+(`kotlinEngine` flavor) and `run_decode_throughput` in
+[`android/native/benchmarks.rs`](../../android/native/benchmarks.rs)
+(`rustEngine` flavor).

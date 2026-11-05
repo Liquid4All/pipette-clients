@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "decode_throughput",
+  "ipc": "host",
+  "model_type": "torch",
+  "runtime_type": "docker_sglang"
+}

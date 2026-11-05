@@ -295,8 +295,10 @@ class ExampleUnitTest {
     val small = PresetModel(id = "test-small", name = "Small", detail = "Q4_K_M · 267 MB", identifier = "LiquidAI/LFM2.5-350M-GGUF:Q4_K_M")
     val large = PresetModel(id = "test-large", name = "Large", detail = "Q4_K_M · 1.28 GB", identifier = "unsloth/Qwen3.5-2B-GGUF:Q4_K_M")
 
-    assertEquals(267L * 1024L * 1024L, small.estimatedBytes)
-    assertEquals((1.28 * 1024.0 * 1024.0 * 1024.0).toLong(), large.estimatedBytes)
+    // Decimal, matching how the labels are written: they are `ByteCountFormatter`'s
+    // `.file` output for the real byte count, so a 1024-based parse read them ~7% high.
+    assertEquals(267L * 1_000L * 1_000L, small.estimatedBytes)
+    assertEquals((1.28 * 1_000_000_000.0).toLong(), large.estimatedBytes)
   }
 
   @Test
@@ -388,7 +390,7 @@ class ExampleUnitTest {
         .put("submitted_at", "2026-06-08T12:01:00Z")
         .put("runtime_name", "ggml-org/llama.cpp:android")
         .put("runtime_version", "test")
-        .put("runtime_flags", "-ngl 99 -c 612")
+        .put("runtime_flags", """{"ctx_size":612,"load_mode":"none","n_ubatch":512,"number_gpu_layers":99}""")
         .put("device_name", "Pixel Test")
         .put("device_form_factor", "phone")
         .put("device_os_name", "Android")
@@ -404,6 +406,9 @@ class ExampleUnitTest {
     assertTrue(csv.contains("Decode throughput"))
     assertTrue(csv.contains(",400,tok/s,400,"))
     assertTrue(csv.contains("server-1"))
+    // `runtime_flags` is canonical JSON now, so the column is full of commas and quotes: the
+    // exporter has to wrap it and double every quote, or the row silently gains fields.
+    assertTrue(csv.contains("\"{\"\"ctx_size\"\":612,\"\"load_mode\"\":\"\"none\"\",\"\"n_ubatch\"\":512,\"\"number_gpu_layers\"\":99}\""))
   }
 
   @Test

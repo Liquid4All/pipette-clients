@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Emit sharded `pipette-plan run` command lines (one per shard) to stdout.
+# Emit sharded `pipette-ctl run` command lines (one per shard) to stdout.
 # Pipe into ./scripts/slurm/schedule to submit them as parallel SLURM jobs.
 #
 # Each shard runs only its disjoint slice of the missing + failed cells
 # (`run --include-failed --shard i/N`) and records state, so a plain
-# `pipette-plan status` reflects completion. Sharding is by position in
+# `pipette-ctl status` reflects completion. Sharding is by position in
 # the full ordered matrix, so already-complete cells keep their slot and
-# are simply skipped — re-running the same shards only picks up the work
+# are simply skipped: re-running the same shards only picks up the work
 # that is left.
 #
 # Usage:
@@ -17,19 +17,19 @@ set -euo pipefail
 #   PLAN[:N]     plan TOML path; optional :N overrides the shard count for
 #                that plan (small plans want fewer shards, big ones more)
 #   --shards N   default shard count for plans without :N (default 1)
-#   --work-dir   passed to `pipette-plan --work-dir` (default: omitted/cwd)
-#   --bin PATH   pipette-plan binary (default ./target/release/pipette-plan)
+#   --work-dir   passed to `pipette-ctl --work-dir` (default: omitted/cwd)
+#   --bin PATH   pipette-ctl binary (default ./target/release/pipette-ctl)
 #
-# Example — the incomplete gen6 plans, then submit on the GPU partition:
-#   ./scripts/slurm/run-plans.sh --work-dir /home/yuri/pipette-clients \
-#       internal-pipette-plans/release_v1/gen6.gemma-4-e2b-it.toml:2 \
-#       internal-pipette-plans/release_v1/gen6.gemma-4-e4b-it.toml:4 \
-#       internal-pipette-plans/release_v1/gen6.qwen3.5-0.8b.toml:4 \
-#       internal-pipette-plans/release_v1/gen6.qwen3.5-2b.toml:4 \
-#       internal-pipette-plans/release_v1/gen6.qwen3.5-4b.toml:6 \
+# Example: the incomplete gen6 plans, then submit on the GPU partition:
+#   ./scripts/slurm/run-plans.sh --work-dir ~/pipette-work \
+#       plans/gen6.gemma-4-e2b-it.toml:2 \
+#       plans/gen6.gemma-4-e4b-it.toml:4 \
+#       plans/gen6.qwen3.5-0.8b.toml:4 \
+#       plans/gen6.qwen3.5-2b.toml:4 \
+#       plans/gen6.qwen3.5-4b.toml:6 \
 #     | PARTITION=gpu GPUS=1 CPUS=8 JOB_PREFIX=gen6 ./scripts/slurm/schedule
 
-BIN=./target/release/pipette-plan
+BIN=./target/release/pipette-ctl
 WORK_DIR=""
 DEFAULT_SHARDS=1
 plans=()

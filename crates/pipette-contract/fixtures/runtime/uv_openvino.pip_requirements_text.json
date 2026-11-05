@@ -1,0 +1,9 @@
+{
+  "python_version": "3.11",
+  "server_version": "2026.4.1",
+  "source": {
+    "contents": "openvino-genai==2026.4.1.0\n",
+    "type": "pip_requirements_text"
+  },
+  "type": "uv_openvino"
+}

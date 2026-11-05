@@ -1,30 +1,25 @@
 import SwiftUI
 
-/// Colors for `JobLiveActivityView` so the same live-activity block reads in both
-/// the system-styled running page and the dark Pocket Mode card.
+/// Colors for `JobLiveActivityView`, so the block reads on both the system-styled
+/// running page and the dark Pocket Mode card.
 struct JobActivityPalette {
     var primaryText: Color
     var secondaryText: Color
-    /// Emphasis color for the cooling caption — a cool tint that ties to the
-    /// card's cooling wash.
+    /// Emphasis color for the cooling caption.
     var accent: Color
 }
 
-/// The "what is the benchmark doing right now" block shared by the running job
-/// page and Pocket Mode — the original text-only treatment: the current cell on
-/// one line and the fine-grained per-rep progress on the next. No icon, no box.
+/// The current cell and its per-rep progress, shared by the running job page and
+/// Pocket Mode. While the thermal gate cools, the second line shows the cooldown
+/// timer instead.
 ///
-/// Constant height: the cell label reserves two lines (`reservesSpace`) so a one-
-/// vs two-line model name doesn't move the layout, and the progress line reserves
-/// one. While the thermal gate is cooling, that same second line shows the
-/// cooldown timer (elapsed vs. the deadline it's allowed to cool); the ambient
-/// "we're cooling" cue is the card background wash, which costs no space.
+/// Constant height: both lines reserve their space so a one- vs two-line model
+/// name or a state swap never moves the layout.
 struct JobLiveActivityView: View {
     let currentCellLabel: String
-    /// The fine-grained per-rep progress ("Measurement 3/5", "Loading…") shown
-    /// when not cooling.
+    /// Per-rep progress ("Measurement 3/5"), shown when not cooling.
     let progressText: String
-    /// Non-nil while the thermal gate is cooling; drives the live cooldown line.
+    /// Non-nil while the thermal gate is cooling.
     let cooling: JobCoolingState?
     let palette: JobActivityPalette
 
@@ -42,9 +37,7 @@ struct JobLiveActivityView: View {
 
     @ViewBuilder private var secondLine: some View {
         if let cooling {
-            // A TimelineView ticks *only this label* once a second, system-scheduled
-            // — no manual timer and no whole-view invalidation. Emphasized (accent +
-            // semibold) so cooling reads as the active state.
+            // Ticks only this label each second, without invalidating the whole view.
             TimelineView(.periodic(from: cooling.since, by: 1)) { context in
                 line(cooling.caption(at: context.date), emphasized: true)
             }
@@ -53,8 +46,7 @@ struct JobLiveActivityView: View {
         }
     }
 
-    // Fixed size across states (only weight/color change) so the reserved line
-    // never jumps as it swaps between cooling and normal progress.
+    // Only weight and color change across states, so the reserved line never jumps.
     private func line(_ text: String, emphasized: Bool) -> some View {
         Text(text.isEmpty ? " " : text)
             .font(.system(size: 14, weight: emphasized ? .semibold : .regular))
@@ -65,11 +57,9 @@ struct JobLiveActivityView: View {
     }
 }
 
-/// What the "Device temperature" indicator shows. While cooling it reports the
-/// current reading *and* the setpoint (`43°C → 36°C`) and colors by temp-vs-target
-/// — orange until the device drops to the setpoint — rather than the coarse OS
-/// thermal state, which can read "nominal"/green even while the gate holds the
-/// device above its target.
+/// What the "Device temperature" indicator shows. While cooling it shows reading and
+/// setpoint (`43°C → 36°C`) colored by temp vs target, not by the OS thermal state,
+/// which can read nominal while the gate still holds the device above its target.
 struct DeviceThermalDisplay {
     let text: String
     let iconName: String
@@ -85,7 +75,7 @@ struct DeviceThermalDisplay {
             iconName = state.iconName
             color = state.indicatorColor
         } else {
-            text = state.shortLabel.capitalized
+            text = formatPressureWord(state).capitalized
             iconName = state.iconName
             color = state.indicatorColor
         }
@@ -93,8 +83,7 @@ struct DeviceThermalDisplay {
 }
 
 extension ProcessInfo.ThermalState {
-    /// SF Symbol matching the current thermal pressure, for a device-temperature
-    /// indicator.
+    /// SF Symbol for the device-temperature indicator.
     var iconName: String {
         switch self {
         case .nominal:  return "checkmark.circle.fill"

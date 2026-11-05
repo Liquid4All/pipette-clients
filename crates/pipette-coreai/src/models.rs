@@ -6,16 +6,15 @@
 use std::path::PathBuf;
 
 use pipette_ops::models::require_bound_model_dir;
-use pipette_plan_types::run::RunRequest;
 use pipette_plan_types::ModelType;
+use pipette_plan_types::RunRequest;
 
 /// Files the Core AI bundle needs to load.
 ///
-/// `metadata.json` only: the `.aimodel` weights and tokenizer live under the
-/// same bundle directory, but the Swift sidecar (`LanguageBundle(at:)`)
-/// resolves their exact names from metadata — so requiring `metadata.json`
-/// catches a download that stopped before anything landed and leaves the rest
-/// to Core AI.
+/// The bundle needs `metadata.json` only. The `.aimodel` weights and the
+/// tokenizer are in the same directory, and the Swift sidecar
+/// (`LanguageBundle(at:)`) reads their names from the metadata. The
+/// `metadata.json` check detects a download that stopped early.
 const REQUIRED_FILES: &[&str] = &["metadata.json"];
 
 /// Bound Core AI bundle directory: `Model::AppleCoreAi` + `AbsoluteDir` after

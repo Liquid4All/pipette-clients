@@ -1,0 +1,30 @@
+Build the engine as a static library.
+
+Not an upstream bug — a deliberate divergence, so it is a patch of its own with a
+different lifetime from 001. Upstream declares `onnxruntime-genai` `SHARED`
+unconditionally and has no static option.
+
+A static engine links into the app binary: no framework to embed beside the
+llama.cpp ones, no dylib to codesign, and nothing extra for the unsigned CI archive
+to carry.
+
+Two consequences the build script handles rather than this patch:
+
+  - A static target propagates its link interface, so `install(EXPORT …)` fails on
+    `ortcustomops` and the telemetry target not being in the export set. The script
+    configures with `CMAKE_SKIP_INSTALL_RULES=ON`; nothing installs from this tree.
+  - The archive is only the engine's own objects, so the script combines it with
+    `ortcustomops`, `ocos_operators` and `noexcep_operators` through `libtool`, the
+    way `build-llama.sh` combines ggml's.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -112,7 +112,7 @@
+   endif()
+   set(ORTGENAI_COMPILE_TARGET onnxruntime-genai)
+   set(ORTGENAI_USAGE_SCOPE PRIVATE)
+-  add_library(onnxruntime-genai SHARED ${generator_srcs})
++  add_library(onnxruntime-genai STATIC ${generator_srcs})
+ else()
+   set(ORTGENAI_COMPILE_TARGET onnxruntime-genai-obj)
+   set(ORTGENAI_USAGE_SCOPE PUBLIC)

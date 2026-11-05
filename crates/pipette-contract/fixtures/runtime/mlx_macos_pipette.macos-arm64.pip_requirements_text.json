@@ -1,0 +1,9 @@
+{
+  "flavor": "macos-arm64",
+  "source": {
+    "contents": "mlx-lm==0.31.3\n",
+    "type": "pip_requirements_text"
+  },
+  "type": "mlx_macos_pipette",
+  "version": "0.31.3"
+}

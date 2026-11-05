@@ -1,0 +1,6 @@
+{
+  "dir": "/opt/ovms/v2026.4.1",
+  "flavor": "Acme-Win-Arm64",
+  "source": "absolute_dir",
+  "type": "ovms"
+}

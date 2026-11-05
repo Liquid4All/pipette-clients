@@ -1,88 +1,61 @@
-//! [`ModelManifest`] — the on-disk record for one stored model.
+//! [`ModelManifest`]: the `manifest.toml` at the root of a stored model's
+//! `models/<key>/` entry, next to its `blobs/` payload.
 //!
-//! A stored model is one directory under the workspace `models/` tree, named by
-//! its [`crate::model::ModelStorageKey`] segment. The entry separates
-//! metadata from payload:
-//!
-//! ```text
-//! models/<key>/
-//! ├── manifest.toml         # this record, at the entry root
-//! └── blobs/                # the model's files, isolated from metadata
-//! ```
-//!
-//! The manifest records the model twice: `declared` (as authored in the plan —
-//! the reporting identity) and `stored` (the same model with `Local` source
-//! arms, paths relative to the model-storage root, i.e. under `<key>/blobs`).
-//! Build `stored` with [`crate::model::to_stored`] under
-//! [`crate::model::ModelStorageKey::blobs_dir`]; bind those relative
-//! paths under a concrete models dir with [`ModelManifest::bind_under`].
-//!
-//! This type is a **serde record** only. Loading/writing policy (TOML decode,
-//! auth strip, version, storage key, `stored` drift) lives in
-//! [`crate::model`].
+//! A serde record only. The store applies the policy (auth strip, version,
+//! storage key, `stored` drift) when it reads or writes one.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use pipette_plan_types::Model;
 
-use super::stored::{under_root, ModelStoredError};
+use super::stored::{ModelStoredError, under_root};
 
 pub const MANIFEST_VERSION: u32 = 2;
 /// Aliases [`crate::entry::BLOBS_DIR_NAME`] so model and runtime stores agree.
 pub const BLOBS_DIR_NAME: &str = crate::entry::BLOBS_DIR_NAME;
 
-/// On-disk model store entry metadata (`manifest.toml`).
-///
-/// Field types are enforced by serde. Domain rules are applied by the model
-/// store when reading or writing entries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelManifest {
     pub manifest_version: u32,
-    /// When the fetch started — stamped before the download runs, not after.
+    /// When the fetch started: stamped before the download runs, not after.
     #[serde(with = "time::serde::rfc3339")]
     pub fetched_at: OffsetDateTime,
-    /// When an `ensure` last resolved this entry — the eviction order. Seeded to
+    /// When an `ensure` last resolved this entry: the eviction order. Seeded to
     /// `fetched_at` on publish, rewritten best-effort on every hit.
     #[serde(with = "time::serde::rfc3339")]
     pub last_used_at: OffsetDateTime,
-    /// Plan identity (store strips auth before accepting/persisting).
+    /// The model as the plan declared it, auth stripped: the reporting identity.
     pub declared: Model,
-    /// Local form of `declared` under
-    /// [`crate::model::ModelStorageKey::blobs_dir`] (store-enforced).
+    /// `declared` with `Relative*` sources under
+    /// [`crate::model::ModelStorageKey::blobs_dir`], relative to the models root.
     pub stored: Model,
     /// Bytes `blobs/` occupied at publish, so the quota sweep can total a store
-    /// by reading manifests instead of walking every payload file.
-    ///
-    /// Measures `blobs/` alone, not the entry directory: `last_used_at` is
-    /// rewritten on every cache hit, and a total that included `manifest.toml`
-    /// would drift with it. `None` on entries published before this field, or
-    /// where the payload lives outside the store (a docker image is held by the
-    /// daemon) — [`crate::quota`] falls back to measuring the payload.
+    /// from manifests instead of walking every payload file. Excludes
+    /// `manifest.toml`, which every hit rewrites. When `None`, [`crate::quota`]
+    /// measures the payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blobs_bytes: Option<u64>,
 }
 
 impl ModelManifest {
-    /// Loader form: prefix `stored`'s models-root-relative Local paths with
-    /// `models_dir` ([`Path::join`]). Does not re-derive from `declared`.
+    /// `stored` with its paths joined under `models_dir`. Does not re-derive
+    /// from `declared`.
     pub fn bind_under(&self, models_dir: &Path) -> Result<Model, ModelStoredError> {
         under_root(&self.stored, models_dir)
     }
 
-    /// Absolute payload paths this entry should have on disk, under
-    /// `models_dir`. Empty for a model that stores nothing (Apple Foundation is
-    /// supplied by the OS), and empty when `stored` will not bind — which the
-    /// store already reports as corrupt.
-    ///
-    /// Telling a live entry from a husk: a manifest is not evidence its bytes
-    /// are still there.
+    /// Payload paths this entry should have under `models_dir`, to tell a live
+    /// entry from a husk whose bytes are gone. Only GGUF text, GGUF vision and
+    /// MLX list paths; empty for the rest and when `stored` will not bind (the
+    /// store reports that as corrupt).
     pub(crate) fn payload_paths(&self, models_dir: &Path) -> Vec<std::path::PathBuf> {
         use pipette_plan_types::{
-            GgufText, GgufTextSource, GgufVision, GgufVisionSource, Mlx, ModelSource,
+            GgufText, GgufTextSource, GgufVision, GgufVisionAbsoluteFiles, GgufVisionSource, Mlx,
+            ModelSource,
         };
         let Ok(bound) = self.bind_under(models_dir) else {
             return Vec::new();
@@ -93,21 +66,29 @@ impl ModelManifest {
                 source: GgufTextSource::AbsoluteFile { path },
             }) => vec![abs(path.as_ref())],
             Model::GgufVision(GgufVision {
-                source: GgufVisionSource::AbsoluteFiles { model, mmproj },
+                source: GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles { model, mmproj }),
             }) => vec![abs(model.as_ref()), abs(mmproj.as_ref())],
             Model::Mlx(Mlx {
                 source: ModelSource::AbsoluteDir { dir },
             }) => vec![abs(dir.as_ref())],
-            _ => Vec::new(),
+            Model::GgufText(_)
+            | Model::GgufVision(_)
+            | Model::GgufVisionSpeculative(_)
+            | Model::Mlx(_)
+            | Model::MlxSpeculative(_)
+            | Model::TorchSpeculative(_)
+            | Model::Torch(_)
+            | Model::Openvino(_)
+            | Model::OnnxGenai(_)
+            | Model::AppleFoundationText
+            | Model::AppleCoreAi(_) => Vec::new(),
         }
     }
 
-    /// RFC 3339 form of [`Self::fetched_at`] for display / logs.
     pub fn fetched_at_rfc3339(&self) -> Result<String, time::error::Format> {
         self.fetched_at.format(&Rfc3339)
     }
 
-    /// RFC 3339 form of [`Self::last_used_at`] for display / logs.
     pub fn last_used_at_rfc3339(&self) -> Result<String, time::error::Format> {
         self.last_used_at.format(&Rfc3339)
     }
@@ -181,6 +162,12 @@ mod tests {
 
     #[test]
     fn bind_under_joins_models_dir_onto_stored_paths() -> anyhow::Result<()> {
+        // Platform-shaped: `bind_under` picks its `Absolute*` arm off
+        // `Path::is_absolute`, and `/ws/models` is relative on Windows.
+        #[cfg(windows)]
+        const MODELS_ROOT: &str = "C:/ws/models";
+        #[cfg(not(windows))]
+        const MODELS_ROOT: &str = "/ws/models";
         let manifest = sample_manifest()?;
         assert_eq!(
             manifest.stored,
@@ -190,15 +177,6 @@ mod tests {
                 },
             })
         );
-        // Platform-shaped: `bind_under` picks its `Absolute*` arm off
-        // `Path::is_absolute`, and a bare `/ws/models` is relative on Windows —
-        // which sends this through the `Relative*` arm and fails on the leading
-        // `/` instead of asserting the join. Forward slashes on both platforms,
-        // since the join normalizes separators to `/`.
-        #[cfg(windows)]
-        const MODELS_ROOT: &str = "C:/ws/models";
-        #[cfg(not(windows))]
-        const MODELS_ROOT: &str = "/ws/models";
         assert_eq!(
             manifest.bind_under(Path::new(MODELS_ROOT))?,
             Model::GgufText(GgufText {
@@ -209,7 +187,7 @@ mod tests {
                 },
             })
         );
-        // Relative models_dir stays relative (Relative arm, not Local).
+        // A relative models_dir keeps the Relative arm.
         assert_eq!(
             manifest.bind_under(Path::new("models"))?,
             Model::GgufText(GgufText {

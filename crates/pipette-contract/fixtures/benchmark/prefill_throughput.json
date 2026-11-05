@@ -1,0 +1,6 @@
+{
+  "benchmark_id": "prefill_throughput_512",
+  "benchmark_type": "prefill_throughput",
+  "parameter_batch_size": 1,
+  "parameter_prefill_tokens": 512
+}

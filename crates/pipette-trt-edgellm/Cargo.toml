@@ -1,0 +1,28 @@
+[package]
+name = "pipette-trt-edgellm"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Not gated at compile time: the archives are JetPack builds, and the installer
+# refuses a named flavor off Linux arm64 before anything downloads.
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+pipette-artifacts-catalog.workspace = true
+pipette-completions.workspace = true
+pipette-http.workspace = true
+pipette-memprobe.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+httpmock.workspace = true
+rstest.workspace = true
+tempfile.workspace = true

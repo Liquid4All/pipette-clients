@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "asr_throughput",
+  "model_type": "gguf_vision",
+  "runtime_type": "llamacpp_ios_pipette"
+}

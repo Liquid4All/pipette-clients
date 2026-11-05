@@ -1,0 +1,8 @@
+{
+  "benchmark_id": "vl_max_memory_224x336_t0_f2",
+  "benchmark_type": "vl_max_memory",
+  "parameter_image_height": 336,
+  "parameter_image_width": 224,
+  "parameter_num_images": 2,
+  "parameter_text_tokens": 0
+}

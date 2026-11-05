@@ -1,11 +1,20 @@
+pub mod custom_label;
 pub mod error;
+pub mod eval_cell;
 pub mod eval_completions;
 pub mod fs;
+pub mod generation;
 pub mod measurement;
 pub mod models;
+pub mod png;
 pub mod prompt_seed;
 pub mod readiness;
+pub mod run_context;
+pub mod run_response;
+pub mod sse;
 pub mod thermal_series;
+pub mod vl_spec_decode;
+pub mod wav;
 
 pub use error::{Error, Result};
 pub use eval_completions::EvalCompletionsStore;

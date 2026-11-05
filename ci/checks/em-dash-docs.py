@@ -1,30 +1,15 @@
 #!/usr/bin/env python3
 """Reject em dashes in tracked Markdown prose.
 
-An em dash is uncommon to type by hand, so it reads as machine-written. The three
-client source trees are guarded by `em-dash-clients.py`, and Python by
-`em-dash-python.py`. All three run in `conventions`, which needs no toolchain and
-has no path filter.
+An em dash is uncommon to type by hand, so it reads as machine-written.
 
-Two spans are exempt, because the character is not punctuation there:
+Exempt, because the character is not punctuation there:
 
-- **Fenced code blocks.** Sample output and transcripts are data, not prose. An
-  em dash inside one is what the tool actually printed.
-- **A table cell that is, or opens with, the glyph.** `| — |` and
-  `| — (a function, no shape) |` both read as "not applicable". That is
-  typography for an empty value, matching the mobile clients, which exempt a
-  string literal that is exactly one em dash.
+- Fenced code blocks and inline `` `code` `` spans: data, not prose.
+- A table cell that is, or opens with, the glyph: it means "not applicable".
 
-Inline `` `code` `` spans are exempt for the same reason as fences.
-
-Every rendering is rejected, not just U+2014: an HTML entity renders identically,
-and the numeric forms accept leading zeros. The needles are built from the code
-point so this file does not trip its own check.
-
-Fix by rewriting the sentence, not by swapping in an en dash or a double hyphen:
-those are the same tell wearing a hat. A period, comma, colon, or parentheses
-almost always carries the same clause break. In a list item or heading naming a
-term, a colon is usually what was meant.
+Every rendering is rejected, not just U+2014. The needles are built from the
+code point so this file does not trip its own check.
 """
 
 import re
@@ -49,9 +34,7 @@ def tracked_markdown() -> list[str]:
 def renderings() -> list[str]:
     """Every spelling that renders as an em dash, lowercased.
 
-    Split into a prefix and its digits so ZERO-PADDED forms are caught: `&#08212;`
-    renders exactly like `&#8212;`, and comparing whole fixed strings would reject
-    only the unpadded spelling of each.
+    Split into a prefix and its digits so zero-padded forms (`&#08212;`) are caught.
     """
     return [
         ("&", f"{'mdash'};"),
@@ -125,10 +108,8 @@ def scan_source(text: str, path: str) -> list[str]:
 def selftest() -> list[str]:
     """Fixtures for the exemptions, run on every invocation.
 
-    The exemptions are where a guard like this goes quietly wrong: one that
-    over-exempts still passes, so nothing reveals it. Every spelling here is
-    COMPOSED from its code point, because a fixture holding `&mdash;` literally
-    would make this file trip its own check.
+    An over-eager exemption still passes, so nothing else reveals it. Spellings
+    are composed so this file does not trip its own check.
     """
     d = EM_DASH
     ent = "&" + "mdash" + ";"

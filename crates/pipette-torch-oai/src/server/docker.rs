@@ -1,48 +1,26 @@
-//! Docker container launch, stop, and log tail for torch-oai servers.
+//! The server in a container, run attached (`docker run --rm`) so the docker
+//! CLI's output and exit are the container's.
 
 use std::{
-    fmt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
 
-use pipette_plan_types::VllmFlavor;
-use pipette_subprocess::cleanup::TeardownToken;
+use pipette_plan_types::{
+    EnvForward, Runtime, RuntimeFlags, TorchOaiExtraRuntimeConfiguration, VllmFlavor,
+};
+use pipette_subprocess::DockerRun;
 
-use super::{pick_free_port, DockerLaunchEnv, LaunchSpec, ServerState};
+use super::{Server, ServerKind, ServerState, Transport};
+use crate::flavor::sglang_to_vllm_flavor;
 
-/// The `docker` binary every function in this module takes a path to.
-pub fn resolve_docker() -> anyhow::Result<PathBuf> {
-    pipette_subprocess::which("docker").context("docker not found on PATH; install Docker Engine")
-}
-
-/// Newtype wrapping a docker container id. [`Display`](std::fmt::Display) formats as the
-/// short id (first 12 chars) so log lines stay readable; use
-/// `.0`/`AsRef<str>` for the full id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContainerId(pub String);
-
-impl ContainerId {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for ContainerId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ContainerId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let short: String = self.0.chars().take(12).collect();
-        write!(f, "{short}")
-    }
-}
+/// Where the model directory is mounted. One model per run, so a stable path
+/// keeps the store's `<key>/blobs` basename out of the server's `--model`,
+/// which doubles as the OpenAI request's `model` field.
+pub const CONTAINER_MODEL_PATH: &str = "/models/model";
+pub const CONTAINER_DRAFT_PATH: &str = "/models/draft";
 
 fn gpu_access_args(flavor: VllmFlavor, gpus_spec: Option<&str>) -> Vec<String> {
     match flavor {
@@ -60,7 +38,7 @@ fn nvidia_gpu_args(gpus_spec: Option<&str>) -> Vec<String> {
 
 fn amd_gpu_args(gpus_spec: Option<&str>) -> Vec<String> {
     if gpus_spec.is_some() {
-        log::debug!(
+        tracing::debug!(
             "gpus is ignored for AMD runtimes; use ROCR_VISIBLE_DEVICES \
              via the cell's envs to restrict visible GPUs"
         );
@@ -77,7 +55,7 @@ fn amd_gpu_args(gpus_spec: Option<&str>) -> Vec<String> {
 
 fn cpu_args(gpus_spec: Option<&str>) -> Vec<String> {
     if gpus_spec.is_some() {
-        log::debug!("gpus is ignored for CPU runtimes");
+        tracing::debug!("gpus is ignored for CPU runtimes");
     }
     Vec::new()
 }
@@ -95,278 +73,224 @@ fn random_container_name() -> String {
     format!("pipette-bench-{suffix}")
 }
 
-/// Launch a detached container. Returns the in-memory state describing it
-/// plus the [`TeardownToken`] the caller must hand to [`stop`] (or pass
-/// directly to [`pipette_subprocess::cleanup::deregister`]) once it has torn the
-/// container down on the happy path. Forgetting the token leaves the
-/// signal handler firing a stale `docker stop` against an already-gone
-/// container on the next ^C — harmless, but it violates the contract
-/// documented on [`pipette_subprocess::cleanup::register`].
-pub fn start(
+/// `workspace_label` marks the container for the next run's orphan reap.
+pub fn launch(
     docker: &Path,
-    env: DockerLaunchEnv,
-    spec: LaunchSpec,
-) -> anyhow::Result<(ServerState, TeardownToken)> {
-    let container_port = spec.default_port();
-    let host_port = pick_free_port()?;
-    let container_name = random_container_name();
-
-    let mut cmd = Command::new(docker);
-    // `127.0.0.1` is hardcoded — the design pins pipette-torch-oai to
-    // loopback-only since the tool exists to drive the engine for
-    // measurement, not to host it for outside consumers. Operators who
-    // need to publish to the network use `docker` directly.
-    cmd.arg("run")
-        .arg("-d")
-        .arg("--rm")
-        .arg("--name")
-        .arg(&container_name)
-        .arg("--label")
-        .arg(format!(
-            "{}={}",
-            crate::cleanup::WORKSPACE_LABEL,
-            env.workspace_label
-        ))
-        .arg("-p")
-        .arg(format!("127.0.0.1:{host_port}:{container_port}"));
-
-    let (kind, envs, gpus, shm_size, ipc, mounts) = match &spec {
-        LaunchSpec::Docker {
-            kind,
-            envs,
-            gpus,
-            shm_size,
-            ipc,
-            mounts,
-            ..
-        } => (*kind, envs, gpus, shm_size, ipc, mounts),
-        LaunchSpec::Uv { .. } => {
-            anyhow::bail!("server::start (docker) called with a uv LaunchSpec");
-        }
-    };
-
-    // GPU access flags dispatch on the launch env flavor — not on
-    // `LaunchSpec.gpus`, which only applies to `NvidiaGpu`.
-    cmd.args(gpu_access_args(env.flavor, gpus.as_deref()));
-    if let Some(shm) = shm_size {
-        cmd.arg("--shm-size").arg(shm);
-    }
-    if let Some(ipc) = ipc {
-        cmd.arg("--ipc").arg(ipc);
-    }
-
-    if let Some(home) = &env.hf_home {
-        std::fs::create_dir_all(home)
-            .with_context(|| format!("failed to create hf-home dir {}", home.display()))?;
-        cmd.arg("-v")
-            .arg(format!("{}:/root/.cache/huggingface", home.display()))
-            .arg("-e")
-            .arg("HF_HOME=/root/.cache/huggingface");
-    }
-    envs.iter().try_for_each(|(k, v)| {
-        if v.is_empty() {
-            // Inherit form: `-e <NAME>` (no `=value`) tells docker to read
-            // the value from the docker CLI's environment. Used both
-            // intentionally (a bare `K` env entry forwards $K) and as the
-            // secret-safe path — the value never hits argv.
-            //
-            // Fail fast if `$K` is unset or non-UTF-8: silently
-            // forwarding an empty value would just push the misconfig
-            // downstream (e.g. vLLM rejecting an empty HF_TOKEN with a
-            // less helpful error). The cell clearly meant to forward
-            // something.
-            let value = match std::env::var(k) {
-                Ok(v) => v,
-                Err(std::env::VarError::NotPresent) => anyhow::bail!(
-                    "env `{k}`: variable not set in this process's environment; \
-                     export it before running, or set `{k}=<value>` in the cell's envs"
-                ),
-                Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
-                    "env `{k}`: variable is set but contains non-UTF-8 bytes; \
-                     set `{k}=<value>` in the cell's envs with a valid UTF-8 value"
-                ),
-            };
-            cmd.env(k, value).arg("-e").arg(k);
-        } else {
-            // Explicit form: the cell supplied `K=V`; the value is already on
-            // this process's argv, so re-emitting it on docker's argv doesn't
-            // widen the exposure. For secrets, prefer the bare `K` inherit
-            // form so neither argv is touched.
-            cmd.arg("-e").arg(format!("{k}={v}"));
-        }
-        Ok(())
-    })?;
-    cmd.args(mounts.iter().flat_map(|(src, dst)| {
-        [
-            "-v".to_string(),
-            format!("{}:{}", src.display(), dst.display()),
-        ]
-    }));
-
-    cmd.arg(&env.image_ref);
-    // Wire order: server's model flag → server_args (shell-split) →
-    // trailing `--` args. The model flag is emitted here (using `env.model`
-    // and `LaunchSpec` kind) rather than threaded through assembled_args —
-    // this keeps `command_args` a pure carrier of trailing `--` args and
-    // matches `uv::launch`, which reads the model off `UvLaunchEnv`.
-    cmd.arg(spec.model_arg_flag()).arg(&env.model);
-    let args = spec.assembled_args();
-    cmd.args(&args);
-
-    log::info!(
-        "[server] starting docker container {container_name} from {} \
-         (host_port={host_port}, container_port={container_port})",
-        env.image_ref,
+    runtime: &Runtime,
+    flags: &RuntimeFlags,
+    server_args: &[String],
+    mounts: &[(PathBuf, PathBuf)],
+    workspace_label: &str,
+    client_config: Option<&TorchOaiExtraRuntimeConfiguration>,
+) -> anyhow::Result<Server> {
+    let kind = ServerKind::of(runtime)?;
+    let port = pipette_subprocess::pick_server_port()?;
+    let run = docker_run(
+        runtime,
+        flags,
+        server_args,
+        mounts,
+        workspace_label,
+        client_config,
+        port,
+    )?;
+    ensure_image(docker, &run.image)?;
+    tracing::info!(
+        container = %run.name,
+        image = %run.image,
+        host_port = port,
+        container_port = kind.default_port(),
+        "starting docker container"
     );
-    pipette_subprocess::echo_info(&cmd);
-    // Inherit stderr so docker daemon errors (image-not-found, NVIDIA hook
-    // failure, …) stream through live. Capture stdout — that's just the
-    // container id printed by `docker run -d`.
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("failed to spawn {}", docker.display()))?;
-    let mut stdout_buf = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        use std::io::Read;
-        out.read_to_string(&mut stdout_buf)
-            .context("failed to read docker run stdout")?;
-    }
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for {}", docker.display()))?;
-    if !status.success() {
-        anyhow::bail!("docker run failed with {status}");
-    }
-    let container_id_raw = stdout_buf.trim().to_string();
-    if container_id_raw.is_empty() {
-        anyhow::bail!("docker run returned an empty container id");
-    }
-    let container_id = ContainerId(container_id_raw);
-
-    log::info!("container {container_id} bound to host port {host_port}");
-    // Register with the signal-handler registry as soon as docker
-    // confirms the container exists — any later failure (readiness,
-    // dispatch) is then covered by both the Drop guard and the SIGINT
-    // handler. The token is returned to the caller so the Drop guard
-    // can `cleanup::deregister` it after the happy-path stop succeeds;
-    // otherwise the registry would grow unboundedly across runs and
-    // SIGINT during run N would fire stale `docker stop` calls against
-    // containers from runs 1..N-1.
-    let teardown_token = crate::cleanup::register_docker(docker, container_id.as_str());
-
-    let state = ServerState::Docker {
+    let state = ServerState {
         kind,
-        container_id,
-        docker_bin: docker.to_path_buf(),
-        port: host_port,
+        port,
+        executable: docker.to_path_buf(),
     };
-    Ok((state, teardown_token))
-}
-
-/// Stop the container described by `state`. No-op if it's already gone.
-pub fn stop(docker: &Path, state: &ServerState, timeout_secs: u32) -> anyhow::Result<()> {
-    let container_id = state
-        .container_id()
-        .context("server::stop called on a non-docker ServerState; use server::uv::stop instead")?;
-    // An inspect we couldn't interpret is treated as "nothing to stop", as it
-    // always has been here: `docker stop` against a daemon that just refused
-    // an inspect has nothing better to report than the inspect did.
-    if container_liveness(docker, container_id.as_str())? != ContainerLiveness::Running {
-        log::info!("container {container_id} already stopped");
-        return Ok(());
-    }
-    log::info!("stopping container {container_id}");
-    let mut cmd = Command::new(docker);
-    cmd.args([
-        "stop",
-        "-t",
-        &timeout_secs.to_string(),
-        container_id.as_str(),
-    ])
-    .stdout(Stdio::null());
-    pipette_subprocess::echo_info(&cmd);
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run docker stop {container_id}"))?;
-    if !status.success() {
-        anyhow::bail!("docker stop {container_id} exited with {status}");
-    }
-    Ok(())
-}
-
-/// What `docker inspect` was able to tell us about a container.
-///
-/// `Unknown` is a third answer rather than an error because `docker inspect`
-/// exits non-zero both when the container is gone and when the CLI never
-/// reached the daemon, and only the first says anything about the container.
-/// A caller that aborts a run on `NotRunning` must not abort on a daemon hiccup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContainerLiveness {
-    Running,
-    NotRunning,
-    Unknown,
-}
-
-/// Ask the daemon whether `container_id` is still running.
-///
-/// `Err` only when the `docker` binary itself couldn't be spawned; a docker
-/// that ran and failed answers [`ContainerLiveness::Unknown`] unless it said
-/// the object no longer exists.
-pub fn container_liveness(docker: &Path, container_id: &str) -> anyhow::Result<ContainerLiveness> {
-    let mut cmd = Command::new(docker);
-    cmd.args(["inspect", "--format", "{{.State.Running}}", container_id]);
-    pipette_subprocess::echo_debug(&cmd);
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to inspect container {container_id}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(inspect_failure_liveness(&stderr));
-    }
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(if s == "true" {
-        ContainerLiveness::Running
-    } else {
-        ContainerLiveness::NotRunning
+    Ok(Server {
+        state,
+        transport: Transport::Docker(pipette_subprocess::start_docker_process(
+            docker,
+            run,
+            super::STOP_GRACE,
+        )?),
     })
 }
 
-/// Classify a failed `docker inspect` from its stderr. Both docker and podman
-/// spell a removed container "No such object" / "No such container"; anything
-/// else (daemon unreachable, socket EPERM, CLI misuse) is no evidence.
-fn inspect_failure_liveness(stderr: &str) -> ContainerLiveness {
-    let stderr = stderr.to_lowercase();
-    if stderr.contains("no such object") || stderr.contains("no such container") {
-        ContainerLiveness::NotRunning
-    } else {
-        ContainerLiveness::Unknown
+/// Pull `image` if the daemon lacks it, so the pull is not timed as startup:
+/// the store records a docker runtime once, and an image pruned since would
+/// otherwise be pulled inside the ready wait, its progress shown only at `-v`.
+fn ensure_image(docker: &Path, image: &str) -> anyhow::Result<()> {
+    let mut inspect = Command::new(docker);
+    inspect
+        .args(["image", "inspect", image])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    pipette_subprocess::echo_debug(&inspect);
+    #[expect(clippy::disallowed_methods, reason = "every stream is discarded")]
+    let present = inspect
+        .status()
+        .with_context(|| format!("failed to run {}", docker.display()))?
+        .success();
+    if present {
+        return Ok(());
     }
+    tracing::info!(%image, "image is not in the docker daemon; pulling it");
+    let mut pull = Command::new(docker);
+    pull.args(["pull", image])
+        .stdin(Stdio::null())
+        .stdout(std::io::stderr());
+    pipette_subprocess::echo_info(&pull);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "docker reports the pull on stdout, sent to stderr above"
+    )]
+    let status = pull
+        .status()
+        .with_context(|| format!("failed to run {}", docker.display()))?;
+    anyhow::ensure!(
+        status.success(),
+        "`docker pull {image}` failed with {status}"
+    );
+    Ok(())
 }
 
-/// Stream the container's stdout/stderr to the parent process's
-/// stdout/stderr in the background. Returns the spawned `docker logs -f`
-/// child — caller should kill it during teardown to avoid a brief race
-/// where post-container output interleaves with the next step.
-pub fn tail_logs(docker: &Path, container_id: &str) -> anyhow::Result<std::process::Child> {
-    let mut cmd = Command::new(docker);
-    cmd.args(["logs", "-f", container_id])
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    pipette_subprocess::echo_info(&cmd);
-    cmd.spawn()
-        .with_context(|| format!("failed to spawn `docker logs -f {container_id}`"))
+/// Published on `127.0.0.1:<port>` only.
+fn docker_run(
+    runtime: &Runtime,
+    flags: &RuntimeFlags,
+    server_args: &[String],
+    mounts: &[(PathBuf, PathBuf)],
+    workspace_label: &str,
+    client_config: Option<&TorchOaiExtraRuntimeConfiguration>,
+    port: u16,
+) -> anyhow::Result<DockerRun> {
+    let kind = ServerKind::of(runtime)?;
+    let (image, flavor) = match runtime {
+        Runtime::DockerVllm(d) => (
+            format!("{}:{}", d.image_name.as_ref(), d.image_tag.as_ref()),
+            d.flavor,
+        ),
+        Runtime::DockerSglang(d) => (
+            format!("{}:{}", d.image_name.as_ref(), d.image_tag.as_ref()),
+            sglang_to_vllm_flavor(d.flavor),
+        ),
+        other @ (Runtime::LlamacppCliStockTools(_)
+        | Runtime::LlamacppApkPipette(_)
+        | Runtime::LlamacppIosPipette(_)
+        | Runtime::MlxMacosPipette(_)
+        | Runtime::MlxIosPipette(_)
+        | Runtime::OnnxGenaiIosPipette(_)
+        | Runtime::UvVllm(_)
+        | Runtime::UvSglang(_)
+        | Runtime::UvOpenvino(_)
+        | Runtime::UvOnnxGenai(_)
+        | Runtime::Ovms(_)
+        | Runtime::TrtEdgellm(_)
+        | Runtime::AppleCoreAiMacosPipette(_)
+        | Runtime::AppleFoundation(_)) => {
+            anyhow::bail!("`{}` is not a docker runtime", other.headless_token())
+        }
+    };
+    let mut run = DockerRun {
+        name: random_container_name(),
+        image,
+        options: vec![
+            "--label".to_owned(),
+            format!("{}={workspace_label}", crate::cleanup::WORKSPACE_LABEL),
+            "--label".to_owned(),
+            format!(
+                "{}={}",
+                crate::cleanup::OWNER_LABEL,
+                pipette_subprocess::owner()
+            ),
+            "-p".to_owned(),
+            format!("127.0.0.1:{port}:{}", kind.default_port()),
+        ],
+        args: kind
+            .container_command()
+            .iter()
+            .copied()
+            .chain([kind.model_arg_flag(), CONTAINER_MODEL_PATH])
+            .map(str::to_owned)
+            .chain(server_args.iter().cloned())
+            .collect(),
+        envs: Vec::new(),
+    };
+    // GPU access dispatches on the flavor; `gpus` applies only to `NvidiaGpu`.
+    run.options.extend(gpu_access_args(flavor, flags.gpus()));
+    if let Some(shm) = flags.shm_size() {
+        run.options
+            .extend(["--shm-size".to_owned(), shm.to_string()]);
+    }
+    if let Some(ipc) = flags.ipc() {
+        run.options
+            .extend(["--ipc".to_owned(), ipc.as_str().to_owned()]);
+    }
+    run.envs.extend(
+        flags
+            .envs()
+            .iter()
+            .map(|entry| cell_forward(entry.name(), entry.value().unwrap_or_default()))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    );
+    // The client's configuration goes before the cell's forwards above, so the
+    // cell's own win. A device pin indexes the container's view, which matches
+    // the host's only when every device is exposed (`--gpus all`, or the
+    // daemon's default runtime); nothing checks a narrower `gpus`.
+    pipette_subprocess::forward_client_config(&mut run, client_config);
+    run.options.extend(mounts.iter().flat_map(|(src, dst)| {
+        [
+            "-v".to_owned(),
+            format!("{}:{}", src.display(), dst.display()),
+        ]
+    }));
+    Ok(run)
+}
+
+/// A cell's env entry as a forward. An empty value is the inherit form, `K` and
+/// `K=` alike, since `-e NAME` has no spelling for an explicit empty value; it
+/// fails here when this process has nothing to forward rather than starting
+/// the server without it.
+fn cell_forward(name: &str, value: &str) -> anyhow::Result<EnvForward> {
+    let entry = if value.is_empty() {
+        match std::env::var(name) {
+            Ok(_) => name.to_owned(),
+            Err(std::env::VarError::NotPresent) => anyhow::bail!(
+                "env `{name}`: variable not set in this process's environment; \
+                 export it before running, or set `{name}=<value>` in the cell's envs"
+            ),
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+                "env `{name}`: variable is set but contains non-UTF-8 bytes; \
+                 set `{name}=<value>` in the cell's envs with a valid UTF-8 value"
+            ),
+        }
+    } else {
+        format!("{name}={value}")
+    };
+    Ok(EnvForward::try_new(entry)?)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::Duration;
+
     use rstest::rstest;
 
-    use pipette_plan_types::VllmFlavor;
+    #[cfg(unix)]
+    use pipette_ops::run_response::RunResponseBuilder;
+    #[cfg(unix)]
+    use pipette_plan_types::BenchmarkResultData;
+    use pipette_plan_types::{
+        DockerIpcMode, DockerSglang, DockerShmSize, DockerVllm, NonEmptyString, SglangFlavor,
+    };
 
+    #[cfg(unix)]
+    use super::super::test_support::{
+        fake_docker, published_port, ready_once, serve_fake, write_executable,
+    };
     use super::*;
 
     /// AMD addresses GPUs through device mounts, never `--gpus`.
@@ -380,21 +304,14 @@ mod tests {
     ];
 
     #[test]
-    fn container_id_display_truncates_to_short_id() {
-        let id = ContainerId("abcdef0123456789feedface".to_string());
-        assert_eq!(id.to_string(), "abcdef012345");
-    }
-
-    #[test]
     fn random_container_name_has_expected_shape() {
         let name = random_container_name();
         assert!(name.starts_with("pipette-bench-"), "got {name}");
-        // Fixed prefix + 8-char uuid suffix.
         assert_eq!(name.len(), "pipette-bench-".len() + 8);
     }
 
-    // SweepPins the exact argv per flavor: a stray `gpus` value must not reach AMD
-    // or CPU even if it survives the builder's flavor gate.
+    // A stray `gpus` value must not reach AMD or CPU even if it survives the
+    // flag resolution's flavor gate.
     #[rstest]
     #[case::nvidia_all(VllmFlavor::NvidiaGpu, Some("all"), &["--gpus", "all"])]
     #[case::nvidia_device_list(VllmFlavor::NvidiaGpu, Some("device=0,1"), &["--gpus", "device=0,1"])]
@@ -411,21 +328,294 @@ mod tests {
         assert_eq!(gpu_access_args(flavor, gpus_spec), expected);
     }
 
-    // The readiness wait aborts a run on `NotRunning`, so an unreachable daemon or a
-    // permission error has to land on `Unknown` instead.
+    fn runtime() -> anyhow::Result<Runtime> {
+        Ok(Runtime::DockerVllm(DockerVllm {
+            image_name: NonEmptyString::try_new("vllm/vllm-openai".to_owned())?,
+            image_tag: NonEmptyString::try_new("v0.20.2".to_owned())?,
+            flavor: VllmFlavor::NvidiaGpu,
+        }))
+    }
+
+    fn flags(envs: &[&str]) -> anyhow::Result<RuntimeFlags> {
+        Ok(RuntimeFlags::EndToEndLatencyDockerVllmTorch {
+            tensor_parallel_size: None,
+            dtype: None,
+            max_model_len: None,
+            prefix_caching: None,
+            gpus: Some("all".to_owned()),
+            shm_size: Some(DockerShmSize::try_new("16g")?),
+            ipc: Some(DockerIpcMode::Host),
+            envs: envs
+                .iter()
+                .map(|entry| EnvForward::try_new((*entry).to_owned()))
+                .collect::<Result<_, _>>()?,
+            raw: vec![],
+        })
+    }
+
+    fn model_mount() -> Vec<(PathBuf, PathBuf)> {
+        vec![(
+            PathBuf::from("/data/models/abc/blobs"),
+            PathBuf::from(CONTAINER_MODEL_PATH),
+        )]
+    }
+
+    fn server_args() -> Vec<String> {
+        vec!["--max-model-len".to_owned(), "4096".to_owned()]
+    }
+
+    /// Every variable is a forward, none an option: the client's configuration
+    /// first, then the cell's, so the later win.
+    #[test]
+    fn a_docker_run_publishes_on_loopback_and_orders_its_forwards() -> anyhow::Result<()> {
+        let client_config = TorchOaiExtraRuntimeConfiguration::from(vec![EnvForward::try_new(
+            "CUDA_VISIBLE_DEVICES=1".to_owned(),
+        )?]);
+        // `PATH` stands in for a forward the operator exported: every test
+        // process has one.
+        let run = docker_run(
+            &runtime()?,
+            &flags(&["PATH", "VLLM_USE_V1=1"])?,
+            &server_args(),
+            &model_mount(),
+            "/ws/.pipette",
+            Some(&client_config),
+            20001,
+        )?;
+
+        assert!(run.name.starts_with("pipette-bench-"), "{}", run.name);
+        assert_eq!(run.image, "vllm/vllm-openai:v0.20.2");
+        assert_eq!(
+            run.options,
+            [
+                "--label",
+                "pipette.workspace=/ws/.pipette",
+                "--label",
+                format!("pipette.owner={}", pipette_subprocess::owner()).as_str(),
+                "-p",
+                "127.0.0.1:20001:8000",
+                "--gpus",
+                "all",
+                "--shm-size",
+                "16g",
+                "--ipc",
+                "host",
+                "-v",
+                "/data/models/abc/blobs:/models/model",
+            ]
+        );
+        assert_eq!(
+            run.args,
+            ["--model", "/models/model", "--max-model-len", "4096"]
+        );
+        assert_eq!(
+            run.envs.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+            ["CUDA_VISIBLE_DEVICES=1", "PATH", "VLLM_USE_V1=1"]
+        );
+        Ok(())
+    }
+
+    fn sglang_runtime() -> anyhow::Result<Runtime> {
+        Ok(Runtime::DockerSglang(DockerSglang {
+            image_name: NonEmptyString::try_new("lmsysorg/sglang".to_owned())?,
+            image_tag: NonEmptyString::try_new("v0.5.21".to_owned())?,
+            flavor: SglangFlavor::NvidiaGpu,
+        }))
+    }
+
+    /// vLLM's image enters at its server; SGLang's at a wrapper that runs its
+    /// arguments, so the launch names the server and binds every interface.
     #[rstest]
-    #[case::docker_removed("Error: No such object: abc", ContainerLiveness::NotRunning)]
-    #[case::podman_removed("Error: no such container abc", ContainerLiveness::NotRunning)]
-    #[case::daemon_down(
-        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
-        ContainerLiveness::Unknown
-    )]
-    #[case::socket_permission(
-        "permission denied while trying to connect to the Docker daemon socket",
-        ContainerLiveness::Unknown
-    )]
-    #[case::silent_failure("", ContainerLiveness::Unknown)]
-    fn inspect_failure_liveness_cases(#[case] stderr: &str, #[case] expected: ContainerLiveness) {
-        assert_eq!(inspect_failure_liveness(stderr), expected);
+    #[case::vllm(runtime(), &["--model", "/models/model", "--max-model-len", "4096"])]
+    #[case::sglang(sglang_runtime(), &[
+        "python3", "-m", "sglang.launch_server", "--host", "0.0.0.0",
+        "--model-path", "/models/model", "--max-model-len", "4096",
+    ])]
+    fn each_server_gets_its_container_command(
+        #[case] runtime: anyhow::Result<Runtime>,
+        #[case] expected: &[&str],
+    ) -> anyhow::Result<()> {
+        let run = docker_run(
+            &runtime?,
+            &flags(&[])?,
+            &server_args(),
+            &model_mount(),
+            "/ws/.pipette",
+            None,
+            20001,
+        )?;
+        assert_eq!(run.args, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn an_inherited_forward_that_is_not_set_is_refused() -> anyhow::Result<()> {
+        let name = "PIPETTE_TORCH_OAI_TEST_NEVER_SET";
+        let err = docker_run(
+            &runtime()?,
+            &flags(&[name])?,
+            &server_args(),
+            &model_mount(),
+            "/ws/.pipette",
+            None,
+            20001,
+        )
+        .err()
+        .context("expected a refusal")?;
+        let message = format!("{err:#}");
+        assert!(message.contains(name), "{message}");
+        assert!(message.contains("not set"), "{message}");
+        Ok(())
+    }
+
+    /// Through a stand-in `docker`: the run is attached and ready once the
+    /// published port answers, the client's value reaches the CLI's
+    /// environment, and the stop is `docker stop` with the 30 s grace.
+    #[cfg(unix)]
+    #[test]
+    fn a_container_runs_attached_until_docker_stops_it() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let docker = fake_docker(dir.path(), r#"echo "up with $CUDA_VISIBLE_DEVICES""#)?;
+        let http = serve_fake(&dir.path().join("argv"), published_port, ready_once)?;
+        let client_config = TorchOaiExtraRuntimeConfiguration::from(vec![EnvForward::try_new(
+            "CUDA_VISIBLE_DEVICES=1".to_owned(),
+        )?]);
+
+        let mut server = launch(
+            &docker,
+            &runtime()?,
+            &flags(&[])?,
+            &server_args(),
+            &model_mount(),
+            "/ws/.pipette",
+            Some(&client_config),
+        )?;
+        server.wait_ready(Duration::from_secs(10))?;
+        let argv = http
+            .join()
+            .map_err(|_| anyhow::anyhow!("the fake server panicked"))??;
+        let crate::memprobe::ServerCgroup::Container { docker: bin, name } = server.cgroup() else {
+            anyhow::bail!("a docker server has a container");
+        };
+        assert_eq!(bin, docker);
+        let port = server.state().port;
+        assert!(
+            argv.starts_with(&format!(
+                "run --rm --name {name} --label pipette.workspace=/ws/.pipette \
+                 --label pipette.owner={} -p 127.0.0.1:{port}:8000 ",
+                pipette_subprocess::owner()
+            )),
+            "{argv}"
+        );
+        server.stop();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("calls"))?,
+            format!("stop -t 30 {name}\n")
+        );
+        assert_eq!(
+            server.output().runtime_stdout.as_deref(),
+            Some("up with 1\nstopped\n")
+        );
+        Ok(())
+    }
+
+    /// A response records the container as it does a process: stopped first,
+    /// so its output is whole, under the request and launcher the cell named.
+    #[cfg(unix)]
+    #[test]
+    fn a_response_records_the_stopped_container() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let docker = fake_docker(dir.path(), "echo up")?;
+        let http = serve_fake(&dir.path().join("argv"), published_port, ready_once)?;
+        let mut server = launch(
+            &docker,
+            &runtime()?,
+            &flags(&[])?,
+            &server_args(),
+            &model_mount(),
+            "/ws/.pipette",
+            None,
+        )?;
+        server.wait_ready(Duration::from_secs(10))?;
+        http.join()
+            .map_err(|_| anyhow::anyhow!("the fake server panicked"))??;
+
+        let response = RunResponseBuilder::new(BenchmarkResultData::PrefillThroughput {
+            prefill_time_ms: 1.0,
+            prefill_time_ms_stddev: None,
+        })
+        .executable(docker.display().to_string())
+        .command(vec!["POST /v1/completions".to_owned()])
+        .process(&mut server)
+        .build();
+
+        assert_eq!(
+            response.runtime_output.runtime_stdout.as_deref(),
+            Some("up\nstopped\n")
+        );
+        assert_eq!(response.command, ["POST /v1/completions"]);
+        assert_eq!(response.executable, Some(docker.display().to_string()));
+        Ok(())
+    }
+
+    /// An image the daemon already has is not pulled.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_image_is_pulled_before_the_wait() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let docker = write_executable(
+            &dir.path().join("docker"),
+            &format!(
+                r#"#!/bin/sh
+DIR='{}'
+echo "$@" >> "$DIR/calls"
+case "$1" in
+  image) [ -e "$DIR/pulled" ] ;;
+  pull) touch "$DIR/pulled" ;;
+esac
+"#,
+                dir.path().display()
+            ),
+        )?;
+        let image = "vllm/vllm-openai:v0.20.2";
+        ensure_image(&docker, image)?;
+        ensure_image(&docker, image)?;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("calls"))?,
+            format!("image inspect {image}\npull {image}\nimage inspect {image}\n")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_uv_runtime_is_refused() -> anyhow::Result<()> {
+        use pipette_plan_types::{
+            AbsolutePath, UvBuild, UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang,
+        };
+
+        let uv = Runtime::UvSglang(UvSglang {
+            server_version: UvServerVersion::try_new("0.5.0".to_owned())?,
+            build: UvBuild::try_new("cu129".to_owned())?,
+            python_version: UvPythonVersion::try_new("3.12".to_owned())?,
+            source: UvRuntimeSource::AbsolutePreinstalled {
+                dir: AbsolutePath::try_new("/venv".to_owned())?,
+            },
+        });
+        let err = docker_run(
+            &uv,
+            &flags(&[])?,
+            &server_args(),
+            &model_mount(),
+            "/ws/.pipette",
+            None,
+            20001,
+        )
+        .err()
+        .context("expected a refusal")?;
+        assert!(
+            err.to_string().contains("not a docker runtime"),
+            "got {err:#}"
+        );
+        Ok(())
     }
 }

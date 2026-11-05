@@ -1,75 +1,66 @@
 #!/usr/bin/env bash
 #
-# Emit Generated/MLX/MLXBuildInfo.swift from the resolved SwiftPM pins, so the
-# MLX runtime's reported component versions track Package.resolved automatically
-# instead of being hand-maintained. The MLX inference stack spans several
-# packages that pin differently (semver vs. revision) and are bumped often, so a
-# generated single-source-of-truth beats a constant that can drift.
+# Emit Generated/MLX/MLXBuildInfo.swift and .json from the resolved SwiftPM pins,
+# so the MLX runtime's reported component versions track Package.resolved
+# instead of a hand-maintained constant.
 #
-# This mirrors how build-llama.sh emits LlamaCppBuildInfo.swift: it runs as a
-# pre-"Compile Sources" build phase and writes into the file-system-synchronized
-# Generated/MLX/ group, so the .swift is auto-compiled. The file is committed;
-# the build phase regenerates it in place (only rewriting when the contents
-# actually change, so an unchanged build doesn't churn the file or force a
-# recompile).
-#
-# Pure shell + plutil (ships with macOS) — no python/jq, matching build-llama.sh,
-# so the build phase carries no interpreter dependency.
+# Runs as a pre-"Compile Sources" build phase into the synchronized Generated/MLX/
+# group. The files are committed and rewritten only when their contents change,
+# so an unchanged build does not force a recompile. Shell + plutil (ships with
+# macOS) only, so the build phase needs no interpreter.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVED="$SCRIPT_DIR/Pipette/Pipette.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 OUT_DIR="$SCRIPT_DIR/Pipette/Pipette/Generated/MLX"
 OUT="$OUT_DIR/MLXBuildInfo.swift"
+OUT_JSON="$OUT_DIR/MLXBuildInfo.json"
 
-# Read a scalar from Package.resolved (a JSON plist) via plutil. Non-zero exit on
-# a missing keypath, which terminates the scan loop below.
+# Non-zero exit on a missing keypath, which ends the scan loop below.
 extract() { plutil -extract "$1" raw -o - "$RESOLVED" 2>/dev/null; }
 
-# Reduce a URL to the plan-types `RepositoryUrl` form — scheme-less
-# `<host>/<org>/<repo>` (e.g. `github.com/ml-explore/mlx-swift`). Mirrors
-# `pipette_plan_types::strip_url_scheme` *exactly* — trim trailing slashes, then
-# strip the `http(s)://` prefix, and nothing else — so the emitted
-# `repository_url` is byte-identical to what the Rust sanitizer stores for the
-# same URL (no `.git` trimming or SSH rewriting: Rust does neither, and diverging
-# would fragment one repo into two warehouse keys).
+# Reduce a URL to the plan-types `RepositoryUrl` form, `<host>/<org>/<repo>`.
+# Enough for the https locations SwiftPM records; the `RepositoryUrl` sanitizer
+# in pipette-mgmt (`strip_url_scheme`) also normalizes SSH and `.git`.
 strip_url() {
     local u="$1"
     while [[ "$u" == */ ]]; do u="${u%/}"; done
     u="${u#https://}"; echo "${u#http://}"
 }
 
-# Walk the pins array by index until an out-of-range keypath ends the loop,
-# capturing each component's pinned ref and repo URL. mlx-swift /
-# swift-transformers are semver-pinned (`version`); mlx-swift-lm is
-# revision-pinned (`revision`). The URLs feed the plan-types `MlxSwiftStack`
-# in the submitted `runtime_descriptor`.
-mlx_swift="" mlx_swift_lm="" swift_transformers=""
+# Package.resolved records `version` only for a pin resolved from a release tag,
+# and these repos tag without a `v`, so the version is the tag. The commit is the
+# SHA's 9-char prefix: fixed, where git's `--short` is not.
+pin_tag() { extract "pins.$1.state.version" || true; }
+pin_commit() {
+    local revision
+    revision="$(extract "pins.$1.state.revision" || true)"
+    echo "${revision:0:9}"
+}
+
+# Walk the pins by index until an out-of-range keypath ends the loop.
+mlx_swift_tag="" mlx_swift_lm_tag="" swift_transformers_tag=""
+mlx_swift_commit="" mlx_swift_lm_commit="" swift_transformers_commit=""
 mlx_swift_url="" mlx_swift_lm_url="" swift_transformers_url=""
 i=0
 while identity="$(extract "pins.$i.identity")"; do
     case "$identity" in
         mlx-swift)
-            mlx_swift="$(extract "pins.$i.state.version")"
+            mlx_swift_tag="$(pin_tag "$i")" mlx_swift_commit="$(pin_commit "$i")"
             mlx_swift_url="$(strip_url "$(extract "pins.$i.location")")" ;;
         mlx-swift-lm)
-            mlx_swift_lm="$(extract "pins.$i.state.revision")"
+            mlx_swift_lm_tag="$(pin_tag "$i")" mlx_swift_lm_commit="$(pin_commit "$i")"
             mlx_swift_lm_url="$(strip_url "$(extract "pins.$i.location")")" ;;
         swift-transformers)
-            swift_transformers="$(extract "pins.$i.state.version")"
+            swift_transformers_tag="$(pin_tag "$i")" swift_transformers_commit="$(pin_commit "$i")"
             swift_transformers_url="$(strip_url "$(extract "pins.$i.location")")" ;;
     esac
     i=$((i + 1))
 done
 
-# Abbreviate the mlx-swift-lm revision to a 9-char short hash, matching the
-# llama.cpp short-commit convention so both engines report the same hash length.
-# Package.resolved stores the full SHA, so a fixed-length prefix is deterministic
-# (unlike git's environment-dependent `--short` auto length).
-mlx_swift_lm="${mlx_swift_lm:0:9}"
-
 for pair in \
-    "mlx-swift:$mlx_swift" "mlx-swift-lm:$mlx_swift_lm" "swift-transformers:$swift_transformers" \
+    "mlx-swift:$mlx_swift_commit" "mlx-swift-lm:$mlx_swift_lm_commit" \
+    "swift-transformers:$swift_transformers_commit" \
     "mlx-swift.url:$mlx_swift_url" "mlx-swift-lm.url:$mlx_swift_lm_url" \
     "swift-transformers.url:$swift_transformers_url"; do
     if [[ "$pair" == *: ]]; then
@@ -78,25 +69,90 @@ for pair in \
     fi
 done
 
+# `Build.tagged` / `Build.untagged`, spelled as a Swift expression.
+build_expr() {
+    local tag="$1" commit="$2"
+    if [[ -n "$tag" ]]; then
+        echo "Build.tagged(tag: \"$tag\", commit: \"$commit\")"
+    else
+        echo "Build.untagged(commit: \"$commit\")"
+    fi
+}
+
 content="// Generated by ios/gen-mlx-build-info.sh — do not edit.
-// The MLX runtime's component versions + repo URLs, read from Package.resolved at
-// build time. nonisolated so the nonisolated MLXRuntime can read it off the main actor.
+// What the in-process MLX engine was built from: its three Swift packages, each as
+// a pin and the repository it came from, read from Package.resolved.
+// nonisolated so the nonisolated MlxRuntime can read it off the main actor.
 nonisolated enum MLXBuildInfo {
-    static let mlxSwiftVersion = \"$mlx_swift\"
-    static let mlxSwiftLMRevision = \"$mlx_swift_lm\"
-    static let swiftTransformersVersion = \"$swift_transformers\"
+    /// A package pinned by version is an upstream release; one pinned by revision
+    /// or branch has no tag, so \`untagged\` is a real state.
+    nonisolated enum Build {
+        case tagged(tag: String, commit: String)
+        case untagged(commit: String)
+
+        /// Always present, and the exact identity: a tag can be moved or deleted
+        /// upstream, a commit cannot.
+        var commit: String {
+            switch self {
+            case let .tagged(_, commit), let .untagged(commit):
+                return commit
+            }
+        }
+
+        /// The upstream release tag on this pin, when it carries one.
+        var tag: String? {
+            switch self {
+            case let .tagged(tag, _): return tag
+            case .untagged: return nil
+            }
+        }
+
+        /// What a submission reports as \`repository_version\`: the tag when the
+        /// pin has one, so the descriptor names the release a plan pins by, and
+        /// the commit otherwise, which is still exact.
+        var submissionVersion: String { tag ?? commit }
+    }
+
+    static let mlxSwift = $(build_expr "$mlx_swift_tag" "$mlx_swift_commit")
+    static let mlxSwiftLM = $(build_expr "$mlx_swift_lm_tag" "$mlx_swift_lm_commit")
+    static let swiftTransformers = $(build_expr "$swift_transformers_tag" "$swift_transformers_commit")
+
     static let mlxSwiftRepositoryUrl = \"$mlx_swift_url\"
     static let mlxSwiftLMRepositoryUrl = \"$mlx_swift_lm_url\"
     static let swiftTransformersRepositoryUrl = \"$swift_transformers_url\"
 }
 "
 
-# Rewrite only on change so an unchanged build doesn't bump mtime / recompile.
-if [[ -f "$OUT" && "$(cat "$OUT")" == "$(printf '%s' "$content")" ]]; then
-    echo "==> MLXBuildInfo.swift up to date"
-    exit 0
-fi
+# One pin as a JSON member; an untagged pin's tag is `null`.
+json_pin() {
+    local name="$1" url="$2" tag="$3" commit="$4" tag_json=null
+    [[ -n "$tag" ]] && tag_json="\"$tag\""
+    printf '  "%s": {"repository_url": "%s", "tag": %s, "commit": "%s"}' \
+        "$name" "$url" "$tag_json" "$commit"
+}
 
-mkdir -p "$OUT_DIR"
-printf '%s' "$content" > "$OUT"
-echo "==> Wrote MLXBuildInfo.swift (mlx-swift=$mlx_swift mlx-swift-lm=$mlx_swift_lm swift-transformers=$swift_transformers)"
+# The same values as data, for ios/release-manifest.py. Kept out of the app
+# bundle by a membership exception in the project.
+json="{
+$(json_pin mlx_swift "$mlx_swift_url" "$mlx_swift_tag" "$mlx_swift_commit"),
+$(json_pin mlx_swift_lm "$mlx_swift_lm_url" "$mlx_swift_lm_tag" "$mlx_swift_lm_commit"),
+$(json_pin swift_transformers "$swift_transformers_url" "$swift_transformers_tag" "$swift_transformers_commit")
+}
+"
+
+# Rewrite only on change so an unchanged build doesn't bump mtime / recompile.
+write_if_changed() {
+    local path="$1" body="$2"
+    if [[ -f "$path" && "$(cat "$path")" == "$(printf '%s' "$body")" ]]; then
+        echo "==> ${path##*/} up to date"
+        return
+    fi
+    mkdir -p "$OUT_DIR"
+    printf '%s' "$body" > "$path"
+    echo "==> Wrote ${path##*/} (mlx-swift=${mlx_swift_tag:-$mlx_swift_commit}" \
+        "mlx-swift-lm=${mlx_swift_lm_tag:-$mlx_swift_lm_commit}" \
+        "swift-transformers=${swift_transformers_tag:-$swift_transformers_commit})"
+}
+
+write_if_changed "$OUT" "$content"
+write_if_changed "$OUT_JSON" "$json"

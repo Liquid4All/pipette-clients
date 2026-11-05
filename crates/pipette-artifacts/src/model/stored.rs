@@ -1,53 +1,46 @@
-//! [`to_stored`] — map a declared model to its effective (installed) form under
-//! a base dir — the model-side counterpart to
-//! [`crate::runtime::to_stored`].
-//! [`under_root`] — prefix an already-Relative model with a root via [`Path::join`].
-//!
-//! Store usage:
-//! - **manifest `stored`** — `to_stored(declared, &key.blobs_dir())`
-//!   (models-root-relative Relative paths).
-//! - **loader paths** — `under_root(&stored, models_dir)` (join the relative
-//!   `stored` paths under the concrete models dir).
-//! - **fetch staging** — `to_stored(declared, &staged_blobs)` (absolute base).
+//! [`to_stored`] maps a declared model to its installed form under a base dir
+//! (the manifest's `stored` under `<key>/blobs`, or a fetch's staged `blobs/`).
+//! [`under_root`] joins a `stored` model's relative paths under a models dir.
 
 use std::path::Path;
 
 use pipette_plan_types::{
-    AbsolutePath, AppleCoreAi, GgufText, GgufTextSource, GgufVision, GgufVisionSource, Mlx, Model,
-    ModelSource, Openvino, RelativePath, RepoSubpath, ResourceUrl, Torch,
+    AbsolutePath, GgufText, GgufTextSource, GgufVision, GgufVisionAbsoluteFiles, GgufVisionHfFiles,
+    GgufVisionRelativeFiles, GgufVisionSource, GgufVisionSpeculative, GgufVisionSpeculativeSource,
+    GgufVisionUrlFiles, GgufVisionVaultUrlFiles, Mlx, MlxSpeculative, Model, ModelSource,
+    OnnxGenai, Openvino, RelativePath, RepoSubpath, ResourceUrl, Torch, TorchSpeculative,
+    VaultPath,
 };
+
+/// The subdirectories a speculative pair's target and drafter are stored under
+/// (MLX and torch alike). Fixed names rather than [`dir_to_stored`]'s
+/// prefix-derived one: two sources with no `prefix` would both resolve to the
+/// entry root.
+pub const MLX_TARGET_DIR: &str = "target";
+/// See [`MLX_TARGET_DIR`].
+pub const MLX_DRAFT_DIR: &str = "draft";
 
 /// Why [`to_stored`] couldn't map a model to on-disk paths.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ModelStoredError {
-    /// A `Url` source's path ends in `/`, so it names no file to store under.
     #[error("model URL `{0}` names no file")]
     InvalidUrlPath(String),
-    /// A `Url` source's filename isn't a safe model path (an escape sequence or
-    /// similar) even after its query string and fragment are stripped.
     #[error("URL filename `{0}` is not a valid model path")]
     InvalidUrlFilename(String),
-    /// `base` joined with a file/dir didn't form a valid [`AbsolutePath`] (e.g. a
-    /// non-normalized `base`).
     #[error("`{0}` is not a valid local path")]
     InvalidPath(String),
-    /// Vision model + mmproj re-home to the same on-disk path (same leaf under
-    /// `base`), so import would overwrite one file with the other.
+    /// Two files of one model re-home to the same leaf under `base`, so one
+    /// would overwrite the other.
     #[error("model and mmproj re-home to the same path `{0}`")]
     CollidingPaths(String),
-    /// [`under_root`] needs a model whose sources are already `Relative`
-    /// (e.g. manifest `stored`).
     #[error("expected Relative source paths, got {0}")]
     NotRelative(String),
 }
 
-/// Effective form of `model` under `base` (manifest `stored` / fetch target).
-///
-/// Rewrites sources to store paths under `base`. Relativity of the result
-/// matches `base` (relative → `Relative` arms; absolute → `Absolute` arms).
-/// OS-bundled models are unchanged. Multi-file arms reject path collisions.
+/// `model` with its sources rewritten to paths under `base`: `Relative*`
+/// arms for a relative `base`, `Absolute*` for an absolute one. Apple Foundation
+/// is unchanged.
 pub fn to_stored(model: &Model, base: &Path) -> Result<Model, ModelStoredError> {
-    // Relative `base` (manifest `stored`) → Relative* arms; absolute base → Absolute*.
     let abs = base.is_absolute();
     Ok(match model {
         Model::GgufText(m) => Model::GgufText(GgufText {
@@ -57,6 +50,9 @@ pub fn to_stored(model: &Model, base: &Path) -> Result<Model, ModelStoredError> 
                 }
                 GgufTextSource::Url { url, .. } => {
                     gguf_text_under(base, url_filename(url)?.as_ref(), abs)?
+                }
+                GgufTextSource::VaultUrl { url, .. } => {
+                    gguf_text_under(base, &vault_filename(url), abs)?
                 }
                 GgufTextSource::RelativeFile { path } => {
                     gguf_text_under(base, path_leaf(path.as_ref())?, abs)?
@@ -68,31 +64,67 @@ pub fn to_stored(model: &Model, base: &Path) -> Result<Model, ModelStoredError> 
         }),
         Model::GgufVision(m) => Model::GgufVision(GgufVision {
             source: match &m.source {
-                GgufVisionSource::HuggingFace { model, mmproj, .. } => {
+                GgufVisionSource::HuggingFace(GgufVisionHfFiles { model, mmproj, .. }) => {
                     gguf_vision_under(base, model.as_ref(), mmproj.as_ref(), abs)?
                 }
-                GgufVisionSource::Url { model, mmproj, .. } => gguf_vision_under(
-                    base,
-                    url_filename(model)?.as_ref(),
-                    url_filename(mmproj)?.as_ref(),
-                    abs,
-                )?,
-                GgufVisionSource::RelativeFiles { model, mmproj } => gguf_vision_under(
-                    base,
-                    path_leaf(model.as_ref())?,
-                    path_leaf(mmproj.as_ref())?,
-                    abs,
-                )?,
-                GgufVisionSource::AbsoluteFiles { model, mmproj } => gguf_vision_under(
-                    base,
-                    path_leaf(model.as_ref())?,
-                    path_leaf(mmproj.as_ref())?,
-                    abs,
-                )?,
+                GgufVisionSource::Url(GgufVisionUrlFiles { model, mmproj, .. }) => {
+                    gguf_vision_under(
+                        base,
+                        url_filename(model)?.as_ref(),
+                        url_filename(mmproj)?.as_ref(),
+                        abs,
+                    )?
+                }
+                GgufVisionSource::VaultUrl(GgufVisionVaultUrlFiles { model, mmproj, .. }) => {
+                    gguf_vision_under(base, &vault_filename(model), &vault_filename(mmproj), abs)?
+                }
+                GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles { model, mmproj }) => {
+                    gguf_vision_under(
+                        base,
+                        path_leaf(model.as_ref())?,
+                        path_leaf(mmproj.as_ref())?,
+                        abs,
+                    )?
+                }
+                GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles { model, mmproj }) => {
+                    gguf_vision_under(
+                        base,
+                        path_leaf(model.as_ref())?,
+                        path_leaf(mmproj.as_ref())?,
+                        abs,
+                    )?
+                }
             },
+        }),
+        Model::GgufVisionSpeculative(m) => {
+            let vision = to_stored(
+                &Model::GgufVision(GgufVision {
+                    source: m.source.vision(),
+                }),
+                base,
+            )?;
+            let Model::GgufVision(GgufVision { source: vision }) = vision else {
+                return Err(ModelStoredError::InvalidPath(
+                    "gguf_vision did not map to a gguf_vision source".to_owned(),
+                ));
+            };
+            Model::GgufVisionSpeculative(GgufVisionSpeculative {
+                source: speculative_under(&m.source, vision, base, abs)?,
+            })
+        }
+        Model::AppleCoreAi(m) => Model::AppleCoreAi(pipette_plan_types::AppleCoreAi {
+            source: dir_to_stored(&m.source, base, abs)?,
         }),
         Model::Mlx(m) => Model::Mlx(Mlx {
             source: dir_to_stored(&m.source, base, abs)?,
+        }),
+        Model::MlxSpeculative(_) => Model::MlxSpeculative(MlxSpeculative {
+            target: dir_source(under_joined(base, MLX_TARGET_DIR, abs)?),
+            draft: dir_source(under_joined(base, MLX_DRAFT_DIR, abs)?),
+        }),
+        Model::TorchSpeculative(_) => Model::TorchSpeculative(TorchSpeculative {
+            target: dir_source(under_joined(base, MLX_TARGET_DIR, abs)?),
+            draft: dir_source(under_joined(base, MLX_DRAFT_DIR, abs)?),
         }),
         Model::Torch(m) => Model::Torch(Torch {
             source: dir_to_stored(&m.source, base, abs)?,
@@ -100,17 +132,15 @@ pub fn to_stored(model: &Model, base: &Path) -> Result<Model, ModelStoredError> 
         Model::Openvino(m) => Model::Openvino(Openvino {
             source: dir_to_stored(&m.source, base, abs)?,
         }),
-        Model::AppleCoreAi(m) => Model::AppleCoreAi(AppleCoreAi {
+        Model::OnnxGenai(m) => Model::OnnxGenai(OnnxGenai {
             source: dir_to_stored(&m.source, base, abs)?,
         }),
         Model::AppleFoundationText => Model::AppleFoundationText,
     })
 }
 
-/// Prefix every **relative** path in `stored` with `root` ([`Path::join`]).
-///
-/// Absolute `root` → Absolute* arms; relative `root` stays Relative*.
-/// `stored` must already be Relative* form.
+/// Join every path in `stored`, which must be in `Relative*` form, under `root`.
+/// An absolute `root` yields `Absolute*` arms.
 pub fn under_root(stored: &Model, root: &Path) -> Result<Model, ModelStoredError> {
     let abs_root = root.is_absolute();
     let join = |rel: &str| -> Result<JoinedPath, ModelStoredError> {
@@ -130,26 +160,62 @@ pub fn under_root(stored: &Model, root: &Path) -> Result<Model, ModelStoredError
             },
         }),
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::RelativeFiles { model, mmproj },
+            source: GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles { model, mmproj }),
         }) => {
             let model_j = join(model.as_ref())?;
             let mmproj_j = join(mmproj.as_ref())?;
             Model::GgufVision(GgufVision {
                 source: match (model_j, mmproj_j) {
                     (JoinedPath::Rel(model), JoinedPath::Rel(mmproj)) => {
-                        GgufVisionSource::RelativeFiles { model, mmproj }
+                        GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles { model, mmproj })
                     }
                     (JoinedPath::Abs(model), JoinedPath::Abs(mmproj)) => {
-                        GgufVisionSource::AbsoluteFiles { model, mmproj }
+                        GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles { model, mmproj })
                     }
                     _ => {
                         return Err(ModelStoredError::InvalidPath(
                             "mixed relative/absolute vision paths".to_owned(),
-                        ))
+                        ));
                     }
                 },
             })
         }
+        Model::GgufVisionSpeculative(GgufVisionSpeculative {
+            source: GgufVisionSpeculativeSource::RelativeFiles { files, draft },
+        }) => {
+            let model_j = join(files.model.as_ref())?;
+            let mmproj_j = join(files.mmproj.as_ref())?;
+            let draft_j = draft.as_ref().map(|d| join(d.as_ref())).transpose()?;
+            Model::GgufVisionSpeculative(GgufVisionSpeculative {
+                source: match (model_j, mmproj_j, draft_j) {
+                    (JoinedPath::Rel(model), JoinedPath::Rel(mmproj), draft) => {
+                        GgufVisionSpeculativeSource::RelativeFiles {
+                            files: GgufVisionRelativeFiles { model, mmproj },
+                            draft: relative_draft(draft)?,
+                        }
+                    }
+                    (JoinedPath::Abs(model), JoinedPath::Abs(mmproj), draft) => {
+                        GgufVisionSpeculativeSource::AbsoluteFiles {
+                            files: GgufVisionAbsoluteFiles { model, mmproj },
+                            draft: absolute_draft(draft)?,
+                        }
+                    }
+                    _ => {
+                        return Err(ModelStoredError::InvalidPath(
+                            "mixed relative/absolute vision paths".to_owned(),
+                        ));
+                    }
+                },
+            })
+        }
+        Model::AppleCoreAi(pipette_plan_types::AppleCoreAi {
+            source: ModelSource::RelativeDir { dir },
+        }) => Model::AppleCoreAi(pipette_plan_types::AppleCoreAi {
+            source: match join(dir.as_ref())? {
+                JoinedPath::Rel(dir) => ModelSource::RelativeDir { dir },
+                JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },
+            },
+        }),
         Model::Mlx(Mlx {
             source: ModelSource::RelativeDir { dir },
         }) => Model::Mlx(Mlx {
@@ -157,6 +223,20 @@ pub fn under_root(stored: &Model, root: &Path) -> Result<Model, ModelStoredError
                 JoinedPath::Rel(dir) => ModelSource::RelativeDir { dir },
                 JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },
             },
+        }),
+        Model::MlxSpeculative(MlxSpeculative {
+            target: ModelSource::RelativeDir { dir: target },
+            draft: ModelSource::RelativeDir { dir: draft },
+        }) => Model::MlxSpeculative(MlxSpeculative {
+            target: dir_source(join(target.as_ref())?),
+            draft: dir_source(join(draft.as_ref())?),
+        }),
+        Model::TorchSpeculative(TorchSpeculative {
+            target: ModelSource::RelativeDir { dir: target },
+            draft: ModelSource::RelativeDir { dir: draft },
+        }) => Model::TorchSpeculative(TorchSpeculative {
+            target: dir_source(join(target.as_ref())?),
+            draft: dir_source(join(draft.as_ref())?),
         }),
         Model::Torch(Torch {
             source: ModelSource::RelativeDir { dir },
@@ -174,16 +254,25 @@ pub fn under_root(stored: &Model, root: &Path) -> Result<Model, ModelStoredError
                 JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },
             },
         }),
-        Model::AppleCoreAi(AppleCoreAi {
+        Model::OnnxGenai(OnnxGenai {
             source: ModelSource::RelativeDir { dir },
-        }) => Model::AppleCoreAi(AppleCoreAi {
+        }) => Model::OnnxGenai(OnnxGenai {
             source: match join(dir.as_ref())? {
                 JoinedPath::Rel(dir) => ModelSource::RelativeDir { dir },
                 JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },
             },
         }),
         Model::AppleFoundationText => Model::AppleFoundationText,
-        other => return Err(ModelStoredError::NotRelative(other.to_string())),
+        other @ (Model::GgufText(_)
+        | Model::GgufVision(_)
+        | Model::GgufVisionSpeculative(_)
+        | Model::Mlx(_)
+        | Model::MlxSpeculative(_)
+        | Model::TorchSpeculative(_)
+        | Model::Torch(_)
+        | Model::Openvino(_)
+        | Model::OnnxGenai(_)
+        | Model::AppleCoreAi(_)) => return Err(ModelStoredError::NotRelative(other.to_string())),
     })
 }
 
@@ -200,9 +289,9 @@ fn dir_to_stored(
             };
             dir_source(joined)
         }
-        ModelSource::RelativeDir { .. } | ModelSource::AbsoluteDir { .. } => {
-            dir_source(path_from_base(base, abs)?)
-        }
+        ModelSource::VaultArchive { .. }
+        | ModelSource::RelativeDir { .. }
+        | ModelSource::AbsoluteDir { .. } => dir_source(path_from_base(base, abs)?),
     })
 }
 
@@ -215,6 +304,79 @@ fn dir_source(joined: JoinedPath) -> ModelSource {
     match joined {
         JoinedPath::Rel(dir) => ModelSource::RelativeDir { dir },
         JoinedPath::Abs(dir) => ModelSource::AbsoluteDir { dir },
+    }
+}
+
+/// The drafter's stored path beside `vision`, the pair [`to_stored`] already
+/// mapped. Refuses a drafter that would land on one of those two files.
+fn speculative_under(
+    declared: &GgufVisionSpeculativeSource,
+    vision: GgufVisionSource,
+    base: &Path,
+    abs: bool,
+) -> Result<GgufVisionSpeculativeSource, ModelStoredError> {
+    let leaf = match declared {
+        GgufVisionSpeculativeSource::HuggingFace { draft, .. } => {
+            draft.as_ref().map(|d| d.as_ref().to_owned())
+        }
+        GgufVisionSpeculativeSource::Url { draft, .. } => draft
+            .as_ref()
+            .map(|d| url_filename(d).map(|n| n.as_ref().to_owned()))
+            .transpose()?,
+        GgufVisionSpeculativeSource::VaultUrl { draft, .. } => draft.as_ref().map(vault_filename),
+        GgufVisionSpeculativeSource::RelativeFiles { draft, .. } => draft
+            .as_ref()
+            .map(|d| path_leaf(d.as_ref()).map(str::to_owned))
+            .transpose()?,
+        GgufVisionSpeculativeSource::AbsoluteFiles { draft, .. } => draft
+            .as_ref()
+            .map(|d| path_leaf(d.as_ref()).map(str::to_owned))
+            .transpose()?,
+    };
+    let draft = leaf
+        .as_deref()
+        .map(|leaf| under_joined(base, leaf, abs))
+        .transpose()?;
+    Ok(match (vision, draft) {
+        (GgufVisionSource::RelativeFiles(files), draft) => {
+            let draft = relative_draft(draft)?;
+            if let Some(hit) = draft.as_ref().filter(|d| {
+                d.as_ref() == files.model.as_ref() || d.as_ref() == files.mmproj.as_ref()
+            }) {
+                return Err(ModelStoredError::CollidingPaths(hit.to_string()));
+            }
+            GgufVisionSpeculativeSource::RelativeFiles { files, draft }
+        }
+        (GgufVisionSource::AbsoluteFiles(files), draft) => {
+            let draft = absolute_draft(draft)?;
+            if let Some(hit) = draft.as_ref().filter(|d| {
+                d.as_ref() == files.model.as_ref() || d.as_ref() == files.mmproj.as_ref()
+            }) {
+                return Err(ModelStoredError::CollidingPaths(hit.to_string()));
+            }
+            GgufVisionSpeculativeSource::AbsoluteFiles { files, draft }
+        }
+        (other, _) => {
+            return Err(ModelStoredError::InvalidPath(format!(
+                "a stored gguf-vision source must be a path pair, got {other:?}"
+            )));
+        }
+    })
+}
+
+fn relative_draft(joined: Option<JoinedPath>) -> Result<Option<RelativePath>, ModelStoredError> {
+    match joined {
+        None => Ok(None),
+        Some(JoinedPath::Rel(path)) => Ok(Some(path)),
+        Some(JoinedPath::Abs(path)) => Err(ModelStoredError::InvalidPath(path.to_string())),
+    }
+}
+
+fn absolute_draft(joined: Option<JoinedPath>) -> Result<Option<AbsolutePath>, ModelStoredError> {
+    match joined {
+        None => Ok(None),
+        Some(JoinedPath::Abs(path)) => Ok(Some(path)),
+        Some(JoinedPath::Rel(path)) => Err(ModelStoredError::InvalidPath(path.to_string())),
     }
 }
 
@@ -238,13 +400,19 @@ fn gguf_vision_under(
             if model.as_ref() == mmproj.as_ref() {
                 return Err(ModelStoredError::CollidingPaths(model.to_string()));
             }
-            Ok(GgufVisionSource::RelativeFiles { model, mmproj })
+            Ok(GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles {
+                model,
+                mmproj,
+            }))
         }
         (JoinedPath::Abs(model), JoinedPath::Abs(mmproj)) => {
             if model.as_ref() == mmproj.as_ref() {
                 return Err(ModelStoredError::CollidingPaths(model.to_string()));
             }
-            Ok(GgufVisionSource::AbsoluteFiles { model, mmproj })
+            Ok(GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles {
+                model,
+                mmproj,
+            }))
         }
         _ => Err(ModelStoredError::InvalidPath(
             "mixed relative/absolute vision paths".to_owned(),
@@ -270,7 +438,6 @@ fn path_from_joined(path: &Path, abs: bool) -> Result<JoinedPath, ModelStoredErr
     }
 }
 
-/// Last path segment of a local path (for re-homing into the store).
 fn path_leaf(path: &str) -> Result<&str, ModelStoredError> {
     path.rsplit(['/', '\\'])
         .next()
@@ -288,11 +455,8 @@ fn absolute_path(path: &str) -> Result<AbsolutePath, ModelStoredError> {
     AbsolutePath::try_new(path.clone()).map_err(|_| ModelStoredError::InvalidPath(path))
 }
 
-/// The download URL's trailing path segment as a safe model path — the filename
-/// the fetcher lands on disk. The query string and fragment are stripped first,
-/// so a signed URL (`…/w.gguf?token=…`) stores as `w.gguf`; the full URL remains
-/// the model's identity. Rejects a URL that names no file, or a filename that
-/// isn't a valid [`RepoSubpath`] (an escape sequence, …) once trimmed.
+/// The URL's last path segment without query or fragment, so a signed URL
+/// (`.../w.gguf?token=...`) stores as `w.gguf`. The full URL stays the identity.
 fn url_filename(url: &ResourceUrl) -> Result<RepoSubpath, ModelStoredError> {
     let leaf = url
         .as_ref()
@@ -304,11 +468,17 @@ fn url_filename(url: &ResourceUrl) -> Result<RepoSubpath, ModelStoredError> {
     RepoSubpath::try_new(leaf).map_err(|_| ModelStoredError::InvalidUrlFilename(leaf.to_owned()))
 }
 
+/// `<resource_id>.gguf`: a vault path's last segment is `content`, which
+/// names nothing and would collide across a vision pair.
+fn vault_filename(path: &VaultPath) -> String {
+    format!("{}.gguf", path.resource_id())
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
 
-    use pipette_plan_types::{HfOrg, HfRepo, HfRepoName, RepoSubpath};
+    use pipette_plan_types::{HfOrg, HfRepo, HfRepoName, NonEmptyTrimmedString, RepoSubpath};
 
     use super::*;
 
@@ -321,21 +491,10 @@ mod tests {
         })
     }
 
-    /// Absolute base — staging / loader shape. Platform-shaped because
-    /// [`to_stored`] picks its `Absolute*` arms off `Path::is_absolute`, whose
-    /// answer is per-platform: a bare `/store/entry` has a root but no drive
-    /// prefix, so Windows reads it as relative, every re-home takes the
-    /// `Relative*` branch, and `RelativePath` then rejects the leading `/` —
-    /// the test fails on path spelling without reaching what it meant to assert.
-    ///
-    /// Note the asymmetry that makes this easy to miss: `AbsolutePath`'s own
-    /// validator is a platform-independent string check that accepts the Unix
-    /// spelling everywhere, so the `/elsewhere/w.gguf`-style *inputs* below need
-    /// no such treatment — only bases, and the expectations derived from them.
-    ///
-    /// Forward slashes on both platforms because the joins normalize separators
-    /// to `/`; only the prefix differs, which is what lets [`under`] compose
-    /// every expectation from the one string.
+    /// Platform-shaped because [`to_stored`] picks its `Absolute*` arms off
+    /// `Path::is_absolute`, and a driveless `/store/entry` is relative on Windows.
+    /// The `/elsewhere/...` inputs below need no such treatment: `AbsolutePath`
+    /// validates as a platform-independent string.
     #[cfg(windows)]
     const BASE: &str = "C:/store/entry";
     #[cfg(not(windows))]
@@ -345,40 +504,226 @@ mod tests {
         Path::new(BASE)
     }
 
-    /// `relative` re-homed under [`BASE`], spelled the way the joins spell it.
     fn under(relative: &str) -> String {
         format!("{BASE}/{relative}")
     }
 
-    /// Models root for the [`under_root`] tests, platform-shaped for the same
-    /// reason as [`BASE`].
     #[cfg(windows)]
     const MODELS_ROOT: &str = "C:/ws/models";
     #[cfg(not(windows))]
     const MODELS_ROOT: &str = "/ws/models";
 
-    /// Models-root-relative base — the store's `stored` shape (`<key>/blobs`).
     fn relative_base() -> &'static Path {
         Path::new("entry/blobs")
     }
 
-    /// Every Relative path in `model` has no leading `/`.
+    /// A merged drafter stays absent rather than becoming a file that does not
+    /// exist.
+    #[rstest]
+    #[case::separate_drafter(Some("repo/draft-4L.gguf"), Some("draft-4L.gguf"))]
+    #[case::merged_drafter(None, None)]
+    fn a_speculative_model_stores_and_rehomes_with_its_drafter(
+        #[case] declared_draft: Option<&str>,
+        #[case] expected_leaf: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use pipette_plan_types::{GgufVisionSpeculative, GgufVisionSpeculativeSource};
+
+        let declared = Model::GgufVisionSpeculative(GgufVisionSpeculative {
+            source: GgufVisionSpeculativeSource::HuggingFace {
+                files: GgufVisionHfFiles {
+                    repo: hf("liquidai", "vl")?,
+                    model: RepoSubpath::try_new("weights/q4.gguf")?,
+                    model_sha256: None,
+                    mmproj: RepoSubpath::try_new("mm.gguf")?,
+                    mmproj_sha256: None,
+                },
+                draft: declared_draft
+                    .map(|d| RepoSubpath::try_new(d.to_owned()))
+                    .transpose()?,
+                draft_sha256: None,
+            },
+        });
+
+        let stored = to_stored(&declared, relative_base())?;
+        let Model::GgufVisionSpeculative(GgufVisionSpeculative {
+            source: GgufVisionSpeculativeSource::RelativeFiles { files, draft },
+        }) = &stored
+        else {
+            anyhow::bail!("a relative base must yield the RelativeFiles arm, got {stored:?}");
+        };
+        // The HF arm keeps the repo-relative path, as `gguf_vision` does.
+        assert_eq!(files.model.as_ref(), "entry/blobs/weights/q4.gguf");
+        assert_eq!(files.mmproj.as_ref(), "entry/blobs/mm.gguf");
+        assert_eq!(
+            draft.as_ref().map(AsRef::as_ref),
+            declared_draft
+                .map(|d| format!("entry/blobs/{d}"))
+                .as_deref()
+        );
+
+        let launched = under_root(&stored, Path::new(MODELS_ROOT))?;
+        let Model::GgufVisionSpeculative(GgufVisionSpeculative {
+            source: GgufVisionSpeculativeSource::AbsoluteFiles { files, draft },
+        }) = &launched
+        else {
+            anyhow::bail!("an absolute root must yield the AbsoluteFiles arm, got {launched:?}");
+        };
+        assert_eq!(
+            files.model.as_ref(),
+            format!("{MODELS_ROOT}/entry/blobs/weights/q4.gguf")
+        );
+        assert_eq!(
+            draft.as_ref().map(AsRef::as_ref),
+            expected_leaf
+                .map(|_| format!(
+                    "{MODELS_ROOT}/entry/blobs/{}",
+                    declared_draft.unwrap_or_default()
+                ))
+                .as_deref()
+        );
+        Ok(())
+    }
+
+    /// A `prefix` is not part of the stored path: `plan_dir_downloads` strips it
+    /// on the way in.
+    #[rstest]
+    #[case::no_prefixes(None, None)]
+    #[case::prefixed_target(Some("4bit"), None)]
+    #[case::both_prefixed(Some("4bit"), Some("8bit"))]
+    fn an_mlx_pair_stores_and_rehomes_under_its_role_dirs(
+        #[case] target_prefix: Option<&str>,
+        #[case] draft_prefix: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use pipette_plan_types::MlxSpeculative;
+
+        let source = |repo: &str, prefix: Option<&str>| -> anyhow::Result<ModelSource> {
+            Ok(ModelSource::HuggingFace {
+                repo: hf("liquidai", repo)?,
+                prefix: prefix
+                    .map(|p| RepoSubpath::try_new(p.to_owned()))
+                    .transpose()?,
+            })
+        };
+        let declared = Model::MlxSpeculative(MlxSpeculative {
+            target: source("vl-mlx", target_prefix)?,
+            draft: source("vl-dspark", draft_prefix)?,
+        });
+
+        let stored = to_stored(&declared, relative_base())?;
+        let Model::MlxSpeculative(MlxSpeculative {
+            target: ModelSource::RelativeDir { dir: target },
+            draft: ModelSource::RelativeDir { dir: draft },
+        }) = &stored
+        else {
+            anyhow::bail!("a relative base must yield two RelativeDirs, got {stored:?}");
+        };
+        assert_eq!(target.as_ref(), "entry/blobs/target");
+        assert_eq!(draft.as_ref(), "entry/blobs/draft");
+
+        let launched = under_root(&stored, Path::new(MODELS_ROOT))?;
+        let Model::MlxSpeculative(MlxSpeculative {
+            target: ModelSource::AbsoluteDir { dir: target },
+            draft: ModelSource::AbsoluteDir { dir: draft },
+        }) = &launched
+        else {
+            anyhow::bail!("an absolute root must yield two AbsoluteDirs, got {launched:?}");
+        };
+        assert_eq!(
+            target.as_ref(),
+            format!("{MODELS_ROOT}/entry/blobs/{MLX_TARGET_DIR}")
+        );
+        assert_eq!(
+            draft.as_ref(),
+            format!("{MODELS_ROOT}/entry/blobs/{MLX_DRAFT_DIR}")
+        );
+        assert_ne!(target, draft, "the two halves cannot share a directory");
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::absolute_target(true, false)]
+    #[case::absolute_draft(false, true)]
+    fn an_mlx_pair_with_a_non_relative_half_is_not_rehomed(
+        #[case] absolute_target: bool,
+        #[case] absolute_draft: bool,
+    ) -> anyhow::Result<()> {
+        use pipette_plan_types::MlxSpeculative;
+
+        let half = |absolute: bool, name: &str| -> anyhow::Result<ModelSource> {
+            Ok(if absolute {
+                ModelSource::AbsoluteDir {
+                    dir: AbsolutePath::try_new(under(name))?,
+                }
+            } else {
+                ModelSource::RelativeDir {
+                    dir: RelativePath::try_new(format!("entry/blobs/{name}"))?,
+                }
+            })
+        };
+        let stored = Model::MlxSpeculative(MlxSpeculative {
+            target: half(absolute_target, MLX_TARGET_DIR)?,
+            draft: half(absolute_draft, MLX_DRAFT_DIR)?,
+        });
+        assert!(matches!(
+            under_root(&stored, Path::new(MODELS_ROOT)),
+            Err(ModelStoredError::NotRelative(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_drafter_colliding_with_the_weights_is_refused() -> anyhow::Result<()> {
+        use pipette_plan_types::{GgufVisionSpeculative, GgufVisionSpeculativeSource};
+
+        let declared = Model::GgufVisionSpeculative(GgufVisionSpeculative {
+            source: GgufVisionSpeculativeSource::Url {
+                files: GgufVisionUrlFiles {
+                    model: ResourceUrl::try_new("https://ex.com/a/w.gguf")?,
+                    model_sha256: None,
+                    mmproj: ResourceUrl::try_new("https://ex.com/mm.gguf")?,
+                    mmproj_sha256: None,
+                },
+                draft: Some(ResourceUrl::try_new("https://ex.com/b/w.gguf")?),
+                draft_sha256: None,
+            },
+        });
+        assert!(matches!(
+            to_stored(&declared, relative_base()),
+            Err(ModelStoredError::CollidingPaths(_))
+        ));
+        Ok(())
+    }
+
     fn assert_all_local_paths_relative(model: &Model) -> anyhow::Result<()> {
         let paths: Vec<&str> = match model {
             Model::GgufText(GgufText {
                 source: GgufTextSource::RelativeFile { path },
             }) => vec![path.as_ref()],
             Model::GgufVision(GgufVision {
-                source: GgufVisionSource::RelativeFiles { model, mmproj },
+                source: GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles { model, mmproj }),
             }) => vec![model.as_ref(), mmproj.as_ref()],
             Model::Mlx(Mlx {
+                source: ModelSource::RelativeDir { dir },
+            })
+            | Model::AppleCoreAi(pipette_plan_types::AppleCoreAi {
                 source: ModelSource::RelativeDir { dir },
             })
             | Model::Torch(Torch {
                 source: ModelSource::RelativeDir { dir },
             }) => vec![dir.as_ref()],
             Model::AppleFoundationText => vec![],
-            other => anyhow::bail!("expected a Relative source form, got {other:?}"),
+            other @ (Model::GgufText(_)
+            | Model::GgufVision(_)
+            | Model::GgufVisionSpeculative(_)
+            | Model::Mlx(_)
+            | Model::MlxSpeculative(_)
+            | Model::TorchSpeculative(_)
+            | Model::Torch(_)
+            | Model::Openvino(_)
+            | Model::OnnxGenai(_)
+            | Model::AppleCoreAi(_)) => {
+                anyhow::bail!("expected a Relative source form, got {other:?}")
+            }
         };
         paths.iter().for_each(|p| {
             assert!(
@@ -389,8 +734,6 @@ mod tests {
         Ok(())
     }
 
-    /// Manifest `stored` form: every storable variant + source arm lands under a
-    /// models-root-relative base (no absolute paths).
     #[rstest]
     #[case::gguf_text_hf(
         Model::GgufText(GgufText {
@@ -429,45 +772,45 @@ mod tests {
     )]
     #[case::gguf_vision_hf(
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::HuggingFace {
+            source: GgufVisionSource::HuggingFace(GgufVisionHfFiles {
                 repo: hf("org", "vl")?,
                 model: RepoSubpath::try_new("model.gguf")?,
                 model_sha256: None,
                 mmproj: RepoSubpath::try_new("mmproj.gguf")?,
                 mmproj_sha256: None,
-            },
+            }),
         }),
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::RelativeFiles { model: RelativePath::try_new("entry/blobs/model.gguf".to_owned())?,
+            source: GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles { model: RelativePath::try_new("entry/blobs/model.gguf".to_owned())?,
                 mmproj: RelativePath::try_new("entry/blobs/mmproj.gguf".to_owned())?,
-            },
+            }),
         }),
     )]
     #[case::gguf_vision_url(
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::Url {
+            source: GgufVisionSource::Url(GgufVisionUrlFiles {
                 model: ResourceUrl::try_new("https://ex.com/model.gguf")?,
                 model_sha256: None,
                 mmproj: ResourceUrl::try_new("https://ex.com/mmproj.gguf")?,
                 mmproj_sha256: None,
-            },
+            }),
         }),
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::RelativeFiles { model: RelativePath::try_new("entry/blobs/model.gguf".to_owned())?,
+            source: GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles { model: RelativePath::try_new("entry/blobs/model.gguf".to_owned())?,
                 mmproj: RelativePath::try_new("entry/blobs/mmproj.gguf".to_owned())?,
-            },
+            }),
         }),
     )]
     #[case::gguf_vision_local(
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::AbsoluteFiles { model: AbsolutePath::try_new("/a/model.gguf".to_owned())?,
+            source: GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles { model: AbsolutePath::try_new("/a/model.gguf".to_owned())?,
                 mmproj: AbsolutePath::try_new("/b/mmproj.gguf".to_owned())?,
-            },
+            }),
         }),
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::RelativeFiles { model: RelativePath::try_new("entry/blobs/model.gguf".to_owned())?,
+            source: GgufVisionSource::RelativeFiles(GgufVisionRelativeFiles { model: RelativePath::try_new("entry/blobs/model.gguf".to_owned())?,
                 mmproj: RelativePath::try_new("entry/blobs/mmproj.gguf".to_owned())?,
-            },
+            }),
         }),
     )]
     #[case::mlx_hf_bare(
@@ -578,8 +921,6 @@ mod tests {
         }))
     }
 
-    /// The on-disk filename is the URL's trailing segment with any query string
-    /// or fragment stripped, so a signed URL lands as a plain `w.gguf`.
     #[rstest]
     #[case("https://ex.com/dir/w.gguf")]
     #[case("https://ex.com/dir/w.gguf?token=abc&expires=1")]
@@ -606,6 +947,87 @@ mod tests {
         Ok(())
     }
 
+    fn vault_url(id: &str) -> anyhow::Result<VaultPath> {
+        Ok(format!("/vault/resources/{id}/content").parse()?)
+    }
+
+    fn custom_label(label: Option<&str>) -> anyhow::Result<Option<NonEmptyTrimmedString>> {
+        Ok(label.map(NonEmptyTrimmedString::try_new).transpose()?)
+    }
+
+    /// The label cases prove a record's name does not change the path.
+    #[rstest]
+    #[case::unlabelled(None)]
+    #[case::labelled(Some("acme LFM3 q4"))]
+    fn vault_gguf_lands_under_its_resource_id(#[case] label: Option<&str>) -> anyhow::Result<()> {
+        let model = Model::GgufText(GgufText {
+            source: GgufTextSource::VaultUrl {
+                url: vault_url("vault_1")?,
+                sha256: None,
+                principal_id: "org_1".parse()?,
+                custom_label: custom_label(label)?,
+            },
+        });
+        let Model::GgufText(GgufText {
+            source: GgufTextSource::AbsoluteFile { path },
+        }) = to_stored(&model, base())?
+        else {
+            return Err(anyhow::anyhow!("expected Absolute gguf-text source"));
+        };
+        assert_eq!(path, AbsolutePath::try_new(under("vault_1.gguf"))?);
+        Ok(())
+    }
+
+    /// A vision pair naming one resource twice would land on one file.
+    #[rstest]
+    #[case::unlabelled(None)]
+    #[case::labelled(Some("acme LFM3 q4"))]
+    fn vault_vision_pair_refuses_a_shared_resource(
+        #[case] label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let pair = |model: &str, mmproj: &str| -> anyhow::Result<Model> {
+            Ok(Model::GgufVision(GgufVision {
+                source: GgufVisionSource::VaultUrl(GgufVisionVaultUrlFiles {
+                    model: vault_url(model)?,
+                    model_sha256: None,
+                    mmproj: vault_url(mmproj)?,
+                    mmproj_sha256: None,
+                    principal_id: "org_1".parse()?,
+                    custom_label: custom_label(label)?,
+                }),
+            }))
+        };
+        assert!(to_stored(&pair("vault_1", "vault_2")?, base()).is_ok());
+        assert_eq!(
+            to_stored(&pair("vault_1", "vault_1")?, base()),
+            Err(ModelStoredError::CollidingPaths(under("vault_1.gguf")))
+        );
+        Ok(())
+    }
+
+    /// A vault archive is the entry root, like a prefix-less HF snapshot.
+    #[rstest]
+    #[case::unlabelled(None)]
+    #[case::labelled(Some("acme LFM3 q4"))]
+    fn vault_archive_is_the_entry(#[case] label: Option<&str>) -> anyhow::Result<()> {
+        let model = Model::Mlx(Mlx {
+            source: ModelSource::VaultArchive {
+                url: vault_url("vault_1")?,
+                sha256: None,
+                principal_id: "org_1".parse()?,
+                custom_label: custom_label(label)?,
+            },
+        });
+        let Model::Mlx(Mlx {
+            source: ModelSource::AbsoluteDir { dir },
+        }) = to_stored(&model, base())?
+        else {
+            return Err(anyhow::anyhow!("expected Absolute mlx source"));
+        };
+        assert_eq!(dir.as_ref(), BASE);
+        Ok(())
+    }
+
     #[test]
     fn dir_model_prefix_nests_under_entry_bare_is_the_entry() -> anyhow::Result<()> {
         let bare = Model::Mlx(Mlx {
@@ -621,15 +1043,16 @@ mod tests {
             },
         });
         let dir_of = |m: Model| -> anyhow::Result<String> {
-            match m {
-                Model::Mlx(Mlx {
-                    source: ModelSource::AbsoluteDir { dir },
-                })
-                | Model::Torch(Torch {
-                    source: ModelSource::AbsoluteDir { dir },
-                }) => Ok(dir.as_ref().to_owned()),
-                _ => Err(anyhow::anyhow!("expected a local dir source")),
-            }
+            let (Model::Mlx(Mlx {
+                source: ModelSource::AbsoluteDir { dir },
+            })
+            | Model::Torch(Torch {
+                source: ModelSource::AbsoluteDir { dir },
+            })) = m
+            else {
+                return Err(anyhow::anyhow!("expected a local dir source"));
+            };
+            Ok(dir.as_ref().to_owned())
         };
         assert_eq!(dir_of(to_stored(&bare, base())?)?, BASE);
         assert_eq!(dir_of(to_stored(&sub, base())?)?, under("4bit"));
@@ -668,10 +1091,25 @@ mod tests {
             Model::Mlx(Mlx {
                 source: ModelSource::AbsoluteDir { dir },
             })
+            | Model::AppleCoreAi(pipette_plan_types::AppleCoreAi {
+                source: ModelSource::AbsoluteDir { dir },
+            })
             | Model::Torch(Torch {
                 source: ModelSource::AbsoluteDir { dir },
             }) => dir,
-            other => anyhow::bail!("expected absolute dir model, got {other:?}"),
+            other @ (Model::GgufText(_)
+            | Model::GgufVision(_)
+            | Model::GgufVisionSpeculative(_)
+            | Model::Mlx(_)
+            | Model::MlxSpeculative(_)
+            | Model::TorchSpeculative(_)
+            | Model::Torch(_)
+            | Model::Openvino(_)
+            | Model::OnnxGenai(_)
+            | Model::AppleFoundationText
+            | Model::AppleCoreAi(_)) => {
+                anyhow::bail!("expected absolute dir model, got {other:?}")
+            }
         };
         assert_eq!(dir.as_ref(), BASE);
         Ok(())
@@ -680,40 +1118,40 @@ mod tests {
     #[rstest]
     #[case::hf(
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::HuggingFace {
+            source: GgufVisionSource::HuggingFace(GgufVisionHfFiles {
                 repo: hf("org", "vl")?,
                 model: RepoSubpath::try_new("model.gguf")?,
                 model_sha256: None,
                 mmproj: RepoSubpath::try_new("mmproj.gguf")?,
                 mmproj_sha256: None,
-            },
+            }),
         })
     )]
     #[case::url(
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::Url {
+            source: GgufVisionSource::Url(GgufVisionUrlFiles {
                 model: ResourceUrl::try_new("https://ex.com/model.gguf")?,
                 model_sha256: None,
                 mmproj: ResourceUrl::try_new("https://ex.com/mmproj.gguf")?,
                 mmproj_sha256: None,
-            },
+            }),
         })
     )]
     #[case::local(
         Model::GgufVision(GgufVision {
-            source: GgufVisionSource::AbsoluteFiles { model: AbsolutePath::try_new("/elsewhere/model.gguf".to_owned())?,
+            source: GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles { model: AbsolutePath::try_new("/elsewhere/model.gguf".to_owned())?,
                 mmproj: AbsolutePath::try_new("/elsewhere/mmproj.gguf".to_owned())?,
-            },
+            }),
         })
     )]
     fn vision_both_files_land_under_base(#[case] declared: Model) -> anyhow::Result<()> {
         assert_eq!(
             to_stored(&declared, base())?,
             Model::GgufVision(GgufVision {
-                source: GgufVisionSource::AbsoluteFiles {
+                source: GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles {
                     model: AbsolutePath::try_new(under("model.gguf"))?,
                     mmproj: AbsolutePath::try_new(under("mmproj.gguf"))?,
-                },
+                }),
             })
         );
         Ok(())
@@ -721,12 +1159,11 @@ mod tests {
 
     #[test]
     fn local_vision_rejects_colliding_leaf_names() -> anyhow::Result<()> {
-        // Same leaf under different dirs would both land at base/weights.gguf.
         let local = Model::GgufVision(GgufVision {
-            source: GgufVisionSource::AbsoluteFiles {
+            source: GgufVisionSource::AbsoluteFiles(GgufVisionAbsoluteFiles {
                 model: AbsolutePath::try_new("/data/a/weights.gguf".to_owned())?,
                 mmproj: AbsolutePath::try_new("/data/b/weights.gguf".to_owned())?,
-            },
+            }),
         });
         assert_eq!(
             to_stored(&local, base()),
@@ -764,7 +1201,6 @@ mod tests {
 
     #[test]
     fn under_root_rejects_already_absolute_local() -> anyhow::Result<()> {
-        // `Absolute` is already host-absolute; under_root only accepts `Relative`.
         let local = Model::GgufText(GgufText {
             source: GgufTextSource::AbsoluteFile {
                 path: AbsolutePath::try_new("/elsewhere/w.gguf".to_owned())?,

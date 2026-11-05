@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "vl_max_memory",
+  "model_type": "gguf_vision",
+  "precision": "bf16",
+  "runtime_type": "trt_edgellm"
+}

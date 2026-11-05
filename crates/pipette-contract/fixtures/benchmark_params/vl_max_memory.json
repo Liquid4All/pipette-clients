@@ -1,0 +1,7 @@
+{
+  "benchmark_type": "vl_max_memory",
+  "image_height": 336,
+  "image_width": 224,
+  "num_images": 1,
+  "text_tokens": 0
+}

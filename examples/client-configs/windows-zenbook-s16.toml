@@ -1,0 +1,6 @@
+# A Zenbook S 16 (Ryzen AI 9 HX 370) on Windows. Its firmware cuts socket power
+# from 28 W toward 17 W once the THZ0 zone reaches 68 °C, and gives it back only
+# once THZ0 has cooled to about 43 °C, so the gate holds each timed rep until
+# then.
+[readiness.windows]
+ceilings = { "acpi:THZ0" = 43 }

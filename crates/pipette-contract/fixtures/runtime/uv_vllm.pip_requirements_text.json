@@ -1,0 +1,10 @@
+{
+  "build": "cu121",
+  "python_version": "3.12",
+  "server_version": "0.10.0",
+  "source": {
+    "contents": "vllm==0.10.0\n",
+    "type": "pip_requirements_text"
+  },
+  "type": "uv_vllm"
+}

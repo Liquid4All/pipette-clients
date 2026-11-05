@@ -1,6 +1,6 @@
 //! Byte-level progress for a fetch, for a caller that wants to render one.
 //!
-//! Reported per **artifact** — one model or one runtime — because that is the
+//! Reported per **artifact** (one model or one runtime) because that is the
 //! unit the store ensures and the only unit this crate knows. A caller fetching
 //! several (a cell needs a runtime *and* a model) sums them itself: it is the one
 //! that knows how many are coming, and this crate would have to be told.
@@ -22,15 +22,15 @@ pub struct FetchProgress<'a> {
     pub file: &'a str,
     /// Bytes written for this artifact so far, across every part.
     pub done_bytes: u64,
-    /// Bytes this artifact will write in total, where that can be known before
-    /// the first one — a repo listing gives it, a bare URL whose response omits
-    /// `content-length` does not. `None` means render a rate, not a percentage.
+    /// Bytes this artifact will write in total, if known before the first one
+    /// (a repo listing gives it, a URL without `content-length` does not).
+    /// `None` means render a rate, not a percentage.
     pub total_bytes: Option<u64>,
 }
 
 impl FetchProgress<'_> {
-    /// Completed fraction, or `None` when the total is unknown or zero — a
-    /// divide the caller would otherwise have to guard at every render.
+    /// `None` when the total is unknown or zero, so a renderer need not guard
+    /// the divide.
     pub fn fraction(&self) -> Option<f64> {
         match self.total_bytes {
             Some(total) if total > 0 => Some((self.done_bytes as f64 / total as f64).min(1.0)),
@@ -39,19 +39,13 @@ impl FetchProgress<'_> {
     }
 }
 
-/// A caller watching a fetch.
-///
-/// Invoked on the thread doing the writing, once per write — often, and cheaply.
-/// Throttling belongs to the sink: the download loop cannot know what a renderer
-/// costs, and a sink that only redraws on a timer is one line of state.
+/// Invoked on the writing thread once per write, so throttling belongs to the
+/// sink: the download loop cannot know what a renderer costs.
 pub type ProgressSink = Arc<dyn for<'a> Fn(FetchProgress<'a>) + Send + Sync>;
 
-/// Accumulates one artifact's byte count and forwards it to the sink.
-///
-/// Held by the fetch loop across the artifact's parts, so `done_bytes` keeps
-/// rising as files complete. A fetch with no sink installed carries one of these
-/// too — the `Option` is checked once per write, which is cheaper than threading
-/// a branch through every call site.
+/// Accumulates one artifact's byte count across its parts and forwards it to
+/// the sink. A fetch with no sink carries one too: the `Option` is checked
+/// once per write rather than at every call site.
 pub(crate) struct Reporter {
     sink: Option<ProgressSink>,
     artifact: String,
@@ -73,14 +67,11 @@ impl Reporter {
         }
     }
 
-    /// A reporter nobody is listening to — for a caller that fetches without
-    /// having been asked to narrate it.
     #[cfg(test)]
     pub(crate) fn silent() -> Self {
         Self::new(None, String::new(), None)
     }
 
-    /// Add `n` bytes written for `file` and tell the sink.
     pub(crate) fn advance(&mut self, file: &str, n: u64) {
         self.done_bytes = self.done_bytes.saturating_add(n);
         if let Some(sink) = &self.sink {
@@ -93,23 +84,38 @@ impl Reporter {
         }
     }
 
-    /// Adopt a total the transfer discovered, for an artifact whose size could not
-    /// be established beforehand — a response's `content-length`, say. Only ever
-    /// widens `None` into a number: a single file's length is not an artifact's
-    /// total once there is more than one part, and the first caller to know the
-    /// real figure should win.
+    /// The bytes counted so far, for a retry to [`rewind`](Self::rewind) to.
+    pub(crate) fn mark(&self) -> u64 {
+        self.done_bytes
+    }
+
+    /// Drop the bytes counted since `mark`, so a retry that writes from the
+    /// start again counts each byte once.
+    pub(crate) fn rewind(&mut self, mark: u64) {
+        self.done_bytes = self.done_bytes.min(mark);
+    }
+
+    /// Adopt a total the transfer discovered (a response's `content-length`).
+    /// Only widens `None`: a single file's length is not the artifact's total
+    /// once there is more than one part.
     pub(crate) fn set_total_if_unknown(&mut self, total: Option<u64>) {
         if self.total_bytes.is_none() {
             self.total_bytes = total;
         }
     }
+
+    /// `done_bytes` reaches the total, or becomes it when none was known. This
+    /// counts a part that moved without reporting, like a local copy.
+    pub(crate) fn finish(&mut self) {
+        let total = *self.total_bytes.get_or_insert(self.done_bytes);
+        let artifact = self.artifact.clone();
+        self.advance(&artifact, total.saturating_sub(self.done_bytes));
+    }
 }
 
-/// `std::io::copy`, counting what it moves.
-///
-/// Hand-rolled because `io::copy` reports only the total it returns, and a caller
-/// watching a multi-GB download needs to hear before the end. The buffer matches
-/// `io::copy`'s own, so throughput does not change with a sink installed.
+/// `std::io::copy`, counting what it moves: `io::copy` reports only the total
+/// at the end. The buffer matches `io::copy`'s own, so throughput does not
+/// change with a sink installed.
 pub(crate) fn copy_reporting(
     reader: &mut impl Read,
     writer: &mut impl Write,
@@ -124,7 +130,10 @@ pub(crate) fn copy_reporting(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        writer.write_all(&buf[..read])?;
+        let chunk = buf.get(..read).ok_or_else(|| {
+            std::io::Error::other("reader reported more bytes than the buffer holds")
+        })?;
+        writer.write_all(chunk)?;
         reporter.advance(file, read as u64);
     }
 }
@@ -132,6 +141,8 @@ pub(crate) fn copy_reporting(
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    use rstest::rstest;
 
     use super::*;
 
@@ -144,14 +155,10 @@ mod tests {
             total_bytes: total,
         };
         assert_eq!(progress(None).fraction(), None);
-        // A zero total is a listing that answered but had nothing to say; dividing
-        // by it would report `inf` rather than "unknown".
         assert_eq!(progress(Some(0)).fraction(), None);
         assert_eq!(progress(Some(40)).fraction(), Some(0.25));
     }
 
-    /// Clamped, so a server that sends more than it promised cannot render past
-    /// the end of a bar.
     #[test]
     fn fraction_clamps_when_more_arrives_than_promised() {
         let progress = FetchProgress {
@@ -163,8 +170,6 @@ mod tests {
         assert_eq!(progress.fraction(), Some(1.0));
     }
 
-    /// The invariant the whole feature rests on: a reader trusts the number because
-    /// it is the number of bytes that landed, not an estimate beside them.
     #[test]
     fn copy_reports_exactly_what_it_wrote() -> anyhow::Result<()> {
         let reported: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -187,15 +192,11 @@ mod tests {
         Ok(())
     }
 
-    /// The count rises across an artifact's parts — a vision model's second file
-    /// continues the first rather than restarting.
     #[test]
     fn advance_accumulates_across_files() -> anyhow::Result<()> {
         let seen: Arc<Mutex<Vec<(String, u64)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&seen);
         let sink: ProgressSink = Arc::new(move |p: FetchProgress<'_>| {
-            // A sink cannot report a failure, so a poisoned lock drops the sample
-            // rather than taking the download down with it.
             if let Ok(mut seen) = captured.lock() {
                 seen.push((p.file.to_owned(), p.done_bytes));
             }
@@ -215,6 +216,33 @@ mod tests {
                 ("mmproj.gguf".to_owned(), 250),
             ]
         );
+        Ok(())
+    }
+
+    /// Adopts the count as the total when none was known, and never lowers it.
+    #[rstest]
+    #[case::short_of_the_total(Some(300), 100, (300, Some(300)))]
+    #[case::no_total(None, 100, (100, Some(100)))]
+    #[case::past_the_total(Some(40), 50, (50, Some(40)))]
+    fn finish_reports_the_artifact_whole(
+        #[case] total: Option<u64>,
+        #[case] done: u64,
+        #[case] expected: (u64, Option<u64>),
+    ) -> anyhow::Result<()> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&seen);
+        let sink: ProgressSink = Arc::new(move |p: FetchProgress<'_>| {
+            if let Ok(mut seen) = captured.lock() {
+                seen.push((p.done_bytes, p.total_bytes));
+            }
+        });
+
+        let mut reporter = Reporter::new(Some(sink), "a".to_owned(), total);
+        reporter.advance("f", done);
+        reporter.finish();
+
+        let seen = seen.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert_eq!(seen.last(), Some(&expected));
         Ok(())
     }
 }

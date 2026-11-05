@@ -1,0 +1,10 @@
+{
+  "execution_provider": "cpu",
+  "python_version": "3.11",
+  "server_version": "0.16.0",
+  "source": {
+    "contents": "onnxruntime-genai==0.16.0\n",
+    "type": "pip_requirements_text"
+  },
+  "type": "uv_onnx_genai"
+}

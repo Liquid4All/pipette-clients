@@ -1,9 +1,5 @@
-//! Crate-level error for `pipette-ops`.
-//!
-//! `Error` is the single typed error the shared runtime layer returns. The
-//! management-server vocabulary lives in the client's own error type; what
-//! remains here is what every consumer can hit. Anything that only needs to
-//! propagate flows through [`Error::Other`].
+//! Crate-level error for `pipette-ops`: what every consumer can hit. Anything
+//! that only needs to propagate flows through [`Error::Other`].
 
 use std::path::PathBuf;
 

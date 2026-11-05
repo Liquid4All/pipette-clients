@@ -1,183 +1,248 @@
+import CryptoKit
 import Foundation
 
-/// One row of the synced catalog index — the crate's `BenchmarkSummary`
-/// (`pipette-mgmt-client/src/types.rs:357`).
-///
-/// Deliberately loose, as upstream is: the id and type are lifted out, and the whole
-/// server row is retained so a `parameter_*` key this client does not model still
-/// reaches the readers that index by string. The crate spells that with
-/// `#[serde(flatten)] parameters: BTreeMap<String, Value>`; Swift has no flatten for an
-/// untyped bag, so the row itself is the bag.
-nonisolated struct BenchmarkSummary {
-    let benchmarkId: String
-    let benchmarkType: String
-    /// The full row, `parameter_*` keys included.
-    let rawJson: [String: Any]
-
-    init?(row: [String: Any]) {
-        guard let benchmarkId = row["benchmark_id"] as? String,
-              let benchmarkType = row["benchmark_type"] as? String
-        else { return nil }
-        self.benchmarkId = benchmarkId
-        self.benchmarkType = benchmarkType
-        self.rawJson = row
-    }
-}
-
-/// The benchmark catalog on disk — the crate's `BenchmarkStore`
-/// (`pipette-cli/src/benchmarks/store.rs:23`).
-///
-/// A concrete filesystem handle over one directory, not a protocol: call sites take the
-/// store itself, and tests point one at a temporary directory rather than substituting a
-/// fake. That is the crate's shape, and the reason it gives — no path-trait indirection
-/// — is the same one ``IdentityStore`` states.
+/// The benchmark catalog on disk: the crate's `BenchmarkStore`
+/// (`crates/pipette-cli/src/benchmarks/store.rs`). A concrete handle over one directory,
+/// not a protocol: tests point one at a temporary directory rather than substituting a fake.
 ///
 /// ```text
 /// benchmarks/
-///   local/<id>.json     # generated here by StandardBenchmarks; never submitted
-///   remote/index.json   # the GET /benchmarks list, loose rows
-///   remote/sync.json    # list ETag + per-id ETag map
-///   remote/<id>.json    # one synced definition, eval samples included
+///   local/<id>.json          # generated here by StandardBenchmarks; never submitted
+///   remote/detail/<id>.json  # one synced definition as the server sent it, eval samples
+///                            # included (why: `definitionsDir`)
+///   remote/detail/<id>.etag  # the sha256 of that body, then the ETag it came with, if any
+///   remote/state/index.json  # the GET /benchmarks list as the server sent it, every row
+///   remote/state/sync.json   # RemoteSyncState: server, list ETag
+///   remote/*.json            # an older build's index, sync state and definitions: never
+///                            # read, deleted only by `clearRemote` (why: `stateDir`)
 /// ```
 ///
-/// Reads tolerate a missing tree; writes create it. Ids are written verbatim
-/// (`<id>.json`) as the crate writes them, so the same benchmark is the same filename on
-/// both clients — `entryJson` refuses an id that could escape the directory rather than
-/// percent-encoding it into something the crate would not recognize.
+/// Ids are written verbatim, as the crate writes them, so the same benchmark is the same
+/// filename on both clients: `fileJson` refuses an id that could escape the directory
+/// rather than percent-encoding it into a name the crate would not recognize.
 ///
-/// Stateless, so the concurrent per-id writes in the sync's fetch group stay safe: each
-/// writes its own file atomically.
+/// Stateless, so a claim caching a definition while a pull writes or prunes stays safe:
+/// each write is atomic, an ETag is honored only for the body it hashes, and a delete that
+/// finds the file already gone is not an error.
 nonisolated struct BenchmarkStore: Sendable {
-    /// The workspace `benchmarks/` directory.
     let root: URL
-
-    private static let indexName = "index"
-    private static let syncName = "sync"
-    /// Reserved stems in `remote/` — everything else there is a definition.
-    private static let reservedStems: Set<String> = [indexName, syncName]
 
     private func sourceDir(_ source: BenchmarkSource) -> URL {
         root.appendingPathComponent(source.rawValue, isDirectory: true)
     }
 
-    /// `<source>/<name>.json`, or nil when `name` is not a safe path component.
-    private func entryJson(_ source: BenchmarkSource, _ name: String) -> URL? {
-        guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { return nil }
-        return sourceDir(source).appendingPathComponent("\(name).json")
+    /// Builds before `detail/` cached the typed definition at `remote/<id>.json`, losing any
+    /// parameter they did not model (one before `parameter_num_images` reads an 80-image
+    /// benchmark back as one image); nothing in those files says what was lost, so nothing
+    /// here reads them. A new directory rather than a marker: older builds never look in it,
+    /// and with no bookkeeping in it a benchmark named `index` or `sync` lists like any other.
+    private func definitionsDir(_ source: BenchmarkSource) -> URL {
+        switch source {
+        case .local: sourceDir(.local)
+        case .remote: sourceDir(.remote).appendingPathComponent("detail", isDirectory: true)
+        }
     }
 
-    private func ensure(_ source: BenchmarkSource) throws {
-        try FileManager.default.createDirectory(
-            at: sourceDir(source), withIntermediateDirectories: true)
+    private func definitionJson(_ source: BenchmarkSource, _ id: String) -> URL? {
+        Self.fileJson(in: definitionsDir(source), id)
+    }
+
+    private func definitionEtag(_ id: String) -> URL? {
+        definitionJson(.remote, id)?.deletingPathExtension().appendingPathExtension("etag")
+    }
+
+    /// Only builds with this layout read or write here. Older builds keep their bookkeeping at
+    /// `remote/index.json` and `remote/sync.json` with only the rows each can convert, so
+    /// sharing it would let a `304` hand one build another's filtered list. They touch only
+    /// `remote/*.json`, never a subdirectory.
+    private var stateDir: URL {
+        sourceDir(.remote).appendingPathComponent("state", isDirectory: true)
+    }
+
+    private var indexJson: URL { stateDir.appendingPathComponent("index.json") }
+    private var syncJson: URL { stateDir.appendingPathComponent("sync.json") }
+
+    /// Nil when `name` is not a valid `BenchmarkId`. Checked again here because
+    /// `BenchmarkId(validated:)` skips the check, and a name that is not an id must not
+    /// become a path. The required leading alphanumeric also keeps `.` and `..` out.
+    private static func fileJson(in dir: URL, _ name: String) -> URL? {
+        guard BenchmarkId.validate(name) else { return nil }
+        return dir.appendingPathComponent("\(name).json")
+    }
+
+    private static func ensure(_ dir: URL) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
     // MARK: - Definitions
 
-    /// Load by qualified address. Nil when missing or unparseable.
-    func get(_ reference: SourcedBenchmarkId) -> BenchmarkDefinition? {
-        guard let path = entryJson(reference.source, reference.id),
-              let data = try? Data(contentsOf: path)
-        else { return nil }
-        return try? Coding.decoder.decode(BenchmarkDefinition.self, from: data)
+    /// Nil when missing; an error when the file is there but cannot be used, so a corrupt
+    /// definition is not mistaken for an absent one. A remote id is read from
+    /// `remote/detail/` only, so one an older build cached is nil too.
+    func get(_ reference: SourcedBenchmarkId) throws -> BenchmarkDefinition? {
+        guard let path = definitionJson(reference.source, reference.id.value) else { return nil }
+        return try Self.readDefFile(path, reference.source)
     }
 
-    /// Create or replace a definition on one half of the catalog.
-    func put(_ source: BenchmarkSource, _ definition: BenchmarkDefinition) throws {
-        guard let path = entryJson(source, definition.benchmarkId) else {
-            throw BenchmarkStoreError.unsafeBenchmarkId(definition.benchmarkId)
+    /// This build generated a local definition, so its type is the whole of it.
+    func putLocal(_ definition: BenchmarkDefinition) throws {
+        guard let path = definitionJson(.local, definition.benchmarkId.value) else {
+            throw BenchmarkStoreError.unsafeBenchmarkId(definition.benchmarkId.value)
         }
-        try ensure(source)
+        try Self.ensure(definitionsDir(.local))
         try Coding.encoder.encode(definition).write(to: path, options: .atomic)
     }
 
-    /// Every definition on one half, sorted by id.
-    ///
-    /// A file that fails to parse is logged and skipped rather than failing the listing,
-    /// as the crate's `list` does — one corrupt entry must not hide the catalog. On the
-    /// remote half `index.json` / `sync.json` are skipped: they are sync metadata, not
-    /// definitions.
-    func list(_ source: BenchmarkSource) -> [BenchmarkDefinition] {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: sourceDir(source), includingPropertiesForKeys: nil)
-        else { return [] }
-        return files
-            .filter { $0.pathExtension == "json" }
-            .filter {
-                source != .remote
-                    || !Self.reservedStems.contains($0.deletingPathExtension().lastPathComponent)
+    /// The `.etag` file is `<sha256 of the body>\n<etag>`, and ``getRemote(id:)`` honors it only
+    /// for the body it hashes: a crash, or a pull and a claim caching the same id at once, can
+    /// leave the two files from different writes, which then costs a full fetch, never a `304`
+    /// to a body the file no longer holds.
+    func putRemote(_ remote: ConvertedRemote, etag: EntityTag?) throws {
+        let id = remote.definition.benchmarkId.value
+        guard let path = definitionJson(.remote, id), let etagPath = definitionEtag(id) else {
+            throw BenchmarkStoreError.unsafeBenchmarkId(id)
+        }
+        try Self.ensure(definitionsDir(.remote))
+        try Self.removeIfPresent(etagPath)
+        try remote.sent.rawJson.write(to: path, options: .atomic)
+        if let etag {
+            try Data("\(Self.digest(remote.sent.rawJson))\n\(etag.value)".utf8)
+                .write(to: etagPath, options: .atomic)
+        }
+    }
+
+    /// Nil when nothing is cached; an error when the body does not read. The ETag is nil when
+    /// its file is missing, unreadable or records another body (``putRemote(_:etag:)``), so
+    /// the next fetch is unconditional.
+    func getRemote(id: BenchmarkId) throws -> (definition: BenchmarkDefinition, etag: EntityTag?)? {
+        guard let path = definitionJson(.remote, id.value),
+              FileManager.default.fileExists(atPath: path.path)
+        else { return nil }
+        let body = try Data(contentsOf: path)
+        let definition = try Self.decodeDef(body, path, .remote)
+        let etag = definitionEtag(id.value)
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .flatMap { recorded -> EntityTag? in
+                let parts = recorded.split(separator: "\n", maxSplits: 1)
+                guard parts.count == 2, parts[0] == Self.digest(body) else { return nil }
+                return EntityTag.fromHeaderValue(String(parts[1]))
             }
+        return (definition, etag)
+    }
+
+    /// Nil also when the cached definition does not read.
+    func remoteDetailEtag(id: BenchmarkId) -> EntityTag? {
+        (try? getRemote(id: id))??.etag
+    }
+
+    private static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A file that fails to read is logged and skipped, as in the crate, so one corrupt
+    /// entry does not hide the catalog.
+    func list(_ source: BenchmarkSource) -> [BenchmarkDefinition] {
+        guard let files = try? Self.jsonFiles(in: definitionsDir(source)) else { return [] }
+        return files
             .compactMap { path in
-                guard let data = try? Data(contentsOf: path) else { return nil }
                 do {
-                    return try Coding.decoder.decode(BenchmarkDefinition.self, from: data)
+                    return try Self.readDefFile(path, source)
                 } catch {
                     AppLog.benchmarkSync.warning(
-                        "skipping catalog file \(path.lastPathComponent): \(error)")
+                        "skipping corrupt catalog file \(path.lastPathComponent): \(error)")
                     return nil
                 }
             }
             .sorted { $0.benchmarkId < $1.benchmarkId }
     }
 
-    // MARK: - Remote sync metadata
-
-    /// The synced index rows. Empty when never synced.
-    func listRemoteIndex() -> [BenchmarkSummary] {
-        guard let path = entryJson(.remote, Self.indexName),
-              let data = try? Data(contentsOf: path),
-              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return [] }
-        return rows.compactMap(BenchmarkSummary.init(row:))
+    private static func readDefFile(
+        _ path: URL, _ source: BenchmarkSource
+    ) throws -> BenchmarkDefinition? {
+        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
+        return try decodeDef(Data(contentsOf: path), path, source)
     }
 
-    /// Replace the index with the server's list response, stored verbatim so a row this
-    /// client cannot model still round-trips.
-    ///
-    /// Callers must pass rows that already parsed as definitions (`keepParseable`): the
-    /// 304 path in `BenchmarkSync` takes the stored ids without re-filtering, and
-    /// `BenchmarkSummary` only checks that `benchmark_id` and `benchmark_type` are
-    /// present.
-    func putRemoteIndex(_ data: Data) throws {
-        guard let path = entryJson(.remote, Self.indexName) else { return }
-        try ensure(.remote)
-        try data.write(to: path, options: .atomic)
-    }
-
-    /// Is a synced definition already on disk? Drives the conditional per-id fetch.
-    func hasRemoteDetail(id: String) -> Bool {
-        guard let path = entryJson(.remote, id) else { return false }
-        return FileManager.default.fileExists(atPath: path.path)
-    }
-
-    func getSyncState() -> BenchmarkSync.SyncState? {
-        guard let path = entryJson(.remote, Self.syncName),
-              let data = try? Data(contentsOf: path)
-        else { return nil }
-        return try? Coding.decoder.decode(BenchmarkSync.SyncState.self, from: data)
-    }
-
-    func putSyncState(_ state: BenchmarkSync.SyncState) throws {
-        guard let path = entryJson(.remote, Self.syncName) else { return }
-        try ensure(.remote)
-        try Coding.encoder.encode(state).write(to: path, options: .atomic)
-    }
-
-    /// Drop every synced definition not in `ids` (best-effort). Sync metadata is kept.
-    func pruneRemoteDetails(keeping ids: [String]) {
-        let keep = Set(ids)
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: sourceDir(.remote), includingPropertiesForKeys: nil)
-        else { return }
-        for file in files where file.pathExtension == "json" {
-            let stem = file.deletingPathExtension().lastPathComponent
-            guard !keep.contains(stem), !Self.reservedStems.contains(stem) else { continue }
-            try? FileManager.default.removeItem(at: file)
-            AppLog.benchmarkSync.info("pruned orphan detail \(stem)")
+    /// A local file in the retired nested-`parameters` shape is refused by name, since the
+    /// typed decode would otherwise report it as a missing field. A remote file is decoded as
+    /// a fresh body is: one that converted on fetch must never read back as corrupt, or every
+    /// claim would refetch it.
+    private static func decodeDef(
+        _ data: Data, _ path: URL, _ source: BenchmarkSource
+    ) throws -> BenchmarkDefinition {
+        if source == .local,
+           let document = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+           document["parameters"] != nil {
+            throw BenchmarkStoreError.nestedParameters(path.lastPathComponent)
+        }
+        do {
+            return try Coding.decoder.decode(BenchmarkDefinition.self, from: data)
+        } catch {
+            throw BenchmarkStoreError.unparseable(path.lastPathComponent, "\(error)")
         }
     }
 
-    /// Drop the synced index, details and sync state — the crate's `clear_remote`.
-    /// The local half is untouched, which is the whole point of the split.
+    // MARK: - Remote sync metadata
+
+    /// Empty when never synced; an error when the file is there but does not read. Rows this
+    /// build cannot convert are included, so a reader that lists or resolves synced
+    /// benchmarks filters through ``benchmarkDefinitionFromSummary(_:)``.
+    func listRemoteIndex() throws -> [PipetteMgmtClient.BenchmarkSummary] {
+        guard FileManager.default.fileExists(atPath: indexJson.path) else { return [] }
+        return try Coding.decoder.decode(
+            [PipetteMgmtClient.BenchmarkSummary].self, from: Data(contentsOf: indexJson))
+    }
+
+    /// Each row is written as the bytes the server sent, so a key this client does not model
+    /// still round-trips, and no row is dropped: the list ETag validates this file, so a
+    /// `304` must hand back the server's list whichever build or version stored it.
+    func putRemoteIndex(_ summaries: [PipetteMgmtClient.BenchmarkSummary]) throws {
+        try Self.ensure(stateDir)
+        var data = Data("[".utf8)
+        for (index, summary) in summaries.enumerated() {
+            if index > 0 { data.append(Data(",".utf8)) }
+            data.append(summary.rawJson)
+        }
+        data.append(Data("]".utf8))
+        try data.write(to: indexJson, options: .atomic)
+    }
+
+    /// A file an older build cached at `remote/<id>.json` never counts.
+    func hasRemoteDetail(id: BenchmarkId) -> Bool {
+        guard let path = definitionJson(.remote, id.value) else { return false }
+        return FileManager.default.fileExists(atPath: path.path)
+    }
+
+    /// Nil when never pulled; an error when the file is there but does not read.
+    func getSyncState() throws -> RemoteSyncState? {
+        guard FileManager.default.fileExists(atPath: syncJson.path) else { return nil }
+        return try Coding.decoder.decode(RemoteSyncState.self, from: Data(contentsOf: syncJson))
+    }
+
+    func putSyncState(_ state: RemoteSyncState) throws {
+        try Self.ensure(stateDir)
+        try Coding.encoder.encode(state).write(to: syncJson, options: .atomic)
+    }
+
+    /// Each pull rewrites the list wholesale but not the detail files and their ETags, so
+    /// without this a benchmark dropped server-side stays runnable forever.
+    ///
+    /// `ids` must be every id of the *list* response, rows this build does not fetch
+    /// included: a build that reads one may have cached its detail, and a benchmark whose
+    /// detail merely failed this round is still in the catalog.
+    func pruneRemoteDetails(keeping ids: [String]) throws {
+        let keep = Set(ids)
+        for file in try Self.jsonFiles(in: definitionsDir(.remote)) {
+            let stem = file.deletingPathExtension().lastPathComponent
+            guard !keep.contains(stem) else { continue }
+            AppLog.benchmarkSync.debug(
+                "pruning remote benchmark detail `\(stem)`: no longer in the catalog")
+            try Self.removeIfPresent(file.deletingPathExtension().appendingPathExtension("etag"))
+            try Self.removeIfPresent(file)
+        }
+    }
+
+    /// Takes an older build's `remote/*.json` files too. The local half is untouched.
     func clearRemote() {
         let dir = sourceDir(.remote)
         do {
@@ -188,15 +253,40 @@ nonisolated struct BenchmarkStore: Sendable {
             AppLog.benchmarkSync.error("Failed to clear remote benchmarks at \(dir.path): \(error)")
         }
     }
+
+    // MARK: - Files
+
+    /// A directory that does not exist holds none.
+    private static func jsonFiles(in dir: URL) throws -> [URL] {
+        guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+    }
+
+    private static func removeIfPresent(_ file: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: file)
+        } catch CocoaError.fileNoSuchFile {
+            // A concurrent claim or pull got there first.
+        }
+    }
 }
 
 nonisolated enum BenchmarkStoreError: LocalizedError, Equatable {
     case unsafeBenchmarkId(String)
+    case nestedParameters(String)
+    /// The file name and why it did not decode.
+    case unparseable(String, String)
 
     var errorDescription: String? {
         switch self {
         case .unsafeBenchmarkId(let id):
-            return "`\(id)` is not usable as a catalog filename"
+            return ModelError.invalidBenchmarkId(id).errorDescription
+        case .nestedParameters(let file):
+            return "benchmark file \(file) uses unsupported nested parameters object"
+        case let .unparseable(file, reason):
+            return "failed to parse benchmark document in \(file): \(reason)"
         }
     }
 }

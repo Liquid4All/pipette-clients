@@ -1,0 +1,238 @@
+{
+  "benchmark/eval.json": {
+    "a#b#3": {
+      "temperature": 0.6
+    },
+    "row": {
+      "temperature": 0.6
+    },
+    "row#": {
+      "temperature": 0.6
+    },
+    "row#+2": {
+      "temperature": 0.6
+    },
+    "row#-5": {
+      "temperature": 0.6
+    },
+    "row#0": {
+      "temperature": 0.6
+    },
+    "row#1": {
+      "temperature": 0.6
+    },
+    "row#4294967295": {
+      "temperature": 0.6
+    },
+    "row#4294967296": {
+      "temperature": 0.6
+    },
+    "row#draft": {
+      "temperature": 0.6
+    },
+    "row-1#0": {
+      "temperature": 0.6
+    },
+    "row-1#1": {
+      "temperature": 0.6
+    }
+  },
+  "benchmark/eval.max_context.json": {
+    "a#b#3": {
+      "temperature": 0.6
+    },
+    "row": {
+      "temperature": 0.6
+    },
+    "row#": {
+      "temperature": 0.6
+    },
+    "row#+2": {
+      "temperature": 0.6
+    },
+    "row#-5": {
+      "temperature": 0.6
+    },
+    "row#0": {
+      "temperature": 0.6
+    },
+    "row#1": {
+      "temperature": 0.6
+    },
+    "row#4294967295": {
+      "temperature": 0.6
+    },
+    "row#4294967296": {
+      "temperature": 0.6
+    },
+    "row#draft": {
+      "temperature": 0.6
+    },
+    "row-1#0": {
+      "temperature": 0.6
+    },
+    "row-1#1": {
+      "temperature": 0.6
+    }
+  },
+  "benchmark/eval.pinned.json": {
+    "a#b#3": {
+      "min_p": 0.05,
+      "seed": 10,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row": {
+      "min_p": 0.05,
+      "seed": 7,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#": {
+      "min_p": 0.05,
+      "seed": 7,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#+2": {
+      "min_p": 0.05,
+      "seed": 9,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#-5": {
+      "min_p": 0.05,
+      "seed": 7,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#0": {
+      "min_p": 0.05,
+      "seed": 7,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#1": {
+      "min_p": 0.05,
+      "seed": 8,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#4294967295": {
+      "min_p": 0.05,
+      "seed": 6,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#4294967296": {
+      "min_p": 0.05,
+      "seed": 7,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row#draft": {
+      "min_p": 0.05,
+      "seed": 7,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row-1#0": {
+      "min_p": 0.05,
+      "seed": 7,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    },
+    "row-1#1": {
+      "min_p": 0.05,
+      "seed": 8,
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.95
+    }
+  },
+  "benchmark/eval.seed_at_cap.json": {
+    "a#b#3": {
+      "seed": 2,
+      "temperature": 0.6
+    },
+    "row": {
+      "seed": 4294967295,
+      "temperature": 0.6
+    },
+    "row#": {
+      "seed": 4294967295,
+      "temperature": 0.6
+    },
+    "row#+2": {
+      "seed": 1,
+      "temperature": 0.6
+    },
+    "row#-5": {
+      "seed": 4294967295,
+      "temperature": 0.6
+    },
+    "row#0": {
+      "seed": 4294967295,
+      "temperature": 0.6
+    },
+    "row#1": {
+      "seed": 0,
+      "temperature": 0.6
+    },
+    "row#4294967295": {
+      "seed": 4294967294,
+      "temperature": 0.6
+    },
+    "row#4294967296": {
+      "seed": 4294967295,
+      "temperature": 0.6
+    },
+    "row#draft": {
+      "seed": 4294967295,
+      "temperature": 0.6
+    }
+  },
+  "benchmark/eval.unknown_id.json": {
+    "a#b#3": {
+      "temperature": 0.0
+    },
+    "row": {
+      "temperature": 0.0
+    },
+    "row#": {
+      "temperature": 0.0
+    },
+    "row#+2": {
+      "temperature": 0.0
+    },
+    "row#-5": {
+      "temperature": 0.0
+    },
+    "row#0": {
+      "temperature": 0.0
+    },
+    "row#1": {
+      "temperature": 0.0
+    },
+    "row#4294967295": {
+      "temperature": 0.0
+    },
+    "row#4294967296": {
+      "temperature": 0.0
+    },
+    "row#draft": {
+      "temperature": 0.0
+    }
+  }
+}

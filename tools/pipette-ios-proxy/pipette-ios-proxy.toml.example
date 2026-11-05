@@ -1,0 +1,92 @@
+# pipette-ios-proxy.toml
+#
+# Resolution: --config <path>, then $PIPETTE_IOS_PROXY_CONFIG, then this file
+# beside the binary. Every accepted key appears below; an unknown key is an error.
+
+[server]
+url = "https://collector.pipette.liquid.ai"
+# Stored in `client_details` so the fleet can tell a relayed phone from a native
+# one. Substituted per device: {udid}, {product_type}, {host}.
+client_details = "pipette-ios-proxy relaying {product_type} ({udid}) from {host}"
+
+# One table per phone; everything else is shared. Each entry is the phone's OWN
+# client, given ONE way: `identity_token` (what `headlessrun auth export` prints,
+# inline or via `identity_token_file`), or `client_id` with `private_key` /
+# `private_key_file`. See README "Keys".
+[[devices]]
+# What `devicectl --device` takes (the farm uses the CoreDevice id). Required with
+# two or more entries; `run --udid` selects one entry by this value.
+udid        = "00008130-0011223344556677"
+client_id   = "ev1_9f2c1d3e4b5a6c7d"
+# The ed25519 seed as 64 hex chars. This makes the FILE the credential: keep it
+# 0600. To keep keys out of the config, use `private_key_file = "<path>"` instead.
+private_key = "1122334455667788990011223344556677889900112233445566778899001122"
+# Optional overrides. The phone reports its own name.
+# device_name = "fleet-iphone-15pro-a"
+# bundle_id   = "ai.liquid.liquid-pipette"
+
+# The token form: the phone's `auth export` output as printed, which carries the
+# client_id. A file holding it is a credential too: keep it 0600.
+[[devices]]
+udid           = "00008140-0011223344556677"
+identity_token = "eyJ2ZXJzaW9uIjoxLCJjbGllbnRfaWQiOiJldjFfMWEyYjNjNGQ1ZTZmN2E4YiIsInNlcnZlcl91cmwiOiJodHRwczovL2NvbGxlY3Rvci5waXBldHRlLmxpcXVpZC5haSIsInByaXZhdGVfa2V5X2hleCI6ImFhMTFiYjIyY2MzM2RkNDRlZTU1ZmY2NjAwNzc4ODk5YWExMWJiMjJjYzMzZGQ0NGVlNTVmZjY2MDA3Nzg4OTkifQ"
+
+# Where builds come from: [builds] (a pool) or [signing] (the bucket's
+# releases, below), never both. To run some phones each way, render two config
+# files that share one --state-dir.
+[builds]
+# Every signed .app or .ipa here, shared by all phones. Which one a job installs
+# is decided by the runtime the job names; `scan` reads what each build provides.
+dir = "./builds"
+
+# The bucket each clients release publishes the app builds to, read with a
+# read-only IAM user's key pair: by `builds list` and `builds pull`, and by
+# `run`, `register` and `probe` with [signing]. Optional with [builds]: without
+# it those two verbs are refused, `check` reports it as off, and nothing else
+# changes. With [builds] only `check` and `builds` read the secret, so a bad
+# secret file never stops `run`. See README "Pulling builds".
+[client_releases]
+bucket            = "example-client-releases"
+region            = "us-east-1"
+# An S3-compatible store instead of AWS, addressed path-style: an origin only.
+# endpoint        = "http://127.0.0.1:9000"
+access_key_id     = "AKIAIOSFODNN7EXAMPLE"
+# The secret access key, alone in a 0600 file. `secret_access_key = "<secret>"`
+# inline instead makes this file the credential: keep it 0600 too.
+secret_access_key_file = "client-releases.secret"
+# With [signing]: the version any job runs on when the claim admits it and its
+# manifest names the job's runtime; else the newest admitted build that does.
+# default         = "2026.10.02-5c435ba-internal"
+
+# Instead of [builds]: install the release each job pins, signed on this Mac at
+# install time. See README "Installing the version a job pins".
+# [signing]
+# team_id                = "ABCDE12345"                  # the Apple team every build is signed for
+# keychain               = "~/Library/Keychains/login.keychain-db"
+# keychain_password_file = "keychain.password"           # the password alone, 0600
+# api_key_file           = "AuthKey_ABCDE12345.p8"       # App Store Connect key, 0600
+# api_key_id             = "ABCDE12345"
+# api_issuer_id          = "00000000-0000-0000-0000-000000000000"
+# export_timeout_secs    = 300
+
+[loop]
+idle_wait_secs      = 30      # after a 204, ± jitter
+idle_jitter_secs    = 10
+heartbeat_secs      = 20      # keep under half the lease window
+claim_backoff_secs  = 5       # base backoff on 5xx, capped
+max_jobs            = 0       # 0 = run until stopped
+
+[devicectl]
+call_timeout_secs       = 60      # every call except the headless launch
+run_timeout_secs        = 1800    # the launch, bounded by the proxy instead
+first_line_timeout_secs = 60      # no app line by then: relaunch once, then give up
+# Set to hold Xcode's "GPU Performance State" condition at max for every run on
+# every phone, so iOS cannot scale the GPU between reps. Once set it is required:
+# `run` refuses to start when this CLI fails `version`, and a run it cannot pin
+# fails. Unset, nothing is pinned. Give an absolute path: launchd and an ssh unit
+# run with a PATH that omits ~/.local/bin.
+# pymobiledevice3       = "/opt/pymobiledevice3/bin/pymobiledevice3"
+
+[log]
+level  = "info"               # error|warn|info|debug|trace
+format = "text"               # text|json

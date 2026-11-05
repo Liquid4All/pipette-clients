@@ -1,0 +1,49 @@
+[package]
+name = "pipette-memprobe"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "A process's memory read by pid from the parent, per OS (/proc, phys_footprint, PSAPI + PDH), a cgroup's from the host's cgroup v2 tree, and the macOS Metal allocator shim."
+
+[lints]
+workspace = true
+
+[features]
+# The stand-ins (`cgroup::NvidiaGpu::stand_in`, `amd::AmdGpu::stand_in`,
+# `amd::test_support`) for a dependent crate's tests.
+test-support = []
+
+# anyhow stays out of [dependencies] so no signature can return it.
+[dependencies]
+pipette-plan-types.workspace = true
+thiserror.workspace = true
+
+# `phys_footprint`, and the Metal shim's extract and snapshot files and its log.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+
+# `waitid` for an exited child's peak; on Linux, NVML, loaded at run time for
+# an NVIDIA GPU's memory, and the AMD GPU open's log.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc.workspace = true
+tracing.workspace = true
+
+# PSAPI for the peak working set, PDH and D3DKMT for the GPU and NPU memory.
+[target.'cfg(target_os = "windows")'.dependencies]
+tracing.workspace = true
+windows-sys.workspace = true
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc.workspace = true
+hex.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+rstest.workspace = true
+tempfile.workspace = true

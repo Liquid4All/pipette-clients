@@ -1,0 +1,9 @@
+{
+  "benchmark_id": "vl_max_memory_256x256_text1024_decode256_img5",
+  "benchmark_type": "vl_max_memory",
+  "parameter_decode_tokens": 256,
+  "parameter_image_height": 256,
+  "parameter_image_width": 256,
+  "parameter_num_images": 5,
+  "parameter_text_tokens": 1024
+}

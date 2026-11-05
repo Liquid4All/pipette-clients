@@ -1,0 +1,9 @@
+# One node, two cards, two clients: this is the client that owns card 1. Every
+# runtime it spawns sees only that card, under the index nvidia-smi shows.
+[[runtimes]]
+runtime_type = "llamacpp_cli_stock_tools"
+envs = ["CUDA_DEVICE_ORDER=PCI_BUS_ID", "CUDA_VISIBLE_DEVICES=1"]
+
+[[runtimes]]
+runtime_type = "uv_vllm"
+envs = ["CUDA_DEVICE_ORDER=PCI_BUS_ID", "CUDA_VISIBLE_DEVICES=1", "VLLM_WORKER_MULTIPROC_METHOD=spawn"]

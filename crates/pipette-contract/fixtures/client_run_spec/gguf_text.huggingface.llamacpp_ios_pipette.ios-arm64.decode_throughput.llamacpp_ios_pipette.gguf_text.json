@@ -1,0 +1,27 @@
+{
+  "benchmark": "decode_throughput_512_128",
+  "benchmark_flags": {
+    "benchmark_type": "decode_throughput",
+    "model_type": "gguf_text",
+    "readiness": {
+      "max_wait_secs": 1800,
+      "skip_thermal": true
+    },
+    "runtime_type": "llamacpp_ios_pipette"
+  },
+  "model": {
+    "org": "LiquidAI",
+    "path": "LFM2.5-350M-Q4_0.gguf",
+    "repo_name": "LFM2.5-350M-GGUF",
+    "source": "huggingface",
+    "type": "gguf_text"
+  },
+  "model_flags": null,
+  "runtime": {
+    "flavor": "ios-arm64",
+    "repository_url": "github.com/ggml-org/llama.cpp",
+    "repository_version": "b10216",
+    "type": "llamacpp_ios_pipette"
+  },
+  "runtime_flags": null
+}

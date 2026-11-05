@@ -1,36 +1,27 @@
 # pdh-multiproc-exp
 
-Reproducible harness for the multi-process attribution finding documented in
-[`peak-memory-windows.md`](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/methodology/peak-memory-windows.md)
-("Per-process attribution under concurrent GPU use").
+Reproducible harness for the per-process driver-state finding in
+[Peak Memory: Windows](../../docs/methodology/peak-memory-windows.md#caveats).
 
 Spawns N concurrent `llama-bench` instances on Windows, polls each PID's
-PDH `\GPU Process Memory(pid_<PID>_*)\Total Committed` counter plus the
+Performance Data Helper (PDH) `\GPU Process Memory(pid_<PID>_*)\Total Committed` counter plus the
 adapter-wide `\GPU Adapter Memory(*)\Total Committed`, and reports
 whether per-PID peaks sum to the adapter delta from baseline (ratio
 1.000 = strict per-process attribution with no cross-process sharing).
 
 ## Build / run
 
-Windows only. Requires Rust + MSVC link.exe (the windows-sys crate
-needs the link library).
+Windows only. Requires Rust and the MSVC linker (`link.exe`). The windows-sys
+crate imports its functions through `raw-dylib`, so the build needs no Windows
+SDK import library.
 
 ```powershell
 cargo run --release -- <n_processes> <n_prompt>
 ```
 
-The binary expects `llama-bench.exe` and an LFM2 GGUF model at fixed
-paths:
-
-```rust
-const LLAMA_BENCH: &str = r"C:\Users\yuri\mem-test\llama-b9058\llama-bench.exe";
-const MODEL: &str = r"C:\Users\yuri\mem-test\LFM2-350M-Q4_K_M.gguf";
-```
-
-Edit `src/main.rs` if your install paths differ. This is a one-off
-diagnostic, not a polished tool: kept here for reproducibility of the
-peak-memory methodology's "33–44 MiB driver-state overhead is
-per-process" claim.
+The `llama-bench.exe` and LFM2-350M GGUF paths are constants at the top of
+`src/main.rs`; edit them for your install. This is a one-off diagnostic, not a
+maintained tool.
 
 ## Example output
 
@@ -45,19 +36,19 @@ per-process" claim.
   Σ per-PID / adapter Δ                          1.000     (1.0 = perfect agreement; >1 = PDH double-counts)
 ```
 
-Ratio 1.000 = WDDM attributes per-process exactly, no double-counting,
-no sharing.
+Result: at a ratio of 1.000, the Windows Display Driver Model (WDDM) bills each process its full driver-state
+overhead, with no double-counting and no cross-process sharing.
 
 ## Caveats
 
 - At higher GPU memory pressure (~3 concurrent processes at n=256, or
-  ~2 at n=2048 on Strix Halo's default GPU carve-out), the OS appears
+  ~2 at n=2048 on the Radeon 890M's default GPU carve-out), the OS appears
   to serialize the workloads: only one PID is active in PDH at a time.
   The per-process attribution remains exact for whichever process is
-  currently allocating, but the experiment can't distinguish "the
+  currently allocating, but the experiment cannot distinguish "the
   other process serialized" from "the other process completed before
   PDH registered its instance" without exit-code instrumentation.
 - The exact `Total Committed` numbers are specific to the GPU + driver
-  combination tested (AMDVLK 32.0.23002.1006 on Radeon 890M / Strix
-  Halo). Discrete GPUs with shader-cache-aware drivers may amortize
+  combination tested (AMDVLK 32.0.23002.1006 on a Ryzen AI 9 HX 370
+  with a Radeon 890M). Discrete GPUs with shader-cache-aware drivers may amortize
   some overhead for processes loading identical shaders.

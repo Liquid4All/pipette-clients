@@ -1,464 +1,405 @@
-use std::{io::Write, time::Duration};
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::time::Duration;
 
-use anyhow::Context;
 use base64::Engine;
-use reqwest::blocking::Client;
-use serde::Deserialize;
-use serde_json::json;
 
 use pipette_http::HttpClient;
-use pipette_ops::measurement;
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::reserved_flags::llamacpp_cli_stock_tools as reserved;
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use pipette_memprobe::{Sampler, SupportedWatch};
+use pipette_ops::generation::Clock;
+use pipette_ops::measurement::{
+    self, MeasurementObserver, MeasurementWarmup, VlThroughputMeasurementReading,
+};
+use pipette_ops::readiness::ReadinessGate;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::{
+    BenchmarkFlagRef, BenchmarkResultData, LlamacppCliStockToolsExtraRuntimeConfiguration,
+    RunResponse, RuntimeFlags, VlThroughputBenchmark, VlThroughputLlamacppCliStockToolsGgufVision,
+};
+use pipette_subprocess::start_process;
 
-use crate::models::require_gguf_vision;
-use crate::runtime_flags::{self, MmapPolicy};
-use crate::runtimes::require_llama_server;
-use crate::server;
+use crate::models::ResolvedGgufVisionModel;
+use crate::mtmd::{self, CtxInputs, MtmdCommandBuilder};
+use crate::runtimes::{self, ResolvedLlamaServer};
+use crate::server::{self, LoggingMarker, ServerCommandBuilder};
 
-/// Default HTTP timeout when `benchmark_flags.http_timeout` is unset.
-const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 120;
-
-/// Marker token that llama.cpp multimodal expects in the prompt string to
-/// indicate where each image should be inserted.
-const MEDIA_MARKER: &str = "<__media__>";
-
-/// VL throughput cell: bound `llama-server` + GGUF vision, typed [`VlThroughput`] body.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub fn run(
-    req: &RunRequest,
+    benchmark: &VlThroughputBenchmark,
+    runtime_flags: VlThroughputLlamacppCliStockToolsGgufVision,
+    benchmark_flags: &BenchmarkFlagRef,
+    program: &ResolvedLlamaServer,
+    model: &ResolvedGgufVisionModel,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: MeasurementObserver<'_>,
+    client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_vl_throughput()
-        .map_err(anyhow::Error::from)?;
-    let llama_server = require_llama_server(req)?;
-    let (model_path, mmproj_path) = require_gguf_vision(req)?;
-    let flags = runtime_flags::for_server(
-        req,
-        {
-            // ~1 token per 14x14 patch + text + decode.
-            let image_tokens =
-                (benchmark.parameter_image_width / 14) * (benchmark.parameter_image_height / 14);
-            image_tokens
-                .saturating_add(benchmark.parameter_text_tokens)
-                .saturating_add(benchmark.parameter_decode_tokens)
-                .max(8192)
-        },
-        MmapPolicy::PinInRam,
+    // Before the model loads.
+    measurement::require_decode_steps(benchmark.parameter_decode_tokens)?;
+    let inputs = CtxInputs::new(
+        benchmark.parameter_image_width.into_inner().unsigned_abs(),
+        benchmark.parameter_image_height.into_inner().unsigned_abs(),
+        benchmark.parameter_text_tokens.into_inner().unsigned_abs(),
+        benchmark
+            .parameter_decode_tokens
+            .into_inner()
+            .unsigned_abs(),
+        benchmark.parameter_num_images.into_inner().unsigned_abs(),
     )?;
-    let extra_flags = server::args_for(&flags).build(reserved::SERVER, "vl_throughput")?;
-
-    readiness_gate()?;
-    let params = VlBenchmarkParams {
-        image_width: benchmark.parameter_image_width,
-        image_height: benchmark.parameter_image_height,
-        text_tokens: benchmark.parameter_text_tokens,
-        decode_tokens: benchmark.parameter_decode_tokens,
+    // Calibrated once, before the server starts: a second mtmd model load beside
+    // a resident server is an OOM/jetsam risk on the low-RAM devices this targets.
+    // The cell's image-token overrides ride along so the helper counts what the
+    // server will see.
+    let calibration = calibration(&runtime_flags, program, model, client_config);
+    let calibrated_per_image = mtmd::calibrate(&inputs, &calibration);
+    // The 8192 floor is this benchmark's headroom on top of the shared fallback
+    // (vl_max_memory has none).
+    let ctx_size = inputs.ctx_size(calibrated_per_image, &runtime_flags.raw, 8192);
+    // Several frames are counted together, since some llama.cpp builds merge
+    // frames, in a context for the frames alone: the helper's prompt is `hi`.
+    // Not after one frame found no count: the same helper would not find one
+    // for more frames, and a wedged one would hold the cell for a second
+    // deadline.
+    let calibrated_image_tokens = if inputs.num_images > 1 {
+        calibrated_per_image.and_then(|per_image| {
+            let frames = CtxInputs {
+                text_tokens: 0,
+                decode_tokens: 0,
+                ..inputs
+            };
+            let frames_ctx = frames.ctx_size(Some(per_image), &runtime_flags.raw, 0);
+            mtmd::calibrate_frames(&inputs, &calibration.ctx_size(Some(frames_ctx)))
+        })
+    } else {
+        calibrated_per_image
     };
-    let http_timeout = http_timeout_from_req(req);
+    let runtime_flags = VlThroughputLlamacppCliStockToolsGgufVision {
+        load_mode: runtimes::get_load_mode(runtime_flags.mmap, runtime_flags.load_mode),
+        ctx_size: runtime_flags.ctx_size.or(Some(ctx_size)),
+        ..runtime_flags
+    };
+    let launch = launch(
+        &runtime_flags,
+        program,
+        &model.backbone,
+        &model.mmproj,
+        client_config,
+    );
+    let timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
+    let http = HttpClient::loopback("pipette", timeout)?;
+    let port = pipette_subprocess::pick_server_port()?;
+    let url = server::url(port);
+    let ready = server::health(&url, timeout)?;
+    let command = launch.build(port)?;
 
-    let mut server = server::start(&llama_server, &model_path, Some(&mmproj_path), &extra_flags)?;
-
-    let result = (|| -> anyhow::Result<RunResponse> {
-        if let Err(e) = server::wait_until_ready(&server.base_url, &mut server.child, http_timeout)
-        {
-            let stderr = server::shutdown_and_collect_stderr(&mut server);
-            if stderr.is_empty() {
-                anyhow::bail!("{e}");
-            } else {
-                anyhow::bail!("{e}\nserver stderr:\n{stderr}");
-            }
-        }
-
-        let client = HttpClient::blocking_with_timeout("pipette", http_timeout)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let eog_token_ids = server::discover_eog_token_ids(&server);
-        let text_prompt = build_text_prompt(&client, &server.base_url, params.text_tokens)?;
-        let image_b64 = generate_image_b64(params.image_width, params.image_height)?;
-
-        // Warm-up run — validate to catch misconfiguration early.
-        log::info!("vl_throughput: warm-up run");
-        let warmup_resp = send_vl_completion(
-            &client,
-            &server.base_url,
-            &text_prompt,
-            &image_b64,
-            params.decode_tokens,
-            &eog_token_ids,
-        )?;
-        validate_response(&warmup_resp, params.decode_tokens)?;
-
-        let measured = measurement::run(
-            "vl_throughput",
+    let mut llama_server = start_process("llama-server", command, Duration::ZERO)?;
+    let sampler = Sampler::start(llama_server.pid(), SupportedWatch::OBSERVE)?;
+    llama_server.wait_ready(timeout, ready)?;
+    let worked = (|| {
+        let text = server::message_filler(&http, &url, inputs.text_tokens)?;
+        let image = base64::engine::general_purpose::STANDARD
+            .encode(pipette_ops::png::gray(inputs.width, inputs.height)?);
+        let chat = |decode_tokens, num_images| {
+            server::chat(&http, &url, &text, &image, decode_tokens, num_images)
+        };
+        // Every rep sends the same prompt with `cache_prompt: false`, so the
+        // entry can require the same token counts from each.
+        let mut result_data = measurement::vl_throughput(
+            benchmark,
+            NonZeroUsize::try_from(measurement::REPS)?,
             readiness_gate,
             observer,
-            // No untimed per-rep setup: the server holds no state a rep resets.
-            |_| Ok(()),
-            |_| {
-                send_vl_completion(
-                    &client,
-                    &server.base_url,
-                    &text_prompt,
-                    &image_b64,
-                    params.decode_tokens,
-                    &eog_token_ids,
-                )
-            },
-            |_, rep| {
-                validate_response(&rep.value, params.decode_tokens)?;
-                Ok(rep.value.timings.prompt_ms)
+            MeasurementWarmup::Once,
+            (),
+            |()| {
+                let generation = chat(inputs.decode_tokens, inputs.num_images)?;
+                // The image tokens are settled after the reps, below.
+                Ok(VlThroughputMeasurementReading::from_generation(
+                    &generation,
+                    None,
+                    Clock::Server,
+                )?)
             },
         )?;
-
-        // Every rep sends the same prompt, so the token count is read off a
-        // rep rather than reduced.
-        let prompt_tokens = measured
-            .first()
-            .map(|resp| resp.timings.prompt_n)
-            .context("vl_throughput measured no repetitions")?;
-        let prompt = measured.stats();
-        let predicted = measured.metric("predicted_ms", |rep| rep.value.timings.predicted_ms);
-
-        // Both metrics' samples and means are already logged by the harness;
-        // the token count is the one thing it cannot know.
-        log::info!("vl_throughput: prompt_tokens={prompt_tokens}");
-
-        Ok(RunResponse {
-            executable: Some(llama_server.display().to_string()),
-            command: server.command_preview.clone(),
-            runtime_flags: Some(flags.clone()),
-            ..RunResponse::new(
-                BenchmarkResultData::VlThroughput {
-                    prompt_tokens,
-                    prompt_ms: prompt.mean_ms,
-                    prompt_ms_stddev: Some(prompt.stddev_ms),
-                    predicted_ms: predicted.mean_ms,
-                    predicted_ms_stddev: Some(predicted.stddev_ms),
-                },
-                String::new(),
-                String::new(),
-            )
-        })
+        let BenchmarkResultData::VlThroughput {
+            prompt_tokens,
+            image_tokens: settled,
+            ..
+        } = &mut result_data
+        else {
+            anyhow::bail!("the VL throughput entry returned another benchmark's result");
+        };
+        *settled = image_tokens(calibrated_image_tokens, *prompt_tokens);
+        Ok(result_data)
     })();
-
-    let _ = server.child.kill();
-    let _ = server.child.wait();
-    result
+    let (memory, _) = sampler.stop();
+    let data =
+        worked.map_err(|err| server::with_server_tail(err, llama_server.stop_with_tail()))?;
+    Ok(RunResponseBuilder::new(data)
+        .process(&mut llama_server)
+        .memory(memory)
+        .runtime_flags(RuntimeFlags::VlThroughputLlamacppCliStockToolsGgufVision(
+            runtime_flags,
+        ))
+        .build())
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-struct VlBenchmarkParams {
-    image_width: u32,
-    image_height: u32,
-    text_tokens: u32,
-    decode_tokens: u32,
-}
-
-fn http_timeout_from_req(req: &RunRequest) -> Duration {
-    Duration::from_secs(
-        req.benchmark_flags
-            .as_ref()
-            .and_then(|f| f.http_timeout())
-            .unwrap_or(DEFAULT_HTTP_TIMEOUT_SECS),
-    )
-}
-
-fn build_text_prompt(client: &Client, base_url: &str, token_count: u32) -> anyhow::Result<String> {
-    if token_count == 0 {
-        return Ok(String::new());
-    }
-    let target = token_count as usize;
-
-    // Strategy: tokenize a seed phrase once to learn the bytes-per-token ratio,
-    // then build a string of the estimated length and adjust with at most a few
-    // extra tokenize calls.
-    for candidate in [" the quick brown fox", " hello world", " lorem ipsum", "\n"] {
-        let seed_tokens = tokenize_text(client, base_url, candidate)?;
-        if seed_tokens.is_empty() {
-            continue;
-        }
-        let bytes_per_token = candidate.len() as f64 / seed_tokens.len() as f64;
-
-        // Estimate: build a string slightly longer than needed.
-        let estimated_bytes = ((target as f64) * bytes_per_token * 1.05) as usize;
-        let repeats = estimated_bytes / candidate.len() + 1;
-        let long_text = candidate.repeat(repeats);
-
-        // Verify and adjust. Trim to estimated length first, then correct.
-        let mut end = estimated_bytes.min(long_text.len());
-        let mut n = tokenize_text(client, base_url, &long_text[..end])?.len();
-
-        if n == target {
-            return Ok(long_text[..end].to_string());
-        }
-
-        if n < target {
-            // Too short — extend one seed-phrase at a time.
-            while n < target && end < long_text.len() {
-                end = (end + candidate.len()).min(long_text.len());
-                n = tokenize_text(client, base_url, &long_text[..end])?.len();
-            }
-        }
-
-        if n > target {
-            // Too long — shrink by estimated bytes-per-token steps.
-            while n > target && end > 0 {
-                let overshoot = n - target;
-                let shrink = ((overshoot as f64) * bytes_per_token).ceil() as usize;
-                end = end.saturating_sub(shrink.max(1));
-                n = tokenize_text(client, base_url, &long_text[..end])?.len();
-            }
-        }
-
-        // Fine-tune: walk one character at a time in the right direction.
-        let max_finetune = candidate.len() * 2;
-        for _ in 0..max_finetune {
-            if n == target {
-                break;
-            }
-            if n < target && end < long_text.len() {
-                end += 1;
-            } else if n > target && end > 0 {
-                end -= 1;
-            } else {
-                break;
-            }
-            n = tokenize_text(client, base_url, &long_text[..end])?.len();
-        }
-
-        if n == target {
-            return Ok(long_text[..end].to_string());
-        }
-    }
-    anyhow::bail!(
-        "failed to build text prompt of exactly {token_count} tokens for vl_throughput benchmark"
-    )
-}
-
-fn tokenize_text(client: &Client, base_url: &str, content: &str) -> anyhow::Result<Vec<u32>> {
-    let response: server::TokenizeResponse = client
-        .post(format!("{base_url}/tokenize"))
-        .json(&json!({ "content": content }))
-        .send()
-        .context("failed to call /tokenize")?
-        .error_for_status()
-        .context("/tokenize failed")?
-        .json()
-        .context("failed to parse /tokenize response")?;
-    Ok(response.tokens)
-}
-
-fn send_vl_completion(
-    client: &Client,
-    base_url: &str,
-    text_prompt: &str,
-    image_b64: &str,
-    decode_tokens: u32,
-    eog_token_ids: &[u32],
-) -> anyhow::Result<VlCompletionResponse> {
-    let logit_bias: Vec<(u32, bool)> = eog_token_ids.iter().map(|&id| (id, false)).collect();
-
-    // The prompt must contain <__media__> markers matching the number of
-    // images in multimodal_data. We place the marker before the text.
-    let prompt_with_marker = format!("{MEDIA_MARKER}{text_prompt}");
-
-    let resp = client
-        .post(format!("{base_url}/completion"))
-        .json(&json!({
-            "prompt": {
-                "prompt_string": prompt_with_marker,
-                "multimodal_data": [image_b64],
-            },
-            "temperature": 0.0,
-            "n_predict": decode_tokens,
-            "ignore_eos": true,
-            "logit_bias": logit_bias,
-            "cache_prompt": false,
-        }))
-        .send()
-        .context("failed to call /completion")?
-        .error_for_status()
-        .context("/completion failed")?
-        .json()
-        .context("failed to parse /completion response")?;
-    Ok(resp)
-}
-
-fn validate_response(resp: &VlCompletionResponse, expected_decode: u32) -> anyhow::Result<()> {
-    if resp.timings.predicted_n != expected_decode {
-        anyhow::bail!(
-            "llama-server generation mismatch: expected {} tokens, got {}",
-            expected_decode,
-            resp.timings.predicted_n
+/// The calibrated image-only share of `prompt_tokens`, or `None` if it is missing or
+/// cannot fit in the prompt.
+fn image_tokens(calibrated: Option<u32>, prompt_tokens: u32) -> Option<u32> {
+    let Some(tokens) = calibrated else {
+        tracing::warn!(
+            prompt_tokens,
+            "no calibrated image_tokens (is llama-mtmd-cli in the runtime?); the row reports \
+             none"
         );
+        return None;
+    };
+    if !(1..=prompt_tokens).contains(&tokens) {
+        tracing::warn!(
+            image_tokens = tokens,
+            prompt_tokens,
+            "calibrated image_tokens is not within the measured prompt_tokens; stale \
+             calibration cache row? the row reports none"
+        );
+        return None;
     }
-    let stopped_at_limit =
-        resp.stopped_limit || (resp.stop && resp.stop_type.as_deref() == Some("limit"));
-    if !stopped_at_limit {
-        anyhow::bail!("llama-server did not stop at the requested generation limit");
-    }
-    Ok(())
+    tracing::info!(prompt_tokens, image_tokens = tokens, "token counts");
+    Some(tokens)
 }
 
-// ---------------------------------------------------------------------------
-// Response types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct VlCompletionResponse {
-    #[serde(default)]
-    stopped_limit: bool,
-    #[serde(default)]
-    stop: bool,
-    #[serde(default)]
-    stop_type: Option<String>,
-    timings: VlCompletionTimings,
+/// The cell's server, every field named: a flag plan-types adds fails to compile
+/// here until this cell renders it or sets it aside.
+/// The slot count is the server's unless `no_cache` pins one.
+fn launch(
+    flags: &VlThroughputLlamacppCliStockToolsGgufVision,
+    program: &ResolvedLlamaServer,
+    model: &Path,
+    mmproj: &Path,
+    client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
+) -> ServerCommandBuilder {
+    let VlThroughputLlamacppCliStockToolsGgufVision {
+        threads,
+        number_gpu_layers,
+        mmap,
+        load_mode,
+        flash_attention,
+        ctx_size,
+        no_cache,
+        envs,
+        raw,
+    } = flags.clone();
+    ServerCommandBuilder::new(program.clone(), model, LoggingMarker::VlThroughput)
+        .mmproj(mmproj)
+        .threads(threads)
+        .number_gpu_layers(number_gpu_layers)
+        .mmap(mmap)
+        .load_mode(load_mode)
+        .flash_attention(flash_attention)
+        .raw(raw)
+        .ctx_size(ctx_size)
+        .no_cache(no_cache)
+        .envs(envs)
+        .client_config(client_config.cloned())
 }
 
-#[derive(Debug, Deserialize)]
-struct VlCompletionTimings {
-    prompt_n: u32,
-    prompt_ms: f64,
-    predicted_n: u32,
-    predicted_ms: f64,
+/// The cell's calibration helper, every field named: a flag plan-types adds
+/// fails to compile here until the helper takes it or sets it aside. The
+/// threads, load knobs, flash attention, context and cache change how the
+/// server serves, not the count or where the model loads.
+fn calibration(
+    flags: &VlThroughputLlamacppCliStockToolsGgufVision,
+    program: &ResolvedLlamaServer,
+    model: &ResolvedGgufVisionModel,
+    client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
+) -> MtmdCommandBuilder {
+    let VlThroughputLlamacppCliStockToolsGgufVision {
+        threads: _,
+        number_gpu_layers,
+        mmap: _,
+        load_mode: _,
+        flash_attention: _,
+        ctx_size: _,
+        no_cache: _,
+        envs,
+        raw,
+    } = flags.clone();
+    MtmdCommandBuilder::new(program.clone(), &model.backbone, &model.mmproj)
+        .number_gpu_layers(number_gpu_layers)
+        .raw(raw)
+        .envs(envs)
+        .client_config(client_config.cloned())
 }
-
-// ---------------------------------------------------------------------------
-// Synthetic PNG generation
-// ---------------------------------------------------------------------------
-
-/// Generate a minimal valid PNG of solid gray pixels and return it as a
-/// base64-encoded string suitable for the llama.cpp multimodal API.
-fn generate_image_b64(width: u32, height: u32) -> anyhow::Result<String> {
-    let png_bytes = generate_png(width, height)?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(&png_bytes))
-}
-
-/// Generate a minimal valid PNG file in memory.
-///
-/// Produces a solid gray (128, 128, 128) RGB image of the given dimensions.
-fn generate_png(width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-
-    // PNG signature
-    buf.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-
-    // IHDR chunk
-    let mut ihdr_data = Vec::with_capacity(13);
-    ihdr_data.extend_from_slice(&width.to_be_bytes());
-    ihdr_data.extend_from_slice(&height.to_be_bytes());
-    ihdr_data.push(8); // bit depth
-    ihdr_data.push(2); // color type: RGB
-    ihdr_data.push(0); // compression method
-    ihdr_data.push(0); // filter method
-    ihdr_data.push(0); // interlace method
-    write_chunk(&mut buf, b"IHDR", &ihdr_data);
-
-    // IDAT chunk: zlib-compressed raw scanlines
-    let raw_scanlines = build_raw_scanlines(width, height);
-    let compressed = zlib_compress(&raw_scanlines)?;
-    write_chunk(&mut buf, b"IDAT", &compressed);
-
-    // IEND chunk
-    write_chunk(&mut buf, b"IEND", &[]);
-
-    Ok(buf)
-}
-
-fn build_raw_scanlines(width: u32, height: u32) -> Vec<u8> {
-    // Each scanline: filter byte (0 = None) + 3 bytes per pixel (RGB).
-    let row_len = 1 + (width as usize) * 3;
-    let mut row = vec![0u8; row_len];
-    // Fill pixel bytes with solid gray (128); row[0] stays 0 (filter: None).
-    row[1..].fill(128);
-    row.repeat(height as usize)
-}
-
-fn zlib_compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use flate2::{write::ZlibEncoder, Compression};
-
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(data)?;
-    Ok(encoder.finish()?)
-}
-
-fn write_chunk(buf: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
-    let length = data.len() as u32;
-    buf.extend_from_slice(&length.to_be_bytes());
-    buf.extend_from_slice(chunk_type);
-    buf.extend_from_slice(data);
-    let crc = png_crc32(chunk_type, data);
-    buf.extend_from_slice(&crc.to_be_bytes());
-}
-
-fn png_crc32(chunk_type: &[u8], data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in chunk_type.iter().chain(data.iter()) {
-        let index = ((crc ^ byte as u32) & 0xFF) as usize;
-        crc = CRC32_TABLE[index] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFF_FFFF
-}
-
-/// Standard CRC-32 lookup table (polynomial 0xEDB88320).
-static CRC32_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0u32;
-    while i < 256 {
-        let mut crc = i;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = 0xEDB8_8320 ^ (crc >> 1);
-            } else {
-                crc >>= 1;
-            }
-            j += 1;
-        }
-        table[i as usize] = crc;
-        i += 1;
-    }
-    table
-};
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use pipette_plan_types::{LlamacppFlashAttention, LlamacppLoadMode, PositiveSeconds};
+
     use super::*;
+    use crate::runtimes::test_llama_server;
+
+    fn server_args(
+        flags: &VlThroughputLlamacppCliStockToolsGgufVision,
+    ) -> Result<Vec<String>, server::ServerArgsError> {
+        launch(
+            flags,
+            &test_llama_server(),
+            Path::new("model.gguf"),
+            Path::new("mmproj.gguf"),
+            None,
+        )
+        .args()
+    }
+
+    /// Every knob set to its own value, so a knob that lands on another's flag shows.
+    fn every_knob_set() -> VlThroughputLlamacppCliStockToolsGgufVision {
+        VlThroughputLlamacppCliStockToolsGgufVision {
+            threads: Some(3),
+            number_gpu_layers: Some(7),
+            mmap: None,
+            load_mode: Some(LlamacppLoadMode::DirectIo),
+            flash_attention: Some(LlamacppFlashAttention::On),
+            ctx_size: Some(4096),
+            no_cache: Some(true),
+            envs: Vec::new(),
+            raw: vec!["--poll".to_owned(), "0".to_owned()],
+        }
+    }
 
     #[test]
-    fn generate_png_produces_valid_header() -> anyhow::Result<()> {
-        let png = generate_png(2, 2)?;
-        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+    fn the_server_takes_every_knob() -> anyhow::Result<()> {
+        assert_eq!(
+            server_args(&every_knob_set())?.join(" "),
+            "--ctx-checkpoints 0 --ctx-size 4096 --flash-attn on --load-mode dio --n-gpu-layers 7 --no-cache-prompt --no-warmup --parallel 1 --poll 0 --threads 3"
+        );
+        Ok(())
+    }
+
+    /// Every case measured a 300-token prompt.
+    #[rstest::rstest]
+    #[case::calibrated(Some(64), Some(64))]
+    #[case::the_whole_prompt(Some(300), Some(300))]
+    #[case::calibration_past_the_prompt(Some(400), None)]
+    #[case::calibrated_zero(Some(0), None)]
+    #[case::uncalibrated(None, None)]
+    fn image_tokens_are_the_calibrated_count_or_none(
+        #[case] calibrated: Option<u32>,
+        #[case] expected: Option<u32>,
+    ) {
+        assert_eq!(image_tokens(calibrated, 300), expected);
+    }
+
+    /// A single token is the prefill's own, with no decode after it, so the
+    /// cell is refused before the gate, the calibration and the server start.
+    #[test]
+    fn a_single_decode_token_is_refused_before_the_model_loads() -> anyhow::Result<()> {
+        use std::cell::Cell;
+
+        use pipette_plan_types::{
+            AbsolutePath, BenchmarkId, LlamaCppFlavor, LlamacppCliStockTools,
+            LlamacppCliStockToolsSource, NonNegativeCount, PositiveCount, Runtime,
+        };
+
+        let tmp = tempfile::tempdir()?;
+        // Never run: it only resolves.
+        std::fs::write(
+            tmp.path()
+                .join(format!("llama-server{}", std::env::consts::EXE_SUFFIX)),
+            "",
+        )?;
+        let program = ResolvedLlamaServer::try_from(&Runtime::LlamacppCliStockTools(
+            LlamacppCliStockTools {
+                source: LlamacppCliStockToolsSource::AbsoluteDir {
+                    dir: AbsolutePath::try_new(tmp.path().display().to_string())?,
+                },
+                flavor: LlamaCppFlavor::MacosArm64,
+            },
+        ))?;
+        let benchmark = VlThroughputBenchmark {
+            benchmark_id: BenchmarkId::try_new("vl_throughput_224x224_t0_d1_f1")?,
+            parameter_image_width: PositiveCount::try_new(224)?,
+            parameter_image_height: PositiveCount::try_new(224)?,
+            parameter_text_tokens: NonNegativeCount::try_new(0)?,
+            parameter_decode_tokens: PositiveCount::try_new(1)?,
+            parameter_num_images: NonNegativeCount::try_new(1)?,
+        };
+        let runtime_flags = VlThroughputLlamacppCliStockToolsGgufVision {
+            threads: None,
+            number_gpu_layers: None,
+            mmap: None,
+            load_mode: None,
+            flash_attention: None,
+            ctx_size: None,
+            no_cache: None,
+            envs: Vec::new(),
+            raw: Vec::new(),
+        };
+        let gated = Cell::new(false);
+        let Err(err) = run(
+            &benchmark,
+            runtime_flags,
+            &BenchmarkFlagRef::from(
+                pipette_plan_types::BenchmarkFlags::VlThroughputLlamacppCliStockToolsGgufVision {
+                    http_timeout_seconds: None,
+                    readiness: None,
+                },
+            ),
+            &program,
+            &ResolvedGgufVisionModel {
+                backbone: tmp.path().join("model.gguf"),
+                mmproj: tmp.path().join("mmproj.gguf"),
+            },
+            &|| {
+                gated.set(true);
+                Ok(())
+            },
+            MeasurementObserver {
+                on_before_rep_start: &|| Ok(()),
+                on_after_rep_end: &|| Ok(()),
+            },
+            None,
+        ) else {
+            anyhow::bail!("a one-token decode cell was measured");
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<measurement::VlThroughputMeasurementError>(),
+                Some(measurement::VlThroughputMeasurementError::TooFewTokens { .. })
+            ),
+            "{err:#}"
+        );
+        assert!(!gated.get(), "refused only after the gate");
         Ok(())
     }
 
     #[test]
-    fn generate_png_roundtrips_dimensions_in_ihdr() -> anyhow::Result<()> {
-        let png = generate_png(320, 240)?;
-        // IHDR starts at offset 8 (after signature): 4 bytes length + 4 bytes "IHDR"
-        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
-        let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
-        assert_eq!(w, 320);
-        assert_eq!(h, 240);
-        Ok(())
-    }
+    fn http_timeout_flag_propagates_and_defaults() -> anyhow::Result<()> {
+        use pipette_plan_types::BenchmarkFlags;
 
-    #[test]
-    fn generate_image_b64_produces_non_empty_base64() -> anyhow::Result<()> {
-        let b64 = generate_image_b64(4, 4)?;
-        assert!(!b64.is_empty());
-        // Should be valid base64.
-        base64::engine::general_purpose::STANDARD
-            .decode(&b64)
-            .context("invalid base64")?;
+        let pinned = |flags: Option<BenchmarkFlags>| {
+            flags
+                .map(BenchmarkFlagRef::from)
+                .and_then(|flags| flags.http_timeout_seconds)
+        };
+        let with_flag = pinned(Some(
+            BenchmarkFlags::VlThroughputLlamacppCliStockToolsGgufVision {
+                http_timeout_seconds: Some(PositiveSeconds::try_new(7)?),
+                readiness: None,
+            },
+        ));
+        assert_eq!(
+            measurement::http_timeout_for(with_flag, 1),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            measurement::http_timeout_for(pinned(None), 1),
+            Duration::from_secs(measurement::DEFAULT_HTTP_TIMEOUT_SECS)
+        );
         Ok(())
     }
 }

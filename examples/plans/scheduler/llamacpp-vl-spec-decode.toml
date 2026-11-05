@@ -1,0 +1,77 @@
+# Example scheduler-mode plan: the VL spec-decode benchmark on llama.cpp, filed
+# with the management server as a campaign.
+#
+#   pipette-ctl campaigns create --name llamacpp-vl-spec-decode \
+#     --plan examples/plans/scheduler/llamacpp-vl-spec-decode.toml
+#
+# The local-dispatch twin, ../llamacpp-macos-vl-spec-decode.toml, explains the
+# benchmark, `speculative_enabled`, and how to build the fork archive both
+# variants run on. This file uses eligibility instead of transports and runs
+# every dataset at k7, k8 and k9: 36 jobs, 18 benchmark ids per variant.
+#
+# Eligibility is a named roster only: each job pulls an ~80 MB corpus and
+# refuses to start on battery, so its machines are chosen, not matched, until
+# clients can report a capability flag for it. Widen `clients` rather than
+# adding `requires`: a client is eligible when rostered *or* matching, so
+# `requires = ["os:macos"]` would hand these cells to every Mac.
+
+# No `expires_at`: each job takes ingestion's 30-day default.
+# Each dataset is its own measurement; do not merge into another plan's run.
+merge_duplicates = false
+
+# k8 is the reference condition; k7 and k9 find where the optimum sits on this
+# silicon. A pair is joined on the whole benchmark id, so every k needs its own
+# speculation-off row even though that arm never drafts.
+benchmarks = [
+  "vl_spec_decode_mmspec_test_gqa_k8",
+  "vl_spec_decode_mmspec_test_textvqa_k8",
+  "vl_spec_decode_mmspec_test_charxiv_k8",
+  "vl_spec_decode_mmspec_test_mmmu_pro_k8",
+  "vl_spec_decode_mmspec_test_coco_k8",
+  "vl_spec_decode_mmspec_test_multi_turn_k8",
+  "vl_spec_decode_mmspec_test_gqa_k7",
+  "vl_spec_decode_mmspec_test_textvqa_k7",
+  "vl_spec_decode_mmspec_test_charxiv_k7",
+  "vl_spec_decode_mmspec_test_mmmu_pro_k7",
+  "vl_spec_decode_mmspec_test_coco_k7",
+  "vl_spec_decode_mmspec_test_multi_turn_k7",
+  "vl_spec_decode_mmspec_test_gqa_k9",
+  "vl_spec_decode_mmspec_test_textvqa_k9",
+  "vl_spec_decode_mmspec_test_charxiv_k9",
+  "vl_spec_decode_mmspec_test_mmmu_pro_k9",
+  "vl_spec_decode_mmspec_test_coco_k9",
+  "vl_spec_decode_mmspec_test_multi_turn_k9",
+]
+
+# The regular model: speculation off.
+[[variants]]
+clients = ["ev1_9f2c1d3e4b5a6c7d"]
+models = [
+  { type = "gguf_vision", source = "huggingface", org = "example-org", repo_name = "VLM-3B-GGUF", model = "VLM-3B-F16.gguf", mmproj = "mmproj-VLM-3B-F16.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "remote_archive", url = "https://REPLACE_WITH_HOST/llamacpp/llama-fork-bin-macos-arm64.tar.gz", flavor = "macos-arm64" },
+]
+runtime_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", speculative_enabled = false, flash_attention = "on", number_gpu_layers = 99, ctx_size = 8192, mmap = true },
+]
+benchmark_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+]
+
+# The spec-decoding model: speculation on. See the local twin for the drafter
+# and the `raw` flags.
+[[variants]]
+clients = ["ev1_9f2c1d3e4b5a6c7d"]
+models = [
+  { type = "gguf_vision_speculative", source = "huggingface", org = "example-org", repo_name = "VLM-3B-Draft-GGUF", model = "VLM-3B-Draft-F16.gguf", mmproj = "mmproj-VLM-3B-F16.gguf" },
+]
+runtimes = [
+  { type = "llamacpp_cli_stock_tools", source = "remote_archive", url = "https://REPLACE_WITH_HOST/llamacpp/llama-fork-bin-macos-arm64.tar.gz", flavor = "macos-arm64" },
+]
+runtime_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", speculative_enabled = true, flash_attention = "on", number_gpu_layers = 99, ctx_size = 8192, mmap = true, envs = ["DRAFT_FUSED=1", "GGML_DRAFT_DELTA=16"], raw = ["--spec-type", "draft-fused", "--spec-draft-n-min", "0"] },
+]
+benchmark_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+]

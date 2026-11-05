@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "end_to_end_latency",
+  "model_type": "onnx_genai",
+  "runtime_type": "onnx_genai_ios_pipette"
+}

@@ -1,174 +1,39 @@
 import Foundation
 import SwiftUI
 
-/// The credential a HuggingFace fetch for `model` should present, most specific first:
-/// the `auth_token` the plan shipped on the model coordinate, then the one stored for this
-/// model when its claim arrived, then the user's own.
+/// Owns model downloads: GGUF files on a `URLSession`, directory and vault pulls as tasks.
 ///
-/// A `claimToken` wins over the Keychain. The CLI injects the plan's token into the fetch,
-/// and a claim that carries a credential is naming the one that can read *that* repo;
-/// falling back to whatever the device happens to have stored answers 401 for a gated repo
-/// the plan could have opened. The middle tier covers a transfer whose in-memory claim is
-/// gone (a relaunch). The last tier is the user's own token, which nothing writes yet — a
-/// Settings field is the missing half, so today it is always absent on device.
+/// The session is a background one with a stable identifier, so transfers outlive the app
+/// and a relaunch reattaches to them. A one-shot headless run takes a foreground session
+/// instead (`sessionConfiguration(foreground:)`).
 ///
-/// Both transports resolve through here, so a repo that opens for one format can't 401 for
-/// the other. Why iOS stores a token at all is in `docs/pipette-ios/execution-alignment.md`.
-func resolveHfToken(claimToken: AuthToken?, model: Model?) -> HfCredential? {
-    if let claimToken { return HfCredential(token: claimToken, source: .claim) }
-    if let stored = model.flatMap({ KeychainHelper.loadHfToken(forModel: $0) }) {
-        return HfCredential(token: stored, source: .stored)
-    }
-    return KeychainHelper.loadHfToken().map { HfCredential(token: $0, source: .user) }
-}
-
-/// A resolved credential and the tier that answered.
-///
-/// The tier is carried so the log line can name it. `source=claim` is the one that
-/// matters operationally: it is the difference between a plan's token reaching the fetch
-/// and the device quietly falling back to something else — the failure that made gated
-/// MLX pulls 401 and public ones anonymous, and which no log said a word about.
-struct HfCredential {
-    let token: AuthToken
-    let source: HfTokenSource
-}
-
-/// Where a credential came from, most specific first. `rawValue` is the log spelling.
-enum HfTokenSource: String {
-    /// The `auth_token` on the model coordinate this run was dispatched with.
-    case claim
-    /// Stored for this model when its claim arrived — a transfer that outlived its claim.
-    case stored
-    /// The device's own token, iOS's analogue of `PIPETTE_HF_TOKEN`.
-    case user
-}
-
-/// Attach `Authorization: Bearer …` for huggingface.co requests. Other hosts are left
-/// alone so the token isn't leaked to third parties.
-///
-/// Says which it did, on the record: an anonymous fetch of a public repo is
-/// indistinguishable from an authenticated one until HF starts answering 429, and that is
-/// exactly when someone needs to know which of the two this was. The token itself is never
-/// logged — `AuthToken` renders `<redacted>`, and only the tier's name is interpolated.
-func attachHfAuth(_ request: inout URLRequest, claimToken: AuthToken? = nil, model: Model? = nil) {
-    guard let host = request.url?.host, host.hasSuffix("huggingface.co") else { return }
-    let path = request.url?.path ?? "?"
-    guard let credential = resolveHfToken(claimToken: claimToken, model: model) else {
-        AppLog.storage.info("hf auth: no token available — requesting \(host)\(path) anonymously")
-        return
-    }
-    request.setValue("Bearer \(credential.token.value)", forHTTPHeaderField: "Authorization")
-    AppLog.storage.info(
-        "hf auth: attached bearer token source=\(credential.source.rawValue) to \(host)\(path)")
-}
-
-/// Disk-backed store for download metadata and resume-data blobs.
-///
-/// Lives in `~/Library/Caches/Pipette/downloads/` — per iOS conventions,
-/// re-downloadable content belongs in Caches. The system may evict files
-/// here under storage pressure; worst case the user restarts a download.
-enum DownloadStore {
-    private static var dir: URL {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        let url = caches.appendingPathComponent("Pipette/downloads", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
-
-    /// Download keys are `<repo>/<filename>`, which contain `/`.
-    /// Percent-encode to a single, collision-free filename — an
-    /// injective mapping, unlike a `/`→`__` substitution which two distinct
-    /// keys can alias onto.
-    private static func safeName(_ key: String) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "._-")
-        return key.addingPercentEncoding(withAllowedCharacters: allowed)
-            ?? key.replacingOccurrences(of: "/", with: "%2F")
-    }
-
-    private static func recordPath(for key: String) -> URL {
-        dir.appendingPathComponent(safeName(key) + ".record")
-    }
-
-    private static func resumePath(for key: String) -> URL {
-        dir.appendingPathComponent(safeName(key) + ".resumeData")
-    }
-
-    static func saveRecord(_ record: DownloadRecord) {
-        guard let data = try? PropertyListEncoder().encode(record) else { return }
-        let key = LocalStorage.modelRelativePath(repo: record.repo, filename: record.filename)
-        try? data.write(to: recordPath(for: key))
-    }
-
-    static func clearRecord(for key: String) {
-        try? FileManager.default.removeItem(at: recordPath(for: key))
-    }
-
-    static func allRecords() -> [DownloadRecord] {
-        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        return files.filter { $0.pathExtension == "record" }.compactMap { url in
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? PropertyListDecoder().decode(DownloadRecord.self, from: data)
-        }
-    }
-
-    static func saveResumeData(_ data: Data, for key: String) {
-        try? data.write(to: resumePath(for: key))
-    }
-
-    static func loadResumeData(for key: String) -> Data? {
-        try? Data(contentsOf: resumePath(for: key))
-    }
-
-    static func hasResumeData(for key: String) -> Bool {
-        FileManager.default.fileExists(atPath: resumePath(for: key).path)
-    }
-
-    static func clearResumeData(for key: String) {
-        try? FileManager.default.removeItem(at: resumePath(for: key))
-    }
-}
-
-/// Singleton that owns the `URLSession` used for model downloads.
-///
-/// The session is a background one, so downloads keep running when the app is
-/// backgrounded or terminated; the system relaunches the app to deliver
-/// completion events via the session identifier. The identifier is stable across
-/// launches so reconnecting to an in-flight task is automatic —
-/// `URLSession(configuration:delegate:queue:)` with a matching background config
-/// attaches to the existing session. A one-shot headless run takes a foreground
-/// session instead — see `sessionConfiguration(foreground:)`.
-///
-/// Delegate callbacks arrive on `OperationQueue.main` so we can use
-/// `MainActor.assumeIsolated` inside them to mutate observed state without
-/// an extra Task hop.
+/// Delegate callbacks arrive on `OperationQueue.main`, so they use
+/// `MainActor.assumeIsolated` without a Task hop.
 @MainActor
 @Observable
 final class DownloadCoordinator: NSObject {
-    static let shared = DownloadCoordinator(storage: FileStorage.production)
+    static let shared = DownloadCoordinator(ws: PipetteWorkspace.production)
 
     struct Download: Identifiable {
-        /// The transfer's lifecycle state. Replaces the old `Phase` (3 cases) plus a
-        /// free-form `status` String: the transitional statuses that `Phase` couldn't
-        /// express are now first-class cases, and there is no parallel string to keep
-        /// in sync. Numeric progress is orthogonal and stays in the byte/fraction
-        /// fields below — the status *text* is derived from this state in `ModelsView`.
+        /// Progress lives in the byte and fraction fields; `ModelsView` derives the status
+        /// text from this.
         enum State: Equatable {
-            case queued                  // "Queued" — waiting for a free concurrency slot, not yet transferring
-            case connecting              // "Connecting…" / "Reconnecting…"
-            case downloading             // actively transferring; numeric progress stays in bytes/explicitFraction/progress
-            case pausing                 // "Pausing…"
-            case paused                  // "Paused"
-            case resuming                // "Resuming…"
-            case failed(reason: String)  // carries the error text
+            case queued                  // waiting for a concurrency slot
+            case connecting
+            case downloading
+            case pausing
+            case paused
+            case cancelling              // a tombstone until the transport has stopped
+            case resuming
+            case failed(reason: String)
         }
-        /// A single-file (GGUF) transfer vs an MLX repo *directory* pull.
-        enum Kind: Equatable { case file; case directory(prefix: String?) }
+        /// A single-file (GGUF) transfer, a directory pull, or a vault pull: every file of a
+        /// gguf, or a directory model's archive, from the registered server, in one row.
+        enum Kind: Equatable { case file; case directory(prefix: String?); case vault }
 
         let filename: String
-        /// The HF resolve URL for a `.file` (GGUF) transfer. `nil` for an MLX
-        /// `.directory` pull — those go through HubApi and have no single URL to
-        /// resume against, so there is no fabricated coordinate to carry here.
+        /// The resolve URL of a `.file` transfer; `nil` for directory and vault pulls,
+        /// which have no single URL to resume against.
         let url: URL?
         let repo: String?
         let familyId: String?
@@ -176,33 +41,42 @@ final class DownloadCoordinator: NSObject {
         var totalBytes: Int64?
         var state: State
         var kind: Kind = .file
-        /// A directory pull only exposes an aggregate fraction (no byte counts),
-        /// so its progress is carried here rather than derived from bytes.
+        /// A directory pull reports a fraction, not byte counts.
         var explicitFraction: Double?
-        /// The typed model definition this download was ignited from, carried
-        /// through to completion so the manifest is written verbatim.
+        /// Carried to completion so the manifest is written verbatim.
         var source: Model?
-        /// The catalog's explicitly-authored quant, when the download was ignited from
-        /// a `CatalogEntry`. Preferred over deriving from the artifact name so the row
-        /// shows the declared quant even for a repo slug that doesn't encode it; nil for
-        /// non-catalog downloads (headless get, sideload), which fall back to `source`.
+        /// The planned digest `GGUFModelInstaller` checks before installing; nil when the
+        /// source named none, which verifies nothing, as upstream.
+        var sha256: Sha256?
+        /// The catalog's authored quant; nil for a download not started from the catalog.
         var catalogQuant: String?
-        /// Set when a connectivity drop paused this transfer (vs a user pause), so
-        /// `resumeAfterReconnect` can auto-resume it without touching downloads the
-        /// user paused on purpose. Cleared when the download resumes. In-memory only
-        /// (not persisted): auto-resume applies within a session; after an app
-        /// restart a still-paused download recovers via Resume All instead.
+        /// A connectivity drop, not a person, paused this row, so `resumeAfterReconnect`
+        /// may resume it. Set only by `applyNetworkInterruption`; `resume(key:)` clears it.
+        /// In-memory only: the resume blob cannot say what paused it, so a relaunch restores
+        /// this as false.
         var interruptedByNetwork: Bool = false
+        /// So `ensureModel` can hand the worker a classifiable refusal.
+        var vaultFailure: VaultFetchError?
+        /// Counted from one; a `.vault` row counts across all its files. `resume(key:)`
+        /// resets it.
+        var attempt: Int = 1
+        var vaultEpoch: VaultEpoch?
+        /// The strong ETag of the response the saved resume data holds, which a resumed
+        /// transfer must answer with. Nil means the resume cannot be checked, so
+        /// `performResume` starts from zero.
+        ///
+        /// Checked here because the Hub's CDN answers a stale `If-Range` with `206` and
+        /// URLSession appends every `206`, which would join two versions of a file.
+        var resumeETag: String?
 
-        /// Stable per-transfer key — not the storage key: a vision model is two
-        /// transfers in one entry. For a file: `<repo>/<filename>`, unique across
-        /// repos for the same filename. For a directory: `<repo>[/<prefix>]`, unique
-        /// per MLX model in a multi-model repo.
+        /// Per transfer, not the storage key: a vision model is two transfers in one entry.
         var key: String {
             switch kind {
             case .file: return LocalStorage.modelRelativePath(repo: repo, filename: filename)
-            // Matches `HFModelRef.key` (`<repo>` or `<repo>/<prefix>`), the canonical form.
+            // Matches `HfModelRef.key`.
             case let .directory(prefix): return [repo, prefix].compactMap { $0 }.joined(separator: "/")
+            // `filename` is the entry's storage key, which names every file of the model.
+            case .vault: return "vault/\(filename)"
             }
         }
         var id: String { key }
@@ -212,124 +86,148 @@ final class DownloadCoordinator: NSObject {
             return Double(bytesDownloaded) / Double(total)
         }
 
-        /// Quant label for the download row. Prefers the catalog's authored `quant`,
-        /// then the typed `source`'s derivation, then a filename parse for a source-less
-        /// (legacy/sideload) record. The filename parse alone can't name an MLX quant —
-        /// an MLX download's `filename` is the repo/directory leaf, not a GGUF weight
-        /// file — which is why the explicit/source reads are what keep the row from
-        /// showing "unknown" for MLX.
+        /// The filename parse is the last resort, for a record with no `source`; it cannot
+        /// name an MLX quant.
         var quant: String? {
             catalogQuant ?? source?.quant ?? LocalStorage.parseQuant(from: filename)
         }
     }
 
+    /// Orders a `.vault` row's progress reports: by the file's start offset, then by how
+    /// often that file restarted from zero. Late reports from an earlier epoch are ignored.
+    struct VaultEpoch: Comparable {
+        let before: Int64
+        let restarts: Int
+
+        static func < (lhs: VaultEpoch, rhs: VaultEpoch) -> Bool {
+            (lhs.before, lhs.restarts) < (rhs.before, rhs.restarts)
+        }
+    }
+
     private(set) var downloads: [String: Download] = [:]
-    /// Bumped after each successful completion so views can react with their
-    /// own refresh logic (e.g., re-scanning the models directory).
+    /// Bumped after each successful completion so views can rescan.
     private(set) var completedVersion: Int = 0
     var errorMessage: String?
 
-    // Below are internal machinery, not observed UI state — `@ObservationIgnored`
-    // keeps them out of the observation graph (and `lazy` is incompatible with an
-    // observed stored property).
+    @ObservationIgnored let ws: PipetteWorkspace
 
-    /// The device storage this coordinator writes downloads into. Injected so
-    /// tests point it at a temporary root.
-    @ObservationIgnored let storage: Storage
+    @ObservationIgnored let downloadStore: DownloadStore
 
-    /// MLX directory downloads route through `HubApi` behind this seam (GGUF stays
-    /// on the `URLSession` path below). Injectable so tests can supply a fake.
-    @ObservationIgnored var mlxDownloader: MLXModelDownloading
-    /// In-flight MLX pulls, keyed the same as `downloads`. Cancelling the task is
-    /// how `cancel(key:)` stops an MLX download (HubApi honors `Task.isCancelled`).
+    @ObservationIgnored var transport: ModelTransport
+    /// Sizes a fetch before admission: the crate's `ArtifactsContext.download_http_client`.
+    @ObservationIgnored let downloadHttpClient: HttpClient
+    @ObservationIgnored let vaultHttpClient: HttpClient
+    /// The registered identity a vault fetch signs as.
+    @ObservationIgnored let vaultSession: () throws -> MgmtSession
+    /// In-flight directory and vault pulls, keyed as `downloads`. Cancelling the task stops
+    /// the pull.
     @ObservationIgnored private var mlxTasks: [String: Task<Void, Never>] = [:]
 
-    /// Last time a progress update was published, per download. Used to
-    /// debounce `didWriteData` (which fires far more than once per second)
-    /// down to at most one UI update per second per download.
+    /// URL-session tasks selected for cancellation, retained until every matching
+    /// completion callback arrives. The row and reservation stay live for the same span.
+    @ObservationIgnored private var cancellingURLTaskIDs: [String: Set<Int>] = [:]
+
     @ObservationIgnored private var lastProgressPublishedAt: [String: Date] = [:]
 
-    /// Minimum gap between published progress updates for one download.
     private static let progressUpdateInterval: TimeInterval = 1.0
 
-    /// Cap on simultaneously-active model transfers. Additional downloads wait
-    /// in `.queued` and start as slots free, so adding many models no longer
-    /// opens a connection per model at once. Counts GGUF (URLSession) and MLX
-    /// (HubApi) transfers together. Tunable — 2 bounds bandwidth/connection use
-    /// while still overlapping one transfer with the next. Internal (not private)
-    /// so tests can assert against the configured cap.
+    /// Active transfers of every kind. 2 bounds bandwidth while still overlapping one
+    /// transfer with the next; the rest wait in `.queued`.
     static let maxConcurrentDownloads = 2
 
-    /// Downloads waiting for a slot, FIFO. Each `start` closure ignites the real
-    /// transfer and is invoked by `pumpQueue` when a slot frees; the matching
-    /// `downloads[key]` entry sits in `.queued` until then.
+    /// Downloads waiting for a slot, FIFO; `pumpQueue` runs each `start`.
     @ObservationIgnored private var pendingStarts: [(key: String, start: () -> Void)] = []
 
-    /// Set by the AppDelegate in `handleEventsForBackgroundURLSession`; called
-    /// once the session finishes replaying its queued events to the delegate.
+    /// From `handleEventsForBackgroundURLSession`; called once the session has replayed its
+    /// events and no install is still running.
     @ObservationIgnored var backgroundCompletionHandler: (() -> Void)?
 
     nonisolated private static let sessionIdentifier = "ai.liquid.pipette.downloads"
 
-    /// Whether `arguments` name a headless run that completes in one go, which is
-    /// the only case a foreground session is right for.
-    ///
-    /// `settings run` is excluded: it starts the planner worker, which stays
-    /// resident until killed and can be suspended between claims, so it needs a
-    /// background session's ability to outlive suspension. Every other headless
-    /// verb runs to completion with the app held active by `devicectl --console`.
-    ///
-    /// Deep links are excluded too, by carrying no `headlessrun`: a link-launched
-    /// bench is driven by someone holding the phone, who may background it.
+    /// Whether `arguments` name a headless run that completes in one go, the only case a
+    /// foreground session suits. `settings run` starts the resident worker, which can be
+    /// suspended between claims; a deep link carries no `headlessrun`, and its user may
+    /// background the app.
     nonisolated static func usesForegroundSession(_ arguments: [String]) -> Bool {
         guard let marker = arguments.firstIndex(of: "headlessrun") else { return false }
         let verbs = arguments[arguments.index(after: marker)...]
         return !(verbs.first == "settings" && verbs.dropFirst().first == "run")
     }
 
-    /// A background session hands the transfer to `nsurlsessiond`, which iOS
-    /// schedules discretionarily — it throttles hard on a phone warm from
-    /// benchmarking (measured 373 KB/s at 73°C, against 23 MB/s available on the
-    /// same link). A one-shot headless cell fails outright if the model does not
-    /// arrive, so it gains nothing from surviving suspension and pays for it in
-    /// throughput.
+    /// `nsurlsessiond` throttles a background transfer hard on a phone warm from
+    /// benchmarking (measured 373 KB/s at 73°C against 23 MB/s on the same link), and a
+    /// one-shot cell gains nothing from surviving suspension.
     ///
-    /// Switching costs one thing knowingly: a foreground session does not adopt
-    /// transfers a previous launch left running in `nsurlsessiond`, so those are
-    /// orphaned rather than resumed. They finish or die on their own, and the
-    /// cell re-downloads. Accepted because a cell owns the phone for its
-    /// duration, so a transfer outliving one is already leftover state.
+    /// Accepted cost: a foreground session does not adopt transfers a previous launch left
+    /// in `nsurlsessiond`, so the cell re-downloads.
     nonisolated static func sessionConfiguration(foreground: Bool) -> URLSessionConfiguration {
         let config = foreground
             ? URLSessionConfiguration.default
             : URLSessionConfiguration.background(withIdentifier: sessionIdentifier)
         config.allowsCellularAccess = true
         config.waitsForConnectivity = true
-        // Background-only — asks the system to relaunch us to deliver completions.
         config.sessionSendsLaunchEvents = !foreground
         return config
     }
 
     @ObservationIgnored private lazy var session: URLSession = {
-        URLSession(configuration: Self.sessionConfiguration(foreground: foregroundSession),
+        URLSession(configuration: injectedSessionConfiguration
+                       ?? Self.sessionConfiguration(foreground: foregroundSession),
                    delegate: self, delegateQueue: .main)
     }()
 
     @ObservationIgnored private let foregroundSession: Bool
 
+    /// Test-only: a `URLProtocol` here holds a `.file` row in a chosen state. `nil` builds
+    /// the real configuration.
+    @ObservationIgnored private let injectedSessionConfiguration: URLSessionConfiguration?
+
+    @ObservationIgnored private let reachability: NetworkReachable
+
+    @ObservationIgnored let admission: ModelAdmission
+
+    /// One per store entry, so a model two `ensureModel` callers want is fetched and
+    /// admitted once.
+    @ObservationIgnored let transfers = TransferRegistry()
+
+    /// The grant each in-flight entry is spending. It belongs to the transfer, not the
+    /// waiter: a waiter that gives up leaves bytes still landing, so the grant is held until
+    /// the last row for the entry retires. Keyed by entry because a vision model's two
+    /// files share one grant.
+    @ObservationIgnored private var reservations: [ModelStorageKey: Reservation] = [:]
+
+    /// The jitter, wait and log of `.file` and `.vault` retries, and of `Ensure`'s vault
+    /// record reads.
+    @ObservationIgnored let retryHooks: RetryHooks
+    /// The wait of each `.file` transfer between two attempts; a pause or cancel cancels it.
+    @ObservationIgnored private var retryTasks: [String: Task<Void, Never>] = [:]
+
     init(
-        storage: Storage,
-        mlxDownloader: MLXModelDownloading? = nil,
-        foregroundSession: Bool = DownloadCoordinator.usesForegroundSession(CommandLine.arguments)
+        ws: PipetteWorkspace,
+        transport: ModelTransport? = nil,
+        downloadHttpClient: HttpClient = .shared,
+        foregroundSession: Bool = DownloadCoordinator.usesForegroundSession(CommandLine.arguments),
+        reachability: NetworkReachable = NetworkReachability.shared,
+        sessionConfiguration: URLSessionConfiguration? = nil,
+        vaultHttpClient: HttpClient = .shared,
+        vaultSession: (() throws -> MgmtSession)? = nil,
+        retryHooks: RetryHooks = .live
     ) {
-        self.storage = storage
-        self.mlxDownloader = mlxDownloader ?? HubMLXModelDownloader(downloadBase: storage.hubCacheDir)
+        self.ws = ws
+        self.transport = transport ?? HubModelTransport(downloadBase: ws.hubCacheDir)
+        self.downloadHttpClient = downloadHttpClient
+        self.vaultHttpClient = vaultHttpClient
+        self.vaultSession = vaultSession ?? { try ws.registration.mgmtSession() }
         self.foregroundSession = foregroundSession
+        self.reachability = reachability
+        self.injectedSessionConfiguration = sessionConfiguration
+        self.retryHooks = retryHooks
+        self.downloadStore = DownloadStore(dir: ws.downloadsDir)
+        self.admission = ModelAdmission(ws: ws)
         super.init()
         restoreState()
-        // When connectivity returns, resume the transfers a network drop paused.
-        // The handler runs off the main actor, so hop back; reference the shared
-        // instance rather than capturing `self` across the concurrency boundary.
+        // The handler runs off the main actor; the shared instance avoids capturing `self`
+        // across that boundary.
         NetworkReachability.shared.onReconnect {
             Task { @MainActor in DownloadCoordinator.shared.resumeAfterReconnect() }
         }
@@ -337,102 +235,89 @@ final class DownloadCoordinator: NSObject {
 
     // MARK: - Public API
 
-    /// The single ignition point: start a download straight from its typed model
-    /// definition. Dispatches by variant — the transport (URLSession for GGUF,
-    /// HubApi `Task` for MLX), the on-disk key, and provenance are all derived
-    /// from `source`, so callers never build URLs or repo strings themselves.
-    /// A vision model's two files are enqueued as separate transfers, both tagged
-    /// with the same `source`, so both land in one store entry (see
-    /// `GGUFModelInstaller`).
+    /// The single ignition point. A vault model goes to `startVaultDownload`, a directory
+    /// model to `startDirectoryDownload`; a GGUF model's files come from
+    /// `ModelFetch.planDownloads`, which makes every HTTP decision up front, as the crate's
+    /// planner does. A vision model's two files are separate transfers into one entry.
     ///
-    /// `declaredSizeBytes` is the catalog's authored size, when the ignition has one:
-    /// an artifact bigger than the whole quota is refused here, before any transfer
-    /// starts. Ignitions with no declared size (headless, deep links) skip the check —
-    /// the pre-flight is best-effort by construction.
+    /// No quota check: that is `ensureModel`'s, as in the crate, and every ignition goes
+    /// through it. `jobId` is for the vault log events.
     func startDownload(_ source: Model, familyId: String? = nil, quant: String? = nil,
-                       declaredSizeBytes: Int64? = nil) {
-        if let declaredSizeBytes, declaredSizeBytes > storage.storageQuotaBytes {
-            let refusal = DownloadError.exceedsQuota(
-                neededBytes: declaredSizeBytes, quotaBytes: storage.storageQuotaBytes)
-            errorMessage = refusal.localizedDescription
-            AppLog.storage.warning("Refusing download: \(refusal.localizedDescription)")
+                       jobId: JobId? = nil) {
+        if let files = ModelFetch.vaultFiles(source) {
+            startVaultDownload(source, files: files, familyId: familyId, quant: quant,
+                               jobId: jobId)
             return
         }
         switch source {
-        case let .mlx(m):
-            guard let ref = m.ref else { refuseUnfetchable(source); return }
-            startMLXDownload(ref, familyId: familyId, quant: quant)
-        // Only the HuggingFace arm names something this client can fetch. A store form
-        // (`relativeFile` / `absoluteFile`) is already-installed bytes, and a `url` arm is
-        // a body authored for the CLI — both decode, neither downloads here, which is the
-        // same split upstream draws between reading a spec and being able to run it.
-        case let .ggufText(m):
-            guard case let .huggingFace(repo, path, _) = m.source else {
-                refuseUnfetchable(source); return
+        case .mlx, .onnxGenai:
+            guard let ref = HfModelRef.of(source) else {
+                // A path arm is installed bytes, never a pull; this client has no import.
+                refuseUnfetchable(source, ModelFetchError.notFetchable(
+                    "local/relative directory models are imported, not downloaded"))
+                return
             }
-            enqueueGGUF(repo: repo, filename: path,
-                        source: source, familyId: familyId, quant: quant)
-        case let .ggufVision(m):
-            guard case let .huggingFace(repo, model, _, mmproj, _) = m.source else {
-                refuseUnfetchable(source); return
+            startDirectoryDownload(source, ref: ref, familyId: familyId, quant: quant)
+            return
+        case .ggufText, .ggufVision, .ggufVisionSpeculative, .appleFoundationText:
+            break
+        }
+        let planned: [ModelFetch.Download]
+        do {
+            planned = try planDownloads(source)
+        } catch {
+            refuseUnfetchable(source, error)
+            return
+        }
+        for download in planned {
+            // Unreachable in practice. `return`, not `continue`: a vision model with only
+            // one file enqueued never resolves, and `ensureModel` would wait out its window.
+            guard let url = URL(string: download.url.value) else {
+                refuseUnfetchable(source, ModelFetchError.invalidUrl(download.url.value))
+                return
             }
-            enqueueGGUF(repo: repo, filename: model,
-                        source: source, familyId: familyId, quant: quant)
-            enqueueGGUF(repo: repo, filename: mmproj,
-                        source: source, familyId: familyId, quant: quant)
-        case .appleFoundationText:
-            // AFM ships with the OS — there is nothing to download.
-            AppLog.storage.error("startDownload called for appleFoundation, which has no downloadable coordinate")
+            enqueueFileDownload(url: url, repo: source.repo?.description, familyId: familyId,
+                                source: source, quant: quant, sha256: download.sha256)
         }
     }
 
-    /// A source this client cannot fetch: a store-relative or absolute path (already
-    /// installed, by definition) or a `url` arm no iOS download path implements.
-    private func refuseUnfetchable(_ source: Model) {
+    /// The file parts of the crate's `parts(declared, to_stored(declared, root))`. A source
+    /// with no store form has no destination, so it is refused as `notStorable`.
+    private func planDownloads(_ source: Model) throws -> [ModelFetch.Download] {
+        guard let into = ws.models.fetchDestination(for: source) else {
+            throw ModelStoreError.notStorable(source.artifactName)
+        }
+        return try ModelFetch.planDownloads(source, into: into)
+    }
+
+    /// One sentence for the UI; `reason` goes only to the log.
+    private func refuseUnfetchable(_ source: Model, _ reason: Error) {
         errorMessage = "This model's source can't be downloaded on iOS."
-        AppLog.storage.error("startDownload: \(source.artifactName) names no fetchable HuggingFace coordinate")
+        AppLog.storage.error(
+            "startDownload: \(source.artifactName) cannot be planned: \(reason.localizedDescription)")
     }
 
-    /// Build the HF resolve URL for a single GGUF file and hand it to the
-    /// URLSession primitive, carrying the typed `source` for provenance.
-    private func enqueueGGUF(repo: HFRepo, filename: RepoSubpath, source: Model?,
-                             familyId: String?, quant: String? = nil) {
-        // `main` only when the coordinate names no revision. Hardcoding it ignored a
-        // plan's pin outright, and 404s a repo whose default branch is named something
-        // else.
-        let ref = repo.revision?.value ?? "main"
-        guard let url = URL(
-            string: "https://huggingface.co/\(repo.description)/resolve/\(ref)/\(filename.value)"
-        ) else { return }
-        enqueueFileDownload(url: url, repo: repo.description, familyId: familyId, source: source, quant: quant)
-    }
-
-    /// Low-level URLSession transport for a single file. Not the public ignition
-    /// surface — callers use `startDownload(_:familyId:)`; this is the shared GGUF
-    /// primitive it funnels into.
     private func enqueueFileDownload(url: URL, repo: String?, familyId: String? = nil, source: Model? = nil,
-                                     quant: String? = nil) {
+                                     quant: String? = nil, sha256: Sha256? = nil) {
         let filename = url.lastPathComponent
         let key = LocalStorage.modelRelativePath(repo: repo, filename: filename)
 
         if downloads[key] != nil { return }
-        // Without a coordinate there is no store entry to place the file in, so the
-        // install would have nowhere to put it — refuse rather than transfer bytes
-        // the scanner will never find.
+        // Refuse rather than transfer bytes with no store entry to land in.
         guard let spec = GGUFModelInstaller.entrySpec(repo: repo, filename: filename, source: source),
-              let blobs = storage.modelStore.blobsDir(for: spec) else {
+              let blobs = ws.models.blobsDir(for: spec) else {
             errorMessage = "\(filename) has no model coordinate to store it under."
             return
         }
-        // Dedup is scoped to this model's entry: a different repo's identically-named
-        // GGUF keys to its own entry and downloads fine.
-        if FileManager.default.fileExists(atPath: blobs.appendingPathComponent(filename).path) {
+        // The installer's own path, not the leaf, so a nested file already on disk is
+        // found.
+        let dest = GGUFModelInstaller.destination(for: spec, leaf: filename, under: blobs,
+                                                  in: ws.models)
+        if FileManager.default.fileExists(atPath: dest.path) {
             errorMessage = "\(filename) already exists."
             return
         }
 
-        // Register the row up front in `.queued`; the concurrency gate starts the
-        // transfer now if a slot is free, else it waits until `pumpQueue` runs it.
         downloads[key] = Download(
             filename: filename,
             url: url,
@@ -442,20 +327,18 @@ final class DownloadCoordinator: NSObject {
             totalBytes: nil,
             state: .queued,
             source: source,
+            sha256: sha256,
             catalogQuant: quant
         )
-        // Past the dedup and existence guards above, so this is a genuinely new transfer and can't
-        // double-count. Captured on enqueue rather than when the gate grants a slot: the queued
-        // wait is part of the user's download, and a device that never drains its queue is exactly
-        // what the started-vs-completed gap should show.
+        // On enqueue, not when a slot frees: a queue that never drains should show as the
+        // started-vs-completed gap.
         Analytics.capture(AnalyticsEvents.modelDownloadStarted, [AnalyticsEvents.modelId: filename])
 
         gate(key: key) { [weak self] in self?.beginFileDownload(key: key) }
     }
 
-    /// Ignite the URLSession transfer for a registered GGUF download once the
-    /// concurrency gate grants it a slot. The resume record is persisted only
-    /// here, so a still-queued download leaves nothing to reconcile on relaunch.
+    /// The record is first saved here, when the transfer starts, so a still-queued
+    /// download leaves nothing to reconcile on relaunch.
     private func beginFileDownload(key: String) {
         guard var dl = downloads[key], let url = dl.url else { return }
 
@@ -469,31 +352,32 @@ final class DownloadCoordinator: NSObject {
         dl.state = .connecting
         downloads[key] = dl
 
-        DownloadStore.saveRecord(DownloadRecord(
+        saveRecord(for: dl)
+    }
+
+    private func saveRecord(for dl: Download) {
+        guard let url = dl.url else { return }
+        downloadStore.saveRecord(DownloadRecord(
             filename: dl.filename,
             urlString: url.absoluteString,
             repo: dl.repo,
             familyId: dl.familyId,
-            source: dl.source
+            source: dl.source,
+            sha256: dl.sha256,
+            etag: dl.resumeETag
         ))
     }
 
-    /// Start (or no-op if already present) an MLX model download. Progress flows into
-    /// the same `downloads` map the GGUF path uses; the finished model is installed
-    /// via `MLXModelInstaller` (validate → relocate → record).
+    /// Start an MLX or ONNX Runtime GenAI pull, installed by `DirectoryModelInstaller`.
     ///
-    /// Unlike GGUF, MLX pulls are an in-process `Task` around `HubApi` (not a
-    /// background `URLSession`), so they aren't persisted via `DownloadStore` and the
-    /// in-progress row doesn't survive app termination. This is deliberate: a killed
-    /// pull leaves its partial files in `hubCacheDir`, and re-initiating the download
-    /// resumes from that cache rather than restarting — so the model isn't lost, it
-    /// just loses its live progress indicator until the user taps download again.
-    /// That resume window closes at the next sweep, which reclaims hub snapshots no
-    /// in-flight pull is holding (they are multi-GB and nothing else ever frees them).
-    func startMLXDownload(_ ref: HFModelRef, familyId: String? = nil, quant: String? = nil) {
+    /// An in-process `Task` around `HubApi`, so the row does not survive termination. A
+    /// killed pull leaves the files it has so far in `hubCacheDir`, and starting again resumes
+    /// from them until the next sweep reclaims them.
+    func startDirectoryDownload(_ source: Model, ref: HfModelRef,
+                                familyId: String? = nil, quant: String? = nil) {
         let key = ref.key
         if downloads[key] != nil { return }
-        if let blobs = storage.modelStore.blobsDir(for: .mlx(ref.asMlx())),
+        if let blobs = ws.models.blobsDir(for: source),
            FileManager.default.fileExists(atPath: blobs.path) {
             errorMessage = "\(ref.leaf) is already downloaded."
             return
@@ -508,57 +392,59 @@ final class DownloadCoordinator: NSObject {
             state: .queued,
             kind: .directory(prefix: ref.subpath?.value),
             explicitFraction: 0,
-            source: .mlx(ref.asMlx()),
+            source: source,
             catalogQuant: quant
         )
-        // The MLX twin of the GGUF capture in `enqueueFileDownload`, and past the same dedup and
-        // existence guards. Without it `finishMLX`/`failMLX` emit terminal events with no matching
-        // start, so every MLX pull would show up in the funnel as a completion out of nowhere.
+        // Pairs with the terminal events of finishDirectory/failDirectory, so a pull never shows
+        // in the funnel as a completion with no start.
         Analytics.capture(AnalyticsEvents.modelDownloadStarted, [AnalyticsEvents.modelId: ref.leaf])
 
-        gate(key: key) { [weak self] in self?.beginMLXDownload(ref, key: key) }
+        gate(key: key) { [weak self] in self?.beginDirectoryDownload(source, ref: ref, key: key) }
     }
 
-    /// Launch the HubApi pull for a registered MLX download once the concurrency
-    /// gate grants it a slot.
-    private func beginMLXDownload(_ ref: HFModelRef, key: String) {
+    private func beginDirectoryDownload(_ source: Model, ref: HfModelRef, key: String) {
         guard var dl = downloads[key] else { return }
         dl.state = .connecting
         downloads[key] = dl
 
-        // Resolved here, on the main actor, so the downloader stays a pure transport; the
-        // coordinate's token is what a plan-dispatched pull must present.
         let credential = resolveHfToken(claimToken: ref.repo.authToken, model: dl.source)
-        // The MLX twin of `attachHfAuth`'s line. HubApi builds its own requests, so this is
-        // the only place that can say whether the pull carries a credential.
+        // HubApi builds its own requests, so only this line can say whether the pull is
+        // authenticated.
         if let credential {
             AppLog.storage.info(
-                "hf auth: mlx pull of \(ref.key) authenticated source=\(credential.source.rawValue)")
+                "hf auth: directory pull of \(ref.key) authenticated source=\(credential.source.rawValue)")
         } else {
-            AppLog.storage.info("hf auth: no token available — pulling mlx \(ref.key) anonymously")
+            AppLog.storage.info(
+                "hf auth: no token available — pulling \(ref.key) anonymously")
         }
-        let downloader = mlxDownloader
+        let transport = self.transport
         mlxTasks[key] = Task { [weak self] in
             do {
-                let dir = try await downloader.download(ref, token: credential?.token) { fraction in
+                let outcome = try await transport.download(
+                    source, ref: ref, token: credential?.token,
+                    admit: { planned in
+                        try await self?.reconcileGrant(for: source, planned: planned)
+                    }
+                ) { fraction in
                     Task { @MainActor [weak self] in self?.applyMLXProgress(key: key, fraction: fraction) }
                 }
                 await MainActor.run { [weak self] in
-                    self?.finishMLX(key: key, downloadedDir: dir, ref: ref)
+                    self?.finishDirectory(key: key, outcome: outcome, source: source)
                 }
             } catch is CancellationError {
-                // `cancel(key:)` already cleared the UI entry.
+                // `cancel(key:)` owns the row.
             } catch DownloadError.cancelled {
-                // Ditto — the downloader mapped task cancellation to a typed error.
+                // `cancel(key:)` owns the row.
             } catch {
-                await MainActor.run { [weak self] in self?.failMLX(key: key, error: error) }
+                await MainActor.run { [weak self] in self?.failDirectory(key: key, error: error) }
             }
         }
     }
 
     private func applyMLXProgress(key: String, fraction: Double) {
         guard var dl = downloads[key] else { return }
-        // Debounce identically to the GGUF path; the final frame always publishes.
+        guard dl.state != .cancelling else { return }
+        // Debounced as the GGUF path; the final frame always publishes.
         let now = Date()
         let isComplete = fraction >= 1
         if let last = lastProgressPublishedAt[key], !isComplete,
@@ -571,32 +457,70 @@ final class DownloadCoordinator: NSObject {
         downloads[key] = dl
     }
 
-    /// Install the finished download (validate → relocate → record) and clear the
-    /// in-flight entry. Validation/relocation live in `MLXModelInstaller`.
-    private func finishMLX(key: String, downloadedDir: URL, ref: HFModelRef) {
-        // A `cancel(key:)` that raced the download's completion already removed the
-        // in-flight entry; don't install a model the user cancelled.
+    private func finishDirectory(key: String, outcome: TransferOutcome, source: Model) {
+        let downloadedDir = outcome.directory
+        if downloads[key]?.state == .cancelling {
+            try? FileManager.default.removeItem(at: downloadedDir)
+            finishCancellation(key: key, source: source)
+            return
+        }
+        // A cancel that raced completion already removed the row.
         guard downloads[key] != nil else {
             try? FileManager.default.removeItem(at: downloadedDir)
             mlxTasks.removeValue(forKey: key)
             return
         }
-        do {
-            try MLXModelInstaller(ref: ref, storage: storage).install(from: downloadedDir)
-        } catch {
-            failMLX(key: key, error: error)
+        let installer = DirectoryModelInstaller(source: source, ws: ws,
+                                                resolved: outcome.resolved)
+        // Detached: ONNX validation walks the whole decoder graph and the publish moves
+        // gigabytes. The attempt is pinned meanwhile so the sweep leaves it alone.
+        let attempt = ModelStorageKey.of(source)
+        if let attempt { liveStagingAttempts.insert(attempt.value) }
+        pendingInstalls += 1
+        Task.detached {
+            let outcome = Result { try installer.install(from: downloadedDir) }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let attempt { self.liveStagingAttempts.remove(attempt.value) }
+                self.pendingInstalls -= 1
+                self.completeDirectoryInstall(key: key, source: source, outcome: outcome)
+            }
+        }
+    }
+
+    private func completeDirectoryInstall(
+        key: String, source: Model, outcome: Result<Void, Error>
+    ) {
+        if case let .failure(error) = outcome {
+            failDirectory(key: key, error: error)
             return
         }
-        // Swept before the row is cleared, so the just-finished download still pins
-        // itself through `downloads` as well as through `justInstalled`.
-        sweepAfterInstall(justInstalled: ModelStorageKey.of(.mlx(ref.asMlx())))
+        // A cancel during the install: the publish already happened, so undo it.
+        guard downloads[key]?.state != .cancelling else {
+            if let dir = ws.models.entryDir(for: source) {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            finishCancellation(key: key, source: source)
+            return
+        }
+        guard downloads[key] != nil else {
+            if let dir = ws.models.entryDir(for: source) {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            mlxTasks.removeValue(forKey: key)
+            pumpQueue()
+            return
+        }
+        // Before the row is cleared, so the download still pins itself through `downloads`.
+        sweepAfterInstall(justInstalled: ModelStorageKey.of(source))
         let filename = downloads[key]?.filename
-        // Same properties as the GGUF completion in `applyCompletion`: without `size_bytes` here, any
-        // average-download-size query silently becomes GGUF-only rather than visibly incomplete.
+        // Carries size_bytes as the GGUF completion does, or an average-size query silently
+        // covers GGUF only.
         let totalBytes = downloads[key]?.totalBytes
         downloads.removeValue(forKey: key)
         lastProgressPublishedAt.removeValue(forKey: key)
         mlxTasks.removeValue(forKey: key)
+        releaseReservation(afterRetiring: key, source: source)
         completedVersion &+= 1
         Analytics.capture(AnalyticsEvents.modelDownloadCompleted, [
             AnalyticsEvents.modelId: filename,
@@ -605,13 +529,314 @@ final class DownloadCoordinator: NSObject {
         pumpQueue()
     }
 
-    private func failMLX(key: String, error: Error) {
+    private func failDirectory(key: String, error: Error) {
         mlxTasks.removeValue(forKey: key)
         if var dl = downloads[key] {
             dl.state = .failed(reason: "Failed: \(error.localizedDescription)")
             downloads[key] = dl
         }
         errorMessage = "MLX download failed: \(error.localizedDescription)"
+        releaseReservation(afterRetiring: key, source: downloads[key]?.source)
+        Analytics.capture(AnalyticsEvents.modelDownloadFailed, [
+            AnalyticsEvents.modelId: downloads[key]?.filename,
+            AnalyticsEvents.errorKind: AnalyticsEvents.errorKind(error),
+        ])
+        pumpQueue()
+    }
+
+    /// Pull a vault gguf's files one at a time, or a vault directory model's archive, as
+    /// one in-process row.
+    ///
+    /// Not on the background `URLSession`: each signed request carries a single-use nonce
+    /// and timestamp, which a system retry or relaunch would replay stale. A retry in this
+    /// process continues with `Range`; the row is not persisted and cannot pause.
+    ///
+    /// Every record is read before a byte moves, so a refusal costs no download and the
+    /// row knows its total. `jobId` is the job that started the row.
+    func startVaultDownload(_ source: Model, files: [ModelFetch.VaultFile],
+                            familyId: String? = nil, quant: String? = nil,
+                            jobId: JobId? = nil) {
+        guard let entry = ModelStorageKey.of(source) else {
+            refuseUnfetchable(source, ModelStoreError.notStorable(source.artifactName))
+            return
+        }
+        // For a vault arm, no store form means two files on one path, which the store
+        // refuses as the crate does.
+        guard ws.models.fetchDestination(for: source) != nil else {
+            errorMessage = "\(source.artifactName) has two files that name one vault path, "
+                + "so the store cannot hold them apart."
+            AppLog.vault.error(
+                "vault download refused: no store form model=\(source.artifactName) "
+                    + "job_id=\(jobId?.value ?? "none")")
+            return
+        }
+        let row = Download(filename: entry.value, url: nil, repo: nil, familyId: familyId,
+                           bytesDownloaded: 0, totalBytes: nil, state: .queued, kind: .vault,
+                           source: source, catalogQuant: quant)
+        let key = row.key
+        if downloads[key] != nil { return }
+        if ws.models.bound(source) != nil {
+            errorMessage = "\(source.artifactName) is already downloaded."
+            return
+        }
+        downloads[key] = row
+        Analytics.capture(AnalyticsEvents.modelDownloadStarted, [AnalyticsEvents.modelId: entry.value])
+        gate(key: key) { [weak self] in
+            self?.beginVaultDownload(source, files: files, key: key, jobId: jobId)
+        }
+    }
+
+    private func beginVaultDownload(
+        _ source: Model, files: [ModelFetch.VaultFile], key: String, jobId: JobId?
+    ) {
+        guard var dl = downloads[key], let first = files.first else { return }
+        dl.state = .connecting
+        downloads[key] = dl
+        let http = vaultHttpClient
+        let session = vaultSession
+        let ws = self.ws
+        mlxTasks[key] = Task { [weak self] in
+            do {
+                let access = try VaultAccess.of(session, path: first.path)
+                guard let hooks = self?.retryHooks else { return }
+                let records = try await VaultFetch.records(
+                    files, access: access, http: http, jobId: jobId, hooks: hooks)
+                let total = VaultFetch.sizeBytes(records)
+                // The records give the first true size; a heavier pull is admitted again,
+                // as the directory path's `admit` hook does.
+                do {
+                    try await self?.reconcileGrant(
+                        for: source,
+                        planned: VaultFetch.admissionBytes(source, records: records))
+                } catch {
+                    throw VaultFetchError.io(dest: key, source: error.localizedDescription)
+                }
+                self?.applyVaultProgress(key: key, done: 0, total: total)
+                switch source {
+                case .mlx, .onnxGenai:
+                    if let record = records.first {
+                        try await self?.fetchVaultArchive(
+                            record, source: source, ws: ws, access: access,
+                            http: http, key: key, jobId: jobId)
+                    }
+                case .ggufText, .ggufVision, .ggufVisionSpeculative, .appleFoundationText:
+                    var done: Int64 = 0
+                    for (file, record) in zip(files, records) {
+                        try await self?.fetchVaultFile(
+                            file, record: record, source: source, ws: ws,
+                            access: access, http: http, key: key, jobId: jobId, before: done,
+                            total: total)
+                        done = ModelFetch.saturating(done, Int64(clamping: record.bytes))
+                    }
+                }
+                self?.finishVault(key: key, source: source)
+            } catch {
+                // `cancel(key:)` owns the row; the transport reports the cancel as a
+                // failure. A file installed before the cancel goes with the entry.
+                guard !Task.isCancelled else {
+                    if let dir = ws.models.entryDir(for: source) {
+                        try? FileManager.default.removeItem(at: dir)
+                    }
+                    return
+                }
+                let failure = error as? VaultFetchError
+                    ?? .io(dest: key, source: error.localizedDescription)
+                self?.failVault(key: key, error: failure, jobId: jobId)
+            }
+        }
+    }
+
+    /// One vault file, streamed into its own scratch directory under `.staging` and then
+    /// installed by `GGUFModelInstaller`. The digest is checked while streaming, so the
+    /// installer gets none.
+    ///
+    /// Each retry signs new requests and continues the file only if the server confirms
+    /// the object is the same; otherwise the file and progress restart from zero.
+    private func fetchVaultFile(
+        _ file: ModelFetch.VaultFile, record: VaultResource, source: Model, ws: PipetteWorkspace,
+        access: VaultAccess, http: HttpClient, key: String, jobId: JobId?, before: Int64,
+        total: Int64
+    ) async throws {
+        let leaf = file.path.storedFilename
+        let scratch = ws.models.stagingRoot
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let attempt = scratch.lastPathComponent
+        liveStagingAttempts.insert(attempt)
+        defer {
+            liveStagingAttempts.remove(attempt)
+            try? FileManager.default.removeItem(at: scratch)
+        }
+        var partial: VaultPartial?
+        try await retrying(
+            url: file.path.value,
+            attempt: { n in
+                beginVaultAttempt(key: key, retry: n > 1)
+                try await VaultFetch.download(
+                    record, access: access, http: http, to: scratch.appendingPathComponent(leaf),
+                    partial: &partial, jobId: jobId
+                ) { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        self?.applyVaultProgress(
+                            key: key, done: before + progress.written, total: total,
+                            epoch: VaultEpoch(before: before, restarts: progress.restarts))
+                    }
+                }
+            },
+            classify: VaultFetch.disposition(of:), hooks: retryHooks)
+        let installer = GGUFModelInstaller(repo: nil, filename: leaf, source: source,
+                                           sha256: nil, ws: ws)
+        do {
+            try installer.finish(adopted: scratch.appendingPathComponent(leaf))
+        } catch {
+            throw VaultFetchError.io(dest: leaf, source: error.localizedDescription)
+        }
+    }
+
+    /// A vault directory model's archive, streamed into a scratch directory under
+    /// `.staging`, digest-checked while streaming, then unpacked once and published by
+    /// `DirectoryModelInstaller`. Retries as `fetchVaultFile` does.
+    private func fetchVaultArchive(
+        _ record: VaultResource, source: Model, ws: PipetteWorkspace, access: VaultAccess,
+        http: HttpClient, key: String, jobId: JobId?
+    ) async throws {
+        let scratch = ws.models.stagingRoot
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        // Pins the scratch directory and the entry's staged attempt against the sweep.
+        let attempts = [scratch.lastPathComponent]
+            + (ModelStorageKey.of(source).map { [$0.value] } ?? [])
+        liveStagingAttempts.formUnion(attempts)
+        defer {
+            liveStagingAttempts.subtract(attempts)
+            try? FileManager.default.removeItem(at: scratch)
+        }
+        let archive = scratch.appendingPathComponent(".vault-archive")
+        let total = Int64(clamping: record.bytes)
+        var partial: VaultPartial?
+        try await retrying(
+            url: "/vault/resources/\(record.resourceId.value)/content",
+            attempt: { n in
+                beginVaultAttempt(key: key, retry: n > 1)
+                try await VaultFetch.download(
+                    record, access: access, http: http, to: archive, partial: &partial,
+                    jobId: jobId
+                ) { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        self?.applyVaultProgress(
+                            key: key, done: progress.written, total: total,
+                            epoch: VaultEpoch(before: 0, restarts: progress.restarts))
+                    }
+                }
+            },
+            classify: VaultFetch.disposition(of:), hooks: retryHooks)
+        try await Self.unpackAndInstall(
+            record, archive: archive,
+            into: scratch.appendingPathComponent("model", isDirectory: true),
+            source: source, ws: ws, jobId: jobId)
+    }
+
+    /// Off the main actor, in the caller's task so a cancel stops the unpack too.
+    ///
+    /// A tree that fails validation is `.unusable`, permanent because the bytes are pinned
+    /// and every device unpacks the same tree. A failed publish is this device's fault and
+    /// may succeed on another attempt.
+    @concurrent
+    private nonisolated static func unpackAndInstall(
+        _ record: VaultResource, archive: URL, into tree: URL, source: Model,
+        ws: PipetteWorkspace, jobId: JobId?
+    ) async throws(VaultFetchError) {
+        // A refused tree can hold gigabytes, so it goes here rather than in the caller's
+        // main-actor `defer`. A published tree is no longer at `tree`.
+        defer { try? FileManager.default.removeItem(at: tree) }
+        try VaultFetch.unpack(record, archive: archive, into: tree, jobId: jobId)
+        let installer = DirectoryModelInstaller(source: source, ws: ws)
+        do {
+            try installer.validate(tree)
+        } catch {
+            throw .unusable(resourceId: record.resourceId, reason: error.localizedDescription)
+        }
+        do {
+            try installer.publish(tree)
+        } catch {
+            throw .io(dest: tree.path, source: error.localizedDescription)
+        }
+    }
+
+    /// A retry shows the row as `.connecting` until the first new byte, keeping its
+    /// progress; a restart from zero moves progress back through the epoch.
+    private func beginVaultAttempt(key: String, retry: Bool) {
+        guard retry, var dl = downloads[key], dl.state != .cancelling else { return }
+        dl.attempt += 1
+        dl.state = .connecting
+        downloads[key] = dl
+        lastProgressPublishedAt.removeValue(forKey: key)
+    }
+
+    /// A report from an earlier `epoch` is late and ignored; the first of a later epoch may
+    /// move progress back.
+    private func applyVaultProgress(key: String, done: Int64, total: Int64,
+                                    epoch: VaultEpoch? = nil) {
+        guard var dl = downloads[key], dl.state != .cancelling else { return }
+        var rewinds = false
+        if let epoch {
+            if let current = dl.vaultEpoch, epoch < current { return }
+            rewinds = dl.vaultEpoch.map { epoch > $0 } ?? true
+            dl.vaultEpoch = epoch
+        }
+        // Each chunk reports in its own `Task`, in no fixed order, so within an epoch a
+        // lower count is stale.
+        guard rewinds || done >= dl.bytesDownloaded else { return }
+        // The first frame, the final frame and a restart always publish.
+        let now = Date()
+        let isEdge = rewinds || done == 0 || done >= total
+        if let last = lastProgressPublishedAt[key], !isEdge,
+           now.timeIntervalSince(last) < Self.progressUpdateInterval {
+            return
+        }
+        lastProgressPublishedAt[key] = now
+        dl.bytesDownloaded = done
+        dl.totalBytes = total
+        dl.state = .downloading
+        downloads[key] = dl
+    }
+
+    private func finishVault(key: String, source: Model) {
+        // A cancel after the last file installed: the entry is published, so remove it.
+        guard downloads[key]?.state != .cancelling else {
+            if let dir = ws.models.entryDir(for: source) {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            finishCancellation(key: key, source: source)
+            return
+        }
+        sweepAfterInstall(justInstalled: ModelStorageKey.of(source))
+        let totalBytes = downloads[key]?.totalBytes
+        downloads.removeValue(forKey: key)
+        lastProgressPublishedAt.removeValue(forKey: key)
+        mlxTasks.removeValue(forKey: key)
+        releaseReservation(afterRetiring: key, source: source)
+        completedVersion &+= 1
+        Analytics.capture(AnalyticsEvents.modelDownloadCompleted, [
+            AnalyticsEvents.modelId: ModelStorageKey.of(source)?.value,
+            AnalyticsEvents.sizeBytes: totalBytes,
+        ])
+        pumpQueue()
+    }
+
+    /// Keeps the `.failed` row, with its typed refusal, for a person to dismiss.
+    private func failVault(key: String, error: VaultFetchError, jobId: JobId?) {
+        mlxTasks.removeValue(forKey: key)
+        lastProgressPublishedAt.removeValue(forKey: key)
+        let reason = error.localizedDescription
+        if var dl = downloads[key] {
+            dl.state = .failed(reason: reason)
+            dl.vaultFailure = error
+            downloads[key] = dl
+        }
+        errorMessage = reason
+        AppLog.vault.error(
+            "vault download failed key=\(key) job_id=\(jobId?.value ?? "none") "
+                + "permanent=\(error.isPermanent): \(reason)")
+        releaseReservation(afterRetiring: key, source: downloads[key]?.source)
         Analytics.capture(AnalyticsEvents.modelDownloadFailed, [
             AnalyticsEvents.modelId: downloads[key]?.filename,
             AnalyticsEvents.errorKind: AnalyticsEvents.errorKind(error),
@@ -620,20 +845,19 @@ final class DownloadCoordinator: NSObject {
     }
 
     func pause(key: String) {
-        // MLX `.directory` pulls have no pause/resume — only cancel (which stops
-        // the HubApi Task). Mirror the `.file` gating in `restoreState`: leaving
-        // this open would flip a "Paused" UI while the MLX Task kept running.
+        // Only `.file` rows can pause; another kind would show "Paused" while its Task
+        // kept running.
         guard let dl = downloads[key], case .file = dl.kind else { return }
-        // A queued download hasn't started transferring — there's nothing to
-        // pause, and flipping it to `.paused` would strand its start closure in
-        // `pendingStarts`, from which `pumpQueue` would later resurrect it.
+        // A `.paused` queued row would leave its start closure in `pendingStarts`, and
+        // `pumpQueue` would later resurrect it.
         guard dl.state != .queued else { return }
-        // `pause` UI state flips immediately; the resume-data callback writes
-        // the blob when it arrives from the system.
         if var dl = downloads[key] {
             dl.state = .pausing
             downloads[key] = dl
         }
+        // A row between attempts has only the wait to stop; its resume data is already
+        // kept.
+        retryTasks.removeValue(forKey: key)?.cancel()
         session.getAllTasks { [weak self] tasks in
             guard let self = self else { return }
             let match = tasks.first(where: { $0.taskDescription == key }) as? URLSessionDownloadTask
@@ -643,11 +867,12 @@ final class DownloadCoordinator: NSObject {
                 }
                 return
             }
-            match.cancel(byProducingResumeData: { data in
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
+            let response = match.response
+            match.cancel(byProducingResumeData: { [weak self] data in
+                guard let self = self else { return }
+                Task { @MainActor in
                     if let data = data {
-                        DownloadStore.saveResumeData(data, for: key)
+                        self.keepResumeData(data, for: key, response: response)
                     }
                     self.markPaused(key: key)
                 }
@@ -656,26 +881,20 @@ final class DownloadCoordinator: NSObject {
     }
 
     func resume(key: String) {
-        // Only `.file` (URLSession) downloads can resume; an MLX `.directory` pull
-        // has no URLSession task and no URL to resume against. Resume is valid only
-        // from `.paused` — guarding it dedups re-entrant taps and blocks resuming a
-        // download that's already active (either would spawn a duplicate task).
+        // Only from `.paused`, which dedups re-entrant taps that would spawn a duplicate
+        // task.
         guard let dl = downloads[key], case .file = dl.kind,
               case .paused = dl.state, dl.url != nil else { return }
 
-        // Route through the concurrency gate so resuming several paused downloads
-        // can't push active transfers past the cap; a resume with no free slot
-        // waits in `.queued` and is started later by `pumpQueue`.
         var queuedDl = dl
         queuedDl.state = .queued
         queuedDl.interruptedByNetwork = false
+        queuedDl.attempt = 1
         downloads[key] = queuedDl
         gate(key: key) { [weak self] in self?.performResume(key: key) }
     }
 
-    /// Resume the transfers a connectivity drop paused (see `applyNetworkInterruption`),
-    /// leaving downloads the user paused on purpose (`interruptedByNetwork == false`)
-    /// untouched. Wired to `NetworkReachability.onReconnect`.
+    /// Resume the transfers a connectivity drop paused, never those a person paused.
     func resumeAfterReconnect() {
         let keys = downloads.compactMap { key, dl -> String? in
             guard dl.interruptedByNetwork, case .paused = dl.state else { return nil }
@@ -684,8 +903,133 @@ final class DownloadCoordinator: NSObject {
         for key in keys { resume(key: key) }
     }
 
-    /// Resume every paused download at once — the "Resume All" affordance —
-    /// covering both user-paused and network-paused transfers.
+    /// Resume `source`'s paused transfers, for `ensureModel`: after a relaunch nothing else
+    /// clears a pause, and its cause cannot be read back from disk, so this resumes because
+    /// the caller needs the weights. Scoped to `source` so it never lifts a pause nobody
+    /// asked about.
+    ///
+    /// Offline it resumes nothing: `performResume` spends the resume blob, and
+    /// `waitsForConnectivity` would park the new task, losing the only record of the
+    /// partial. It first waits for a reachability reading, since the monitor answers
+    /// `false` until its first one lands right after launch.
+    ///
+    /// Returns whether it resumed anything, which `restartStalled(for:)` turns on.
+    @discardableResult
+    func resumePaused(for source: Model) async -> Bool {
+        let keys = pausedKeys(for: source)
+        // A caller with nothing to resume is not held up for the reading.
+        if !keys.isEmpty { await awaitReachabilityReading() }
+        guard reachability.isConnected else {
+            if !keys.isEmpty {
+                AppLog.storage.warning(
+                    "offline: leaving \(keys.count) paused transfer(s) for "
+                    + "\(source.artifactName) alone, resume data kept for a later run")
+            }
+            return false
+        }
+        for key in keys {
+            AppLog.storage.info("resuming paused transfer key=\(key) — a fetch needs these weights")
+            resume(key: key)
+        }
+        return !keys.isEmpty
+    }
+
+    /// Retire `source`'s failed rows and start them over, for a fetch whose resume did not
+    /// take: a partial the server no longer range-serves fails in seconds, and a phone
+    /// driven from the CLI has nobody to tap Resume.
+    ///
+    /// Only `.failed` rows go, as `markFailed` already spent their record and blob. A
+    /// `.paused` row still holds a partial, and a moving file is left to finish;
+    /// `startDownload` dedups on those, so only what was retired re-ignites.
+    ///
+    /// Offline it does nothing, as `resumePaused`. Returns whether `source` has a transfer
+    /// to wait on afterwards.
+    @discardableResult
+    func restartStalled(
+        for source: Model, familyId: String? = nil, quant: String? = nil
+    ) async -> Bool {
+        await awaitReachabilityReading()
+        guard reachability.isConnected else {
+            AppLog.storage.warning(
+                "offline: not restarting \(source.artifactName), "
+                + "its stalled transfer(s) keep what they have for a later run")
+            return false
+        }
+        let stalled = await retireFailed(for: source)
+        AppLog.storage.info(
+            "restarting \(source.artifactName) from scratch after \(stalled.count) "
+            + "stalled transfer(s) — a fetch needs these weights")
+        startDownload(source, familyId: familyId, quant: quant)
+        return hasTransfer(for: source)
+    }
+
+    /// Retire every failed row of `source` and return their keys. Holds until no old task
+    /// carries one of the keys, so the next transfer cannot meet the old one's cancel.
+    func retireFailed(for source: Model) async -> [String] {
+        let failed = downloads.compactMap { key, dl -> String? in
+            guard dl.source == source, case .failed = dl.state else { return nil }
+            return key
+        }
+        for key in failed { cancel(key: key) }
+        await awaitTaskCancellation(of: Set(failed))
+        return failed
+    }
+
+    /// Cancel any live task still carrying one of `keys`, and wait for it.
+    ///
+    /// `cancel(key:)` cancels through `getAllTasks` and returns before that block runs, so
+    /// a fresh task under the same `taskDescription` could be matched and killed. Here the
+    /// block runs while the key names only the dead transfer; the double cancel is a no-op.
+    private func awaitTaskCancellation(of keys: Set<String>) async {
+        await withCheckedContinuation { continuation in
+            session.getAllTasks { tasks in
+                for task in tasks where keys.contains(task.taskDescription ?? "") {
+                    task.cancel()
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Hold until the path monitor has a reading, or `timeout` passes. `NWPathMonitor`
+    /// answers within milliseconds unless launch work holds its queue off; a second is
+    /// invisible against a model download. No reading by then counts as offline.
+    private func awaitReachabilityReading(timeout: Duration = .seconds(1)) async {
+        guard !reachability.hasReading else { return }
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !reachability.hasReading, ContinuousClock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
+        }
+        if !reachability.hasReading {
+            AppLog.storage.warning(
+                "reachability monitor gave no reading in \(timeout); treating as offline")
+        }
+    }
+
+    /// Pause every in-flight `.file` transfer and wait up to `limit` for its resume data:
+    /// a foreground session's transfer dies with the process. A background session's
+    /// carries on in `nsurlsessiond`.
+    func keepPartialsForNextLaunch(within limit: Duration = .seconds(5)) async {
+        guard foregroundSession else { return }
+        let keys = downloads.compactMap { key, dl -> String? in
+            guard case .file = dl.kind,
+                  [.connecting, .downloading, .resuming].contains(dl.state) else { return nil }
+            return key
+        }
+        guard !keys.isEmpty else { return }
+        for key in keys { pause(key: key) }
+        let deadline = ContinuousClock.now.advanced(by: limit)
+        while keys.contains(where: { downloads[$0]?.state == .pausing }),
+              ContinuousClock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { break }
+        }
+        let kept = keys.filter { downloadStore.hasResumeData(for: $0) }
+        AppLog.storage.info(
+            "paused in-flight transfers before exit count=\(keys.count) "
+                + "resumable=\(kept.count) keys=\(keys.joined(separator: ","))")
+    }
+
+    /// "Resume All": user-paused and network-paused alike.
     func resumeAll() {
         let keys = downloads.compactMap { key, dl -> String? in
             if case .paused = dl.state { return key }
@@ -694,17 +1038,27 @@ final class DownloadCoordinator: NSObject {
         for key in keys { resume(key: key) }
     }
 
-    /// Ignite the URLSession transfer for a resumed download once the concurrency
-    /// gate grants it a slot — from saved resume data when present, else afresh.
+    /// Start a resumed or retried transfer. Uses the saved resume data only when a
+    /// recorded ETag can check it, else starts from zero.
     private func performResume(key: String) {
         guard var dl = downloads[key], let url = dl.url else { return }
 
         let task: URLSessionDownloadTask
-        if let resumeData = DownloadStore.loadResumeData(for: key) {
+        if dl.resumeETag != nil, let resumeData = downloadStore.loadResumeData(for: key) {
             task = session.downloadTask(withResumeData: resumeData)
-            DownloadStore.clearResumeData(for: key)
+            downloadStore.clearResumeData(for: key)
         } else {
-            // Resume data missing — start over from zero with the original URL.
+            if downloadStore.hasResumeData(for: key) {
+                AppLog.storage.info(
+                    "resume data dropped: no ETag to check the resume against, "
+                    + "starting from zero key=\(key)")
+                downloadStore.clearResumeData(for: key)
+            }
+            if dl.resumeETag != nil {
+                dl.resumeETag = nil
+                saveRecord(for: dl)
+            }
+            dl.bytesDownloaded = 0
             var request = URLRequest(url: url)
             attachHfAuth(&request, claimToken: dl.source?.repo?.authToken, model: dl.source)
             task = session.downloadTask(with: request)
@@ -716,80 +1070,231 @@ final class DownloadCoordinator: NSObject {
         downloads[key] = dl
     }
 
-    /// Cancel every download, running or queued.
-    ///
-    /// For the sign-out reset (PIP-459), which deletes `models/`: a transfer left running would land a
-    /// model into the tree that was just cleared, on a device whose registration is gone. The keys are
-    /// snapshotted first because `cancel(key:)` mutates `downloads`.
+    /// Cancel every download, for the sign-out reset (PIP-459): a transfer left running
+    /// would land a model in the `models/` tree just cleared. Keys are snapshotted because
+    /// `cancel(key:)` mutates `downloads`.
     func cancelAll() {
+        for key in Set(downloads.values.compactMap { $0.source.flatMap(ModelStorageKey.of) }) {
+            transfers.cancel(key)
+        }
         for key in Array(downloads.keys) { cancel(key: key) }
     }
 
-    func cancel(key: String) {
-        // Flip UI state immediately; the actual task cancel runs async.
-        downloads.removeValue(forKey: key)
-        lastProgressPublishedAt.removeValue(forKey: key)
-        // Drop it from the wait queue if it never started, and fill the freed
-        // slot from the queue once this cancel returns.
-        pendingStarts.removeAll { $0.key == key }
-        defer { pumpQueue() }
-        DownloadStore.clearRecord(for: key)
-        DownloadStore.clearResumeData(for: key)
+    /// Stop `source`'s bytes and fail everyone waiting on them. A caller that only stops
+    /// waiting cancels its own task instead (see `TransferRegistry`).
+    ///
+    /// The registry is told first, so later callers see the tombstone rather than starting
+    /// a replacement.
+    func cancelTransfers(for source: Model) {
+        if let key = ModelStorageKey.of(source) { transfers.cancel(key) }
+        let keys = downloads.compactMap { key, dl in dl.source == source ? key : nil }
+        for key in keys { cancel(key: key) }
+    }
 
-        // MLX pull: cancelling the Task stops HubApi (it honors Task.isCancelled).
-        if let mlxTask = mlxTasks.removeValue(forKey: key) {
+    func cancel(key: String) {
+        guard var download = downloads[key], download.state != .cancelling else { return }
+        let previousState = download.state
+        download.state = .cancelling
+        downloads[key] = download
+        lastProgressPublishedAt.removeValue(forKey: key)
+        // Queued, paused and failed rows have no transport running, so retire now.
+        pendingStarts.removeAll { $0.key == key }
+        switch previousState {
+        case .queued, .paused, .failed:
+            finishCancellation(key: key, source: download.source)
+            return
+        case .connecting, .downloading, .pausing, .resuming, .cancelling:
+            break
+        }
+
+        // Retire the tombstone only once the Task returns. `finishDirectory` handles a
+        // transport that returns a payload despite the cancel.
+        if let mlxTask = mlxTasks[key] {
             mlxTask.cancel()
+            Task { @MainActor [weak self] in
+                await mlxTask.value
+                self?.finishCancellation(key: key, source: download.source)
+            }
             return
         }
 
-        session.getAllTasks { tasks in
-            tasks.first(where: { $0.taskDescription == key })?.cancel()
+        // The tombstone blocks key reuse until the delegate's completion retires it.
+        session.getAllTasks { [weak self] tasks in
+            Task { @MainActor [weak self] in
+                guard let self, self.downloads[key]?.state == .cancelling else { return }
+                let matches = tasks.filter { $0.taskDescription == key }
+                guard !matches.isEmpty else {
+                    self.finishCancellation(key: key, source: download.source)
+                    return
+                }
+                self.cancellingURLTaskIDs[key] = Set(matches.map(\.taskIdentifier))
+                for task in matches { task.cancel() }
+            }
         }
+    }
+
+    private func finishCancellation(key: String, source: Model?) {
+        guard downloads[key]?.state == .cancelling else { return }
+        downloads.removeValue(forKey: key)
+        lastProgressPublishedAt.removeValue(forKey: key)
+        mlxTasks.removeValue(forKey: key)
+        retryTasks.removeValue(forKey: key)?.cancel()
+        cancellingURLTaskIDs.removeValue(forKey: key)
+        downloadStore.clearRecord(for: key)
+        downloadStore.clearResumeData(for: key)
+        releaseReservation(afterRetiring: key, source: source)
+
+        if let entry = source.flatMap(ModelStorageKey.of) {
+            let entryStillPresent = downloads.values.contains {
+                $0.source.flatMap(ModelStorageKey.of) == entry
+            }
+            if !entryStillPresent { transfers.finishCancellation(entry) }
+        }
+        pumpQueue()
+    }
+
+    private func noteCancelledURLTaskFinished(key: String, taskIdentifier: Int) {
+        guard downloads[key]?.state == .cancelling else { return }
+        guard var taskIDs = cancellingURLTaskIDs[key] else {
+            finishCancellation(key: key, source: downloads[key]?.source)
+            return
+        }
+        taskIDs.remove(taskIdentifier)
+        guard taskIDs.isEmpty else {
+            cancellingURLTaskIDs[key] = taskIDs
+            return
+        }
+        finishCancellation(key: key, source: downloads[key]?.source)
     }
 
     // MARK: - Storage quota
 
-    /// fetch → publish → sweep → return: the artifact lands first, then the store is
-    /// swept back under the cap. Peak disk is the quota plus the newest artifact, and
-    /// that is intended — a reservation would have to guess the final size.
-    private func sweepAfterInstall(justInstalled: ModelStorageKey?) {
-        storage.sweepToQuota(pinning: sweepPins(justInstalled: justInstalled))
+    /// Re-admit the transfer at its planned size when that exceeds the grant, which was
+    /// taken against a declared size. Throws rather than trimming: a package is one model.
+    func reconcileGrant(for source: Model, planned: Int64) async throws {
+        guard let key = ModelStorageKey.of(source),
+              let held = reservations[key], planned > held.bytes
+        else { return }
+        AppLog.storage.warning(
+            "planned size exceeds the grant for \(held.label); re-admitting")
+        let request = AdmissionRequest(key: key, label: held.label, declaredBytes: planned)
+        let pins = sweepPins(justInstalled: nil)
+        // Released first: the old grant and the new are the same transfer.
+        reservations.removeValue(forKey: key)
+        await admission.release(held)
+        do {
+            reservations[key] = try await admission.admit(request, pins: pins)
+        } catch {
+            throw ModelStoreError.admission(error)
+        }
     }
 
-    /// Whether any transfer is registered for `source`. After `startDownload` this is how
-    /// a caller tells acceptance from a silent decline — an oversize artifact, a
-    /// coordinate this client cannot fetch, or bytes already on disk all leave their
-    /// reason in `errorMessage` and enqueue nothing.
+    /// Called once per entry by the `ensureModel` frame that admitted it, before the rows
+    /// exist; released when the last row for `key` retires.
+    func holdReservation(_ reservation: Reservation, for key: ModelStorageKey) {
+        reservations[key] = reservation
+    }
+
+    func hasReservation(for key: ModelStorageKey) -> Bool {
+        reservations[key] != nil
+    }
+
+    /// Give back `key`'s grant once no row can still write into it. A `.failed` row lingers
+    /// for a person to dismiss but writes nothing.
+    func releaseReservation(for key: ModelStorageKey) {
+        guard let reservation = reservations[key] else { return }
+        let stillWriting = downloads.values.contains { dl in
+            guard dl.source.flatMap(ModelStorageKey.of) == key else { return false }
+            if case .failed = dl.state { return false }
+            return true
+        }
+        guard !stillWriting else { return }
+        reservations.removeValue(forKey: key)
+        let admission = self.admission
+        Task { await admission.release(reservation) }
+    }
+
+    /// The ledger is keyed by entry. With no `source` (a completion redelivered after
+    /// relaunch has no row), every entry is checked.
+    private func releaseReservation(afterRetiring key: String, source: Model?) {
+        if let entry = source.flatMap(ModelStorageKey.of) {
+            releaseReservation(for: entry)
+            return
+        }
+        for entry in reservations.keys { releaseReservation(for: entry) }
+    }
+
+    /// Release the grants of transfers that did not survive the last run, and adopt the
+    /// rest. Every restored row and every `.staging` partial counts as alive: erring that
+    /// way costs a retry, the other way promises the same bytes twice.
+    private func reconcileReservations() async {
+        let downloadWriters = Set(downloads.values
+            .compactMap { $0.source.flatMap(ModelStorageKey.of) })
+        let staging = stagingWriters()
+        let retained = await admission.reconcileRestored(
+            against: (Array(downloadWriters) + staging).map(ActiveWriter.init))
+
+        // A completion can retire a row during the actor hop above, so adopt the grant and
+        // release it through the ordinary no-writers check.
+        for reservation in retained where downloadWriters.contains(reservation.key) {
+            if reservations[reservation.key] == nil {
+                reservations[reservation.key] = reservation
+            }
+            releaseReservation(for: reservation.key)
+        }
+    }
+
+    /// Entry keys with a staging attempt on disk, which still hold their grant's bytes.
+    private func stagingWriters() -> [ModelStorageKey] {
+        let staging = ws.modelsDir.appendingPathComponent(
+            Entry.stagingDirName, isDirectory: true)
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: staging, includingPropertiesForKeys: nil)) ?? []
+        return children.map { ModelStorageKey(value: $0.lastPathComponent) }
+    }
+
+    /// The artifact lands first, then the store is swept back under the cap, so peak disk
+    /// is the quota plus the newest artifact. Intended: a reservation would have to guess the
+    /// final size.
+    private func sweepAfterInstall(justInstalled: ModelStorageKey?) {
+        ws.sweepToQuota(pinning: sweepPins(justInstalled: justInstalled))
+    }
+
+    /// After `startDownload`, tells acceptance from a decline, which leaves its reason in
+    /// `errorMessage` and enqueues nothing.
     func hasTransfer(for source: Model) -> Bool {
         downloads.values.contains { $0.source == source }
     }
 
-    /// Whether every one of `source`'s transfers is paused, so nothing will advance it
-    /// until the user resumes.
+    private func pausedKeys(for source: Model) -> [String] {
+        downloads.compactMap { key, dl in
+            guard dl.source == source, case .paused = dl.state else { return nil }
+            return key
+        }
+    }
+
+    /// Whether every one of `source`'s rows is paused by the network, the pause a fetch may
+    /// lift. A person's Pause is reported to the waiting fetch instead of being undone.
+    func isPausedByNetwork(_ source: Model) -> Bool {
+        let rows = downloads.values.filter { $0.source == source }
+        return !rows.isEmpty && rows.allSatisfy { $0.state == .paused && $0.interruptedByNetwork }
+    }
+
     func isPaused(_ source: Model) -> Bool {
         let rows = downloads.values.filter { $0.source == source }
         return !rows.isEmpty && rows.allSatisfy { $0.state == .paused }
     }
 
-    /// Aggregate progress across `source`'s transfers, or nil when none report a
-    /// fraction yet. A vision model's two rows average, so one file finishing shows as
-    /// half rather than as done.
+    /// A vision model's two rows average, so one file finishing shows as half.
     func fraction(for source: Model) -> Double? {
         let fractions = downloads.values.filter { $0.source == source }.compactMap(\.progress)
         guard !fractions.isEmpty else { return nil }
         return fractions.reduce(0, +) / Double(fractions.count)
     }
 
-    /// Bytes moved for `source`, summed across its rows so a vision model's two files
-    /// rise once instead of restarting per file — the CLI sums an artifact's parts the
-    /// same way.
-    ///
-    /// Nil when no row carries byte counts, which is every MLX directory pull: HubApi
-    /// reports an aggregate fraction (`explicitFraction`) and no bytes, so those keep
-    /// reporting a percentage alone.
-    ///
-    /// `total` is nil unless *every* row could be sized. A sum needs every term, and an
-    /// understated total reads as a transfer that stalls just short of the end.
+    /// Bytes moved for `source`, summed across its rows as the CLI sums an artifact's
+    /// parts. Nil for a directory pull, which reports only a fraction. `total` is nil
+    /// unless every row is sized: an understated total reads as a stall near the end.
     func transferred(for source: Model) -> (done: Int64, total: Int64?)? {
         let rows = downloads.values.filter { $0.source == source && $0.explicitFraction == nil }
         guard !rows.isEmpty else { return nil }
@@ -800,10 +1305,8 @@ final class DownloadCoordinator: NSObject {
         return (rows.reduce(0) { $0 + $1.bytesDownloaded }, total)
     }
 
-    /// The failure reason of any transfer belonging to `source`, if one failed.
-    ///
-    /// A vision model has two rows in one entry, so either failing means the entry will
-    /// not resolve — which is what `ensureModel` is waiting to hear.
+    /// The reason any of `source`'s rows failed: either row of a vision model failing
+    /// means its entry will not resolve.
     func failureReason(for source: Model) -> String? {
         downloads.values.lazy
             .filter { $0.source == source }
@@ -811,42 +1314,51 @@ final class DownloadCoordinator: NSObject {
             .first
     }
 
-    /// Entries a sweep must leave alone: the one just published, every in-flight
-    /// download's entry (which covers a vision model's second transfer and every
-    /// queued or paused row), and every model a running or paused job still needs.
-    /// Job manifests are read rather than taking a `JobStore` dependency, so the
-    /// coordinator doesn't gain a second store reference.
+    /// What `ensureModel` throws in place of the text, so the worker can tell a refusal
+    /// every device would meet from a failure worth another claim.
+    func vaultFailure(for source: Model) -> VaultFetchError? {
+        downloads.values.lazy
+            .filter { $0.source == source }
+            .compactMap(\.vaultFailure)
+            .first
+    }
+
+    /// Entries a sweep must leave alone: the one just published, every row's entry, and
+    /// every model a running or paused job needs. It reads job manifests, not `JobStore`,
+    /// and decodes only running and paused ones: this runs before every fetch, and a device
+    /// keeps all its finished jobs.
     func sweepPins(justInstalled: ModelStorageKey?) -> SweepPins {
-        var pins = SweepPins.activeJobs(storage.loadAllJobManifests())
-        if let justInstalled { pins.entries.insert(justInstalled) }
+        var pins = SweepPins.activeJobs(ws.loadJobManifests { _, peek in
+            SweepPins.activeStatuses.contains(peek.status)
+        })
+        if let justInstalled { pins.models.insert(justInstalled) }
         for download in downloads.values {
             guard let source = download.source else { continue }
-            if let key = ModelStorageKey.of(source) { pins.entries.insert(key) }
-            // An MLX pull is still snapshotting into the hub cache; that tree is its
-            // partial download, not a remnant.
+            pins = pins.withModel(source)
+            // A directory pull's hub-cache tree is its partial, not a remnant.
             if case .directory = download.kind, let repo = download.repo {
                 pins.hubRepos.insert(repo)
             }
         }
+        pins.stagingAttempts = liveStagingAttempts
         return pins
     }
 
+    /// `.staging` children still being written or hashed off the main actor; the sweep
+    /// reads every other one as wreckage.
+    @ObservationIgnored private var liveStagingAttempts: Set<String> = []
+
     // MARK: - Concurrency gate
 
-    /// Number of downloads currently occupying a transfer slot (connecting or
-    /// moving), excluding queued, paused, and failed entries. Counts GGUF
-    /// (URLSession) and MLX (HubApi) transfers alike.
     private var activeDownloadCount: Int {
         downloads.values.reduce(into: 0) { count, dl in
             switch dl.state {
-            case .connecting, .downloading, .resuming, .pausing: count += 1
+            case .connecting, .downloading, .resuming, .pausing, .cancelling: count += 1
             case .queued, .paused, .failed: break
             }
         }
     }
 
-    /// Start `start` now if a slot is free; otherwise leave the download parked
-    /// in `.queued` and enqueue it to run when a slot frees up.
     private func gate(key: String, start: @escaping () -> Void) {
         if activeDownloadCount < Self.maxConcurrentDownloads {
             start()
@@ -855,8 +1367,6 @@ final class DownloadCoordinator: NSObject {
         }
     }
 
-    /// Fill freed slots from the pending queue, FIFO. Skips entries the user
-    /// cancelled while they were queued (their `downloads` entry is already gone).
     private func pumpQueue() {
         while activeDownloadCount < Self.maxConcurrentDownloads, !pendingStarts.isEmpty {
             let next = pendingStarts.removeFirst()
@@ -868,13 +1378,13 @@ final class DownloadCoordinator: NSObject {
     // MARK: - Restoration
 
     private func restoreState() {
-        for record in DownloadStore.allRecords() {
+        for record in downloadStore.allRecords() {
             let key = LocalStorage.modelRelativePath(repo: record.repo, filename: record.filename)
             guard let url = URL(string: record.urlString) else {
-                DownloadStore.clearRecord(for: key)
+                downloadStore.clearRecord(for: key)
                 continue
             }
-            let isPaused = DownloadStore.hasResumeData(for: key)
+            let isPaused = downloadStore.hasResumeData(for: key)
             downloads[key] = Download(
                 filename: record.filename,
                 url: url,
@@ -884,46 +1394,36 @@ final class DownloadCoordinator: NSObject {
                 totalBytes: nil,
                 state: isPaused ? .paused : .connecting,
                 source: record.source,
-                // Only GGUF transfers are persisted, and their quant re-derives from
-                // `source` (the weight filename), so no explicit quant need survive.
-                catalogQuant: nil
+                sha256: record.sha256,
+                // Only GGUF rows persist, and their quant re-derives from `source`.
+                catalogQuant: nil,
+                resumeETag: record.etag
             )
         }
 
-        // Only entries restored from records above are candidates for
-        // reconciliation. `getAllTasks` is async, so a download the user (or a
-        // headless run) starts before its callback fires would otherwise be visible
-        // to the loop below and wrongly deleted — it has no live task *yet*. Scope
-        // the sweep to the restored set so a freshly-started download is never touched.
+        // `getAllTasks` is async: a download started before its callback has no live task
+        // yet, so only restored rows are reconciled.
         let restoredKeys = Set(downloads.keys)
 
-        // Force lazy session creation so we reconnect to any background tasks
-        // still running from a previous launch, then reconcile.
+        // Touching the lazy session reattaches to background tasks from a previous launch.
+        // Until it answers, every restored row is ambiguous.
         session.getAllTasks { [weak self] tasks in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 let liveNames = Set(tasks.compactMap { $0.taskDescription })
-                // Entries that claim to be running but have no live task and no
-                // resume-data → stale. Drop them; the system will redeliver
-                // any pending completion events via the delegate.
-                //
-                // Only `.file` (URLSession-backed) downloads participate: an MLX
-                // `.directory` pull is driven by a Swift `Task`/HubApi, not a
-                // URLSession task, so it never appears in `liveNames` — reconciling
-                // it here would wrongly delete an in-flight MLX download.
-                // A restored, not-yet-reconnected `.file` download sits in
-                // `.connecting` (restoreState maps non-paused records to it); those
-                // are the entries this sweep reconciles. `.paused` (has resume data)
-                // and MLX `.directory` pulls are left untouched.
+                // A restored `.connecting` row with no live task and no resume data is
+                // stale; the system redelivers any pending completion via the delegate.
+                // Only `.file` rows: other kinds never appear in `liveNames`.
                 for (name, dl) in self.downloads {
                     guard case .connecting = dl.state,
                           restoredKeys.contains(name), case .file = dl.kind else { continue }
                     if !liveNames.contains(name)
-                        && !DownloadStore.hasResumeData(for: name) {
+                        && !self.downloadStore.hasResumeData(for: name) {
                         self.downloads.removeValue(forKey: name)
-                        DownloadStore.clearRecord(for: name)
+                        self.downloadStore.clearRecord(for: name)
                     }
                 }
+                await self.reconcileReservations()
             }
         }
     }
@@ -932,11 +1432,9 @@ final class DownloadCoordinator: NSObject {
 
     fileprivate func applyProgress(key: String, written: Int64, expected: Int64) {
         guard var dl = downloads[key] else { return }
-        // Debounce: publish at most one progress update per second per
-        // download. The first frame (no prior timestamp) and the final frame
-        // (written == total) always go through so the bar isn't a second stale
-        // at start/finish. `didWriteData` fires continuously, so a dropped
-        // frame's bytes are simply carried by the next accepted one.
+        guard dl.state != .cancelling else { return }
+        // At most one update per `progressUpdateInterval`; the first and final frames
+        // always publish, and a dropped frame's bytes ride on the next one.
         let now = Date()
         let isComplete = expected > 0 && written >= expected
         if let last = lastProgressPublishedAt[key], !isComplete,
@@ -951,64 +1449,51 @@ final class DownloadCoordinator: NSObject {
         downloads[key] = dl
     }
 
-    /// Provenance captured from `downloads[key]` *before* the async move so
-    /// completion can write the model's sidecar manifest even if `cancel(key:)`
-    /// raced the move and removed the in-memory entry. Re-reading `downloads[key]`
-    /// after the move would lose the entry to that race, so the manifest would fall
-    /// back to string reconstruction (losing the exact typed `source`) — or, for a
-    /// bare key with no repo, be skipped entirely, orphaning the moved file.
+    /// Provenance captured before the move, so a `cancel(key:)` that clears the row cannot
+    /// cost the manifest its typed `source` or orphan the moved file.
     struct CompletionProvenance {
         let repo: String?
         let filename: String
-        /// The typed definition the file was ignited from, when known. Lets
-        /// completion write an exact manifest instead of reconstructing one.
         var source: Model?
+        /// See `Download.sha256`. Nil for the key-reconstruction fallback.
+        var sha256: Sha256?
     }
 
-    /// Resolve download provenance for `key`. Prefers the in-memory
-    /// `downloads[key]` entry: reading it here, before the move, is what closes
-    /// the `cancel(key:)`-races-the-move window — it also carries the typed
-    /// `source`, which the key-reconstruction fallback can't recover.
-    ///
-    /// The fallbacks cover a *different* case: a completion the system
-    /// redelivers after relaunch, when no in-memory entry exists. They don't
-    /// recover from a cancel race — `cancel(key:)` clears the on-disk record
-    /// too. Falls back to the on-disk record; failing that, reconstructs
-    /// `repo`/`filename` from the key itself (`<repo>/<filename>` or bare
-    /// `<filename>` for sideloads), with a nil `source`.
+    /// From the row, else the on-disk record (a completion redelivered after relaunch has
+    /// no row), else `repo`/`filename` parsed from the key with a nil `source`.
     func captureProvenance(key: String) -> CompletionProvenance {
         if let dl = downloads[key] {
-            return CompletionProvenance(repo: dl.repo, filename: dl.filename, source: dl.source)
+            return CompletionProvenance(repo: dl.repo, filename: dl.filename,
+                                        source: dl.source, sha256: dl.sha256)
         }
-        if let record = DownloadStore.allRecords().first(where: {
+        if let record = downloadStore.allRecords().first(where: {
             LocalStorage.modelRelativePath(repo: $0.repo, filename: $0.filename) == key
         }) {
-            return CompletionProvenance(
-                repo: record.repo, filename: record.filename, source: record.source)
+            return CompletionProvenance(repo: record.repo, filename: record.filename,
+                                        source: record.source, sha256: record.sha256)
         }
         let filename = (key as NSString).lastPathComponent
         let repo = filename == key ? nil : (key as NSString).deletingLastPathComponent
         return CompletionProvenance(repo: repo, filename: filename)
     }
 
-    /// Clear the completed download's in-flight state and bump `completedVersion`
-    /// (or record the failure). The artifact was already relocated and its manifest
-    /// written by the `ModelInstaller` before this runs.
+    /// Runs after the installer has published the artifact and its manifest.
     func applyCompletion(key: String, result: Result<Void, Error>) {
         lastProgressPublishedAt.removeValue(forKey: key)
         switch result {
         case .success:
-            // Both reads must precede the clears below: `downloads` and the `DownloadStore` record are
-            // what `captureProvenance` reads, and `totalBytes` lives on the row about to be removed.
-            // Provenance rather than `downloads[key]?.filename`: a completion the system redelivers
-            // after relaunch has no in-memory row, and those are precisely the longest-running
-            // downloads: reading the row directly would drop `model_id` on exactly the transfers
-            // most worth attributing. `totalBytes` has no such fallback and is simply absent there.
+            // Read before the clears below. Provenance, not the row: a completion redelivered
+            // after relaunch has no row, and those are the longest downloads.
             let provenance = captureProvenance(key: key)
             let totalBytes = downloads[key]?.totalBytes
+            let source = downloads[key]?.source
+            if let dl = downloads[key], dl.attempt > 1, let url = dl.url {
+                retryHooks.report(.recovered(url: url.absoluteString, attempts: dl.attempt))
+            }
             downloads.removeValue(forKey: key)
-            DownloadStore.clearRecord(for: key)
-            DownloadStore.clearResumeData(for: key)
+            releaseReservation(afterRetiring: key, source: source)
+            downloadStore.clearRecord(for: key)
+            downloadStore.clearResumeData(for: key)
             completedVersion &+= 1
             Analytics.capture(AnalyticsEvents.modelDownloadCompleted, [
                 AnalyticsEvents.modelId: provenance.filename,
@@ -1020,24 +1505,21 @@ final class DownloadCoordinator: NSObject {
         pumpQueue()
     }
 
-    /// Record a terminal download error: surface the alert, clear the on-disk
-    /// record + resume-data (terminal, so nothing restores on next launch), and
-    /// keep the download as a dismissible `.failed` row — visible, cancellable,
-    /// and detectable by the headless runner, matching the MLX path (`failMLX`)
-    /// rather than silently vanishing. Callers own slot bookkeeping (`pumpQueue`).
+    /// Terminal: clears the record and resume data and keeps a dismissible `.failed` row
+    /// the headless runner can detect. Callers own `pumpQueue`.
     private func markFailed(key: String, error: Error) {
         let reason = humanizedDownloadError(error)
         errorMessage = reason
-        // Before the clears below: a failure redelivered after relaunch has no in-memory row, and
-        // the on-disk record `captureProvenance` falls back to is about to be deleted.
+        // Before the clears: a redelivered failure has no row, only the record.
         let provenance = captureProvenance(key: key)
-        DownloadStore.clearRecord(for: key)
-        DownloadStore.clearResumeData(for: key)
+        downloadStore.clearRecord(for: key)
+        downloadStore.clearResumeData(for: key)
         if var dl = downloads[key] {
             dl.state = .failed(reason: reason)
             downloads[key] = dl
         }
-        // Error KIND only, never the humanized reason: it embeds the source URL.
+        releaseReservation(afterRetiring: key, source: downloads[key]?.source)
+        // Error kind only: the humanized reason embeds the source URL.
         Analytics.capture(AnalyticsEvents.modelDownloadFailed, [
             AnalyticsEvents.modelId: provenance.filename,
             AnalyticsEvents.errorKind: AnalyticsEvents.errorKind(error),
@@ -1050,31 +1532,241 @@ final class DownloadCoordinator: NSObject {
         pumpQueue()
     }
 
-    /// A connectivity error stopped an in-flight transfer. Unlike `applyFailure`,
-    /// keep the download resumable: save any resume data, mark it `.paused` and
-    /// flag it network-interrupted, and leave its record on disk — so it resumes
-    /// automatically when connectivity returns (`resumeAfterReconnect`) or via the
-    /// user's Resume All. No `errorMessage`: a transient blip shouldn't alarm.
-    fileprivate func applyNetworkInterruption(key: String, resumeData: Data?) {
-        guard var dl = downloads[key], case .file = dl.kind else { return }
-        if let resumeData { DownloadStore.saveResumeData(resumeData, for: key) }
+    /// Keep a `.file` transfer resumable after a network error: save resume data, pause the
+    /// row, keep its record, and raise no alert.
+    ///
+    /// Reached when the device goes offline mid-transfer, when a retry comes due offline,
+    /// or when retries run out with a partial kept. `interruptedByNetwork` is set only
+    /// offline, since online no reconnect will come to resume it.
+    ///
+    /// Logged because the row looks like one a person paused.
+    fileprivate func applyNetworkInterruption(key: String, resumeData: Data?,
+                                              response: URLResponse?, error: Error,
+                                              interruptedByNetwork: Bool) {
+        guard downloads[key]?.kind == .file else { return }
+        if let resumeData { keepResumeData(resumeData, for: key, response: response) }
+        guard var dl = downloads[key] else { return }
         lastProgressPublishedAt.removeValue(forKey: key)
         dl.state = .paused
-        dl.interruptedByNetwork = true
+        dl.interruptedByNetwork = interruptedByNetwork
         downloads[key] = dl
+        AppLog.storage.warning(
+            "transfer paused by a network error, kept resumable key=\(key) "
+            + "code=\((error as NSError).code) reason=\(error.localizedDescription) "
+            + "resumeData=\(downloadStore.hasResumeData(for: key)) attempt=\(dl.attempt) "
+            + "interruptedByNetwork=\(interruptedByNetwork)")
         pumpQueue()
     }
 
+    // MARK: - Retries
+
+    /// Retry a transient `.file` failure while attempts remain; on the last attempt keep
+    /// the partial if there is one; otherwise fail.
+    ///
+    /// During the wait the row keeps its slot as `.connecting`, so a waiting `ensureModel`
+    /// sees no stall; a `Retry-After` can hold it up to `RetryPolicy.retryAfterLimit`.
+    /// Offline when the wait ends, the row pauses as on a network drop.
+    fileprivate func retryOrFail(key: String, error: Error, disposition: Disposition,
+                                 resumeData: Data?, response: URLResponse?) {
+        guard let dl = downloads[key], case .file = dl.kind, let url = dl.url else {
+            applyFailure(key: key, error: error)
+            return
+        }
+        let policy = RetryPolicy.download
+        let next = policy.next(after: dl.attempt, disposition, jitter: retryHooks.jitter)
+        if let event = RetryEvent(after: next, url: url.absoluteString, attempt: dl.attempt,
+                                   policy: policy, error: error) {
+            retryHooks.report(event)
+        }
+        switch next {
+        case .giveUp:
+            // `keepResumeData` drops a partial that joins two versions of the file.
+            var keptPartial = false
+            if case .transient = disposition, resumeData != nil {
+                keepResumeData(resumeData, for: key, response: response)
+                keptPartial = downloadStore.hasResumeData(for: key)
+            }
+            if keptPartial {
+                applyNetworkInterruption(key: key, resumeData: nil, response: response,
+                                         error: error,
+                                         interruptedByNetwork: !reachability.isConnected)
+            } else {
+                applyFailure(key: key, error: error)
+            }
+        case .refuseRetryAfter:
+            applyFailure(key: key, error: error)
+        case let .retry(wait):
+            keepResumeData(resumeData, for: key, response: response)
+            guard var dl = downloads[key] else { return }
+            dl.attempt += 1
+            dl.state = .connecting
+            downloads[key] = dl
+            lastProgressPublishedAt.removeValue(forKey: key)
+            let sleep = retryHooks.sleep
+            retryTasks[key] = Task { [weak self] in
+                // Paused or cancelled meanwhile; that path settled the row.
+                do { try await sleep(wait) } catch { return }
+                // A retry soon after launch can come due before the path monitor reports.
+                await self?.awaitReachabilityReading()
+                guard let self, !Task.isCancelled else { return }
+                self.retryTasks.removeValue(forKey: key)
+                guard self.downloads[key]?.state == .connecting else { return }
+                // Offline, a new task would spend the resume data and park in
+                // `waitsForConnectivity`; pausing keeps it for the reconnect.
+                guard self.reachability.isConnected else {
+                    self.applyNetworkInterruption(key: key, resumeData: nil, response: nil,
+                                                  error: error, interruptedByNetwork: true)
+                    return
+                }
+                self.performResume(key: key)
+            }
+        }
+    }
+
+    /// Keep `data` as resume data and record the ETag of `response`, whose bytes it holds.
+    /// With no strong ETag the data is kept but `performResume` will start from zero.
+    ///
+    /// Discards the data when it is nil, or when `response` is a `206` to a resume with a
+    /// different ETag, as its bytes already join two versions of the file.
+    private func keepResumeData(_ data: Data?, for key: String, response: URLResponse?) {
+        guard var dl = downloads[key] else { return }
+        let changed = changedResumeETag(key: key, response: response) != nil
+        if let data, !changed {
+            downloadStore.saveResumeData(data, for: key)
+            dl.resumeETag = Self.strongEtag(of: response)
+        } else {
+            if data != nil {
+                AppLog.storage.info(
+                    "resume data dropped: the resumed response has a different ETag, the next "
+                    + "attempt starts from zero key=\(key)")
+            }
+            downloadStore.clearResumeData(for: key)
+            dl.resumeETag = nil
+        }
+        downloads[key] = dl
+        saveRecord(for: dl)
+    }
+
+    /// Both ETags when `response` is a `206` to a resume with a different ETag. Nil for a
+    /// `200`, which URLSession writes from zero.
+    private func changedResumeETag(
+        key: String, response: URLResponse?
+    ) -> (expected: String, received: String?)? {
+        guard let expected = downloads[key]?.resumeETag,
+              (response as? HTTPURLResponse)?.statusCode == 206 else { return nil }
+        let received = Self.strongEtag(of: response)
+        return received == expected ? nil : (expected, received)
+    }
+
+    /// The file changed on the server since the partial: start from zero.
+    ///
+    /// `stage` is `response` (caught at the resume's first response) or `finish` (for a
+    /// resume whose `didResumeAtOffset` never reached the app, such as a background
+    /// transfer completed while suspended).
+    ///
+    /// The restart counts as an attempt with no wait; with none left the row fails. A row
+    /// no longer transferring (`.pausing`) gets no new task, and its next resume starts
+    /// from zero.
+    private func restartFromZero(key: String, expected: String, received: String?,
+                                 at stage: String) {
+        guard var dl = downloads[key] else { return }
+        AppLog.storage.info(
+            "resumed download has a different ETag, restarting from zero key=\(key) "
+            + "expected=\(expected) received=\(received ?? "none") at=\(stage)")
+        downloadStore.clearResumeData(for: key)
+        dl.resumeETag = nil
+        dl.bytesDownloaded = 0
+        downloads[key] = dl
+        saveRecord(for: dl)
+        guard [.connecting, .downloading, .resuming].contains(dl.state) else {
+            AppLog.storage.info(
+                "restart from zero deferred: the row stopped transferring key=\(key) "
+                + "state=\(String(describing: dl.state))")
+            return
+        }
+        guard dl.attempt < RetryPolicy.download.attempts else {
+            AppLog.storage.warning(
+                "restart from zero refused: the attempts ran out key=\(key) "
+                + "attempt=\(dl.attempt)")
+            applyFailure(key: key, error: DownloadError.transport(
+                "the model file changed on the server, and no attempts remain"))
+            return
+        }
+        dl.attempt += 1
+        downloads[key] = dl
+        performResume(key: key)
+    }
+
+    /// A weak ETag (`W/"…"`) promises the same meaning, not the same bytes, so it cannot
+    /// confirm a byte range.
+    nonisolated static func strongEtag(of response: URLResponse?) -> String? {
+        guard let etag = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag"),
+              !etag.isEmpty else { return nil }
+        return strongEtagValue(etag)
+    }
+
+    /// Installs still holding their bytes. The background completion handler waits for
+    /// them: calling it lets the system suspend the app mid-hash, losing the download.
+    @ObservationIgnored private var pendingInstalls = 0
+    @ObservationIgnored private var deferredBackgroundCompletion = false
+
+    private func beginDeferredInstall(key: String, installer: GGUFModelInstaller, adopted: URL) {
+        pendingInstalls += 1
+        // Pinned while the hash runs, or the sweep reads the bytes as an orphan.
+        let attempt = adopted.deletingLastPathComponent().lastPathComponent
+        liveStagingAttempts.insert(attempt)
+        // Detached: an inherited task would hash on the main actor. `finish` being
+        // `nonisolated` does not help, as a synchronous call runs on its caller.
+        Task.detached {
+            let outcome = Result { try installer.finish(adopted: adopted) }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.liveStagingAttempts.remove(attempt)
+                // `finish` cannot stop partway, so a cancel during the hash is undone here.
+                guard self.downloads[key]?.state != .cancelling else {
+                    if let spec = installer.entrySpec,
+                       let dir = self.ws.models.entryDir(for: spec) {
+                        try? FileManager.default.removeItem(at: dir)
+                    }
+                    self.pendingInstalls -= 1
+                    self.finishCancellation(key: key, source: installer.entrySpec)
+                    if self.pendingInstalls == 0, self.deferredBackgroundCompletion {
+                        self.deferredBackgroundCompletion = false
+                        self.callBackgroundCompletion()
+                    }
+                    return
+                }
+                if case .success = outcome {
+                    self.sweepAfterInstall(
+                        justInstalled: installer.entrySpec.flatMap(ModelStorageKey.of))
+                }
+                self.applyCompletion(key: key, result: outcome)
+                self.pendingInstalls -= 1
+                if self.pendingInstalls == 0, self.deferredBackgroundCompletion {
+                    self.deferredBackgroundCompletion = false
+                    self.callBackgroundCompletion()
+                }
+            }
+        }
+    }
+
     fileprivate func callBackgroundCompletion() {
+        guard pendingInstalls == 0 else {
+            deferredBackgroundCompletion = true
+            return
+        }
         backgroundCompletionHandler?()
         backgroundCompletionHandler = nil
     }
 
     private func markPaused(key: String) {
         guard var dl = downloads[key] else { return }
+        if dl.state == .cancelling {
+            downloadStore.clearResumeData(for: key)
+            return
+        }
         dl.state = .paused
         downloads[key] = dl
-        // Pausing frees a slot — let a queued download take it.
         pumpQueue()
     }
 }
@@ -1099,6 +1791,18 @@ extension DownloadCoordinator: URLSessionDownloadDelegate {
                                  expectedTotalBytes: Int64) {
         guard let key = downloadTask.taskDescription else { return }
         MainActor.assumeIsolated {
+            // A cancel or pause owns its task; the pause's `keepResumeData` drops a changed
+            // `206` itself.
+            if ![.cancelling, .pausing].contains(self.downloads[key]?.state),
+               let change = self.changedResumeETag(key: key, response: downloadTask.response) {
+                // Its later callbacks may already be queued; with no description they stop
+                // at the guard, and `pause`/`cancel` match only the new task.
+                downloadTask.taskDescription = nil
+                downloadTask.cancel()
+                self.restartFromZero(key: key, expected: change.expected,
+                                     received: change.received, at: "response")
+                return
+            }
             self.applyProgress(key: key,
                                written: fileOffset,
                                expected: expectedTotalBytes)
@@ -1108,21 +1812,18 @@ extension DownloadCoordinator: URLSessionDownloadDelegate {
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                  didFinishDownloadingTo location: URL) {
         guard let key = downloadTask.taskDescription else { return }
-        // The temp file at `location` is deleted when this method returns, so the
-        // install (relocate + record) must run synchronously here. The delegate
-        // queue is `.main`, so we hop onto the main actor without a Task.
+        // `location` is deleted when this returns, so the adopt must run synchronously.
         MainActor.assumeIsolated {
-            // Capture provenance *before* the move: a `cancel(key:)` racing the move
-            // clears `downloads[key]`, so reading it after would lose `repo`/`source`
-            // and orphan the moved file. The installer takes the captured provenance.
+            // Cancellation owns the task until `didCompleteWithError`, which follows even a
+            // success.
+            if self.downloads[key]?.state == .cancelling { return }
             let provenance = self.captureProvenance(key: key)
             let result: Result<Void, Error>
+            let resumeETag = self.downloads[key]?.resumeETag
             if let http = downloadTask.response as? HTTPURLResponse,
                !(200...299).contains(http.statusCode) {
-                // The failing URL travels with the error, as the crate's
-                // `ModelFetchError::Http { url, .. }` carries it: a 404 on a pinned
-                // revision and a 404 on a mistyped filename read identically without it,
-                // and a headless run has no other channel to tell them apart.
+                // The URL travels with the error, as in the crate's `ModelFetchError::Http`:
+                // otherwise a 404 on a pinned revision and on a mistyped filename read alike.
                 var info: [String: Any] = [
                     NSLocalizedDescriptionKey:
                         "The download couldn't be completed (server returned status \(http.statusCode)). Please try again.",
@@ -1130,16 +1831,37 @@ extension DownloadCoordinator: URLSessionDownloadDelegate {
                 if let url = downloadTask.originalRequest?.url ?? http.url {
                     info[NSURLErrorFailingURLErrorKey] = url
                 }
-                result = .failure(NSError(domain: "Pipette", code: http.statusCode, userInfo: info))
+                var disposition = Disposition(
+                    status: http.statusCode, retryAfter: retryAfter(of: http))
+                // A refused resume (a `416`, or a `403` from an expired signed CDN URL)
+                // refuses the partial, not the file; the next attempt starts from zero.
+                if resumeETag != nil, disposition == .permanent {
+                    disposition = .transient(retryAfter: nil)
+                }
+                self.retryOrFail(
+                    key: key,
+                    error: NSError(domain: "Pipette", code: http.statusCode, userInfo: info),
+                    disposition: disposition, resumeData: nil, response: http)
+                return
+            } else if let change = self.changedResumeETag(key: key,
+                                                          response: downloadTask.response) {
+                // URLSession appended this `206` unchecked; returning discards the temp file.
+                self.restartFromZero(key: key, expected: change.expected,
+                                     received: change.received, at: "finish")
+                return
             } else {
                 let installer = GGUFModelInstaller(
                     repo: provenance.repo, filename: provenance.filename,
-                    source: provenance.source, storage: self.storage
+                    source: provenance.source, sha256: provenance.sha256, ws: self.ws
                 )
-                result = Result { try installer.install(from: location) }
-                if case .success = result {
-                    self.sweepAfterInstall(
-                        justInstalled: installer.entrySpec.flatMap(ModelStorageKey.of))
+                // `adopt` is a synchronous rename; `finish` hashes for seconds, so it runs
+                // off the main actor.
+                do {
+                    let adopted = try installer.adopt(from: location)
+                    self.beginDeferredInstall(key: key, installer: installer, adopted: adopted)
+                    return
+                } catch {
+                    result = .failure(error)
                 }
             }
             self.applyCompletion(key: key, result: result)
@@ -1148,24 +1870,32 @@ extension DownloadCoordinator: URLSessionDownloadDelegate {
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
                                  didCompleteWithError error: Error?) {
-        guard let error = error, let key = task.taskDescription else { return }
-        // User-initiated pause/cancel surfaces as URLError.cancelled — that
-        // path already did its own cleanup (pause → resume data, cancel →
-        // record removal), so ignore the error event here.
+        guard let key = task.taskDescription else { return }
+        let cancelling = MainActor.assumeIsolated {
+            guard self.downloads[key]?.state == .cancelling else { return false }
+            self.noteCancelledURLTaskFinished(key: key, taskIdentifier: task.taskIdentifier)
+            return true
+        }
+        if cancelling { return }
+        guard let error else { return }
+        // A pause or cancel surfaces as `URLError.cancelled`, already handled.
         let nsErr = error as NSError
         if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled {
             return
         }
-        // A connectivity error is transient — keep the download resumable so it
-        // recovers on reconnect. Other errors (bad URL, gated auth, …) are
-        // terminal and drop the download as before.
+        // Offline keeps the download for the reconnect; a transient online failure retries;
+        // the rest are terminal.
         let resumeData = nsErr.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
-        let recoverable = isRecoverableNetworkError(error)
+        let offline = isOfflineError(error)
+        let disposition = (error as? URLError).map { Disposition(of: $0.code) } ?? .permanent
         MainActor.assumeIsolated {
-            if recoverable {
-                self.applyNetworkInterruption(key: key, resumeData: resumeData)
+            if offline {
+                self.applyNetworkInterruption(key: key, resumeData: resumeData,
+                                              response: task.response, error: error,
+                                              interruptedByNetwork: true)
             } else {
-                self.applyFailure(key: key, error: error)
+                self.retryOrFail(key: key, error: error, disposition: disposition,
+                                 resumeData: resumeData, response: task.response)
             }
         }
     }
@@ -1175,70 +1905,4 @@ extension DownloadCoordinator: URLSessionDownloadDelegate {
             self.callBackgroundCompletion()
         }
     }
-}
-
-// MARK: - Error display
-
-/// Single source of truth for how the app treats a `URLError.code`: whether the
-/// failure is transient connectivity (keep the download resumable and auto-resume
-/// on reconnect) and the user-facing message when we override the system one.
-/// Keeps `isRecoverableNetworkError` and `humanizedDownloadError` from drifting
-/// apart over the same enum.
-nonisolated func downloadURLErrorInfo(_ code: URLError.Code) -> (recoverable: Bool, message: String?) {
-    switch code {
-    case .notConnectedToInternet, .networkConnectionLost:
-        return (true, "No internet connection. Check your network and try again.")
-    case .timedOut:
-        return (true, "The download timed out. Check your connection and try again.")
-    case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
-        return (true, "Couldn't reach the download server. Please try again in a moment.")
-    case .dataNotAllowed, .internationalRoamingOff:
-        return (true, nil)
-    case .userAuthenticationRequired:
-        return (false, "This model is gated. Add a Hugging Face access token in Settings, then try again.")
-    default:
-        return (false, nil)
-    }
-}
-
-/// Whether a URLSession failure is transient connectivity worth keeping the
-/// download resumable for, rather than a terminal error no retry fixes.
-nonisolated func isRecoverableNetworkError(_ error: Error) -> Bool {
-    guard let urlError = error as? URLError else { return false }
-    return downloadURLErrorInfo(urlError.code).recoverable
-}
-
-/// Turn a download failure into a short, human-readable sentence for the
-/// "Download Error" alert. Maps common connectivity / HTTP-status cases to
-/// plain language and falls back to the system description otherwise.
-///
-/// An HTTP failure also names the status and the URL it was returned for, as the crate's
-/// `ModelFetchError::Http` does — the sentence alone cannot say *which* coordinate was
-/// refused, and on a plan-dispatched run that is the whole diagnosis.
-func humanizedDownloadError(_ error: Error) -> String {
-    if let urlError = error as? URLError {
-        return downloadURLErrorInfo(urlError.code).message ?? urlError.localizedDescription
-    }
-
-    let ns = error as NSError
-    if ns.domain == "Pipette" {
-        let sentence: String? = switch ns.code {
-        case 401, 403:
-            "Access to this model was denied. It may be gated. Add a Hugging Face token in Settings and try again."
-        case 404:
-            "This model file couldn't be found on the server. It may have moved or been removed."
-        case 500...599:
-            "The download server ran into a problem. Please try again in a moment."
-        default:
-            nil
-        }
-        if let sentence {
-            guard let url = ns.userInfo[NSURLErrorFailingURLErrorKey] as? URL else {
-                return sentence
-            }
-            return "\(sentence) (HTTP \(ns.code) for \(url.absoluteString))"
-        }
-    }
-
-    return error.localizedDescription
 }

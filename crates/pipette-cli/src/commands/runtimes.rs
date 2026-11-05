@@ -1,24 +1,27 @@
-//! `runtimes` — runtime-build management. Pulled runtimes live under the
-//! workspace `runtimes/` tree and `list` reads the shared artifact store
-//! (llama.cpp / docker / UV / MLX), which is the only layout written or read.
-//!
-//! `pull` takes one self-contained `--runtime` reference (a URI or JSON
-//! `Runtime`) and installs every pullable kind through
-//! [`pipette_artifacts::ensure_runtime`] (shared store stage → fetch →
-//! `manifest.toml` → publish). It places bytes on this host without
-//! demanding that this host be able to run them, so there is no GPU
-//! preflight here; a uv install still probes the torch it just built.
+//! `runtimes`: the local runtime store. `pull` installs every pullable kind
+//! through [`pipette_artifacts::ensure_runtime`]. It places bytes on this host
+//! without demanding that this host can run them, so there is no GPU preflight.
+
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Args, Subcommand, ValueEnum};
 use tabled::Tabled;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use pipette_artifacts::{ensure_runtime, runtime_download_size};
+use pipette_artifacts_catalog::runtime::{llamacpp, mlx, onnx_genai, openvino, ovms, torch_oai};
 use pipette_http::HttpClient;
-use pipette_plan_types::{descriptor, LlamaCppFlavor, Runtime, VllmFlavor};
+use pipette_ops::custom_label::descriptor_sha256;
+use pipette_plan_types::{
+    AppleCoreAiMacosPipette, LlamaCppFlavor, Runtime, VllmFlavor, short_digest,
+};
+use pipette_programs::ExternalPrograms;
 
 use crate::artifact_ref::resolve_runtime_arg;
-use crate::commands::print_table_or;
+use crate::commands::write_table_or;
+use crate::console::Console;
 use crate::progress::CellProgress;
 use crate::runtime_uri::runtime_to_uri;
 use crate::workspace::PipetteWorkspace;
@@ -45,7 +48,6 @@ pub enum RuntimeCommand {
     Remove(RemoveArgs),
 }
 
-/// `runtimes list` — how to render the runtime column.
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// How to render the runtime column
@@ -62,8 +64,6 @@ enum ListFormat {
     Uri,
 }
 
-/// `runtimes catalog` — one subword per installable runtime *type*; each row is
-/// a paste-ready `--runtime` URI.
 #[derive(Args, Debug)]
 pub struct CatalogArgs {
     #[command(subcommand)]
@@ -84,9 +84,15 @@ pub enum CatalogCommand {
     /// Bundled OpenVINO venv builds (Intel CPU / GPU / NPU)
     #[command(name = "uv_openvino")]
     UvOpenvino,
+    /// Bundled ONNX Runtime GenAI venv builds (one per execution provider)
+    #[command(name = "uv_onnx_genai")]
+    UvOnnxGenai,
     /// Upstream llama.cpp CLI releases (fetched from GitHub)
     #[command(name = "llamacpp_cli_stock_tools")]
     LlamacppCliStockTools(LlamacppCatalogArgs),
+    /// OpenVINO Model Server releases whose archives the bundled catalog pins
+    #[command(name = "ovms")]
+    Ovms,
 }
 
 #[derive(Args, Debug)]
@@ -94,9 +100,9 @@ pub struct LlamacppCatalogArgs {
     /// Runtime flavor for the emitted ref + asset-availability filter (e.g.
     /// macos-arm64, linux-x64-cpu). `runtimes flavors` lists the vocabulary
     /// and the upstream asset each name resolves to.
-    // Validated against the known set: `LlamaCppFlavor::parse` would otherwise
-    // accept anything as a `Custom` build, and a custom flavor names no
-    // upstream release asset, so it could only ever list nothing.
+    // Validated against the known set: `LlamaCppFlavor::parse` accepts anything
+    // as a `Custom` build, which names no upstream release asset and so lists
+    // nothing.
     #[arg(long, value_parser = parse_known_flavor)]
     flavor: LlamaCppFlavor,
     /// Max releases to fetch from GitHub
@@ -104,7 +110,6 @@ pub struct LlamacppCatalogArgs {
     limit: usize,
 }
 
-/// `runtimes remove` input — a self-contained runtime reference.
 #[derive(Args, Debug)]
 pub struct RemoveArgs {
     /// Runtime URI or JSON `Runtime` object — the same grammar as `pull`,
@@ -114,7 +119,6 @@ pub struct RemoveArgs {
     runtime: String,
 }
 
-/// `runtimes pull` input — a self-contained runtime reference.
 #[derive(Args, Debug)]
 #[command(after_long_help = RUNTIME_URI_EXAMPLES)]
 pub struct PullArgs {
@@ -126,23 +130,28 @@ pub struct PullArgs {
 }
 
 /// `--runtime` notations, one example per scheme, shown under `--help`. A URI is
-/// `<scheme>://<key>=<value>[&<key>=<value>…]`; `&` separates pairs and a URL
-/// value may not contain `?`. Any runtime is also accepted as a JSON `Runtime`
-/// object (an arg starting with `{`).
+/// `<scheme>://<key>=<value>[&<key>=<value>…]`; a URL value may not contain `?`.
+/// An arg starting with `{` is a JSON `Runtime` object.
 const RUNTIME_URI_EXAMPLES: &str = "\
 PULLABLE SCHEMES (runtimes pull) -- a scheme is the runtime type with `-` for `_`:
-  llamacpp-cli-stock-tools   version(+repo) xor url; flavor   (repo defaults to github.com/ggml-org/llama.cpp)
+  llamacpp-cli-stock-tools   version(+repo, asset) xor url; flavor   (repo defaults to github.com/ggml-org/llama.cpp; asset to the flavor's file)
   docker-vllm                image, tag; [flavor] (default nvidia_gpu)   -- pulled into the docker daemon
   docker-sglang              image, tag; [flavor] (default nvidia_gpu)   -- pulled into the docker daemon
   mlx-macos-pipette          version; [flavor] (default macos-arm64)     -- catalog: mlx_macos_pipette (macOS)
-  core-ai-macos-pipette      version (default: bundled coreai-models pin)  -- OS-bundled engine; sidecar built from source (macOS 27+)
+  core-ai-macos-pipette      version (default: bundled coreai-models pin)  -- the OS provides the engine; pipette builds the sidecar (macOS 27+)
   uv-vllm                    server, build, python                       -- catalog: uv_vllm (Linux)
   uv-sglang                  server, build, python                       -- catalog: uv_sglang (Linux)
   uv-openvino                version                                     -- catalog: uv_openvino (Linux/Windows)
+  uv-onnx-genai              version, ep                                 -- catalog: uv_onnx_genai (one venv per provider)
+  ovms                       version(+repo) xor url; flavor              -- catalog: ovms (repo defaults to github.com/openvinotoolkit/model_server)
+  trt-edgellm                url; flavor                                 -- no catalog: a server archive by URL (Jetson)
 
 EXAMPLES:
   # llama.cpp from an upstream release (repo defaults to ggml-org/llama.cpp)
   pipette runtimes pull --runtime 'llamacpp-cli-stock-tools://version=b9305&flavor=macos-arm64'
+
+  # llama.cpp from a named release file
+  pipette runtimes pull --runtime 'llamacpp-cli-stock-tools://version=b11399&asset=llama-b11399-bin-win-cuda-13.4-x64.zip&flavor=windows-x64-cuda-13'
 
   # llama.cpp from a fork / explicit repo
   pipette runtimes pull --runtime 'llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=linux-x64-cpu'
@@ -156,52 +165,81 @@ EXAMPLES:
 
   # MLX (macOS) / uv (Linux): catalog installs; list with runtimes catalog <type>
   pipette runtimes pull --runtime 'mlx-macos-pipette://version=0.31.3&flavor=macos-arm64'
-  pipette runtimes pull --runtime 'uv-vllm://server=0.22.0&build=cu129&python=3.12'
-  pipette runtimes pull --runtime 'uv-sglang://server=0.5.12.post1&build=cu121&python=3.12'
+  pipette runtimes pull --runtime 'uv-vllm://server=0.32.0&build=cu129&python=3.12'
+  pipette runtimes pull --runtime 'uv-sglang://server=0.5.23&build=cu130&python=3.12'
 
-  # Core AI (macOS 27+): engine ships with the OS; the URI names the
-  # bundled coreai-models pin and the Swift sidecar is built from source.
+  # Core AI (macOS 27+): the OS provides the engine. The URI names the
+  # bundled coreai-models pin. Pipette builds the Swift sidecar from source.
   pipette runtimes pull --runtime 'core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60'
 
   # OpenVINO (Linux/Windows) -- one venv per version; `device` is per cell, not per install
-  pipette runtimes pull --runtime 'uv-openvino://version=2026.2.1'
+  pipette runtimes pull --runtime 'uv-openvino://version=2026.4.1'
+
+  # ONNX Runtime GenAI -- one venv per version AND execution provider
+  pipette runtimes pull --runtime 'uv-onnx-genai://version=0.17.1&ep=cpu'
+
+  # OpenVINO Model Server -- an upstream release archive per OS; `device` is per cell
+  pipette runtimes pull --runtime 'ovms://version=v2026.4.1&flavor=windows-x64'
+  pipette runtimes pull --runtime 'ovms://version=v2026.4.1&flavor=ubuntu24-x64'
+
+  # TensorRT Edge-LLM (Jetson) -- a server archive; engines build into the compile cache per cell
+  pipette runtimes pull --runtime 'trt-edgellm://url=https://example.com/trt-edgellm-server-0.11.0-jetson-orin-cuda-13-4e3f9d23f052.tar.gz&flavor=jetson-orin-cuda-13'
 
   # or a JSON Runtime object
   pipette runtimes pull --runtime '{\"type\":\"docker_vllm\",\"image_name\":\"vllm\",\"image_tag\":\"v0.10.0\",\"flavor\":\"nvidia_gpu\"}'
 ";
 
 impl RuntimeArgs {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
-        self.command.execute(ws, http)
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
+        self.command.execute(ws, http, programs, console)
     }
 }
 
 impl RuntimeCommand {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
         match self {
-            RuntimeCommand::List(args) => list(ws, args.format),
-            RuntimeCommand::Catalog(args) => args.execute(http),
-            RuntimeCommand::Flavors => print_llamacpp_flavors(),
-            RuntimeCommand::Pull(args) => args.execute(ws, http),
-            RuntimeCommand::Remove(args) => args.execute(ws),
+            RuntimeCommand::List(args) => list(ws, args.format, coreai_sidecar(), console),
+            RuntimeCommand::Catalog(args) => args.execute(http, console),
+            RuntimeCommand::Flavors => write_llamacpp_flavors(console),
+            RuntimeCommand::Pull(args) => args.execute(ws, http, programs, console),
+            RuntimeCommand::Remove(args) => args.execute(ws, console),
         }
     }
 }
 
 impl PullArgs {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
         use anyhow::Context;
 
         let declared = resolve_runtime_arg(ws, &self.runtime)?;
         // No pin set: `ensure_runtime` pins the entry it is about to publish.
-        let ctx = ws.artifacts(http);
+        // A uv or docker install spawns the program this process located, so an
+        // absent one is reported to the pull that needed it.
+        let ctx = ws.artifacts(http, programs);
         let store = ws.runtimes();
 
         // A llama.cpp archive streams bytes this process counts; a uv solve and a
         // docker pull report their own, so those draw nothing here.
         let progress =
             CellProgress::new(&[runtime_download_size(&store, &declared).unwrap_or(None)]);
-        // One procedure for every installable kind (llama / docker / mlx / uv).
         let _bound = ensure_runtime(&ctx.with_progress(progress.sink()), &store, &declared)
             .with_context(|| format!("installing runtime `{declared}`"))?;
         // Erased before the summary line, which would otherwise print under a
@@ -227,16 +265,17 @@ impl PullArgs {
         let entry = store
             .find(&declared)?
             .ok_or_else(|| anyhow::anyhow!("runtime missing after ensure"))?;
-        println!(
+        writeln!(
+            console.out(),
             "Installed `{declared}` → {}",
             store.entry_dir_for(&entry)?.display()
-        );
+        )?;
         Ok(())
     }
 }
 
 impl RemoveArgs {
-    pub fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
+    pub fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
         let declared = resolve_runtime_arg(ws, &self.runtime)?;
         if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
             #[cfg(target_os = "macos")]
@@ -256,7 +295,7 @@ impl RemoveArgs {
         }
         let store = ws.runtimes();
         if store.remove(&declared)? {
-            println!("Removed `{declared}`");
+            writeln!(console.out(), "Removed `{declared}`")?;
             // Same key as the store entry, so removing the runtime is what
             // makes its compiled artifacts unaddressable; leaving them would
             // strand bytes nothing can reach.
@@ -265,21 +304,21 @@ impl RemoveArgs {
                 std::fs::remove_dir_all(&cache).with_context(|| {
                     format!("removing the compile cache at {}", cache.display())
                 })?;
-                println!("  reclaimed the compile cache");
+                writeln!(console.out(), "  reclaimed the compile cache")?;
             }
             if matches!(declared, Runtime::DockerVllm(_) | Runtime::DockerSglang(_)) {
-                println!(
+                writeln!(
+                    console.out(),
                     "  note: the docker image is still in the daemon; `docker rmi` to remove it"
-                );
+                )?;
             }
             return Ok(());
         }
-        println!("`{declared}` is not installed");
+        writeln!(console.out(), "`{declared}` is not installed")?;
         Ok(())
     }
 }
 
-/// One row of `runtimes list`.
 #[derive(Tabled)]
 struct RuntimeRow {
     #[tabled(rename = "RUNTIME")]
@@ -292,32 +331,78 @@ struct RuntimeRow {
     pulled: String,
 }
 
-fn list(ws: &PipetteWorkspace, format: ListFormat) -> anyhow::Result<()> {
+/// The cached Core AI sidecar. Core AI has no store entry, so `list` shows it
+/// from the sidecar cache.
+fn coreai_sidecar() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        pipette_coreai::cached_sidecar()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn list(
+    ws: &PipetteWorkspace,
+    format: ListFormat,
+    coreai_sidecar: Option<PathBuf>,
+    console: &mut dyn Console,
+) -> anyhow::Result<()> {
+    write_table_or(
+        console.out(),
+        &runtime_rows(ws, format, coreai_sidecar.as_deref())?,
+        "No runtimes installed.",
+    )?;
+    Ok(())
+}
+
+/// The installed runtimes as `list` rows, sorted by the rendered runtime column.
+/// A cached Core AI sidecar adds a row for the bundled Core AI runtime, pulled
+/// when the sidecar was built.
+fn runtime_rows(
+    ws: &PipetteWorkspace,
+    format: ListFormat,
+    coreai_sidecar: Option<&Path>,
+) -> anyhow::Result<Vec<RuntimeRow>> {
     let store = ws.runtimes();
-    let mut rows: Vec<RuntimeRow> = store
+    let stored = store
         .list()?
         .into_iter()
-        .map(|m| {
+        .map(|m| Ok((m.declared.clone(), m.fetched_at_rfc3339()?)));
+    let coreai = coreai_sidecar.map(|bin| {
+        let built = std::fs::metadata(bin)
+            .and_then(|meta| meta.modified())
+            .with_context(|| format!("reading the build time of {}", bin.display()))?;
+        Ok((
+            Runtime::AppleCoreAiMacosPipette(AppleCoreAiMacosPipette::bundled()),
+            OffsetDateTime::from(built).format(&Rfc3339)?,
+        ))
+    });
+    let mut rows: Vec<RuntimeRow> = stored
+        .chain(coreai)
+        .map(|entry: anyhow::Result<(Runtime, String)>| {
+            let (declared, pulled) = entry?;
             Ok(RuntimeRow {
-                // A runtime that predates a grammar key has no URI form; fall
-                // back to the identity rather than dropping the row.
+                // A runtime with no URI form (a vault archive, say) falls back
+                // to its identity rather than dropping the row.
                 runtime: match format {
-                    ListFormat::Name => m.declared.cli_ref(),
+                    ListFormat::Name => declared.cli_ref(),
                     ListFormat::Uri => {
-                        runtime_to_uri(&m.declared).unwrap_or_else(|_| m.declared.cli_ref())
+                        runtime_to_uri(&declared).unwrap_or_else(|_| declared.cli_ref())
                     }
                 },
-                runtime_type: m.declared.headless_token().to_owned(),
+                runtime_type: declared.headless_token().to_owned(),
                 // The prefix `--runtime runtime://sha256=<hex>` takes, and the
                 // same id the warehouse stores as `runtime_descriptor_sha256`.
-                digest: descriptor::short_digest(&descriptor::digest(&m.declared)?).to_owned(),
-                pulled: m.fetched_at_rfc3339()?,
+                digest: short_digest(&descriptor_sha256(&declared)?).to_owned(),
+                pulled,
             })
         })
         .collect::<anyhow::Result<_>>()?;
     rows.sort_by(|a, b| a.runtime.cmp(&b.runtime));
-    print_table_or(&rows, "No runtimes installed.");
-    Ok(())
+    Ok(rows)
 }
 
 fn vllm_flavor_label(flavor: VllmFlavor) -> &'static str {
@@ -329,7 +414,7 @@ fn vllm_flavor_label(flavor: VllmFlavor) -> &'static str {
 }
 
 /// A catalog row whose `REF` is pasted verbatim into `--runtime`, carrying its
-/// hardware `FLAVOR`. Used by the bundled uv-* and mlx subwords.
+/// hardware `FLAVOR`. Used by every subword but llama.cpp's.
 #[derive(Tabled)]
 struct CatalogRefRow {
     #[tabled(rename = "REF")]
@@ -338,7 +423,6 @@ struct CatalogRefRow {
     flavor: String,
 }
 
-/// A llama.cpp release row: a paste-ready `REF` plus the release's publish date.
 #[derive(Tabled)]
 struct LlamacppRefRow {
     #[tabled(rename = "REF")]
@@ -347,11 +431,10 @@ struct LlamacppRefRow {
     published: String,
 }
 
-/// One llama.cpp *flavor* — the `--flavor` vocabulary, listed when the subword
-/// is run without one. Carries the upstream asset stem because that is what
-/// makes the choice decidable: flavor names are pipette's, asset names are
-/// upstream's, and they disagree often enough (`linux-x64-openvino` ships as
-/// `ubuntu-openvino-…`) that seeing both is the point.
+/// One llama.cpp flavor with its upstream asset stem: flavor names are
+/// pipette's, asset names are upstream's, and they disagree often enough
+/// (`linux-x64-openvino` ships as `ubuntu-openvino-…`) that seeing both is the
+/// point.
 #[derive(Tabled)]
 struct LlamacppFlavorRow {
     #[tabled(rename = "FLAVOR")]
@@ -360,66 +443,60 @@ struct LlamacppFlavorRow {
     asset: String,
 }
 
-/// Bundled uv vLLM builds as paste-ready `uv-vllm://…` refs. Split from the
-/// printing so the test can assert every emitted ref parses.
+/// Bundled uv vLLM builds as paste-ready `uv-vllm://…` refs, split from the
+/// printing so a test can assert every emitted ref parses.
 fn uv_vllm_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
-    uv_bundled_rows(pipette_torch_oai::catalog::CatalogEntry::is_vllm)
+    uv_bundled_rows(torch_oai::CatalogEntry::is_vllm)
 }
 
 /// Bundled uv SGLang builds as paste-ready `uv-sglang://…` refs.
 fn uv_sglang_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
-    uv_bundled_rows(pipette_torch_oai::catalog::CatalogEntry::is_sglang)
+    uv_bundled_rows(torch_oai::CatalogEntry::is_sglang)
 }
 
-/// Walk the bundled torch-oai catalog, keeping the entries `keep` selects, and
-/// render each as its scheme's paste-ready ref. A cosmetically malformed slug
-/// is unreachable in practice (catalog tests + build.rs validate the table), so
-/// skip one rather than abort the whole listing.
+/// The bundled torch-oai catalog entries `keep` selects, as paste-ready refs.
+/// A malformed slug is skipped rather than aborting the listing; the catalog's
+/// own tests validate the table.
 fn uv_bundled_rows(
-    keep: fn(&pipette_torch_oai::catalog::CatalogEntry) -> bool,
+    keep: fn(&torch_oai::CatalogEntry) -> bool,
 ) -> anyhow::Result<Vec<CatalogRefRow>> {
-    use pipette_torch_oai::catalog::CatalogEntry;
+    use torch_oai::CatalogEntry;
 
-    let mut rows: Vec<CatalogRefRow> = Vec::new();
-    for slug_body in pipette_torch_oai::catalog::slugs()? {
-        let Ok(slug) = pipette_torch_oai::slug::UvSlug::try_new(slug_body) else {
-            continue;
-        };
-        let Some(entry) = pipette_torch_oai::catalog::lookup(&slug)? else {
-            continue;
-        };
-        if !keep(&entry) {
-            continue;
-        }
-        let runtime_ref = match &entry {
-            CatalogEntry::UvVllm {
-                server_version,
-                build,
-                python_version,
-                ..
-            } => format!("uv-vllm://server={server_version}&build={build}&python={python_version}"),
-            CatalogEntry::UvSglang {
-                server_version,
-                build,
-                python_version,
-                ..
-            } => {
-                format!("uv-sglang://server={server_version}&build={build}&python={python_version}")
+    torch_oai::slugs()?
+        .filter_map(|slug_body| torch_oai::slug::UvSlug::try_new(slug_body).ok())
+        .try_fold(Vec::new(), |mut rows, slug| {
+            if let Some(entry) = torch_oai::lookup(&slug)?.filter(keep) {
+                let runtime_ref = match &entry {
+                    CatalogEntry::UvVllm {
+                        server_version,
+                        build,
+                        python_version,
+                        ..
+                    } => format!(
+                        "uv-vllm://server={server_version}&build={build}&python={python_version}"
+                    ),
+                    CatalogEntry::UvSglang {
+                        server_version,
+                        build,
+                        python_version,
+                        ..
+                    } => format!(
+                        "uv-sglang://server={server_version}&build={build}&python={python_version}"
+                    ),
+                };
+                rows.push(CatalogRefRow {
+                    runtime_ref,
+                    flavor: vllm_flavor_label(entry.flavor()).to_string(),
+                });
             }
-        };
-        rows.push(CatalogRefRow {
-            runtime_ref,
-            flavor: vllm_flavor_label(entry.flavor()).to_string(),
-        });
-    }
-    Ok(rows)
+            Ok(rows)
+        })
 }
 
-/// Bundled OpenVINO builds as paste-ready `uv-openvino://…` refs — one row per
-/// version, because one venv serves every device. Which device a cell runs on
-/// is a flag on the cell, not part of what gets installed.
+/// Bundled OpenVINO builds as paste-ready `uv-openvino://…` refs, one row per
+/// version: one venv serves every device, and the device is a flag on the cell.
 fn openvino_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
-    Ok(pipette_openvino::catalog::catalog_entries()?
+    Ok(openvino::catalog_entries()?
         .into_iter()
         .map(|version| CatalogRefRow {
             runtime_ref: format!("uv-openvino://version={version}"),
@@ -428,12 +505,35 @@ fn openvino_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
         .collect())
 }
 
-/// Bundled MLX builds as paste-ready `mlx-macos-pipette://…` refs.
-///
-/// Listable anywhere: the ref is authored and pulled on whatever host runs the
-/// CLI, and only executing it needs a Mac.
+/// Bundled ONNX Runtime GenAI builds as paste-ready `uv-onnx-genai://…` refs,
+/// one row per version and execution provider: each provider is a separate
+/// wheel, so a separate venv.
+fn onnx_genai_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
+    Ok(onnx_genai::catalog_entries()?
+        .into_iter()
+        .map(|(version, ep)| CatalogRefRow {
+            runtime_ref: format!("uv-onnx-genai://version={version}&ep={ep}"),
+            flavor: ep.to_owned(),
+        })
+        .collect())
+}
+
+/// Pinned OVMS releases as paste-ready `ovms://…` refs, one row per release
+/// tag and flavor.
+fn ovms_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
+    Ok(ovms::rows()?
+        .iter()
+        .map(|row| CatalogRefRow {
+            runtime_ref: format!("ovms://version={}&flavor={}", row.tag, row.flavor),
+            flavor: row.flavor.to_string(),
+        })
+        .collect())
+}
+
+/// Bundled MLX builds as paste-ready `mlx-macos-pipette://…` refs. Listable
+/// anywhere: only executing one needs a Mac.
 fn mlx_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
-    Ok(pipette_mlx::catalog::catalog_entries()?
+    Ok(mlx::catalog_entries()?
         .into_iter()
         .map(|(version, flavor)| CatalogRefRow {
             runtime_ref: format!("mlx-macos-pipette://version={version}"),
@@ -443,19 +543,17 @@ fn mlx_rows() -> anyhow::Result<Vec<CatalogRefRow>> {
 }
 
 /// Upstream llama.cpp CLI releases carrying an asset for `flavor`, as
-/// paste-ready `llamacpp-cli-stock-tools://…` refs. Hits GitHub.
-///
-/// Takes the parsed flavor: the caller has already rejected `Custom`, so the
-/// canonical `as_str` is what belongs in an emitted ref.
+/// paste-ready `llamacpp-cli-stock-tools://…` refs. Hits GitHub. The caller has
+/// already rejected `Custom`, so the canonical `as_str` goes in the ref.
 fn llamacpp_rows(
     http: &HttpClient,
     flavor: &LlamaCppFlavor,
     limit: usize,
 ) -> anyhow::Result<Vec<LlamacppRefRow>> {
-    let releases = pipette_llamacpp::github::github_releases(http, limit)?;
+    let releases = llamacpp::github_releases(http, limit)?;
     let rows = releases
         .into_iter()
-        .filter(|release| pipette_llamacpp::github::release_asset_available(release, flavor))
+        .filter(|release| llamacpp::release_asset_available(release, flavor))
         .map(|release| LlamacppRefRow {
             runtime_ref: format!(
                 "llamacpp-cli-stock-tools://version={}&flavor={}",
@@ -468,11 +566,9 @@ fn llamacpp_rows(
     Ok(rows)
 }
 
-/// Holds `--flavor` to the known set, so clap rejects a typo by name and exits
-/// non-zero. Validates through `parse` rather than a list of literals, so the
-/// vocabulary stays defined in exactly one place; the operator is pointed at
-/// `runtimes flavors`, which also shows the upstream asset each name resolves
-/// to — more use than the bare set clap would print.
+/// Holds `--flavor` to the known set, so clap rejects a typo by name. Validates
+/// through `parse`, so the vocabulary is defined in one place, and points at
+/// `runtimes flavors`, which also shows each name's upstream asset.
 fn parse_known_flavor(value: &str) -> Result<LlamaCppFlavor, String> {
     let flavor = LlamaCppFlavor::parse(value);
     if flavor.is_custom() {
@@ -486,23 +582,26 @@ fn parse_known_flavor(value: &str) -> Result<LlamaCppFlavor, String> {
     Ok(flavor)
 }
 
-/// `runtimes flavors` — the `--flavor` vocabulary. Needs neither workspace nor
-/// network, so it is dispatched before either is set up: a fresh box has to be
-/// able to read this before it can pick what to pull.
-pub fn print_llamacpp_flavors() -> anyhow::Result<()> {
-    print_table_or(&llamacpp_flavor_rows(), "No llama.cpp flavors.");
+/// `runtimes flavors`: the `--flavor` vocabulary. Needs neither workspace nor
+/// network, so a fresh box can read it before it picks what to pull.
+pub fn write_llamacpp_flavors(console: &mut dyn Console) -> anyhow::Result<()> {
+    write_table_or(
+        console.out(),
+        &llamacpp_flavor_rows(),
+        "No llama.cpp flavors.",
+    )?;
     Ok(())
 }
 
-/// The `--flavor` vocabulary: every flavor pipette tracks, with the upstream
-/// asset stem it resolves to. Offline — this is the enum, not the release feed.
+/// Every flavor pipette tracks, with the upstream asset stem it resolves to.
+/// Offline: this is the enum, not the release feed.
 fn llamacpp_flavor_rows() -> Vec<LlamacppFlavorRow> {
     LlamaCppFlavor::known()
         .map(|flavor| LlamacppFlavorRow {
             flavor: flavor.to_string(),
             // Every known flavor names an asset (pinned by
-            // `every_known_flavor_is_offerable`); the placeholder stands in for the
-            // version so the column shows the stable stem.
+            // `listed_llamacpp_flavors_are_usable`); the placeholder stands in
+            // for the version so the column shows the stable stem.
             asset: flavor
                 .release_asset_name(VERSION_PLACEHOLDER)
                 .unwrap_or_else(|| "(none)".to_string()),
@@ -515,35 +614,60 @@ fn llamacpp_flavor_rows() -> Vec<LlamacppFlavorRow> {
 const VERSION_PLACEHOLDER: &str = "<version>";
 
 impl CatalogArgs {
-    /// `runtimes catalog <type>` — installable builds for one runtime type, each
-    /// row a paste-ready `--runtime` ref. Offline and store-independent except
-    /// the llama.cpp subword (GitHub via `http`); lists what's *installable*,
-    /// not what's installed (that's `list`).
-    pub fn execute(self, http: &HttpClient) -> anyhow::Result<()> {
-        self.command.execute(http)
+    /// Lists what is installable, not what is installed (that is `list`).
+    /// Offline except the llama.cpp subword, which hits GitHub.
+    pub fn execute(self, http: &HttpClient, console: &mut dyn Console) -> anyhow::Result<()> {
+        self.command.execute(http, console)
     }
 }
 
 impl CatalogCommand {
-    pub fn execute(self, http: &HttpClient) -> anyhow::Result<()> {
+    pub fn execute(self, http: &HttpClient, console: &mut dyn Console) -> anyhow::Result<()> {
         match self {
             CatalogCommand::UvVllm => {
-                print_table_or(&uv_vllm_rows()?, "No bundled uv-vLLM builds.");
+                write_table_or(
+                    console.out(),
+                    &uv_vllm_rows()?,
+                    "No bundled uv-vLLM builds.",
+                )?;
             }
             CatalogCommand::UvSglang => {
-                print_table_or(&uv_sglang_rows()?, "No bundled uv-SGLang builds.");
+                write_table_or(
+                    console.out(),
+                    &uv_sglang_rows()?,
+                    "No bundled uv-SGLang builds.",
+                )?;
             }
             CatalogCommand::MlxMacosPipette => {
-                print_table_or(&mlx_rows()?, "No bundled MLX builds.");
+                write_table_or(console.out(), &mlx_rows()?, "No bundled MLX builds.")?;
             }
             CatalogCommand::UvOpenvino => {
-                print_table_or(&openvino_rows()?, "No bundled OpenVINO builds.");
+                write_table_or(
+                    console.out(),
+                    &openvino_rows()?,
+                    "No bundled OpenVINO builds.",
+                )?;
+            }
+            CatalogCommand::UvOnnxGenai => {
+                write_table_or(
+                    console.out(),
+                    &onnx_genai_rows()?,
+                    "No bundled ONNX Runtime GenAI builds.",
+                )?;
+            }
+            CatalogCommand::Ovms => {
+                write_table_or(console.out(), &ovms_rows()?, "No pinned OVMS releases.")?;
             }
             CatalogCommand::LlamacppCliStockTools(args) => {
-                print_table_or(
+                write_table_or(
+                    console.out(),
                     &llamacpp_rows(http, &args.flavor, args.limit)?,
-                    "No matching llama.cpp releases.",
-                );
+                    &format!(
+                        "None of the latest {} llama.cpp releases has a `{}` file. \
+                         Raise --limit, or name the file with `asset`.",
+                        args.limit, args.flavor
+                    ),
+                )?;
             }
         }
         Ok(())
@@ -553,17 +677,35 @@ impl CatalogCommand {
 #[cfg(test)]
 mod tests {
 
-    /// The point of `--format uri` is that a listed row is paste-ready: what
-    /// `runtimes list` renders must be what `runtimes pull` accepts. Drives off
-    /// the bundled catalogs so the cases stay valid as they are revised.
-    #[test]
-    fn listed_uri_round_trips_through_pull() -> anyhow::Result<()> {
+    /// Every ref the offline catalogs emit, from one builder so a new catalog
+    /// reaches every test that walks the rows. The network-backed llamacpp
+    /// subword is appended by the tests that want it.
+    fn bundled_catalog_refs() -> anyhow::Result<Vec<String>> {
         let mut refs: Vec<String> = uv_vllm_rows()?
             .iter()
             .chain(uv_sglang_rows()?.iter())
             .map(|r| r.runtime_ref.clone())
             .collect();
         refs.extend(super::mlx_rows()?.iter().map(|r| r.runtime_ref.clone()));
+        refs.extend(
+            super::openvino_rows()?
+                .iter()
+                .map(|r| r.runtime_ref.clone()),
+        );
+        refs.extend(
+            super::onnx_genai_rows()?
+                .iter()
+                .map(|r| r.runtime_ref.clone()),
+        );
+        refs.extend(super::ovms_rows()?.iter().map(|r| r.runtime_ref.clone()));
+        Ok(refs)
+    }
+
+    /// A row `runtimes list --format uri` renders must be what `runtimes pull`
+    /// accepts. Driven off the bundled catalogs so the cases stay valid.
+    #[test]
+    fn listed_uri_round_trips_through_pull() -> anyhow::Result<()> {
+        let mut refs = bundled_catalog_refs()?;
         refs.push("llamacpp-cli-stock-tools://version=b9305&flavor=macos-arm64".to_string());
 
         for uri in refs {
@@ -571,8 +713,7 @@ mod tests {
             let rendered = crate::runtime_uri::runtime_to_uri(&declared)
                 .map_err(|e| anyhow::anyhow!("{uri} has no URI form: {e}"))?;
             // Not byte-equality: the renderer spells out keys the catalog leaves
-            // defaulted (`mlx-macos-pipette://…&flavor=macos-arm64`). What has to hold is that
-            // pasting a listed row back gets you the same runtime.
+            // defaulted (`mlx-macos-pipette://…&flavor=macos-arm64`).
             assert_eq!(
                 parse_runtime_arg(&rendered)?,
                 declared,
@@ -583,32 +724,21 @@ mod tests {
     }
     use strum::IntoEnumIterator;
 
-    use super::{uv_sglang_rows, uv_vllm_rows, RUNTIME_URI_EXAMPLES};
-    use crate::runtime_uri::{parse_runtime_arg, Scheme};
+    use super::{RUNTIME_URI_EXAMPLES, uv_sglang_rows, uv_vllm_rows};
+    use crate::runtime_uri::{Scheme, parse_runtime_arg};
 
-    /// Every emitted BUNDLED ref must parse back through the `--runtime`
-    /// grammar — the whole point of the catalog is that its rows paste in
-    /// verbatim. Covers uv-vLLM + uv-SGLang (present on every host) and, on
-    /// macOS, the mlx rows. The network-backed llamacpp subword is excluded.
     #[test]
     fn bundled_catalog_refs_parse() -> anyhow::Result<()> {
-        let vllm = uv_vllm_rows()?;
-        let sglang = uv_sglang_rows()?;
         assert!(
-            !vllm.is_empty(),
+            !uv_vllm_rows()?.is_empty(),
             "bundled uv-vLLM catalog must have entries"
         );
         assert!(
-            !sglang.is_empty(),
+            !uv_sglang_rows()?.is_empty(),
             "bundled uv-SGLang catalog must have entries"
         );
 
-        let mut refs: Vec<String> = vllm
-            .iter()
-            .chain(sglang.iter())
-            .map(|r| r.runtime_ref.clone())
-            .collect();
-        refs.extend(super::mlx_rows()?.iter().map(|r| r.runtime_ref.clone()));
+        let refs = bundled_catalog_refs()?;
 
         for r in &refs {
             parse_runtime_arg(r)
@@ -617,11 +747,9 @@ mod tests {
         Ok(())
     }
 
-    /// `--flavor` is held to the known set, so a typo is a clap error (exit 2)
-    /// rather than a successful run that lists nothing. Both directions matter:
-    /// rejecting an unknown spelling, and accepting every one the listing
-    /// offers — a validator stricter than the listing would refuse its own
-    /// advice.
+    /// A typo is a clap error rather than a run that lists nothing, and every
+    /// flavor the listing offers is accepted: a validator stricter than the
+    /// listing would refuse its own advice.
     #[test]
     fn flavor_validation_accepts_the_listing_and_rejects_the_rest() -> anyhow::Result<()> {
         super::llamacpp_flavor_rows().iter().try_for_each(
@@ -646,11 +774,9 @@ mod tests {
         Ok(())
     }
 
-    /// The flavor listing exists to be pasted into `--flavor`, so every row
-    /// must survive the trip back: parse to a known variant (not `Custom`,
-    /// which lists nothing) and compose into a `--runtime` URI that parses.
-    /// The asset column must also show a stem, since an empty one would make
-    /// a listed flavor look unfetchable.
+    /// Every listed flavor parses to a known variant (not `Custom`, which lists
+    /// nothing), composes into a `--runtime` URI that parses, and shows an
+    /// asset stem.
     #[test]
     fn listed_llamacpp_flavors_are_usable() -> anyhow::Result<()> {
         let rows = super::llamacpp_flavor_rows();
@@ -679,9 +805,8 @@ mod tests {
         })
     }
 
-    /// Guard against doc rot: every `--runtime '<arg>'` in the help's examples
-    /// must actually parse. Extracts the args from the help text itself, so the
-    /// examples can't drift from the grammar.
+    /// Extracts the args from the help text itself, so the examples can't drift
+    /// from the grammar.
     #[test]
     fn every_documented_example_parses() -> anyhow::Result<()> {
         let args = documented_examples();
@@ -697,9 +822,8 @@ mod tests {
         })
     }
 
-    /// The other half of the doc-rot guard, and the one that catches an
-    /// omission rather than a typo: a scheme the grammar accepts but the help
-    /// never shows is a runtime nobody can discover.
+    /// Catches an omission rather than a typo: a scheme the grammar accepts but
+    /// the help never shows is a runtime nobody can discover.
     #[test]
     fn every_scheme_is_documented_with_an_example() -> anyhow::Result<()> {
         let examples = documented_examples();
@@ -727,9 +851,8 @@ mod tests {
         })
     }
 
-    /// The naming rule, checked against plan-types rather than restated: a
-    /// scheme is its runtime's type word with `-` for `_`. Fails the day a
-    /// shorthand is introduced.
+    /// A scheme is its runtime's type word with `-` for `_`, checked against
+    /// plan-types. Fails the day a shorthand is introduced.
     #[test]
     fn a_schemes_prefix_is_its_runtime_type() -> anyhow::Result<()> {
         documented_examples()
@@ -763,5 +886,130 @@ mod tests {
             .filter_map(|line| line.split_once("--runtime '"))
             .filter_map(|(_, rest)| rest.strip_suffix('\''))
             .collect()
+    }
+
+    use pipette_plan_types::{AppleCoreAiMacosPipette, Runtime};
+
+    use super::{ListFormat, RemoveArgs, RuntimeArgs, RuntimeCommand, list, runtime_rows};
+    use crate::test_support::CapturedConsole;
+    use crate::test_support::TempWorkspace;
+    use crate::workspace::PipetteWorkspace;
+
+    const DOCKER_URI: &str = "docker-vllm://image=vllm/vllm-openai&tag=v0.10.0&flavor=nvidia_gpu";
+    const LLAMA_URI: &str = "llamacpp-cli-stock-tools://version=b9305&flavor=macos-arm64";
+
+    /// An installed runtime, published through the real store with a no-op
+    /// install so its manifest reads back as a live entry.
+    fn install(ws: &PipetteWorkspace, uri: &str) -> anyhow::Result<pipette_plan_types::Runtime> {
+        let declared = parse_runtime_arg(uri)?;
+        ws.runtimes().ensure(&declared, |_, _| Ok(()))?;
+        Ok(declared)
+    }
+
+    fn programs() -> pipette_programs::ExternalPrograms {
+        pipette_programs::ExternalPrograms::at_missing_paths()
+    }
+
+    fn http() -> anyhow::Result<pipette_http::HttpClient> {
+        Ok(pipette_http::HttpClient::new("pipette-test")?)
+    }
+
+    /// Both formats sort by the rendered column, so the listing is stable across
+    /// pulls.
+    #[test]
+    fn list_renders_each_installed_runtime_in_the_requested_format() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("runtimes-list")?;
+        let docker = install(&tw.ws, DOCKER_URI)?;
+        let llama = install(&tw.ws, LLAMA_URI)?;
+
+        let by_name = runtime_rows(&tw.ws, ListFormat::Name, None)?;
+        let mut expected = vec![
+            (docker.cli_ref(), docker.headless_token()),
+            (llama.cli_ref(), llama.headless_token()),
+        ];
+        expected.sort();
+        assert_eq!(
+            by_name
+                .iter()
+                .map(|r| (r.runtime.clone(), r.runtime_type.as_str()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(by_name.iter().all(|row| row.pulled.ends_with('Z')));
+        assert!(by_name.iter().all(|row| !row.digest.is_empty()));
+
+        let by_uri = runtime_rows(&tw.ws, ListFormat::Uri, None)?;
+        let mut uris = vec![DOCKER_URI.to_owned(), LLAMA_URI.to_owned()];
+        uris.sort();
+        assert_eq!(
+            by_uri.iter().map(|r| r.runtime.clone()).collect::<Vec<_>>(),
+            uris
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_store_says_nothing_is_installed() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("runtimes-list-empty")?;
+        assert!(runtime_rows(&tw.ws, ListFormat::Uri, None)?.is_empty());
+        let mut captured = CapturedConsole::default();
+        list(&tw.ws, ListFormat::Name, None, &mut captured)?;
+        assert_eq!(captured.out_text(), "No runtimes installed.\n");
+        Ok(())
+    }
+
+    /// Core AI has no store entry: a cached sidecar is what lists it.
+    #[test]
+    fn a_cached_core_ai_sidecar_lists_the_bundled_runtime() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("runtimes-list-coreai")?;
+        let sidecar = tw.ws.root().join("pipette-coreai-sidecar");
+        std::fs::write(&sidecar, b"")?;
+        let bundled = Runtime::AppleCoreAiMacosPipette(AppleCoreAiMacosPipette::bundled());
+        let rows = runtime_rows(&tw.ws, ListFormat::Name, Some(&sidecar))?;
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.runtime.clone(), r.runtime_type.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(bundled.cli_ref(), bundled.headless_token())]
+        );
+        assert!(rows.iter().all(|row| row.pulled.ends_with('Z')));
+        Ok(())
+    }
+
+    /// The compile cache shares the store entry's key, so it goes with the
+    /// runtime. A docker runtime also notes the image the daemon still holds.
+    #[test]
+    fn remove_takes_the_compile_cache_and_reports_a_missing_runtime() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("runtimes-remove")?;
+        let docker = install(&tw.ws, DOCKER_URI)?;
+        let cache = tw.ws.compile_cache(&docker)?;
+        std::fs::create_dir_all(&cache)?;
+        std::fs::write(cache.join("kernel.bin"), b"compiled")?;
+
+        let mut removed = CapturedConsole::default();
+        RuntimeArgs {
+            command: RuntimeCommand::Remove(RemoveArgs {
+                runtime: DOCKER_URI.to_owned(),
+            }),
+        }
+        .execute(&tw.ws, &http()?, &programs(), &mut removed)?;
+
+        assert!(tw.ws.runtimes().find(&docker)?.is_none());
+        assert!(!cache.exists(), "the compile cache goes with the runtime");
+        let out = removed.out_text();
+        assert!(
+            out.starts_with(&format!("Removed `{docker}`\n")),
+            "got {out}"
+        );
+        assert!(out.contains("reclaimed the compile cache"), "got {out}");
+        assert!(out.contains("docker rmi"), "got {out}");
+
+        let mut again = CapturedConsole::default();
+        RemoveArgs {
+            runtime: DOCKER_URI.to_owned(),
+        }
+        .execute(&tw.ws, &mut again)?;
+        assert_eq!(again.out_text(), format!("`{docker}` is not installed\n"));
+        Ok(())
     }
 }

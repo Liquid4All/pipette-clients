@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// Displays local jobs with their execution and submission state.
 enum JobsRoute: Hashable {
     case detail(JobId)
 }
 
+/// Displays local jobs with their execution and submission state.
 struct JobsView: View {
     @Environment(JobRunner.self) private var jobRunner
     @Environment(JobStore.self) private var jobStore
@@ -14,12 +14,12 @@ struct JobsView: View {
     @Binding var selectedTab: MainTab
     @State private var path = NavigationPath()
     @State private var searchText: String = ""
-    @State private var pendingDelete: JobManifest?
-    // The creation wizard is a modal (fullScreenCover) so it covers the global
-    // pill tab bar and presents its own Back/Next footer, matching the design.
+    @State private var pendingDelete: JobSummary?
+    // A fullScreenCover, so the wizard covers the pill tab bar and shows its own
+    // Back/Next footer.
     @State private var showNewJob = false
 
-    private var jobs: [JobManifest] { jobStore.jobs }
+    private var jobs: [JobSummary] { jobStore.jobs }
 
     private var hasDownloadedModels: Bool {
         modelStore.models.contains { model in
@@ -27,7 +27,7 @@ struct JobsView: View {
         }
     }
 
-    private var filteredJobs: [JobManifest] {
+    private var filteredJobs: [JobSummary] {
         let q = searchText.searchNormalized
         guard !q.isEmpty else { return jobs }
         return jobs.filter { job in
@@ -49,8 +49,8 @@ struct JobsView: View {
                     JobDetailView(jobId: jobId)
                 }
             }
-            // A run-starting deep link opens the job's live page, same as the
-            // wizard's onStarted push above.
+            // A run-starting deep link opens the job's live page, like the wizard's
+            // onStarted push.
             .onChange(of: deepLinkRouter.pendingJobId) { _, jobId in
                 guard let jobId else { return }
                 path.append(JobsRoute.detail(jobId))
@@ -59,14 +59,11 @@ struct JobsView: View {
             .fullScreenCover(isPresented: $showNewJob) {
                 NewJobView(
                     onStarted: { jobId in
-                        // Dismiss the wizard and push JobDetailView so the user
-                        // lands on the detail screen and can see live progress.
                         showNewJob = false
                         path.append(JobsRoute.detail(jobId))
                     },
                     onGoToModels: {
-                        // Empty-state escape hatch: close the wizard and jump to
-                        // the Models tab so the user can download models.
+                        // Empty-state escape hatch to the Models tab.
                         showNewJob = false
                         selectedTab = .models
                     }
@@ -278,7 +275,7 @@ private struct JobsEmptyIllustration: View {
 // MARK: - Job row
 
 struct JobRow: View {
-    let job: JobManifest
+    let job: JobSummary
     @Environment(JobRunner.self) private var jobRunner
 
     private var isRunning: Bool {
@@ -304,13 +301,6 @@ struct JobRow: View {
     /// Rough wall-clock estimate for the active run. See `JobRunner.estimatedTimeLeft`.
     private var estimatedTimeLeft: String? {
         jobRunner.estimatedTimeLeft(jobId: job.jobId, now: Date())
-    }
-
-    /// The engine(s) this job's cells run on — one badge each. New jobs are
-    /// single-runtime; a legacy mixed-runtime job surfaces every engine present.
-    private var runtimeKinds: [RuntimeKind] {
-        let kinds = Set(job.cells.map { RuntimeKind($0.source) })
-        return RuntimeKind.allCases.filter { kinds.contains($0) }
     }
 
     private var primaryMeta: String {
@@ -349,7 +339,7 @@ struct JobRow: View {
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                ForEach(runtimeKinds) { kind in
+                ForEach(job.runtimeKinds) { kind in
                     RuntimeBadge(kind: kind)
                 }
             }
@@ -381,8 +371,7 @@ struct JobRow: View {
     }
 }
 
-/// Compact, color-coded runtime tag for a job row — makes the engine a job ran on
-/// scannable at a glance (distinct hue per runtime).
+/// Color-coded runtime tag for a job row, one hue per runtime.
 private struct RuntimeBadge: View {
     let kind: RuntimeKind
 
@@ -401,6 +390,7 @@ private struct RuntimeBadge: View {
         switch kind {
         case .llamaCpp: return .blue
         case .mlx: return .purple
+        case .onnxGenai: return .teal
         case .afm: return Color(.systemGray)
         }
     }
@@ -408,12 +398,10 @@ private struct RuntimeBadge: View {
 
 #if DEBUG
 #Preview("Jobs") {
-    let store = JobStore(storage: FileStorage.production)
-    store.reload()
-    return JobsView(selectedTab: .constant(.jobs))
+    JobsView(selectedTab: .constant(.jobs))
         .environment(JobRunner())
-        .environment(store)
-        .environment(ModelStore(storage: FileStorage.production))
+        .environment(JobStore(ws: PipetteWorkspace.production))
+        .environment(ModelStore(ws: PipetteWorkspace.production))
         .environment(DeepLinkRouter())
 }
 #endif

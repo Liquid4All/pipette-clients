@@ -1,0 +1,6 @@
+{
+  "flavor": "android-arm64-v8",
+  "repository_url": "github.com/ggml-org/llama.cpp",
+  "repository_version": "b10216",
+  "type": "llamacpp_apk_pipette"
+}

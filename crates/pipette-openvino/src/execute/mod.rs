@@ -1,301 +1,189 @@
-//! OpenVINO execute: kind dispatch from a prepared [`RunRequest`].
-//!
-//! Every kind follows the same shape — bind the venv python, the model dir and
-//! the declared device; then hand
-//! `prepare`/`work`/`sample` to [`pipette_ops::measurement::run`], which owns
-//! the rep count, the readiness wait, the observer reports and the reduction.
-//!
-//! Each rep is a fresh driver process holding one compiled pipeline. That is
-//! the hardware's constraint rather than a style choice: compiling more than
-//! once per process took an NPU down mid-run (`docs/openvino-ir.md`). Every rep
-//! therefore constructs its own pipeline, but a blob cache warmed before the
-//! first one keeps that to a load rather than a compile — see
-//! `docs/openvino-measurement.md`.
+//! OpenVINO execution through a minimal OpenAI-compatible server
+//! (`pipette_openvino_server.py`), one per cell, read on the client's clock.
+//! The server compiles exactly one pipeline before it listens: compiling more
+//! than once per process took an NPU down mid-run (`docs/openvino-ir.md`).
+//! The blob cache keeps that compile to a load for a cell compiled before
+//! (`docs/openvino-measurement.md`).
 
-mod driver;
+mod decode_throughput;
 mod end_to_end_latency;
 mod max_memory_usage;
-mod throughput;
+mod prefill_throughput;
 
-use anyhow::Context;
+/// Why the timing cells refuse a batched entry on this engine. The server
+/// runs one `LLMPipeline.generate` at a time, so a batched entry would be
+/// measured serially and filed under a `_bs<n>` id that promises the
+/// measurement under load. Refused before the pipeline compiles, since no
+/// amount of waiting changes it.
+const ONE_AT_A_TIME: &str = "the OpenVINO server generates one sequence at a time";
 
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_ops::EvalCompletionsStore;
-use pipette_plan_types::run::{RunRequest, RunResponse};
-use pipette_plan_types::BenchmarkType;
+/// Request budget when the plan pins no `http_timeout`: a CPU prefill of a
+/// long prompt on a small host runs to minutes.
+const REQUEST_TIMEOUT_SECS: u64 = 3600;
 
-/// Top-level OpenVINO dispatch: route a prepared [`RunRequest`] by kind.
-///
-/// CLI owns prepare/record; this crate only runs the cell. `eval_completions`
-/// is unused — eval is not implemented for this backend — but the parameter
-/// keeps the engine seam identical to the other backends'.
+use std::path::Path;
+use std::time::Duration;
+
+use pipette_ops::measurement::{self, MeasurementObserver};
+use pipette_ops::readiness::ReadinessGate;
+use pipette_plan_types::{
+    BenchmarkDefinition, RunRequest, RunResponse, UvOpenvinoExtraRuntimeConfiguration,
+};
+
+use crate::flags::resolve_runtime_flags;
+use crate::models::ResolvedOpenvinoModel;
+use crate::runtimes::ResolvedOpenvinoPython;
+
+/// Run a prepared cell; the CLI owns preparation and result recording.
+/// `client_config` is applied whole to the server process, unread here.
 pub fn run(
     req: &RunRequest,
-    _eval_completions: &EvalCompletionsStore,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
-    compile_cache: &std::path::Path,
+    observer: MeasurementObserver<'_>,
+    compile_cache: &Path,
+    client_config: Option<&UvOpenvinoExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
-    match req.benchmark.benchmark_type() {
-        BenchmarkType::PrefillThroughput => {
-            throughput::run_prefill(req, compile_cache, readiness_gate, observer)
+    let timeout = request_timeout(req);
+    match &req.benchmark {
+        BenchmarkDefinition::PrefillThroughput(benchmark) => {
+            measurement::require_one_in_flight(&req.benchmark, ONE_AT_A_TIME)?;
+            prefill_throughput::run(
+                benchmark,
+                resolve_runtime_flags(req)?.try_into()?,
+                &ResolvedOpenvinoPython::try_from(&req.runtime.bound)?,
+                &ResolvedOpenvinoModel::try_from(&req.model.bound)?,
+                compile_cache,
+                timeout,
+                readiness_gate,
+                observer,
+                client_config,
+            )
         }
-        BenchmarkType::DecodeThroughput => {
-            throughput::run_decode(req, compile_cache, readiness_gate, observer)
+        BenchmarkDefinition::DecodeThroughput(benchmark) => {
+            measurement::require_one_in_flight(&req.benchmark, ONE_AT_A_TIME)?;
+            decode_throughput::run(
+                benchmark,
+                resolve_runtime_flags(req)?.try_into()?,
+                &ResolvedOpenvinoPython::try_from(&req.runtime.bound)?,
+                &ResolvedOpenvinoModel::try_from(&req.model.bound)?,
+                compile_cache,
+                timeout,
+                readiness_gate,
+                observer,
+                client_config,
+            )
         }
-        BenchmarkType::EndToEndLatency => {
-            end_to_end_latency::run(req, compile_cache, readiness_gate, observer)
+        BenchmarkDefinition::EndToEndLatency(benchmark) => {
+            measurement::require_one_in_flight(&req.benchmark, ONE_AT_A_TIME)?;
+            end_to_end_latency::run(
+                benchmark,
+                resolve_runtime_flags(req)?.try_into()?,
+                &ResolvedOpenvinoPython::try_from(&req.runtime.bound)?,
+                &ResolvedOpenvinoModel::try_from(&req.model.bound)?,
+                compile_cache,
+                timeout,
+                readiness_gate,
+                observer,
+                client_config,
+            )
         }
-        BenchmarkType::MaxMemoryUsage => max_memory_usage::run(req, compile_cache),
-        BenchmarkType::Eval => {
+        BenchmarkDefinition::MaxMemoryUsage(benchmark) => max_memory_usage::run(
+            benchmark,
+            resolve_runtime_flags(req)?.try_into()?,
+            &ResolvedOpenvinoPython::try_from(&req.runtime.bound)?,
+            &ResolvedOpenvinoModel::try_from(&req.model.bound)?,
+            compile_cache,
+            timeout,
+            client_config,
+        ),
+        BenchmarkDefinition::Eval(_) => {
             anyhow::bail!("eval benchmarks are not yet supported for OpenVINO")
         }
-        BenchmarkType::VlThroughput => {
-            anyhow::bail!("VL throughput benchmarks are not yet supported for OpenVINO")
+        BenchmarkDefinition::VlThroughput(_)
+        | BenchmarkDefinition::VlMaxMemory(_)
+        | BenchmarkDefinition::VlmEval(_)
+        | BenchmarkDefinition::VlSpecDecode(_) => {
+            anyhow::bail!("VL benchmarks are not yet supported for OpenVINO")
+        }
+        BenchmarkDefinition::AsrEval(_) => {
+            anyhow::bail!("asr_eval is not yet supported for OpenVINO")
+        }
+        BenchmarkDefinition::AsrThroughput(_) | BenchmarkDefinition::AsrMaxMemory(_) => {
+            anyhow::bail!("ASR benchmarks are not yet supported for OpenVINO")
         }
     }
 }
 
-/// The per-cell context every kind binds before measuring: where python is,
-/// where the model is, and which device the cell declared.
-struct Cell {
-    python: std::path::PathBuf,
-    model_dir: std::path::PathBuf,
-    device: pipette_plan_types::OpenvinoDevice,
-    /// What this cell runs with: the plan's entry plus every value this client
-    /// derived for it. Resolved once here rather than per kind, so the
-    /// properties the pipeline gets and the flags the record reports cannot
-    /// come from two different resolutions.
-    flags: pipette_plan_types::RuntimeFlags,
-    /// Where OpenVINO keeps compiled blobs. Shared across cells and runs, so a
-    /// cell whose (model, device, properties) has been compiled before starts
-    /// warm — see `docs/openvino-measurement.md`.
-    compile_cache: std::path::PathBuf,
-    script: driver::DriverScript,
-}
-
-impl Cell {
-    /// Bind: resolve the venv python, the model directory and the declared
-    /// device. No device/model compatibility is decided here — a runtime that
-    /// cannot run a pairing reports that itself, and which pairings are worth
-    /// attempting is the plan's call.
-    fn bind(req: &RunRequest, compile_cache: &std::path::Path) -> anyhow::Result<Self> {
-        let python = crate::runtimes::require_openvino_python(req)?;
-        let model_dir = crate::models::require_openvino_model_dir(req)?;
-        let device = crate::runtimes::require_openvino_device(req)?;
-        let flags = crate::flags::resolve_runtime_flags(req)?;
-        std::fs::create_dir_all(compile_cache).with_context(|| {
-            format!(
-                "creating the OpenVINO compile cache at {}",
-                compile_cache.display()
-            )
-        })?;
-        let cell = Self {
-            python,
-            model_dir,
-            device,
-            flags,
-            compile_cache: compile_cache.to_path_buf(),
-            script: driver::DriverScript::materialize()?,
-        };
-        cell.precompile()?;
-        Ok(cell)
-    }
-
-    /// Compile once, untimed, so every measured rep loads a blob instead of the
-    /// first one compiling and the rest loading. A rep that met the device in a
-    /// different state from its peers is the asymmetry this exists to avoid.
-    fn precompile(&self) -> anyhow::Result<()> {
-        self.script.precompile(
-            &self.python,
-            &driver::DriverRequest {
-                model_dir: self.model_dir_str()?,
-                device: crate::runtimes::device_property(&self.device),
-                mode: driver::Mode::Compile,
-                prefill_tokens: 0,
-                decode_tokens: 0,
-                warmup: None,
-                prompt: None,
-                properties: self.properties(),
-                prompt_seed: pipette_ops::prompt_seed::PROMPT_SEED_TEXT,
-            },
-        )
-    }
-
-    /// The `LLMPipeline` properties for this cell: the resolved flags, plus the
-    /// blob cache.
-    ///
-    /// `CACHE_DIR` is added here rather than in `flags.rs` because it is this
-    /// host's scratch location, not something the cell declared — it must not
-    /// reach the recorded flags.
-    fn properties(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut props = crate::flags::pipeline_properties(&self.flags);
-        props.insert(
-            "CACHE_DIR".to_owned(),
-            serde_json::Value::from(self.compile_cache.to_string_lossy().into_owned()),
-        );
-        props
-    }
-
-    /// The response for a finished cell: the result, what ran, and the flags it
-    /// ran with.
-    ///
-    /// The only constructor, so a benchmark kind cannot report a number without
-    /// saying which flags produced it — the omission this exists to prevent, and
-    /// one every kind would otherwise have to remember separately.
-    fn respond(
-        &self,
-        data: pipette_plan_types::result::BenchmarkResultData,
-        stdout: String,
-        stderr: String,
-    ) -> RunResponse {
-        let (executable, command) = self.invocation();
-        RunResponse {
-            executable,
-            command,
-            runtime_flags: Some(self.flags.clone()),
-            ..RunResponse::new(data, stdout, stderr)
-        }
-    }
-
-    fn model_dir_str(&self) -> anyhow::Result<&str> {
-        self.model_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("model path is not valid UTF-8"))
-    }
-
-    /// The warm-up pass for this cell: the measured shape, on every device.
-    ///
-    /// No device is exempt. The NPU was, until it was measured — see
-    /// `docs/openvino-measurement.md`.
-    fn warmup(&self, prefill_tokens: u32, decode_tokens: u32) -> driver::WarmupShape {
-        driver::WarmupShape {
-            prefill_tokens,
-            decode_tokens,
-        }
-    }
-
-    /// What the record says ran: `(executable, command)`.
-    ///
-    /// The executable is the venv interpreter, which is what identifies the
-    /// install this cell used. The preview names the driver script rather than
-    /// its path — the script is a per-run temp copy, so the path would record a
-    /// different string every run — and carries no arguments, because the
-    /// driver's request travels on stdin.
-    fn invocation(&self) -> (Option<String>, Vec<String>) {
-        let python = self.python.display().to_string();
-        (
-            Some(python.clone()),
-            vec![python, driver::DRIVER_FILENAME.to_owned()],
-        )
-    }
-}
-
-/// The last invocation's captured output, for the `RunResponse`.
-///
-/// A `RefCell` because `measurement::run` holds `work` and `sample` at once, so
-/// the output cannot be moved out of a `&mut` capture, and `Measurement` does
-/// not expose its reps.
-type LastOutput = std::cell::RefCell<driver::DriverOutput>;
-
-/// One measured invocation: run the driver, remember what it printed, hand back
-/// the parsed result.
-fn invoke(
-    cell: &Cell,
-    request: &driver::DriverRequest<'_>,
-    last: &LastOutput,
-) -> anyhow::Result<driver::DriverResult> {
-    let (result, output) = cell.script.invoke(&cell.python, request)?;
-    *last.borrow_mut() = output;
-    Ok(result)
-}
-
-fn take_output(last: LastOutput) -> (String, String) {
-    let out = last.into_inner();
-    (out.stdout, out.stderr)
+fn request_timeout(req: &RunRequest) -> Duration {
+    measurement::http_timeout_with_default(
+        req.benchmark_flags.as_ref().and_then(|f| f.http_timeout()),
+        1,
+        REQUEST_TIMEOUT_SECS,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use pipette_plan_types::result::BenchmarkResultData;
+    use anyhow::Context;
+
     use pipette_plan_types::{
-        BenchmarkType, ModelType, OpenvinoDevice, OpenvinoGenerateHint, RuntimeFlagRef,
-        RuntimeFlags, RuntimeType,
+        AbsolutePath, BatchSize, BenchmarkId, BenchmarkType, DeclaredBound,
+        DecodeThroughputBenchmark, Model, ModelSource, ModelType, NonNegativeCount, Openvino,
+        OpenvinoDevice, PositiveCount, Runtime, RuntimeFlagRef, RuntimeFlags, RuntimeType,
     };
 
     use super::*;
 
-    /// A cell built directly rather than through `bind`, which would need a
-    /// real venv and model directory on disk to reach the same two fields.
-    fn cell(flags: RuntimeFlags) -> anyhow::Result<Cell> {
-        Ok(Cell {
-            python: std::path::PathBuf::from("/venv/bin/python"),
-            model_dir: std::path::PathBuf::from("/models/ir"),
-            device: OpenvinoDevice::Npu,
-            flags,
-            compile_cache: std::path::PathBuf::from("/cache/uv-openvino__key"),
-            script: driver::DriverScript::materialize()?,
-        })
-    }
-
-    fn resolved_flags() -> anyhow::Result<RuntimeFlags> {
-        let mut r = RuntimeFlagRef::new(
-            BenchmarkType::PrefillThroughput,
+    /// A reference entry gets as far as binding, which fails here for want of
+    /// an installed runtime.
+    #[rstest::rstest]
+    #[case::batched(4, "decode_throughput_512_256_bs4")]
+    #[case::batched_names_the_engine(4, "one sequence at a time")]
+    #[case::reference(1, "python missing")]
+    fn a_batched_entry_is_refused_before_the_runtime_binds(
+        #[case] batch_size: u32,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let runtime: Runtime = serde_json::from_value(serde_json::json!({
+            "type": "uv_openvino", "server_version": "2026.4.1",
+            "python_version": "3.11",
+            "source": {"type": "absolute_preinstalled", "dir": dir.path()}
+        }))?;
+        let mut flags = RuntimeFlagRef::new(
+            BenchmarkType::DecodeThroughput,
             RuntimeType::UvOpenvino,
             ModelType::Openvino,
         );
-        r.device = Some(OpenvinoDevice::Npu);
-        r.generate_hint = Some(OpenvinoGenerateHint::BestPerf);
-        Ok(RuntimeFlags::try_from(r)?)
-    }
-
-    /// `CACHE_DIR` reaches the pipeline but never the record: it is this host's
-    /// scratch path, and a record carrying it would describe local disk layout
-    /// as if the cell had asked for it.
-    #[test]
-    fn the_cache_reaches_the_pipeline_but_not_the_record() -> anyhow::Result<()> {
-        let cell = cell(resolved_flags()?)?;
-        let props = cell.properties();
-        assert!(props.contains_key("CACHE_DIR"), "got {props:?}");
-
-        let reported = cell.respond(
-            BenchmarkResultData::MaxMemoryUsage {
-                max_host_bytes: 1,
-                max_gpu_bytes: None,
-                max_npu_bytes: None,
-            },
-            String::new(),
-            String::new(),
-        );
-        let json = serde_json::to_string(&reported.runtime_flags)?;
-        assert!(!json.contains("CACHE_DIR"), "got {json}");
-        assert!(!json.contains("cache"), "got {json}");
-        Ok(())
-    }
-
-    /// The derived flags reach the record. Without this the run is still
-    /// correct and the number is still right — it is the record that silently
-    /// stops explaining which settings produced it.
-    #[test]
-    fn a_response_reports_the_flags_the_cell_resolved() -> anyhow::Result<()> {
-        let flags = resolved_flags()?;
-        let response = cell(flags.clone())?.respond(
-            BenchmarkResultData::MaxMemoryUsage {
-                max_host_bytes: 1,
-                max_gpu_bytes: None,
-                max_npu_bytes: None,
-            },
-            String::new(),
-            String::new(),
-        );
-        assert_eq!(response.runtime_flags, Some(flags));
-        // The venv interpreter is what identifies the install this cell used.
-        assert_eq!(
-            response.executable.as_deref(),
-            Some("/venv/bin/python"),
-            "got {:?}",
-            response.executable
-        );
+        flags.device = Some(OpenvinoDevice::Cpu);
+        let req = RunRequest {
+            runtime: DeclaredBound::already_bound(runtime),
+            model: DeclaredBound::already_bound(Model::Openvino(Openvino {
+                source: ModelSource::AbsoluteDir {
+                    dir: AbsolutePath::try_new(dir.path().to_string_lossy().into_owned())?,
+                },
+            })),
+            runtime_flags: Some(RuntimeFlags::try_from(flags)?),
+            model_flags: None,
+            benchmark_flags: None,
+            benchmark: BenchmarkDefinition::DecodeThroughput(DecodeThroughputBenchmark {
+                benchmark_id: BenchmarkId::try_new(format!(
+                    "decode_throughput_512_256_bs{batch_size}"
+                ))?,
+                parameter_prefill_tokens: NonNegativeCount::try_new(512)?,
+                parameter_decode_tokens: PositiveCount::try_new(256)?,
+                parameter_batch_size: BatchSize::try_new(batch_size)?,
+            }),
+        };
+        let observer = MeasurementObserver {
+            on_before_rep_start: &|| Ok(()),
+            on_after_rep_end: &|| Ok(()),
+        };
+        let err = run(&req, &|| Ok(()), observer, dir.path(), None)
+            .err()
+            .context("expected the cell to fail")?;
+        let message = format!("{err:#}");
+        assert!(message.contains(expected), "{message}");
         Ok(())
     }
 }

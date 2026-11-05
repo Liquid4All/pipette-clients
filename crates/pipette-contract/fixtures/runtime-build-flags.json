@@ -1,0 +1,7 @@
+{
+  "runtime/llamacpp_ios_pipette.ios-arm64.json": "runtime:descriptor:6cef53d3f274d3f2a4c449b830556b5c7abadbe43b88c90dac8600d4a6442dc8",
+  "runtime/llamacpp_ios_pipette.ios-arm64.memory_only.json": "runtime:descriptor:85c34c2286d26fa899b9faaa4d4c964802fd2fc97d4dd9619ddd73bacc579b74",
+  "runtime/llamacpp_ios_pipette.ios-arm64.private_thermal.json": "runtime:descriptor:98bbe4ff3a7c6ef337aa303dca5fbcc178f0e087fd006d6f4af152fcc4a06971",
+  "runtime/mlx_ios_pipette.ios-arm64.json": "runtime:descriptor:10958e51c5eed77457b9b92509294dbd31f361be7e5443e400eb223f4aa0cff0",
+  "runtime/onnx_genai_ios_pipette.ios-arm64.json": "runtime:descriptor:139d2a7f112825f99085222c73809a727a87ad82190ed1b552870e5ef774cd08"
+}

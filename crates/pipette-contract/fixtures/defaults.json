@@ -1,0 +1,545 @@
+{
+  "benchmark/asr_eval.asr-eval-corpus_1.evals-server@1.evals_server.json": {
+    "/dataset": "absent",
+    "/dataset/upstream/prompt_profile": "absent",
+    "/dataset/url": "absent",
+    "/recipe": "absent",
+    "/recipe/enable_thinking": "absent"
+  },
+  "benchmark/asr_eval.beams.json": {
+    "/parameter_beam_length_penalty": "absent",
+    "/parameter_beam_repetition_penalty": "absent",
+    "/parameter_num_beams": "absent"
+  },
+  "benchmark/asr_eval.json": {
+    "/parameter_temperature": "absent"
+  },
+  "benchmark/asr_max_memory.json": {
+    "/parameter_text_tokens": {
+      "default": 0
+    }
+  },
+  "benchmark/asr_throughput.json": {
+    "/parameter_text_tokens": {
+      "default": 0
+    }
+  },
+  "benchmark/decode_throughput.json": {
+    "/parameter_batch_size": {
+      "default": 1
+    }
+  },
+  "benchmark/end_to_end_latency.json": {
+    "/parameter_batch_size": {
+      "default": 1
+    }
+  },
+  "benchmark/eval.json": {
+    "/samples": "absent"
+  },
+  "benchmark/eval.max_context.json": {
+    "/parameter_max_context": "absent",
+    "/samples": "absent"
+  },
+  "benchmark/eval.pinned.json": {
+    "/parameter_mcq_choices": "absent",
+    "/parameter_min_p": "absent",
+    "/parameter_seed": "absent",
+    "/parameter_temperature": "absent",
+    "/parameter_top_k": "absent",
+    "/parameter_top_p": "absent",
+    "/samples": "absent"
+  },
+  "benchmark/eval.seed_at_cap.json": {
+    "/parameter_seed": "absent"
+  },
+  "benchmark/prefill_throughput.json": {
+    "/parameter_batch_size": {
+      "default": 1
+    }
+  },
+  "benchmark/vl_max_memory.decode256.json": {
+    "/parameter_decode_tokens": "absent",
+    "/parameter_num_images": {
+      "default": 1
+    },
+    "/parameter_text_tokens": {
+      "default": 0
+    }
+  },
+  "benchmark/vl_max_memory.json": {
+    "/parameter_num_images": {
+      "default": 1
+    },
+    "/parameter_text_tokens": {
+      "default": 0
+    }
+  },
+  "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.json": {
+    "/dataset/subset": "absent",
+    "/dataset/upstream/license": "absent",
+    "/dataset/upstream/subpath": "absent",
+    "/dataset/url": "absent",
+    "/parameter_batch_size": {
+      "default": 1
+    },
+    "/parameter_temperature": {
+      "default": 0.0
+    }
+  },
+  "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.sampled.json": {
+    "/dataset/subset": "absent",
+    "/dataset/upstream/license": "absent",
+    "/dataset/upstream/subpath": "absent",
+    "/dataset/url": "absent",
+    "/parameter_batch_size": {
+      "default": 1
+    },
+    "/parameter_temperature": {
+      "default": 0.0
+    }
+  },
+  "benchmark/vl_throughput.json": {
+    "/parameter_num_images": {
+      "default": 1
+    }
+  },
+  "benchmark/vlm_eval.system.user.assistant.user.json": {
+    "/samples": "absent"
+  },
+  "benchmark/vlm_eval.user.json": {
+    "/samples": "absent"
+  },
+  "benchmark/vlm_eval.vlm-eval-corpus_1.evals-server@1.evals_server.json": {
+    "/dataset": "absent",
+    "/dataset/upstream/prompt_profile": "absent",
+    "/dataset/url": "absent",
+    "/parameter_prompt_profile": "absent"
+  },
+  "benchmark_flags/asr_eval.uv_vllm.torch.json": {
+    "/http_timeout_seconds": "absent"
+  },
+  "benchmark_flags/vlm_eval.uv_vllm.torch.json": {
+    "/http_timeout_seconds": "absent"
+  },
+  "benchmark_params/asr_eval.json": {
+    "/beam_length_penalty": "absent",
+    "/beam_repetition_penalty": "absent",
+    "/num_beams": "absent"
+  },
+  "benchmark_params/vl_max_memory.decode256.json": {
+    "/decode_tokens": "absent"
+  },
+  "client_run_spec/apple_foundation_text.apple_foundation.json": {
+    "/benchmark_flags": {
+      "default": null
+    },
+    "/model_flags": {
+      "default": null
+    },
+    "/runtime_flags": {
+      "default": null
+    }
+  },
+  "client_run_spec/core_ai.huggingface.core_ai_macos_pipette.json": {
+    "/benchmark_flags": {
+      "default": null
+    },
+    "/model_flags": {
+      "default": null
+    },
+    "/runtime_flags": {
+      "default": null
+    }
+  },
+  "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.decode_throughput.llamacpp_ios_pipette.gguf_text.json": {
+    "/benchmark_flags": {
+      "default": null
+    },
+    "/benchmark_flags/readiness": "absent",
+    "/benchmark_flags/readiness/max_wait_secs": "absent",
+    "/benchmark_flags/readiness/skip_thermal": "absent",
+    "/model_flags": {
+      "default": null
+    },
+    "/runtime_flags": {
+      "default": null
+    }
+  },
+  "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.eval.llamacpp_ios_pipette.gguf_text.eval.gguf_text.json": {
+    "/benchmark_flags": {
+      "default": null
+    },
+    "/model_flags": {
+      "default": null
+    },
+    "/runtime_flags": {
+      "default": null
+    }
+  },
+  "client_run_spec/mlx.huggingface.mlx_ios_pipette.ios-arm64.json": {
+    "/benchmark_flags": {
+      "default": null
+    },
+    "/model_flags": {
+      "default": null
+    },
+    "/runtime_flags": {
+      "default": null
+    }
+  },
+  "client_run_spec/mlx.vault_archive.mlx_ios_pipette.ios-arm64.json": {
+    "/benchmark_flags": {
+      "default": null
+    },
+    "/model/custom_label": "absent",
+    "/model/sha256": "absent",
+    "/model_flags": {
+      "default": null
+    },
+    "/runtime_flags": {
+      "default": null
+    }
+  },
+  "device/desktop.json": {
+    "/device_chip_model": {
+      "default": ""
+    },
+    "/device_cpu_arch": "absent",
+    "/device_form_factor": {
+      "default": "desktop"
+    },
+    "/device_gpu_model": "absent",
+    "/device_gpu_vram_bytes": "absent",
+    "/device_name": {
+      "default": ""
+    },
+    "/device_os_family": "absent",
+    "/device_os_name": {
+      "default": ""
+    },
+    "/device_os_version": {
+      "default": ""
+    },
+    "/device_ram_bytes": {
+      "default": 0
+    }
+  },
+  "device/embedded.json": {
+    "/device_chip_model": {
+      "default": ""
+    },
+    "/device_cpu_arch": "absent",
+    "/device_form_factor": {
+      "default": "desktop"
+    },
+    "/device_name": {
+      "default": ""
+    },
+    "/device_os_build": "absent",
+    "/device_os_family": "absent",
+    "/device_os_name": {
+      "default": ""
+    },
+    "/device_os_security_patch": "absent",
+    "/device_os_version": {
+      "default": ""
+    },
+    "/device_ram_bytes": {
+      "default": 0
+    }
+  },
+  "device/laptop.json": {
+    "/device_chip_model": {
+      "default": ""
+    },
+    "/device_form_factor": {
+      "default": "desktop"
+    },
+    "/device_gpu_model": "absent",
+    "/device_gpu_vram_bytes": "absent",
+    "/device_name": {
+      "default": ""
+    },
+    "/device_os_name": {
+      "default": ""
+    },
+    "/device_os_version": {
+      "default": ""
+    },
+    "/device_ram_bytes": {
+      "default": 0
+    }
+  },
+  "device/phone.json": {
+    "/device_chip_model": {
+      "default": ""
+    },
+    "/device_cpu_arch": "absent",
+    "/device_form_factor": {
+      "default": "desktop"
+    },
+    "/device_name": {
+      "default": ""
+    },
+    "/device_os_build": "absent",
+    "/device_os_family": "absent",
+    "/device_os_name": {
+      "default": ""
+    },
+    "/device_os_version": {
+      "default": ""
+    },
+    "/device_ram_bytes": {
+      "default": 0
+    }
+  },
+  "device/server.json": {
+    "/device_chip_model": {
+      "default": ""
+    },
+    "/device_form_factor": {
+      "default": "desktop"
+    },
+    "/device_gpu_model": "absent",
+    "/device_gpu_vram_bytes": "absent",
+    "/device_name": {
+      "default": ""
+    },
+    "/device_npu_model": "absent",
+    "/device_npu_vram_bytes": "absent",
+    "/device_os_name": {
+      "default": ""
+    },
+    "/device_os_version": {
+      "default": ""
+    },
+    "/device_ram_bytes": {
+      "default": 0
+    }
+  },
+  "device/tablet.json": {
+    "/device_chip_model": {
+      "default": ""
+    },
+    "/device_form_factor": {
+      "default": "desktop"
+    },
+    "/device_name": {
+      "default": ""
+    },
+    "/device_os_build": "absent",
+    "/device_os_name": {
+      "default": ""
+    },
+    "/device_os_version": {
+      "default": ""
+    },
+    "/device_ram_bytes": {
+      "default": 0
+    }
+  },
+  "eval_completion/doom_loop.json": {
+    "/completion_tokens": "absent",
+    "/stop_reason": {
+      "default": "unknown"
+    }
+  },
+  "eval_completion/eos.json": {
+    "/completion_tokens": "absent",
+    "/stop_reason": {
+      "default": "unknown"
+    }
+  },
+  "eval_completion/failure.json": {
+    "/failed": "absent",
+    "/failed_reason": "absent",
+    "/stop_detail": "absent",
+    "/stop_reason": {
+      "default": "unknown"
+    }
+  },
+  "eval_completion/truncated.json": {
+    "/completion_tokens": "absent",
+    "/stop_reason": {
+      "default": "unknown"
+    }
+  },
+  "eval_completion/unknown.json": {
+    "/stop_detail": "absent",
+    "/stop_reason": {
+      "default": "unknown"
+    }
+  },
+  "model/gguf_text.huggingface.pinned.json": {
+    "/revision": "absent",
+    "/sha256": "absent"
+  },
+  "model/gguf_text.vault_url.json": {
+    "/custom_label": "absent",
+    "/sha256": "absent"
+  },
+  "model/gguf_vision.url.json": {
+    "/mmproj_sha256": "absent",
+    "/model_sha256": "absent"
+  },
+  "model/gguf_vision.vault_url.json": {
+    "/custom_label": "absent",
+    "/model_sha256": "absent"
+  },
+  "model/gguf_vision_speculative.relative_files.json": {
+    "/draft": "absent"
+  },
+  "model/gguf_vision_speculative.url.json": {
+    "/draft": "absent",
+    "/draft_sha256": "absent"
+  },
+  "model/gguf_vision_speculative.vault_url.json": {
+    "/custom_label": "absent",
+    "/draft": "absent"
+  },
+  "model/mlx.huggingface.prefix.json": {
+    "/prefix": "absent"
+  },
+  "model/mlx.vault_archive.json": {
+    "/custom_label": "absent",
+    "/sha256": "absent"
+  },
+  "model/onnx_genai.huggingface.json": {
+    "/prefix": "absent"
+  },
+  "model/openvino.huggingface.json": {
+    "/prefix": "absent"
+  },
+  "model_flags/asr_eval.gguf_vision.json": {
+    "/enable_thinking": "absent"
+  },
+  "model_flags/asr_eval.torch.json": {
+    "/enable_thinking": "absent"
+  },
+  "model_flags/eval.gguf_text.low.json": {
+    "/reasoning_effort": "absent"
+  },
+  "model_flags/eval.gguf_vision.json": {
+    "/enable_thinking": "absent"
+  },
+  "model_flags/eval.mlx.json": {
+    "/enable_thinking": "absent"
+  },
+  "model_flags/eval.torch.high.json": {
+    "/reasoning_effort": "absent"
+  },
+  "model_flags/eval.torch.medium.json": {
+    "/enable_thinking": "absent",
+    "/reasoning_effort": "absent"
+  },
+  "model_flags/vlm_eval.gguf_vision.json": {
+    "/enable_thinking": "absent"
+  },
+  "model_flags/vlm_eval.torch.json": {
+    "/enable_thinking": "absent"
+  },
+  "runtime/llamacpp_cli_stock_tools.vault_remote_archive.json": {
+    "/custom_label": "absent"
+  },
+  "runtime/llamacpp_ios_pipette.ios-arm64.memory_only.json": {
+    "/private_memory": "absent"
+  },
+  "runtime/llamacpp_ios_pipette.ios-arm64.private_thermal.json": {
+    "/private_thermal": "absent"
+  },
+  "runtime/ovms.vault_remote_archive.json": {
+    "/custom_label": "absent"
+  },
+  "runtime/trt_edgellm.vault_remote_archive.json": {
+    "/custom_label": "absent"
+  },
+  "runtime/uv_vllm.vault_wheelhouse.json": {
+    "/source/custom_label": "absent",
+    "/source/install_flags": "absent"
+  },
+  "runtime_flags/asr_eval.uv_vllm.torch.json": {
+    "/max_model_len": "absent",
+    "/parallel": "absent",
+    "/raw": "absent"
+  },
+  "runtime_flags/decode_throughput.docker_sglang.torch.host.json": {
+    "/ipc": "absent"
+  },
+  "runtime_flags/decode_throughput.docker_vllm.torch.float.json": {
+    "/dtype": "absent"
+  },
+  "runtime_flags/decode_throughput.llamacpp_cli_stock_tools.gguf_text.on.json": {
+    "/flash_attention": "absent"
+  },
+  "runtime_flags/decode_throughput.llamacpp_ios_pipette.gguf_text.mmap.json": {
+    "/load_mode": "absent"
+  },
+  "runtime_flags/decode_throughput.ovms.openvino.fast-compile.json": {
+    "/generate_hint": "absent"
+  },
+  "runtime_flags/decode_throughput.uv_vllm.torch.bfloat16.json": {
+    "/dtype": "absent"
+  },
+  "runtime_flags/end_to_end_latency.docker_sglang.torch.private.json": {
+    "/ipc": "absent"
+  },
+  "runtime_flags/end_to_end_latency.llamacpp_cli_stock_tools.gguf_text.off.json": {
+    "/flash_attention": "absent"
+  },
+  "runtime_flags/end_to_end_latency.llamacpp_ios_pipette.gguf_text.mlock.json": {
+    "/load_mode": "absent"
+  },
+  "runtime_flags/end_to_end_latency.uv_vllm.torch.float16.json": {
+    "/dtype": "absent"
+  },
+  "runtime_flags/eval.docker_sglang.torch.shareable.json": {
+    "/ipc": "absent"
+  },
+  "runtime_flags/eval.llamacpp_ios_pipette.gguf_text.direct_io.json": {
+    "/load_mode": "absent"
+  },
+  "runtime_flags/eval.uv_vllm.torch.half.json": {
+    "/dtype": "absent"
+  },
+  "runtime_flags/eval.uv_vllm.torch.json": {
+    "/repetition_detection": "absent"
+  },
+  "runtime_flags/max_memory_usage.llamacpp_ios_pipette.gguf_text.mmap_mlock.json": {
+    "/load_mode": "absent"
+  },
+  "runtime_flags/max_memory_usage.uv_vllm.torch.auto.json": {
+    "/dtype": "absent"
+  },
+  "runtime_flags/prefill_throughput.docker_sglang.torch.none.json": {
+    "/ipc": "absent"
+  },
+  "runtime_flags/prefill_throughput.llamacpp_cli_stock_tools.gguf_text.auto.json": {
+    "/flash_attention": "absent"
+  },
+  "runtime_flags/prefill_throughput.llamacpp_ios_pipette.gguf_text.none.json": {
+    "/load_mode": "absent"
+  },
+  "runtime_flags/prefill_throughput.uv_openvino.openvino.best-perf.json": {
+    "/generate_hint": "absent"
+  },
+  "runtime_flags/prefill_throughput.uv_vllm.torch.float32.json": {
+    "/dtype": "absent"
+  },
+  "runtime_flags/vl_max_memory.trt_edgellm.gguf_vision.bf16.json": {
+    "/precision": "absent"
+  },
+  "runtime_flags/vl_throughput.trt_edgellm.gguf_vision.fp16.json": {
+    "/precision": "absent"
+  },
+  "runtime_flags/vl_throughput.trt_edgellm.gguf_vision.w8a16.json": {
+    "/envs": "absent",
+    "/precision": "absent",
+    "/raw": "absent"
+  },
+  "runtime_flags/vlm_eval.uv_vllm.torch.json": {
+    "/max_model_len": "absent",
+    "/parallel": "absent",
+    "/raw": "absent"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "device_chip_model": "Intel Xeon Platinum 8480+",
+  "device_form_factor": "server",
+  "device_gpu_model": "NVIDIA H100 80GB HBM3",
+  "device_gpu_vram_bytes": 85899345920,
+  "device_name": "lambda-h100-1",
+  "device_npu_model": "none-reported",
+  "device_npu_vram_bytes": 0,
+  "device_os_name": "Ubuntu",
+  "device_os_version": "22.04",
+  "device_ram_bytes": 1099511627776
+}

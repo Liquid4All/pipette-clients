@@ -1,0 +1,13 @@
+{
+  "draft": {
+    "org": "LiquidAI",
+    "repo_name": "LFM2.5-VL-3B-DSpark",
+    "source": "huggingface"
+  },
+  "target": {
+    "org": "LiquidAI",
+    "repo_name": "LFM2.5-VL-3B-MLX-8bit",
+    "source": "huggingface"
+  },
+  "type": "mlx_speculative"
+}

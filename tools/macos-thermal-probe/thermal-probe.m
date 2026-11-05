@@ -1,48 +1,22 @@
 // Does the macOS thermal-pressure notification track the SoC actually cooling?
 //
-// `crates/pipette-readiness/src/macos.rs` gates benchmark readiness on
-// `notify_get_state(kOSThermalNotificationPressureLevelName)`, proceeding
-// only at level 0. Measured on a fanless MacBook Neo (A18 Pro):
+// `crates/pipette-readiness/src/macos.rs` requires
+// `kOSThermalNotificationPressureLevelName` to read 0 (alongside its die and
+// CPU checks). On a fanless MacBook Neo the level behaves like a release
+// timer, not a temperature threshold: it read `moderate` then `nominal` two
+// seconds apart at the same 38.20C. This tool measures how long the enum
+// keeps the gate waiting after the die is back at baseline, and compares that
+// against the gate's `DEFAULT_MAX_WAIT`.
 //
-//   - The notify signal is live: it reaches `moderate` under load, so it is
-//     not a constant 0. (`notify(3)` accepts *any* name and reports 0 for
-//     it, so that needed proving -- see the `bogus` control column.)
-//   - It moves in lock-step with `ProcessInfo.thermalState` in both
-//     directions, so switching to it bought no latency, only the removal of
-//     a `swift -e` compiler spawn from the poll loop.
-//   - It behaves like a *timer*, not a temperature threshold: one run showed
-//     38.20C reading `moderate` and, two seconds later, the same 38.20C
-//     reading `nominal`. The die had been at that temperature for ~5 minutes.
+// The cooldown ends when the die has recovered AND the enum is nominal: on the
+// Neo the die recovered at 147s and the enum at 318s, so a die-only exit would
+// stop before the number this tool exists to produce. The run first waits for
+// a nominal start, or it measures the tail of an earlier thermal event.
 //
-// So the question is how long the gate keeps waiting after the die is back at
-// baseline. This samples an idle baseline, heats the SoC with an all-core
-// load, then idles -- recording IOHID die temperature (`PMU tdie*`) next to
-// both coarse enums -- and reports that interval. It also compares the
-// enum's recovery time against `DEFAULT_MAX_WAIT`, because a host that needs
-// longer than the deadline doesn't just wait: the gate times out and fails
-// the cell.
-//
-// The cooldown runs until the machine is actually done cooling rather than
-// for a fixed span: it ends once the die has held flat for a whole trailing
-// window *and* the enum has returned to nominal. Waiting on the enum too is
-// what keeps the headline interval measurable -- on the Neo the die settled
-// in 24s and the enum took 317s, so a die-only exit would stop the run five
-// minutes before the number this tool exists to produce.
-//
-// The run waits for a genuinely nominal start before measuring. A run that
-// begins at `fair` is measuring the tail of some earlier thermal event rather
-// than the load applied here; the first Neo run did exactly that and its
-// numbers are an upper bound, not a measurement.
-//
-// Die temperature comes from the same IOHID sensors as the iOS client's
-// `pipette_soc_temp` (`ios/Pipette/Pipette/Native/PipetteThermal.m`) --
-// private symbols via dlsym, `PMU tdie*` services, max reading. Those names
-// verified identical on Apple Silicon Macs. Private API, so this tool stays
-// a diagnostic and nothing links it into a shipped binary.
-//
-// Objective-C rather than a shell loop on purpose: reading ProcessInfo
-// in-process avoids `swift -e` spawning the Swift compiler on every sample,
-// which would itself heat the machine being measured.
+// Die temperature uses the same private IOHID sensors (`PMU tdie*`, max) as
+// the iOS `pipette_soc_temp` in `ios/Pipette/Pipette/Native/PipetteThermal.m`,
+// so this stays a diagnostic that nothing ships. Objective-C so ProcessInfo is
+// read in-process: spawning `swift -e` per sample would heat the machine.
 //
 // Build/run: see README.md.
 
@@ -65,96 +39,49 @@ static const char *kBogusName = "com.example.pipette.no.such.notification";
 // The shorter, undocumented sibling of the linked constant. Confirmed to sit
 // at 0 while the linked one moves; kept as a second-machine cross-check.
 static const char *kUndocumentedName = "com.apple.system.thermalpressure";
-// The die counts as "steady" when its spread (max - min) across the trailing
-// window stays inside a band derived from the idle baseline: it has settled
-// once it is no jumpier than it was before the load. The band has to be
-// measured per host, because the idle noise is wildly hardware-specific --
-// sigma 0.26-0.41C on a 20-sensor actively-cooled Mac against 0.80C on the
-// fanless 7-sensor Neo, whose die wanders 3.79C peak-to-peak doing nothing.
-//
-// It is calibrated by sliding the *same* window over the baseline and taking a
-// high percentile of the ranges seen there. That is the identical statistic the
-// test computes, on data known to be idle, so it needs no distributional
-// assumption at all. An earlier version converted a sigma into an expected
-// range with a fixed multiple; the Neo showed why that fails. Its noise is
-// autocorrelated (lag-1 +0.68), not white, so the Gaussian range factor is
-// wrong and drifts with window length -- measured p90/sigma was 3.51 at a
-// 16-sample window but 4.73 at 31. No single multiple is right for both.
+// "Steady" = the die's spread across the trailing window is inside a band
+// measured per host, because idle noise is hardware-specific (sigma 0.26-0.41C
+// on an actively cooled Mac; sigma 0.80C, 3.79C peak-to-peak on the fanless Neo).
+// The band is this percentile of the same window's range slid over the idle
+// baseline. A sigma multiple is only the fallback: the noise is autocorrelated
+// (lag-1 +0.68), so the range/sigma ratio drifts with window length (3.51 at
+// 16 samples, 4.73 at 31).
 static const double kBandPercentile = 0.90;
-// Sliding windows overlap, so they are not independent samples and the tail of
-// their distribution is a soft estimate. Below this many, fall back to sigma.
+// Overlapping windows make the percentile a soft estimate; below this many,
+// fall back to sigma.
 static const int kMinCalibWindows = 10;
-// Fallback only, when the baseline is too short to hold enough windows. Same
-// Gaussian-range approximation as before, with all its caveats.
 static const double kSigmaMultiple = 4.0;
-// Floor, tied to hardware: these sensors quantize at ~0.10C, so a band under a
-// couple of steps is asking for resolution the sensor does not have.
-//
-// There is deliberately NO ceiling. An earlier version clamped the band at
-// 2.00C to catch a "contaminated" baseline; on the Neo that cut a correct
-// 3.21C band by 38%, put it below the median idle window range of 2.71C, and
-// made `steady` unsatisfiable -- then labelled the good data contaminated. A
-// band too wide to be meaningful is now caught after the fact in the verdict,
-// where the load-induced rise is actually known to compare it against.
+// The sensors quantize at ~0.10C, so the floor is two steps. No ceiling on
+// purpose: a 2.00C cap made `steady` unsatisfiable on the Neo (correct band
+// 3.21C). A band too wide for the load-induced rise is flagged [WEAK] in the
+// verdict instead.
 static const double kBandFloorC = 0.2;
 // Used when there is no usable baseline to derive a band from at all.
 static const double kBandFallbackC = 0.5;
-// A range test alone cannot see drift: max-min answers "how far did it move",
-// never "was it moving". Measured on the Neo, `steady` fired 97s after load
-// stop with the die still falling at 3.21 C/min, because a slow monotonic
-// descent looks exactly like stationary noise to a spread. So the window's
-// trend is tested too -- against a threshold calibrated the same empirical way,
-// since idle |slope| over a 60s window has a median of 1.27 C/min on that host
-// and any "sensible" fixed limit lands below it.
+// A range test cannot see a slow monotonic descent (on the Neo `steady` fired
+// with the die still falling at 3.21 C/min), so the window's slope is also
+// tested against the idle p90 |slope|. Resolving zero slope needs a long
+// window, which is why `recovered`, not `steady`, ends the cooldown.
 //
-// Note the cost: resolving zero-slope needs a long window (idle p90 |slope|
-// falls from ~2.6 C/min at 60s to ~0.3 at 180s), and a long window cannot
-// report sooner than its own length. That trade is why `recovered`, not
-// `steady`, ends the cooldown.
-// "Recovered" = die back near the idle baseline. Tested on a short smoothed
-// mean rather than one sample, because a single reading carries the full noise:
-// on the Neo the old hardcoded 3.0C threshold sat *below* the 3.79C idle
-// peak-to-peak, so a lone dip could read "recovered" while the die was still
-// genuinely hot. Smoothing is kept short to avoid lagging a fast descent.
-//
-// This is the cooldown's exit criterion. Comparing a smoothed reading against a
-// known absolute reference is a far easier estimation problem than detecting a
-// zero slope, and it needs no long window: on the Neo it resolved at 147s where
-// an honest trend test needed 224s.
-// Smoothing is a DURATION, not a sample count. Noise decorrelates on a
-// timescale (lag-1 +0.68 at 2s spacing implies a correlation time of ~5s), so
-// sampling four times faster gives four times the samples and almost no extra
-// noise reduction. Expressing this in samples silently changed the physics
-// whenever `interval` changed.
-//
-// 2s by default: short enough not to lag a fast descent, long enough to be
-// worth averaging. The threshold derived from it uses the EFFECTIVE sample
-// count, not the raw one -- an earlier version divided by sqrt(5) and claimed
-// a resolution the correlated samples could not actually support.
+// "Recovered" = a short smoothed mean back within a noise-derived threshold of
+// the idle baseline (on the Neo it resolved at 147s where the trend test needed
+// 224s). Smoothed because one reading carries the full idle noise; short so it
+// does not lag a fast descent. Smoothing is a duration, not a sample count: the
+// noise has a ~5s correlation time, so faster sampling adds samples but little
+// noise reduction. The threshold divides by the effective sample count for the
+// same reason.
 static const double kRecoveredSmoothSecs = 2.0;
 static const double kRecoveredFloorC = 1.0;
 static const double kRecoveredSigmas = 2.0;
 // A baseline is "drifting" when the total change implied by its linear fit
-// exceeds its own sigma. Run A came in at 0.25x (clean); run 3, which began
-// `nominal after 0s` while the die was still descending, at 1.49x. `nominal`
-// does not mean settled -- the enum is a release timer, not a thermometer.
+// exceeds its own sigma. A clean run measured 0.25x; one that started
+// `nominal` while the die was still descending measured 1.49x.
 static const double kDriftSigmas = 1.0;
-// Cycle convergence, by EQUIVALENCE rather than significance.
-//
-// "No statistically significant trend" was the previous rule and it fails in a
-// specific, systematic way: a search that walks forward shrinking the tail also
-// shrinks the sample size, and t falls purely from lost degrees of freedom. On
-// a real 15-rep Neo batch the peak slope estimate was +0.193, +0.216, +0.203,
-// +0.193, +0.195 C/rep across successive tails -- essentially constant -- while
-// t fell 4.19, 3.91, 2.87, 2.04, 1.45. The rule "declared convergence" at the
-// exact point the trend stopped being *detectable*, not where it stopped.
-//
-// Non-significance is not evidence of flatness; it is often just absence of
-// data. So the test is inverted: bound the slope from above at 95% and require
-// the WORST-CASE drift it permits across the tail to be small next to the
-// rep-to-rep scatter already present. This has the right incentive -- more reps
-// narrow the interval and make convergence easier to demonstrate, where the old
-// rule made it easier with fewer.
+// Cycle convergence is an equivalence test, not a significance test: shrinking
+// the tail drops t through lost degrees of freedom alone (on a 15-rep Neo batch
+// the peak slope held ~+0.2 C/rep while t fell 4.19 to 1.45). So the 95% upper
+// bound on drift across the tail must be within this multiple of the
+// rep-to-rep scatter; more reps make convergence easier to show, not harder.
 static const double kDriftScatterMultiple = 2.0;
 // Minimum reps in a tail before a slope means anything.
 static const int kMinTailReps = 4;
@@ -174,11 +101,8 @@ static const double kSettleTolerances[] = {4.0, 3.0, 2.0, 1.5, 1.0, 0.5};
     ((int)(sizeof(kSettleTolerances) / sizeof(kSettleTolerances[0])))
 // The settled reference is the mean of the last this-many seconds of cooldown.
 static const int kSettleRefSecs = 90;
-// `DEFAULT_MAX_WAIT` in crates/pipette-readiness/src/macos.rs. If the enum
-// needs longer than this to clear, the gate times out and fails the cell.
-// Raised 300 -> 420 once this tool measured the hold-off at ~318 s: the old
-// deadline sat below it, so the gate failed cells on fanless hosts. The enum is
-// the gate's only thermal criterion; die temperature is recorded, not gated on.
+// Mirrors `DEFAULT_MAX_WAIT` in crates/pipette-readiness/src/macos.rs. If the
+// enum needs longer than this to clear, the gate times out and fails the cell.
 static const int kGateDefaultMaxWaitSecs = 420;
 
 static volatile bool gStop = false;
@@ -218,9 +142,8 @@ static CFArrayRef gServices;    // held for the process lifetime
 static SvcRef *gDieSensors;     // borrowed refs into gServices
 static int gDieCount = -1;      // -1 = unavailable
 
-// Resolve the private symbols, enumerate AppleVendor temperature sensors, and
-// keep the `PMU tdie*` ones. Done once: the service list is stable, so only
-// event copies need to repeat per sample.
+// Done once: the service list is stable, so only event copies repeat per
+// sample.
 static void dieTempInit(void) {
     FnCreate create = (FnCreate)dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientCreate");
     FnSetMatching setMatching =
@@ -278,7 +201,6 @@ static double dieTempMax(void) {
     return best;
 }
 
-// Spread (max - min) of a die-sample window, or NAN if empty.
 static double spreadOf(const double *v, int n) {
     if (n <= 0) return NAN;
     double lo = v[0], hi = v[0];
@@ -306,8 +228,6 @@ static int cmpDouble(const void *a, const void *b) {
     return x < y ? -1 : (x > y ? 1 : 0);
 }
 
-// A duration in seconds becomes however many samples that is at this interval,
-// always at least one.
 static int smoothSamples(double secs, double interval) {
     int n = (int)(secs / interval + 0.5);
     return n < 1 ? 1 : n;
@@ -321,14 +241,10 @@ static void sleepSecs(double s) {
     nanosleep(&ts, NULL);
 }
 
-// Lag-1 autocorrelation. Measured, because it decides whether sampling faster
-// buys anything: this noise is strongly autocorrelated (+0.68 at 2s spacing on
-// the Neo, and higher the closer together you sample), so averaging more
-// samples from the same few seconds does NOT average the noise away.
+// Lag-1 autocorrelation: decides whether sampling faster buys precision (+0.68
+// at 2s spacing on the Neo, higher at closer spacing).
 static double lag1Of(const double *v, int n) {
-    // A handful of samples gives a wild estimate -- a 6-sample baseline
-    // produced -0.66 here, which is noise, not anticorrelation. Refuse rather
-    // than hand back a number that would be trusted.
+    // A 6-sample baseline gave -0.66, which is noise, not anticorrelation.
     if (n < 20) return NAN;
     double mean = 0.0;
     for (int i = 0; i < n; i++) mean += v[i];
@@ -339,17 +255,11 @@ static double lag1Of(const double *v, int n) {
     return den > 0.0 ? num / den : NAN;
 }
 
-// How many INDEPENDENT samples `n` correlated ones are worth. For an AR(1)
-// process the variance of the mean inflates by (1+r)/(1-r), so the honest
-// sample count is n(1-r)/(1+r). At r=0.68 that is 0.19n -- five samples are
-// worth about one, and a 5-sample mean is barely smoother than a single
-// reading. Oversampling improves TIME resolution, never noise.
+// How many independent samples `n` AR(1)-correlated ones are worth:
+// n(1-r)/(1+r), so at r=0.68 five samples are worth about one.
 static double effectiveN(int n, double r) {
     if (n <= 0) return 0.0;
-    // Unknown correlation resolves to the CONSERVATIVE answer: assume the
-    // samples tell us nothing new about each other. Defaulting to `n` here
-    // would quietly hand back the optimistic assumption that this whole
-    // correction exists to remove.
+    // Unknown correlation takes the conservative answer, not `n`.
     if (isnan(r)) return 1.0;
     if (r <= 0.0) return (double)n;
     if (r >= 0.99) return 1.0;
@@ -357,11 +267,8 @@ static double effectiveN(int n, double r) {
     return eff < 1.0 ? 1.0 : eff;
 }
 
-// Least-squares fit of y against index, reporting the slope, its standard
-// error, and the residual scatter. Used to ask whether a sequence is actually
-// flat, which a spread cannot answer: five reps creeping +0.31C each span only
-// 0.9C over four of them, which slips under any plausible spread threshold
-// while climbing 3C over a longer batch.
+// Least-squares fit of y against index: slope, its standard error, and the
+// residual scatter. A spread cannot tell a slow climb from flat.
 static void fitTrend(const double *y, int n, double *slope, double *se, double *resid) {
     *slope = *se = *resid = NAN;
     if (n < 3) return;
@@ -387,8 +294,7 @@ static void fitTrend(const double *y, int n, double *slope, double *se, double *
     *se = rs / sqrt(sxx - sx * sx / n);
 }
 
-// Least-squares trend of `n` samples spaced `interval` seconds apart, in C/min.
-// NAN if there are too few points to fit.
+// Least-squares trend in C/min of samples `interval` seconds apart.
 static double slopeOf(const double *v, int n, double interval) {
     if (n < 2) return NAN;
     double sx = 0, sy = 0, sxx = 0, sxy = 0;
@@ -404,9 +310,8 @@ static double slopeOf(const double *v, int n, double interval) {
     return (n * sxy - sx * sy) / den * 60.0;
 }
 
-// Everything the steadiness test needs to know about how this host behaves when
-// it is doing nothing: the distribution of range AND trend over the very same
-// window the test will apply. Measured, never assumed -- see the header.
+// Idle distribution of range and trend over the same window the steadiness
+// test applies.
 typedef struct {
     double rangeMedian, rangeP90;
     double slopeMedian, slopeP90;  // C/min, absolute values
@@ -420,7 +325,6 @@ static double percentileOf(double *sorted, int n, double p) {
     return sorted[i];
 }
 
-// Slide a `w`-sample window over the baseline and collect both statistics.
 // `scratch` must hold at least 2*n doubles. Returns the window count.
 static int calibrate(const double *base, int n, int w, double interval, double *scratch,
                      Calib *out) {
@@ -445,11 +349,9 @@ static int calibrate(const double *base, int n, int w, double interval, double *
     return cnt;
 }
 
-// Turn the idle baseline into the steady band, preferring the empirical
-// window-range calibration and falling back to sigma when the baseline is too
-// short to support it. `*note` is set whenever the number did not come from the
-// preferred path, so a fallback or floored band is always visible in the
-// summary rather than passing as a measurement.
+// `*note` is set whenever the band did not come from the window calibration, so
+// a fallback or floored band shows in the summary instead of passing as a
+// measurement.
 static double deriveSteadyBand(const Calib *c, double baseSigma, int baseSamples,
                                const char **note) {
     *note = NULL;
@@ -471,14 +373,9 @@ static double deriveSteadyBand(const Calib *c, double baseSigma, int baseSamples
     return band;
 }
 
-// How long after load stop the die first reached, and then *held*, each
-// tolerance around its settled value. The gap between those two columns is the
-// noise: on the Neo the die first came within 1C at 105s but kept wandering
-// back out until 318s. Reporting only "first reached" would overstate how
-// quickly a repeatable thermal state is available.
-//
-// `t`/`v` are the cooldown trace, `n` long, and `stopAt` is when the load
-// stopped. Prints nothing if the trace is too short to have a settled tail.
+// How long after load stop the die first reached, and then held, each tolerance
+// around its settled value. Both, because the die wanders back out (on the Neo:
+// within 1C at 105s, held only from 318s).
 static void printSettlingCurve(const double *t, const double *v, int n, double stopAt,
                                double sigma, int smoothN) {
     if (n < smoothN + 2) return;
@@ -495,11 +392,6 @@ static void printSettlingCurve(const double *t, const double *v, int n, double s
 
     printf("\n=== settling curve (after load stop) ===\n");
     printf("  settled reference %.2fC = mean of the last %ds of cooldown\n", ref, kSettleRefSecs);
-    // This asks a different question from `recovered`, and the two can differ
-    // by minutes. Here the reference is where the die actually ENDED UP, so the
-    // curve answers "how long until repeated runs start from the same place" --
-    // the batch-spacing question. `recovered` compares against the pre-load
-    // idle baseline instead, i.e. "how long until it is properly cold".
     printf("  (reference is where the die settled, NOT the pre-load baseline: this is the\n");
     printf("   batch-spacing question, `recovered` above is the return-to-idle one)\n");
     printf("  %-12s %-14s %s\n", "tolerance", "first within", "and stays within");
@@ -534,16 +426,9 @@ static void printSettlingCurve(const double *t, const double *v, int n, double s
 // Calibration cache
 // ---------------------------------------------------------------------------
 //
-// The 300s idle baseline is the most expensive part of a run and the least
-// interesting to repeat: idle noise is a host property, not a session one.
-// Across two Neo sessions the band moved 11% and the median idle |slope| not at
-// all, so measuring it once and reusing it is a good trade -- as long as the
-// cached numbers are tied to the window they were measured for, since both
-// statistics depend on window length.
-//
-// Deliberately dumb format: one line of plain text, easy to read, delete, or
-// eyeball. A cache that cannot be inspected would be a poor fit for a tool
-// whose whole point is not trusting unexamined numbers.
+// Idle noise is a host property (across two Neo sessions the band moved 11%),
+// so a short baseline can reuse a long one's numbers, keyed to the window and
+// interval they were measured for. One plain-text line so it can be inspected.
 #define kCalibMagic "thermal-probe-calib-v1"
 
 static bool calibSave(const char *path, int winSamples, double interval, double sigma,
@@ -558,8 +443,6 @@ static bool calibSave(const char *path, int winSamples, double interval, double 
     return true;
 }
 
-// Load only if the cached calibration was measured for this exact window and
-// interval; the statistics are meaningless transplanted onto a different one.
 static bool calibLoad(const char *path, int winSamples, double interval, double *sigma, Calib *c,
                       const char **why) {
     *why = NULL;
@@ -606,8 +489,7 @@ static void stopBurn(pthread_t *th, int threads) {
     for (int i = 0; i < threads; i++) pthread_join(th[i], NULL);
 }
 
-// Mean of the last `k` samples in the ring, for the noise-robust "recovered"
-// test. `next` is the write cursor.
+// Mean of the last `k` samples in the ring; `next` is the write cursor.
 static double tailMean(const double *win, int cap, int filled, int next, int k) {
     if (filled <= 0) return NAN;
     if (k > filled) k = filled;
@@ -616,9 +498,8 @@ static double tailMean(const double *win, int cap, int filled, int next, int k) 
     return sum / k;
 }
 
-// Has the die held within `band` across the whole trailing window? A window
-// that isn't full yet is never steady: it holds less than the caller's
-// requested seconds of history, so a flat spread across it proves nothing.
+// A window that isn't full yet is never steady: it holds less than the
+// requested history, so a flat spread across it proves nothing.
 static bool dieSteady(const double *win, int cap, int filled, double band) {
     if (filled < cap) return false;
     return spreadOf(win, cap) < band;
@@ -652,7 +533,7 @@ static const char *pressureWord(uint64_t level) {
     }
 }
 
-// `ProcessInfo.ThermalState` — four levels, a different scale again.
+// `ProcessInfo.ThermalState`: four levels, a different scale again.
 static const char *thermalStateWord(NSProcessInfoThermalState state) {
     switch (state) {
         case NSProcessInfoThermalStateNominal: return "nominal";
@@ -710,29 +591,14 @@ static void printTrack(const Track *t, bool isPressureScale, double loadStoppedA
 // Cycle mode: what a real benchmark batch does to the die.
 // ---------------------------------------------------------------------------
 //
-// The question a batch actually asks is NOT "is the machine cold" but "does run
-// N start where run 1 started". Cooling to idle between every run is the
-// expensive way to buy that; letting the duty cycle reach its own limit cycle
-// is usually far cheaper, and costs only the reps spent getting there.
-//
-// So this runs `reps` iterations of (load, rest) and records the die
-// temperature at the moment each rep begins. If those converge, the tail of the
-// batch is mutually comparable and the head should be discarded or pre-warmed.
-// Convergence is judged against the measured noise floor, not a chosen number:
-// two start temperatures that differ by less than the sensor's own idle wander
-// are not distinguishable, so there is nothing left to wait for.
+// A batch needs run N to start where run 1 started, not a cold machine. Letting
+// the duty cycle reach its own limit cycle is usually cheaper than cooling to
+// idle each time. This records the die at each rep's start and peak, and
+// reports from which rep the trend is provably flat.
 
-// Sample the die for `secs`, pushing into the caller's trailing ring and
-// tracking a peak. Returns the hottest reading seen.
-// Sample the die for `secs`, pushing into the caller's trailing ring and
-// tracking a peak. Returns the hottest reading seen.
-//
-// Phases are timed against an ABSOLUTE deadline, not by sleeping `interval`
-// after each sample. Sleeping a fixed amount after variable work accumulates
-// error -- measured at 18% overrun, which turned a requested 3.5s load into
-// 4.1s. For a tool whose entire job is characterizing a specific duty cycle,
-// silently running a different one is fatal, and here it may have been what
-// tripped the pressure enum.
+// Samples the die for `secs` into the caller's ring; returns the peak. Timed
+// against an absolute deadline: sleeping `interval` after each sample overran
+// 18% (a 3.5s load became 4.1s), silently changing the duty cycle.
 static double sampleFor(double secs, double interval, const char *label, int rep, double *ring,
                         int ringCap, int *ringN, int *ringNext, double startClock) {
     double peak = NAN;
@@ -754,8 +620,6 @@ static double sampleFor(double secs, double interval, const char *label, int rep
         fflush(stdout);
         sleepSecs(phase0 + (double)(i + 1) * interval - monotonicNow());
     }
-    // The phase ends when the requested duration has elapsed, not when the
-    // sample count says so.
     sleepSecs(phase0 + secs - monotonicNow());
     return peak;
 }
@@ -788,8 +652,8 @@ static int runCycle(int reps, double loadSecs, double restSecs, double interval,
     double clock0 = monotonicNow();
     printf("%7s  %-5s %-5s %8s  %s\n", "elapsed", "rep", "phase", "tdie_max", "pressure");
 
-    // Baseline: only needed for the noise floor that convergence is judged
-    // against, so it can be much shorter than the single-shot mode's.
+    // Only feeds the printed noise floor and rep 1's start, so it can be much
+    // shorter than the single-shot baseline.
     int baseN = 0;
     for (int bi = 0; (double)bi * interval < baseSecs; bi++) {
         double die = dieTempMax();
@@ -840,25 +704,11 @@ static int runCycle(int reps, double loadSecs, double restSecs, double interval,
         if (startTemp[r] > hi) hi = startTemp[r];
     }
     printf("  start-temp spread across all %d reps: %.2fC\n", reps, hi - lo);
-    // Convergence is a TREND test, not a spread test, and it is applied to the
-    // peak as well as the start.
-    //
-    // Spread was the previous rule and it produced a confident false positive
-    // on real data: reps 2-5 spanning 0.90C "inside the 1.79C noise floor",
-    // while start temperature climbed +0.310 +/- 0.046 C/rep (t=6.7) and peak
-    // +0.554 +/- 0.028 (t=20.1). A sustained climb spans little over four
-    // points and a great deal over fifteen. Spread answers "how far apart are
-    // these", never "are they still going somewhere".
-    //
-    // The idle noise floor is also the wrong yardstick here. It is 2 sigma of
-    // single idle samples, but these are smoothed means taken at the same phase
-    // of a repeating cycle, whose actual scatter was 0.10C -- 18x tighter. So
-    // the test uses each tail's OWN residual scatter and asks whether the slope
-    // is distinguishable from zero. Self-calibrating, no imported constant.
-    //
-    // Peak matters at least as much as start: the benchmark runs THROUGH the
-    // excursion. On that same data the peak was diverging faster than the
-    // start, and testing only the start would have missed it entirely.
+    // A trend test on start AND peak, not a spread test: reps 2-5 spanned only
+    // 0.90C while the start climbed +0.31 C/rep and the peak +0.55. The yardstick
+    // is each tail's own residual scatter (0.10C there), not the idle noise
+    // floor, which describes single idle samples. Peak matters because the
+    // benchmark runs through the excursion.
     if (reps < kMinTailReps + 1) {
         printf("  [SKIP] need at least %d reps to separate a plateau from a slow climb.\n",
                kMinTailReps + 1);
@@ -872,8 +722,7 @@ static int runCycle(int reps, double loadSecs, double restSecs, double interval,
             fitTrend(peakTemp + k, n, &s2, &e2, &r2);
             double tc = tCrit95(n - 2);
             // Worst-case drift the data still permits across this tail, versus
-            // the scatter already in it. Flat means "provably small", not
-            // "too few points to tell".
+            // the scatter already in it.
             bool startFlat = !isnan(e1) && e1 > 0 &&
                              (fabs(s1) + tc * e1) * (n - 1) <= kDriftScatterMultiple * r1;
             bool peakFlat = !isnan(e2) && e2 > 0 &&
@@ -885,7 +734,6 @@ static int runCycle(int reps, double loadSecs, double restSecs, double interval,
                 break;
             }
         }
-        // Always show the trend over the last few reps, converged or not.
         {
             int k = reps - kMinTailReps;
             double s1, e1, r1, s2, e2, r2;
@@ -896,8 +744,7 @@ static int runCycle(int reps, double loadSecs, double restSecs, double interval,
                    kMinTailReps, s1, e1, e1 > 0 ? s1 / e1 : 0.0, s2, e2, e2 > 0 ? s2 / e2 : 0.0);
         }
         if (conv < 0) {
-            // Report the bound over the longest tail, where the estimate is
-            // strongest -- not the shortest, where it is merely unmeasurable.
+            // The longest tail, where the estimate is strongest.
             int n = reps;
             double s1, e1, r1, s2, e2, r2;
             fitTrend(startTemp, n, &s1, &e1, &r1);
@@ -939,9 +786,8 @@ static int runCycle(int reps, double loadSecs, double restSecs, double interval,
     return 0;
 }
 
-// Block until both coarse enums read nominal, so the run starts from a known
-// state. Returns false if the cap expired first, in which case every
-// downstream number is confounded by whatever the machine was already doing.
+// Blocks until both coarse enums read nominal. False if the cap expired first,
+// which confounds every downstream number.
 static bool waitForNominal(double maxSecs, double interval, const char *linkedName) {
     if (maxSecs <= 0) return true;  // caller opted out
     double start = monotonicNow();
@@ -980,8 +826,8 @@ static void usage(const char *me) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        // Cycle mode takes flags; the original single-shot interface stays
-        // positional so existing invocations keep working.
+        // Cycle mode takes flags; single-shot stays positional for existing
+        // invocations.
         if (argc > 1 && strncmp(argv[1], "--", 2) == 0) {
             int reps = 5;
             double cLoad = 60, cRest = 45, cInterval = 2, cBase = 60;
@@ -1017,8 +863,8 @@ int main(int argc, char **argv) {
                                : (int)[[NSProcessInfo processInfo] activeProcessorCount];
         double nominalCap = argc > 6 ? atof(argv[6]) : 900;
         double maxCoolSecs = argc > 7 ? atof(argv[7]) : 1800;
-        // 20ms floor: below that the sampler's own cost starts to matter, and
-        // IOHID event copies are not free. See the observer-effect note.
+        // Below 20ms the sampler's own cost (~0.8ms of CPU per sample, see
+        // README.md) starts to matter.
         if (interval < 0.02) interval = 0.02;
         if (steadySecs < interval) steadySecs = interval;
 
@@ -1066,33 +912,27 @@ int main(int argc, char **argv) {
         double dieFirstSteadyAt = -1.0;  // first onset ever, even if it broke
         int steadyBreaks = 0;            // how many times it fell back out
         bool capHit = false;
-        // Derived from the baseline at load start; until then no cooldown check
-        // runs, so the value is unused.
+        // Derived from the baseline at load start, before any cooldown check.
         double steadyBand = kBandFallbackC;
         double slopeBand = NAN;  // C/min; NAN disables the trend test
         double baseSpread = NAN, baseSigma = NAN, baseSlope = NAN, baseLag1 = NAN;
         Calib cal = {NAN, NAN, NAN, NAN, 0};
         int baseStatN = 0;  // baseCount clamped to what baseSamples actually holds
         const char *bandNote = NULL;
-        // Opt-in noise cache: export THERMAL_PROBE_CALIB=<path> to let a short
-        // baseline borrow an earlier long one's calibration on this host.
         const char *calibPath = getenv("THERMAL_PROBE_CALIB");
         const char *calibNote = NULL;
         // Also derived from baseline noise; see kRecoveredSmoothSecs.
         double recoveredWithin = kRecoveredFloorC;
 
         pthread_t *th = calloc((size_t)threads, sizeof(pthread_t));
-        // Trailing window of cooldown die samples, oldest overwritten. Sized to
-        // span at least steadySecs so a full window is steadySecs of history.
-        // ceil, not integer-division trickery: both are doubles now.
+        // Ring of cooldown die samples spanning at least steadySecs.
         int winSamples = (int)ceil(steadySecs / interval) + 1;
         double *win = calloc((size_t)winSamples, sizeof(double));
         int winNext = 0, winFilled = 0;
-        // Every baseline die sample, for the noise statistics.
         int baseCap = (int)(baseSecs / interval) + 2;
         double *baseSamples = calloc((size_t)baseCap, sizeof(double));
         double *calScratch = calloc((size_t)baseCap * 2, sizeof(double));
-        // Whole cooldown trace, for the settling curve. The cap bounds it.
+        // Whole cooldown trace for the settling curve, bounded by the cap.
         int coolCap = (int)(maxCoolSecs / interval) + 4;
         double *coolT = calloc((size_t)coolCap, sizeof(double));
         double *coolV = calloc((size_t)coolCap, sizeof(double));
@@ -1105,7 +945,6 @@ int main(int argc, char **argv) {
         int smoothN = smoothSamples(kRecoveredSmoothSecs, interval);
         double start = monotonicNow();
         bool loadStarted = false, loadOver = false;
-        // No fixed end: the cooldown decides when to stop, bounded by maxCoolSecs.
         for (double e = 0;; e += interval) {
             double elapsed = monotonicNow() - start;
 
@@ -1116,11 +955,9 @@ int main(int argc, char **argv) {
                 baseSigma = sigmaOf(baseSamples, baseStatN);
                 baseSlope = slopeOf(baseSamples, baseStatN, interval);
                 calibrate(baseSamples, baseStatN, winSamples, interval, calScratch, &cal);
-                // A baseline long enough to calibrate is authoritative and
-                // refreshes the cache; a short one borrows the last good
-                // measurement from this host. Only the NOISE is cached -- the
-                // baseline mean stays session-local, because ambient moves and
-                // `recovered` is measured against it.
+                // Only the noise is cached: the baseline mean stays
+                // session-local, because ambient moves and `recovered` is
+                // measured against it.
                 if (cal.windows >= kMinCalibWindows) {
                     if (calibPath && calibSave(calibPath, winSamples, interval, baseSigma, &cal))
                         calibNote = "measured now; cache refreshed";
@@ -1139,10 +976,8 @@ int main(int argc, char **argv) {
                 steadyBand = deriveSteadyBand(&cal, baseSigma, baseStatN, &bandNote);
                 if (cal.windows >= kMinCalibWindows) slopeBand = cal.slopeP90;
                 if (!isnan(baseSigma)) {
-                    // Divide by the EFFECTIVE sample count. Dividing by
-                    // sqrt(smoothN) assumes independent samples; at lag-1 +0.68
-                    // five of them are worth about one, so that version claimed
-                    // roughly twice the resolution the data supports.
+                    // Effective, not raw, sample count: the samples are
+                    // correlated.
                     baseLag1 = lag1Of(baseSamples, baseStatN);
                     double nEff = effectiveN(smoothN, baseLag1);
                     double fromNoise = kRecoveredSigmas * baseSigma / sqrt(nEff);
@@ -1155,9 +990,6 @@ int main(int argc, char **argv) {
                        "samples; steady band %.2fC%s%s ---\n",
                        baseline, baseSigma, baseSpread, baseStatN, steadyBand,
                        bandNote ? " -- " : "", bandNote ? bandNote : "");
-                // Drift means the baseline was taken while the die was still
-                // moving, so every figure derived from it is inflated. Say so
-                // before the run continues on top of it.
                 if (!isnan(baseSlope) && !isnan(baseSigma) && baseSigma > 0.0) {
                     double totalDrift = fabs(baseSlope) * (baseStatN * interval) / 60.0;
                     if (totalDrift > kDriftSigmas * baseSigma) {
@@ -1203,9 +1035,7 @@ int main(int argc, char **argv) {
                     coolN++;
                 }
             }
-            // Recovery is judged on the smoothed tail, so it must come after the
-            // window push. A single sample carries the full noise -- on a host
-            // with 3.79C of idle wander one dip means nothing.
+            // Must follow the window push: recovery reads the smoothed tail.
             if (loadOver && !isnan(baseline) && dieRecoveredAt < 0 &&
                 winFilled >= smoothN) {
                 double smoothed = tailMean(win, winSamples, winFilled, winNext, smoothN);
@@ -1230,22 +1060,17 @@ int main(int argc, char **argv) {
             fflush(stdout);
 
             if (loadOver) {
-                // `steady` is tracked for comparison but no longer gates the
-                // exit -- an honest trend test needs a window too long to be
-                // the fastest signal. `recovered` does the gating.
+                // `steady` is reported only; `recovered` ends the cooldown.
                 bool steady = false;
                 if (gDieCount > 0 && dieSteady(win, winSamples, winFilled, steadyBand)) {
-                    // Range says flat; now ask whether it was actually moving.
                     double trend = winFilled >= winSamples
                                        ? slopeOf(win, winSamples, interval)
                                        : NAN;
                     steady = isnan(slopeBand) || isnan(trend) || fabs(trend) <= slopeBand;
                 }
                 if (!steady) {
-                    // Fell back out -- the settle clock restarts rather than
-                    // standing as a claim the run went on to contradict. Say so
-                    // in the log, or a bare sequence of "die steady" lines with
-                    // no retraction reads as though it held.
+                    // Log the break, or earlier "die steady" lines read as
+                    // though it held.
                     if (dieSteadyAt >= 0) {
                         steadyBreaks++;
                         printf("--- die left the steady band at %.0fs (%.0fs after load stop); "
@@ -1300,9 +1125,6 @@ int main(int argc, char **argv) {
             else printf("recovered=not yet\n");
             printf("  %-28s sigma=%.2fC spread=%.2fC trend=%+.2f C/min over %d idle samples\n",
                    "die temp noise (baseline)", baseSigma, baseSpread, baseSlope, baseStatN);
-            // Autocorrelation decides whether a faster interval buys precision
-            // or only time resolution. Printed because it is the number that
-            // makes an oversampled mean look better than it is.
             if (!isnan(baseLag1)) {
                 double corrSecs = baseLag1 > 0 && baseLag1 < 1 ? -interval / log(baseLag1) : NAN;
                 printf("  %-28s lag-1 %+.2f at %gs spacing", "noise autocorrelation", baseLag1,
@@ -1312,8 +1134,6 @@ int main(int argc, char **argv) {
                 printf("  %-28s %d samples over %gs are worth %.1f independent ones\n", "",
                        smoothN, kRecoveredSmoothSecs, effectiveN(smoothN, baseLag1));
             }
-            // The calibration is the headline: it says what the steadiness test
-            // would have read on data known to be idle.
             if (cal.windows > 0) {
                 printf("  %-28s range med=%.2fC p%.0f=%.2fC | |slope| med=%.2f p%.0f=%.2f C/min"
                        " (%d windows)\n",
@@ -1325,8 +1145,6 @@ int main(int argc, char **argv) {
             }
             if (calibNote) printf("  %-28s %s\n", "calibration source", calibNote);
             printf("  %-28s %.2fC", "steady band (derived)", steadyBand);
-            // Only claim the calibration when the calibration produced it; a
-            // floored or fallback band came from somewhere else.
             if (bandNote) printf("  [%s]", bandNote);
             else printf(" = p%.0f of idle window range", kBandPercentile * 100);
             printf("\n");
@@ -1345,8 +1163,6 @@ int main(int argc, char **argv) {
                 if (steadyBreaks > 0) printf(", after %d false start(s)", steadyBreaks);
                 printf("\n");
             } else if (dieFirstSteadyAt >= 0) {
-                // It did settle, transiently. Saying "never" here would be a
-                // flat contradiction of the run log above it.
                 printf("reached at %.0fs (%.0fs after load stop) but did NOT hold -- broke %d "
                        "time(s)\n",
                        dieFirstSteadyAt, dieFirstSteadyAt - loadStoppedAt, steadyBreaks);
@@ -1376,10 +1192,7 @@ int main(int argc, char **argv) {
         if (tBogus.everNonZero) {
             printf("  [BAD]  the bogus control went non-zero -- results are untrustworthy.\n");
         }
-        // Replaces the old a-priori band ceiling. A band is only "too wide" in
-        // relation to the thermal swing it has to resolve, and that is not
-        // known until the load has run -- clamping at a fixed temperature
-        // before seeing the rise is what broke the Neo run.
+        // A band is only "too wide" relative to the rise, known only now.
         if (gDieCount > 0 && !isnan(diePeak) && !isnan(baseline) && diePeak - baseline > 0.0) {
             double rise = diePeak - baseline;
             if (steadyBand > 0.5 * rise) {
@@ -1438,7 +1251,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Does this host even fit inside the gate's deadline?
         if (tLinked.clearedAt >= 0 && !isnan(loadStoppedAt)) {
             double sinceStop = tLinked.clearedAt - loadStoppedAt;
             if (sinceStop > (double)kGateDefaultMaxWaitSecs) {
@@ -1460,7 +1272,6 @@ int main(int argc, char **argv) {
             printf("             cell. Raise max_cool_secs to find the real recovery time.\n");
         }
 
-        // The over-wait this run exists to quantify.
         if (gDieCount <= 0) {
             printf("  [SKIP] die temp unavailable, so the over-wait question is unanswered.\n");
         } else if (dieRecoveredAt < 0) {
@@ -1483,9 +1294,8 @@ int main(int argc, char **argv) {
                                      fmax(1.0, dieRecoveredAt - loadStoppedAt));
                 printf("           than the hardware needed. That is what gating on PMU tdie\n");
                 printf("           would recover per cooldown.\n");
-                // dieAtLinkedClear is one raw reading, not a smoothed mean, so
-                // it needs a single-sample allowance rather than the tighter
-                // threshold calibrated for the 5-sample tail.
+                // dieAtLinkedClear is one raw reading, so it gets a
+                // single-sample allowance, not the smoothed-mean threshold.
                 double rawAllowance = recoveredWithin;
                 if (!isnan(baseSigma) && kRecoveredSigmas * baseSigma > rawAllowance)
                     rawAllowance = kRecoveredSigmas * baseSigma;

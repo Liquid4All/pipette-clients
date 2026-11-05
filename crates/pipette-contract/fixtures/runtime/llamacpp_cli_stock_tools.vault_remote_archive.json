@@ -1,0 +1,8 @@
+{
+  "custom_label": "acme llama.cpp build",
+  "flavor": "windows-x64-cpu",
+  "principal_id": "org_01936d",
+  "source": "vault_remote_archive",
+  "type": "llamacpp_cli_stock_tools",
+  "url": "/vault/resources/vault_1/content"
+}

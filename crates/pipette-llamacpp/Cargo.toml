@@ -1,15 +1,14 @@
 [package]
 name = "pipette-llamacpp"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
 
-# Fake llama-server used only by the eval crash-recovery integration test
-# (`tests/eval_crash_recovery.rs`). Built so the test can resolve its path
-# via `env!("CARGO_BIN_EXE_fake_llama_server")`.
+# Fake llama-server for the integration tests, found through
+# `env!("CARGO_BIN_EXE_fake_llama_server")` in `tests/common`.
 [[bin]]
 name = "fake_llama_server"
 path = "tests/bin/fake_llama_server.rs"
@@ -20,35 +19,31 @@ doc = false
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
-ed25519-dalek.workspace = true
-pipette-doomloop = { workspace = true, features = ["plan"] }
+pipette-completions.workspace = true
 pipette-http.workspace = true
-pipette-memprobe-metal.workspace = true
-pipette-mgmt-client.workspace = true
+pipette-memprobe.workspace = true
+pipette-vl-spec-decode-corpus.workspace = true
 pipette-ops.workspace = true
 pipette-subprocess.workspace = true
 pipette-plan-types.workspace = true
-flate2.workspace = true
 hex.workspace = true
-libc.workspace = true
-log.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+strum.workspace = true
+# The calibration clip, under a name no other user of the temp dir can predict.
+tempfile.workspace = true
+thiserror.workspace = true
 time.workspace = true
-tokio.workspace = true
+tracing.workspace = true
 
-# Windows measurement path (`execute/max_memory_usage/windows.rs`):
-# PSAPI for `max_host_bytes` and PDH `\GPU Process Memory(...)\Dedicated
-# Usage` for `max_gpu_bytes`. PDH covers every GPU API (Vulkan, HIP,
-# SYCL, D3D12) in one path — no per-runtime DLL injection or registry
-# registration needed, and it reads regardless of process integrity
-# level (the Vulkan loader's secure-env guard isn't in the picture).
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-sys.workspace = true
+# `getpwuid_r`, for the home directory llama.cpp falls back to.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
+minijinja.workspace = true
 rstest.workspace = true
-tempfile.workspace = true
-toml.workspace = true
+tar.workspace = true
 uuid.workspace = true

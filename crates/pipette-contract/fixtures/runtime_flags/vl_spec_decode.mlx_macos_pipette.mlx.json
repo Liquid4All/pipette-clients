@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "vl_spec_decode",
+  "model_type": "mlx",
+  "runtime_type": "mlx_macos_pipette"
+}

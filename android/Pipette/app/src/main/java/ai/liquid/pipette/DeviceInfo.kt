@@ -19,6 +19,19 @@ object DeviceInfo {
 
   fun formFactor(context: Context): String = if (context.resources.configuration.smallestScreenWidthDp >= 600) "tablet" else "phone"
 
+  /**
+   * The CPU architecture: the first application binary interface (ABI) in `Build.SUPPORTED_ABIS`, `arm64-v8a` on a phone and `x86_64` on most
+   * emulators. The server maps it to the `arch:` flag. The value is null if the platform lists no ABI.
+   */
+  val cpuArch: String?
+    get() = Build.SUPPORTED_ABIS.firstOrNull()?.ifBlank { null }
+
+  /** The operating system (OS) name, sent as `device_os_name`. */
+  const val OS_NAME = "Android"
+
+  /** The operating system (OS) family. Android is its own family, so the family is the OS name. The server maps it to the `os_family:` flag. */
+  const val OS_FAMILY = OS_NAME
+
   fun osVersion(): String = Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString()
 
   /**

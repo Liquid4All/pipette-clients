@@ -1,0 +1,5 @@
+{
+  "source": "url",
+  "type": "gguf_text",
+  "url": "https://example.com/model.gguf"
+}

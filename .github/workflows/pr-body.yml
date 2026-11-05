@@ -1,0 +1,29 @@
+name: PR Body
+
+# Separate from build.yml so `edited` re-runs only this check, not the whole
+# matrix. `synchronize` is needed too: a required check must run on the head
+# commit, or a push after the last edit leaves it pending.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: pr-body-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-body:
+    # Bot descriptions are generated; nobody can restructure them.
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Check PR description structure
+        env:
+          # Via env, never interpolated into `run:`: the body is attacker-controlled
+          # and inline `$(...)` in it would execute on the runner.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: ./ci/pr-body.py --env PR_BODY

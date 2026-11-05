@@ -81,8 +81,8 @@ struct RunningJobDetailPage: View {
                     }
                 }
                 .frame(height: 4)
-                // No implicit width tween on progress updates — this page is live while
-                // the benchmark runs, and UI animation shares the GPU with inference.
+                // No width tween on progress updates: this page is live while the
+                // benchmark runs, and UI animation shares the GPU with inference.
                 .animation(nil, value: progressFraction)
 
                 HStack {
@@ -95,8 +95,7 @@ struct RunningJobDetailPage: View {
                 .monospacedDigit()
             }
 
-            // The same live indicators Pocket Mode shows, so watching a running
-            // job on this page is no less informative than the full-screen cover.
+            // The same live indicators Pocket Mode shows.
             if mode == .running {
                 deviceTemperatureRow
 
@@ -116,9 +115,8 @@ struct RunningJobDetailPage: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        // Ambient cool wash while the readiness gate cools the device — matches
-        // Pocket Mode. Drawn behind the section (extended past the content so it
-        // doesn't hug the text) so it adds no layout.
+        // Cool wash while the readiness gate cools the device, as in Pocket Mode.
+        // A background, so it adds no layout.
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color.blue.opacity(isCooling ? 0.08 : 0))
@@ -128,8 +126,7 @@ struct RunningJobDetailPage: View {
         )
     }
 
-    /// System-styled palette for the shared live-activity block (Pocket Mode
-    /// supplies its own dark palette).
+    /// Pocket Mode supplies its own dark palette.
     private static let systemActivityPalette = JobActivityPalette(
         primaryText: .primary,
         secondaryText: .secondary,

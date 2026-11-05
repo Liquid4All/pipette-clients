@@ -1,9 +1,6 @@
-//! `models` — local model-store management for the unified client.
-//!
-//! Identity/parsing is the shared `pipette_plan_types::Model` (URI or JSON).
-//! Fetch goes through the shared
-//! [`ModelArtifactStore`](pipette_artifacts::model::ModelArtifactStore); GGUF, MLX, and torch
-//! snapshots all land under `.pipette/models/`.
+//! `models`: the local model store. Every storable model lands under
+//! `.pipette/models/` through the shared
+//! [`ModelArtifactStore`](pipette_artifacts::model::ModelArtifactStore).
 
 use clap::{Args, Subcommand, ValueEnum};
 use tabled::Tabled;
@@ -11,10 +8,13 @@ use tabled::Tabled;
 use pipette_artifacts::model::ModelManifest;
 use pipette_artifacts::{ensure_model, model_download_size};
 use pipette_http::HttpClient;
-use pipette_plan_types::{descriptor, ModelType};
+use pipette_ops::custom_label::descriptor_sha256;
+use pipette_plan_types::{ModelType, short_digest};
+use pipette_programs::ExternalPrograms;
 
 use crate::artifact_ref::resolve_model_arg;
-use crate::commands::print_table_or;
+use crate::commands::write_table_or;
+use crate::console::Console;
 use crate::hf_auth::inject_env_hf_token;
 use crate::model_uri::model_to_uri;
 use crate::progress::CellProgress;
@@ -48,10 +48,11 @@ Examples:
 
   # an MLX or torch model (whole repo)
   pipette models pull --model 'mlx://repo=mlx-community/gemma-3-4b-it-4bit'
+  pipette models pull --model 'core-ai://repo=mlboydaisuke/Qwen3.8-27B-CoreAI&prefix=gpu-pipelined/qwen3_8_27b_decode_int4lin'
   pipette models pull --model 'torch://repo=google/gemma-3-4b-it'
 
-  # an OpenVINO IR bundle; `prefix` picks one precision out of a multi-variant repo
-  pipette models pull --model 'openvino://repo=LiquidAI/LFM2.5-350M-ov&prefix=int4-sym-cw'
+  # an OpenVINO IR bundle; add `&prefix=<dir>` to pick one precision out of a multi-variant repo
+  pipette models pull --model 'openvino://repo=OpenVINO/LFM2.5-350M-int8-ov'
 
   # a GGUF from a direct URL
   pipette models pull --model 'gguf-text://url=https://example.com/model-Q4_K_M.gguf'
@@ -59,7 +60,6 @@ Examples:
 A URL value may not contain a query string, and no value may contain `&`. For
 those, pass a JSON Model object instead.";
 
-/// `models list` input.
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// How to render the model column
@@ -76,7 +76,6 @@ enum ListFormat {
     Uri,
 }
 
-/// `models pull` input — a self-contained model reference.
 #[derive(Args, Debug)]
 pub struct PullArgs {
     /// Model URI (`gguf-text://repo=org/r&path=Q4_K_M.gguf`, `mlx://repo=org/r`,
@@ -86,7 +85,6 @@ pub struct PullArgs {
     model: String,
 }
 
-/// `models delete` input — the same self-contained reference `pull` accepts.
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
     /// Model URI or JSON `Model` object — the same grammar as `models pull`,
@@ -97,22 +95,33 @@ pub struct DeleteArgs {
 }
 
 impl ModelsArgs {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
-        self.command.execute(ws, http)
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
+        self.command.execute(ws, http, programs, console)
     }
 }
 
 impl ModelsCommand {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
         match self {
-            ModelsCommand::List(args) => args.execute(ws),
-            ModelsCommand::Pull(args) => args.execute(ws, http),
-            ModelsCommand::Delete(args) => args.execute(ws),
+            ModelsCommand::List(args) => args.execute(ws, console),
+            ModelsCommand::Pull(args) => args.execute(ws, http, programs, console),
+            ModelsCommand::Delete(args) => args.execute(ws, console),
         }
     }
 }
 
-/// One row of `models list`.
 #[derive(Tabled)]
 struct ModelRow {
     #[tabled(rename = "MODEL")]
@@ -129,10 +138,8 @@ impl ModelRow {
     fn new(manifest: &ModelManifest, format: ListFormat) -> anyhow::Result<Self> {
         let model = match format {
             ListFormat::Name => manifest.declared.to_string(),
-            // A stored model's declared source is auth-stripped, so a URI renders
-            // for almost every model. The exception is a URL carrying a query
-            // string: it stores fine (the query is trimmed from the on-disk name)
-            // but can't be represented as a URI, so it falls back to identity here.
+            // A URL carrying a query string stores fine but has no URI form, so
+            // it falls back to identity here.
             ListFormat::Uri => {
                 model_to_uri(&manifest.declared).unwrap_or_else(|_| manifest.declared.to_string())
             }
@@ -142,57 +149,61 @@ impl ModelRow {
             model_type: ModelType::of(&manifest.declared).to_string(),
             // The prefix `--model model://sha256=<hex>` takes, and the same id
             // the warehouse stores as `model_descriptor_sha256`.
-            digest: descriptor::short_digest(&descriptor::digest(
-                &manifest.declared.without_auth_token(),
-            )?)
-            .to_owned(),
+            digest: short_digest(&descriptor_sha256(&manifest.declared.without_auth_token())?)
+                .to_owned(),
             fetched: manifest.fetched_at_rfc3339()?,
         })
     }
 }
 
 impl ListArgs {
-    pub fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
+    pub fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
         let store = ws.models();
         let rows: Vec<ModelRow> = store
             .list()?
             .iter()
             .map(|manifest| ModelRow::new(manifest, self.format))
             .collect::<anyhow::Result<_>>()?;
-        print_table_or(&rows, "No models cached.");
+        write_table_or(console.out(), &rows, "No models cached.")?;
         Ok(())
     }
 }
 
 impl PullArgs {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
         let mut declared = resolve_model_arg(ws, &self.model)?;
         inject_env_hf_token(&mut declared)?;
         // No pin set: `ensure_model` pins the entry it is about to publish.
-        let ctx = ws.artifacts(http);
+        // No model fetch spawns `uv` or `docker`, so a pull works on a host
+        // with neither.
+        let ctx = ws.artifacts(http, programs);
         let store = ws.models();
-        // One artifact, so the cell line and the artifact line say the same thing —
-        // but a directory model is many files, and the cell line is where their sum
-        // shows.
-        let progress =
-            CellProgress::new(&[model_download_size(&ctx, &store, &declared).unwrap_or(None)]);
-        let bound = ensure_model(&ctx.with_progress(progress.sink()), &store, &declared)?;
+        // One artifact, but a directory model is many files, and the cell line
+        // is where their sum shows.
+        let progress = CellProgress::new(&[model_download_size(&ctx, &store, &declared)?]);
+        let (bound, _) = ensure_model(&ctx.with_progress(progress.sink()), &store, &declared)?;
         // Erased before the summary line, which would otherwise print under a
         // finished bar.
         drop(progress);
-        println!("Fetched `{declared}` → {bound}");
+        writeln!(console.out(), "Fetched `{declared}` → {bound}")?;
         Ok(())
     }
 }
 
 impl DeleteArgs {
-    pub fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
+    pub fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
         let declared = resolve_model_arg(ws, &self.model)?;
         let store = ws.models();
         if !store.remove(&declared)? {
             anyhow::bail!("model `{declared}` is not in the local store");
         }
-        println!("Deleted `{declared}`");
+        writeln!(console.out(), "Deleted `{declared}`")?;
         Ok(())
     }
 }
@@ -200,20 +211,20 @@ impl DeleteArgs {
 #[cfg(test)]
 mod tests {
     use anyhow::Context;
-    use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
 
-    use pipette_artifacts::model::to_stored;
-    use pipette_artifacts::model::ModelStorageKey;
     use pipette_artifacts::model::MANIFEST_VERSION;
+    use pipette_artifacts::model::ModelStorageKey;
+    use pipette_artifacts::model::to_stored;
     use pipette_plan_types::{
         GgufText, GgufTextSource, HfOrg, HfRepo, HfRepoName, Model, RepoSubpath, ResourceUrl,
     };
 
     use super::*;
-    use crate::workspace::test_support::TempWorkspace;
+    use crate::test_support::CapturedConsole;
+    use crate::test_support::TempWorkspace;
 
-    /// Minimal fixture for row rendering — not a store load path.
     fn manifest_of(declared: Model) -> anyhow::Result<ModelManifest> {
         let fetched_at = OffsetDateTime::parse("2026-01-01T00:00:00Z", &Rfc3339)?;
         let declared = declared.without_auth_token();
@@ -253,9 +264,6 @@ mod tests {
         Ok(())
     }
 
-    /// A query-string URL stores fine (the query is trimmed from the on-disk
-    /// filename), but `model_to_uri` can't represent it, so `ListFormat::Uri`
-    /// falls back to the identity string — the raw URL.
     #[test]
     fn model_row_uri_falls_back_to_identity_for_a_query_url() -> anyhow::Result<()> {
         let manifest = manifest_of(Model::GgufText(GgufText {
@@ -275,23 +283,40 @@ mod tests {
         Ok(())
     }
 
-    /// Deleting a model that was never pulled is a clear error, not a silent
-    /// no-op — `store.remove` reports `false` and `delete` turns that into a bail.
     #[test]
     fn delete_absent_model_reports_not_found() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("models-delete")?;
         let err = DeleteArgs {
             model: "gguf-text://repo=org/repo&path=model-Q4_K_M.gguf".to_string(),
         }
-        .execute(&tw.ws)
+        .execute(&tw.ws, &mut CapturedConsole::default())
         .err()
         .context("deleting an absent model should error")?;
         assert!(format!("{err:#}").contains("not in the local store"));
         Ok(())
     }
 
-    /// Every URI quoted in `models pull --help` must parse — the help text and
-    /// the grammar can't drift.
+    #[test]
+    fn delete_through_the_dispatch_removes_the_stored_model() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("models-dispatch")?;
+        let uri = "gguf-text://repo=org/repo&path=model-Q4_K_M.gguf";
+        let declared = tw.store_gguf_model(uri)?;
+        ModelsArgs {
+            command: ModelsCommand::Delete(DeleteArgs {
+                model: uri.to_owned(),
+            }),
+        }
+        .execute(
+            &tw.ws,
+            &HttpClient::new("pipette-test")?,
+            &ExternalPrograms::at_missing_paths(),
+            &mut CapturedConsole::default(),
+        )?;
+        assert!(tw.ws.models().find(&declared)?.is_none());
+        Ok(())
+    }
+
+    /// The help text and the URI grammar can't drift.
     #[test]
     fn after_help_examples_parse() -> anyhow::Result<()> {
         let mut failures = Vec::new();

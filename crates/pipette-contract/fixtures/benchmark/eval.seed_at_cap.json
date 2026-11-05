@@ -1,0 +1,8 @@
+{
+  "benchmark_id": "eval_ifbench_2026.06.1_s4294967295",
+  "benchmark_type": "eval",
+  "parameter_dataset_name": "2026.06.1",
+  "parameter_eval_id": "ifbench",
+  "parameter_max_tokens": 2048,
+  "parameter_seed": 4294967295
+}

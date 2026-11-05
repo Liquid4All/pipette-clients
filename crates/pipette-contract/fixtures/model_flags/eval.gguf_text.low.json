@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "eval",
+  "model_type": "gguf_text",
+  "reasoning_effort": "low"
+}

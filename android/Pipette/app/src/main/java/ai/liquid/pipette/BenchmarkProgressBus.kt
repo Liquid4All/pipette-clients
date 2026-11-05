@@ -31,6 +31,7 @@ object BenchmarkProgressBus {
     // live "Cooling m:ss / max" countdown like the Compose pocket. Both processes are
     // on the same device clock, so the elapsed math is valid across the AIDL hop.
     val coolingSinceMillis: Long?,
+    val coolingMaxMillis: Long,
     val running: Boolean,
   ) {
     val cooling: Boolean
@@ -48,6 +49,7 @@ object BenchmarkProgressBus {
           put("overall_permil", overallPermil)
           put("eta_text", etaText)
           put("cooling_since_millis", coolingSinceMillis ?: JSONObject.NULL)
+          put("cooling_max_millis", coolingMaxMillis)
           put("running", running)
         }
         .toString()
@@ -66,6 +68,9 @@ object BenchmarkProgressBus {
               overallPermil = o.optInt("overall_permil"),
               etaText = o.optString("eta_text"),
               coolingSinceMillis = if (o.isNull("cooling_since_millis")) null else o.optLong("cooling_since_millis"),
+              // Defaulted, not required: a snapshot written by an older peer across the process boundary carries no such key, and the shared default
+              // is what that peer was gating on anyway.
+              coolingMaxMillis = o.optLong("cooling_max_millis", Readiness.COOLDOWN_MAX_MILLIS),
               running = o.optBoolean("running"),
             )
           }
@@ -87,6 +92,7 @@ object BenchmarkProgressBus {
       overallPermil = 0,
       etaText = "calculating",
       coolingSinceMillis = null,
+      coolingMaxMillis = Readiness.COOLDOWN_MAX_MILLIS,
       running = true,
     )
 

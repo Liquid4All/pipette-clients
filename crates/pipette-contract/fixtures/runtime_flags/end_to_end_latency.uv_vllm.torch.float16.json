@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "end_to_end_latency",
+  "dtype": "float16",
+  "model_type": "torch",
+  "runtime_type": "uv_vllm"
+}

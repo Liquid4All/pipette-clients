@@ -1,0 +1,23 @@
+{
+  "benchmark_id": "vlm_eval_mmstar_2026.10.1_pp-qwen3_5",
+  "benchmark_type": "vlm_eval",
+  "dataset": {
+    "adapter": "evals-server@1",
+    "bytes": 58777600,
+    "digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "format": "vlm-eval-corpus/1",
+    "upstream": {
+      "dataset_version": "2026.10.1",
+      "eval_id": "mmstar",
+      "identity": "115955fff4f95d524c81964dbe712b97ff3e8443ff180df38e4db9531aa3da72",
+      "prompt_profile": "qwen3_5",
+      "source": "evals_server"
+    },
+    "url": "/datasets/vlm_eval_mmstar_2026.10.1_pp-qwen3_5"
+  },
+  "parameter_dataset_version": "2026.10.1",
+  "parameter_lmms_task": "mmstar",
+  "parameter_max_tokens": 32768,
+  "parameter_prompt_profile": "qwen3_5",
+  "parameter_sample_count": 1500
+}

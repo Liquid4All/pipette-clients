@@ -8,7 +8,7 @@ actor BenchmarkSyncCoordinator {
         let storageRoot: String
     }
 
-    typealias SyncRunner = @Sendable (ServerURL, BenchmarkStore) async throws -> Int
+    typealias SyncRunner = @Sendable (ServerUrl, BenchmarkStore) async throws -> Int
 
     private struct InFlight {
         let id: Int
@@ -26,23 +26,20 @@ actor BenchmarkSyncCoordinator {
     private let syncRunner: SyncRunner
 
     init(syncRunner: @escaping SyncRunner = { serverUrl, store in
-        try await BenchmarkSync.sync(serverUrl: serverUrl, store: store)
+        try await pullRemoteBenchmarks(store: store, server: serverUrl)
     }) {
         self.syncRunner = syncRunner
     }
 
-    /// Pull the catalog opportunistically, on a UI lifecycle event — a tab appearing, a
-    /// login completing.
+    /// Pull the catalog opportunistically on a UI event, such as a login completing.
     ///
-    /// **Not on a headless run.** The crate pulls the catalog from one place,
-    /// `commands::sync`, so on the CLI a sync is something you ask for and never something
-    /// that happens to you. A headless launch still builds the SwiftUI scene, so without
-    /// this guard `MainTabView.onAppear` fired a network fetch and a disk write partway
-    /// through a measured benchmark — at a moment decided by when the response landed.
-    /// `headlessrun sync` remains the way to ask, and goes through `sync` below.
+    /// Never on a headless run: as in the crate, a headless sync happens only when asked
+    /// for (the `sync` command). A headless launch still builds the SwiftUI scene, so
+    /// without this guard a UI event could fire a network fetch and a disk write partway
+    /// through a measured benchmark.
     nonisolated static func syncBestEffortInBackground(
-        serverUrl: ServerURL,
-        storage: Storage,
+        serverUrl: ServerUrl,
+        ws: PipetteWorkspace,
         reason: String,
         clearCacheFirst: Bool = false
     ) {
@@ -50,7 +47,7 @@ actor BenchmarkSyncCoordinator {
         Task.detached {
             await shared.syncBestEffort(
                 serverUrl: serverUrl,
-                storage: storage,
+                ws: ws,
                 reason: reason,
                 clearCacheFirst: clearCacheFirst
             )
@@ -58,27 +55,27 @@ actor BenchmarkSyncCoordinator {
     }
 
     @discardableResult
-    func sync(serverUrl: ServerURL, storage: Storage) async throws -> Int {
+    func sync(serverUrl: ServerUrl, ws: PipetteWorkspace) async throws -> Int {
         try await sync(
             serverUrl: serverUrl,
-            store: storage.benchmarks,
-            key: Self.key(serverUrl: serverUrl, storage: storage)
+            store: ws.benchmarks,
+            key: Self.key(serverUrl: serverUrl, ws: ws)
         )
     }
 
     @discardableResult
-    func syncAfterClearingCache(serverUrl: ServerURL, storage: Storage) async throws -> Int {
+    func syncAfterClearingCache(serverUrl: ServerUrl, ws: PipetteWorkspace) async throws -> Int {
         try await sync(
             serverUrl: serverUrl,
-            store: storage.benchmarks,
-            key: Self.key(serverUrl: serverUrl, storage: storage),
-            clearCache: { storage.benchmarks.clearRemote() },
+            store: ws.benchmarks,
+            key: Self.key(serverUrl: serverUrl, ws: ws),
+            clearCache: { ws.benchmarks.clearRemote() },
             coalesceExisting: false
         )
     }
 
     @discardableResult
-    func sync(serverUrl: ServerURL, store: BenchmarkStore, key: Key) async throws -> Int {
+    func sync(serverUrl: ServerUrl, store: BenchmarkStore, key: Key) async throws -> Int {
         try await sync(
             serverUrl: serverUrl,
             store: store,
@@ -90,7 +87,7 @@ actor BenchmarkSyncCoordinator {
 
     @discardableResult
     private func sync(
-        serverUrl: ServerURL,
+        serverUrl: ServerUrl,
         store: BenchmarkStore,
         key: Key,
         clearCache: (@Sendable () -> Void)?,
@@ -125,26 +122,26 @@ actor BenchmarkSyncCoordinator {
     }
 
     func syncBestEffort(
-        serverUrl: ServerURL,
-        storage: Storage,
+        serverUrl: ServerUrl,
+        ws: PipetteWorkspace,
         reason: String,
         clearCacheFirst: Bool = false
     ) async {
         do {
             if clearCacheFirst {
-                _ = try await syncAfterClearingCache(serverUrl: serverUrl, storage: storage)
+                _ = try await syncAfterClearingCache(serverUrl: serverUrl, ws: ws)
             } else {
-                _ = try await sync(serverUrl: serverUrl, storage: storage)
+                _ = try await sync(serverUrl: serverUrl, ws: ws)
             }
         } catch {
             AppLog.benchmarkSync.error("\(reason) sync failed: \(error)")
         }
     }
 
-    private static func key(serverUrl: ServerURL, storage: Storage) -> Key {
+    private static func key(serverUrl: ServerUrl, ws: PipetteWorkspace) -> Key {
         Key(
             serverURL: serverUrl.value,
-            storageRoot: storage.dataRoot.standardizedFileURL.path
+            storageRoot: ws.root.standardizedFileURL.path
         )
     }
 

@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "prefill_throughput",
+  "model_type": "mlx",
+  "runtime_type": "mlx_ios_pipette"
+}

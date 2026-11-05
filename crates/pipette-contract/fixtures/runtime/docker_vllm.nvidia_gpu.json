@@ -1,0 +1,6 @@
+{
+  "flavor": "nvidia_gpu",
+  "image_name": "vllm/vllm-openai",
+  "image_tag": "v0.10.0",
+  "type": "docker_vllm"
+}

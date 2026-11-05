@@ -2,39 +2,26 @@
 """Reject em dashes in user-visible client copy: Kotlin, Swift, and Rust.
 
 An em dash is uncommon to type by hand, so it reads as machine-written in product
-copy. This check covers the three client source trees; Markdown and Python are
-each guarded separately.
-
-One scanner for three languages, rather than a guard test per language. The three
-started as separate implementations and immediately drifted: block comments nest
-in all three, and two of the three tracked them with a boolean, so the inner `*/`
-of `/* a /* b */ still */` ended the comment early and the tail was scanned as
-copy. A single implementation cannot drift from itself. Running here also means
-the rule is checked with no toolchain and no path filter, so a Swift-only change
-no longer needs the expensive iOS job to have its copy checked.
+copy. Markdown and Python are guarded by their own checks. One scanner serves all
+three languages so their comment and string handling cannot drift apart.
 
 Exempt:
 
 - **Comments**, line and block, block comments nesting.
-- **Logging.** `log::` in Rust, `Log.` in Kotlin, `AppLog.` in Swift: developer
-  text that never reaches a screen. `HeadlessRunner.log` is deliberately NOT
-  exempt, because it prints to a terminal a person reads.
+- **Logging.** `log::` and `tracing::` in Rust, `Log.` in Kotlin, `AppLog.` in
+  Swift: developer text that never reaches a screen. `HeadlessRunner.log` is
+  deliberately NOT exempt, because it prints to a terminal a person reads.
 - **Rust `#[cfg(test)]` modules.** Assertion messages are developer-facing, and
-  fixture strings can be load-bearing: `pipette-doomloop` feeds an
-  em-dash-prefixed body to a tail-drift detector as synthetic model output, so
-  rewriting it would change what the detector is tested against.
+  fixture strings can be load-bearing.
 - **A string literal that is exactly one em dash**, the empty-value glyph the
   mobile clients use in Settings rows and the Jobs results grid.
 
-Two details are load-bearing and were paid for in real bugs:
+Two details are load-bearing:
 
-1. A log call's arguments are blanked by CHARACTER, not by skipping the line. A
-   line-level exemption lets `log::warn!("x"); return Err("a - b".into());`
-   through, and that line's paren delta is zero, so no amount of depth
-   bookkeeping catches it either.
-2. String literals are tracked while scanning, char literals included. A `'"'` in
-   `pipette-device/src/probe.rs` flipped string state on and never off, after
-   which every later comment in the file was scanned as copy.
+1. A log call's arguments are blanked by character, not by skipping the line,
+   so `log::warn!("x"); return Err("...".into());` is still checked.
+2. Char literals are tracked, so a `'"'` cannot flip string state and make every
+   later comment in the file read as copy.
 
 Fix a failure by rewriting the sentence, not by swapping in an en dash or a double
 hyphen: those are the same tell wearing a hat. A period, comma, colon, or
@@ -48,12 +35,11 @@ from pathlib import Path
 
 EM_DASH = chr(0x2014)
 
-RUST_LOG_MACROS = (
-    "log::trace!",
-    "log::debug!",
-    "log::info!",
-    "log::warn!",
-    "log::error!",
+# Both facades: `log` survives in `pipette-android`.
+RUST_LOG_MACROS = tuple(
+    f"{facade}::{level}!"
+    for facade in ("log", "tracing")
+    for level in ("trace", "debug", "info", "warn", "error")
 )
 KOTLIN_LOG_PREFIXES = ("Log.d", "Log.w", "Log.e", "Log.i", "Log.v")
 
@@ -84,8 +70,7 @@ def kotlin_log_call(line: str, i: int) -> int | None:
 def swift_log_call(line: str, i: int) -> int | None:
     """Width of an `AppLog.<category>.<level>(` prefix at `i`, or None.
 
-    Category and level are matched as any identifier, so a new one is covered the
-    day it is added rather than the day someone remembers to list it.
+    Category and level match any identifier, so new ones need no list update.
     """
     marker = "AppLog."
     if not line.startswith(marker, i):
@@ -183,20 +168,15 @@ class Lang:
         padded_escape=True,
     ):
         self.name = name
-        # Matched against tracked paths. Only the SHIPPING sources: a language's
-        # own test tree is developer-facing, and excluding it is also what keeps
-        # each guard's former test file out of scope now that they are gone.
+        # Shipping sources only: test trees are developer-facing.
         self.pattern = re.compile(pattern)
         self.log_call = log_call
         self.string_open = string_open
         self.min_files = min_files
         self.char_literals = char_literals
         self.cfg_test = cfg_test
-        # Rust `\u{...}` and Swift `\u{...}` accept leading zeros, so a padded
-        # spelling renders identically and must be caught. Kotlin's `\u` takes
-        # EXACTLY four hex digits, so a padded form lexes as a different escape
-        # followed by stray digits: not an em dash, and flagging it would be a
-        # false positive.
+        # Rust and Swift `\u{...}` accept leading zeros. Kotlin's `\u` takes
+        # exactly four hex digits, so a padded form there is a different escape.
         self.padded_escape = padded_escape
 
 
@@ -232,9 +212,7 @@ LANGS = [
 def keep(code: list[str], ch: str, blank: bool) -> None:
     """Append `ch`, or a space when inside a log call's argument span.
 
-    Module level, and told explicitly whether to blank, rather than a closure over
-    the scanner's state: a closure would capture the loop variables late, which is
-    the same class of bug the scanner exists to avoid.
+    Not a closure over the scanner's state, which would capture loop variables late.
     """
     code.append(" " if blank else ch)
 
@@ -243,17 +221,13 @@ def scan_lines(source: str, lang: Lang) -> list[tuple[str, bool]]:
     """Blank every span that is not user-visible copy.
 
     Returns one `(code, in_test)` per line. What survives in `code` is real code
-    and the string literals a person can actually read.
+    and the string literals a person can read.
 
-    Kept as one function on purpose: it is a character-level state machine, and
-    splitting it would spread the string, comment, brace-depth, and log-depth
-    state across call boundaries, making exactly the desync bugs it exists to
-    prevent easier to reintroduce.
+    One function on purpose: splitting this state machine would spread its state
+    across calls and invite the desync bugs it exists to prevent.
     """
     out: list[tuple[str, bool]] = []
-    # All three languages NEST block comments, so this counts depth rather than
-    # holding a flag. With a flag, the inner `*/` of `/* a /* b */ still */` ends
-    # the comment early and the tail gets scanned as copy.
+    # A depth, not a flag: all three languages nest block comments.
     block_depth = 0
     closer: str | None = None  # Non-None while inside a string literal.
     escapes = False
@@ -361,8 +335,7 @@ def scan_lines(source: str, lang: Lang) -> list[tuple[str, bool]]:
             code.append(c)
             i += 1
 
-        # A line is test code if it was inside the block on entry or opened it, so
-        # the `#[cfg(test)]` and `mod tests {` lines are covered too.
+        # Covers the `#[cfg(test)]` and `mod tests {` lines too.
         in_test = line_starts_in_test or test_exit_depth is not None or pending_test
         out.append(("".join(code), in_test))
     return out
@@ -381,9 +354,8 @@ def contains_padded(haystack: str, prefix: str, digits: str) -> bool:
 def has_em_dash(line: str, lang: Lang) -> bool:
     """Every rendering this guard rejects.
 
-    The literal character is not enough: an escape or an HTML entity renders as one
-    too. The needles are built from the code point so this file does not contain
-    its own.
+    An escape or an HTML entity renders as one too. The needles are built from
+    the code point so this file does not trip itself.
     """
     # A lone em dash is the empty-value placeholder, not punctuation.
     stripped = line.replace(f'"{EM_DASH}"', '""')
@@ -398,8 +370,7 @@ def has_em_dash(line: str, lang: Lang) -> bool:
     # Lowercased because `&MDASH;` renders the same as `&mdash;`.
     if "&" + "mdash" + ";" in lower:
         return True
-    # HTML numeric references DO allow leading zeros, and a padded form renders
-    # exactly like its unpadded twin, so skip any padding run before the digits.
+    # HTML numeric references allow leading zeros.
     return any(
         contains_padded(lower, prefix, digits)
         for prefix, digits in (("&#", f"{8212};"), ("&#x", f"{0x2014:x};"))
@@ -438,13 +409,11 @@ def offenders(path: Path, lang: Lang) -> list[str]:
 def selftest() -> list[str]:
     """Fixtures for the exemptions, run on every invocation.
 
-    An exemption that is too eager still exits 0, so nothing surfaces it. These
-    cases are the ones that have actually been wrong at some point.
+    An exemption that is too eager still exits 0, so nothing else surfaces it.
     """
     d = EM_DASH
     rust, kotlin, swift = LANGS
-    # Composed rather than written out, for the same reason the needles are: a
-    # fixture holding the entity literally would make this file trip its own check.
+    # Composed so this file does not trip its own check.
     ent = "&" + "mdash" + ";"
     ent_upper = "&" + "MDASH" + ";"
     num_padded = "&#" + f"0{8212};"

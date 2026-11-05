@@ -1,0 +1,5 @@
+{
+  "benchmark_id": "max_memory_usage_1024",
+  "benchmark_type": "max_memory_usage",
+  "parameter_prefill_tokens": 1024
+}

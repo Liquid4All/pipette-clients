@@ -1,0 +1,7 @@
+{
+  "benchmark_type": "eval",
+  "dataset_name": "2026.06.1",
+  "eval_id": "math_500",
+  "max_tokens": 8192,
+  "temperature": 0.6
+}

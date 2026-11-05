@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Tab view for managing downloaded models — GGUF files and MLX repo directories.
+/// Tab view for managing downloaded models.
 struct ModelsView: View {
     @Environment(\.pillTabBarReservedHeight) private var pillTabBarReservedHeight
     @Environment(ModelStore.self) private var modelStore
@@ -23,17 +23,13 @@ struct ModelsView: View {
         Set(models.map { LocalStorage.modelRelativePath(repo: $0.hfRepo, filename: $0.name) })
     }
 
-    /// Models shown as rows in the Models tab, including the built-in AFM model (which
-    /// has no file but is selectable like an MLX model). A vision model's projector is
-    /// part of its entry rather than a row of its own, so the mmproj filter is now
-    /// only a guard against a sideloaded bare projector.
+    /// Includes the built-in AFM model. The mmproj filter guards against a sideloaded
+    /// bare projector; a vision model's projector is part of its own entry.
     private var displayableModelFiles: [DiscoveredModel] {
         models.filter { $0.name.range(of: "mmproj", options: .caseInsensitive) == nil }
     }
 
-    /// The delete/manage pool: downloaded files only. AFM is built-in — it has no file
-    /// to delete and no on-disk footprint to count — so it's excluded from the "N
-    /// downloaded quants" count, select-all, and the multi-select delete flow.
+    /// The delete/manage pool: file-backed models only, so not the built-in AFM.
     private var downloadedModelFiles: [DiscoveredModel] {
         displayableModelFiles.filter { if case .appleFoundationText = $0.source { false } else { true } }
     }
@@ -116,8 +112,6 @@ struct ModelsView: View {
                 VStack(spacing: 14) {
                     header
                     ModelSearchField(text: $searchText, placeholder: "Search your downloaded models")
-                    // Manage/delete is for downloaded files only; hide it when the sole
-                    // model is the built-in AFM (nothing deletable).
                     if !downloadedModelFiles.isEmpty {
                         manageToolbar
                     }
@@ -318,9 +312,7 @@ struct ModelsView: View {
                 modelListRow(row)
             }
 
-            // Gate on the deletable pool (file-backed models), not
-            // `filteredDownloadedGroups` (which includes the built-in AFM row), so the
-            // footer doesn't linger with nothing selectable.
+            // Not `filteredDownloadedGroups`, which includes the built-in AFM row.
             if isManagingModels && !downloadedModelFiles.isEmpty {
                 manageDeleteFooter
             }
@@ -417,8 +409,7 @@ struct ModelsView: View {
         }
     }
 
-    /// Bulk resume for downloads a connectivity drop (or the user) paused — most
-    /// come back on their own via reconnect, but this is the manual fallback.
+    /// Manual fallback for paused downloads; most resume on their own on reconnect.
     @ViewBuilder private var resumeAllBar: some View {
         Button {
             downloadCoordinator.resumeAll()
@@ -442,12 +433,10 @@ struct ModelsView: View {
         }
     }
 
-    /// In-flight transfers sort first, then paused (incl. the transitional
-    /// pausing), then failed — the ordering the old phase rank produced.
     private func downloadStateSortRank(_ state: DownloadCoordinator.Download.State) -> Int {
         switch state {
         case .queued, .connecting, .downloading, .resuming: return 0
-        case .pausing, .paused: return 1
+        case .pausing, .paused, .cancelling: return 1
         case .failed: return 2
         }
     }
@@ -461,8 +450,8 @@ struct ModelsView: View {
         reconcileListUIState()
     }
 
-    /// Prune the selection/expansion state against the current models list
-    /// and reveal families that have newly started downloads.
+    /// Prune selection and expansion against the current models, and reveal families
+    /// that have newly started downloads.
     private func reconcileListUIState() {
         let activeFamilyKeys = Set(activeDownloads.map(downloadFamilyKey))
         let familyKeysToReveal = lastActiveDownloadFamilyKeys.union(activeFamilyKeys)
@@ -471,9 +460,8 @@ struct ModelsView: View {
         expandedDownloadedKeys.formIntersection(currentKeys)
         expandedDownloadedKeys.formUnion(familyKeysToReveal.intersection(currentKeys))
         selectedModelIDs.formIntersection(Set(downloadedModelFiles.map(\.id)))
-        // Gate on the DELETABLE pool (file-backed models), not `downloadedGroups`:
-        // the built-in AFM row is always in the groups when available, so keying off
-        // groups would keep Manage mode alive after the last real model is deleted.
+        // Not `downloadedGroups`: its built-in AFM row would keep Manage mode alive
+        // after the last real model is deleted.
         if downloadedModelFiles.isEmpty {
             isManagingModels = false
             selectedModelIDs.removeAll()
@@ -523,16 +511,13 @@ private struct DownloadedModelGroupBlock: View {
     let onToggleModelSelection: (DiscoveredModel) -> Void
     let onDeleteModels: ([DiscoveredModel]) -> Void
 
-    /// A built-in system model (AFM): no file, so no size, no download, no delete, and
-    /// nothing to expand into per-quant rows. Rendered like an MLX model otherwise — a
-    /// selectable model with a "Built in" indicator in place of the size/quant chips.
+    /// A built-in system model (AFM): no file, so no size, no delete, no quant rows.
     private var isBuiltIn: Bool {
         group.files.contains { if case .appleFoundationText = $0.source { true } else { false } }
     }
 
     private var subtitle: String {
-        // "Built in" is the trailing badge (where other rows show their size / quant
-        // count), so the subtitle carries a distinct descriptor rather than repeating it.
+        // "Built in" is already the trailing badge, so the subtitle says something else.
         if isBuiltIn { return "Apple Intelligence" }
         return group.files.first?.sizeFormatted ?? group.sizeLabel
     }
@@ -541,7 +526,6 @@ private struct DownloadedModelGroupBlock: View {
         VStack(spacing: 0) {
             Button(action: { if !isBuiltIn { onToggle() } }) {
                 HStack(spacing: 10) {
-                    // Built-in models have no per-quant rows to reveal, so no disclosure.
                     Image(systemName: isBuiltIn ? "sparkles" : (isExpanded ? "chevron.down" : "chevron.right"))
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -579,7 +563,6 @@ private struct DownloadedModelGroupBlock: View {
             }
             .buttonStyle(.plain)
             .disabled(isBuiltIn)
-            // No delete affordance for a built-in model — there's nothing on disk.
             .contextMenu {
                 if !isBuiltIn {
                     Button(role: .destructive) {
@@ -616,8 +599,6 @@ private struct DownloadedModelGroupBlock: View {
                                 Text(model.sizeFormatted)
                                     .font(.system(size: 14))
                                     .foregroundStyle(.secondary)
-                                // When a family mixes repos, show each quant's
-                                // source org so the provenance is legible.
                                 if group.spansRepos,
                                    let owner = model.hfRepo.split(separator: "/").first {
                                     Divider()
@@ -761,8 +742,7 @@ private struct DownloadProgressSubrow: View {
     @ViewBuilder
     private var downloadControls: some View {
         HStack(spacing: 4) {
-            // Pause/resume only apply to `.file` (GGUF) transfers. MLX `.directory`
-            // pulls go through HubApi with no pause/resume — only cancel below.
+            // `.directory` pulls go through HubApi, which cannot pause or resume.
             if case .file = download.kind {
                 switch download.state {
                 case .connecting, .downloading, .resuming:
@@ -779,8 +759,8 @@ private struct DownloadProgressSubrow: View {
                     ) {
                         downloadCoordinator.resume(key: download.id)
                     }
-                case .queued, .pausing, .failed:
-                    EmptyView()  // queued/transient/terminal — only cancel remains
+                case .queued, .pausing, .cancelling, .failed:
+                    EmptyView()
                 }
             }
 
@@ -790,15 +770,18 @@ private struct DownloadProgressSubrow: View {
                 isDestructive: true,
                 accessibilityLabel: "Cancel \(download.filename)"
             ) {
-                downloadCoordinator.cancel(key: download.id)
+                // Model-level cancel when possible, so a caller waiting on these weights
+                // fails now rather than a poll later, and a vision model's second row goes too.
+                if let source = download.source {
+                    downloadCoordinator.cancelTransfers(for: source)
+                } else {
+                    downloadCoordinator.cancel(key: download.id)
+                }
             }
         }
     }
 
-    /// The single home for the download's supplementary status line. Switches on
-    /// `state` (with numeric progress for the active-transfer detail) to produce the
-    /// text directly — it is no longer reverse-engineered from a free-form string.
-    /// Returns nil when the badge alone says everything (a plain `.paused`).
+    /// Nil when the badge alone says everything (a plain `.paused`).
     private var statusDetail: String? {
         switch download.state {
         case .queued:
@@ -816,6 +799,8 @@ private struct DownloadProgressSubrow: View {
                 return "Downloading… \(Int((fraction * 100).rounded()))%"
             }
             return "Downloading…"
+        case .cancelling:
+            return "Cancelling…"
         case .pausing:
             return "Pausing…"
         case .paused:
@@ -828,9 +813,8 @@ private struct DownloadProgressSubrow: View {
     }
 }
 
-/// Byte-size formatting for the download detail line: decimal (1000-based), two
-/// decimals, GB at/above 1 GB else MB (matching `ByteFormat.fileSize`). Lives here
-/// because the download's status text has a single home in this view.
+/// Byte sizes for the download detail line: decimal units, two decimals, GB from
+/// 1 GB else MB, matching `ByteFormat.fileSize`.
 private enum DownloadByteFormat {
     private enum Unit {
         case gb, mb
@@ -843,8 +827,7 @@ private enum DownloadByteFormat {
         format(bytes, in: bytes >= 1_000_000_000 ? .gb : .mb)
     }
 
-    /// `written / total` in the *total's* unit so both sides share one unit and
-    /// decimal width, e.g. `2.34 / 5.60 GB`.
+    /// Both sides in the total's unit, e.g. `2.34 / 5.60 GB`.
     static func progress(written: Int64, total: Int64) -> String {
         let unit: Unit = total >= 1_000_000_000 ? .gb : .mb
         return "\(format(written, in: unit, withSuffix: false)) / \(format(total, in: unit))"
@@ -880,6 +863,8 @@ private struct DownloadStateBadge: View {
             return "\(Int((progress * 100).rounded(.down)))%"
         case .pausing, .paused:
             return "Paused"
+        case .cancelling:
+            return "Cancelling"
         case .failed:
             return "Failed"
         }
@@ -887,14 +872,16 @@ private struct DownloadStateBadge: View {
 
     private var foregroundColor: Color {
         switch download.state {
-        case .queued, .connecting, .downloading, .pausing, .paused, .resuming: return .primary
+        case .queued, .connecting, .downloading, .pausing, .paused, .cancelling,
+             .resuming: return .primary
         case .failed: return .red
         }
     }
 
     private var backgroundColor: Color {
         switch download.state {
-        case .queued, .connecting, .downloading, .pausing, .paused, .resuming: return Color(.secondarySystemBackground)
+        case .queued, .connecting, .downloading, .pausing, .paused, .cancelling,
+             .resuming: return Color(.secondarySystemBackground)
         case .failed: return Color.red.opacity(0.10)
         }
     }
@@ -947,19 +934,17 @@ private struct DownloadProgressTrack: View {
         .frame(height: 5)
     }
 
-    /// Whether the transfer is actively moving — drives the full-strength fill and
-    /// the indeterminate stub when there's no numeric progress yet.
     private var isActive: Bool {
         switch state {
         case .connecting, .downloading, .resuming: return true
-        case .queued, .pausing, .paused, .failed: return false
+        case .queued, .pausing, .paused, .cancelling, .failed: return false
         }
     }
 
     private var fillColor: Color {
         switch state {
         case .connecting, .downloading, .resuming: return .primary
-        case .queued, .pausing, .paused: return Color.primary.opacity(0.35)
+        case .queued, .pausing, .paused, .cancelling: return Color.primary.opacity(0.35)
         case .failed: return .red
         }
     }
@@ -981,10 +966,8 @@ private struct AddModelsView: View {
     let onDownloadStarted: () -> Void
 
     @State private var searchText = ""
-    /// Which model rows are expanded to reveal their quant chips.
     @State private var expandedModelIDs: Set<String> = []
-    /// Selected quant chips, by `CatalogEntry.id` — selection is per-quant, not
-    /// per-family, so a model's GGUF and MLX quants are picked individually.
+    /// By `CatalogEntry.id`: selection is per quant, not per family.
     @State private var selectedEntryIDs: Set<String> = []
     @State private var showLargeDownloadWarning = false
 
@@ -1008,8 +991,7 @@ private struct AddModelsView: View {
         downloadedKeys.union(downloadCoordinator.downloads.keys)
     }
 
-    /// Every catalog quant not already downloaded or downloading — the pool the
-    /// header checkbox and "Select all" operate over.
+    /// Every catalog quant not already downloaded or downloading.
     private var allAvailableEntries: [CatalogEntry] {
         CatalogEntry.catalog.filter { !isUnavailableForDownload($0) }
     }
@@ -1144,8 +1126,6 @@ private struct AddModelsView: View {
         let isExpanded = expandedModelIDs.contains(group.id)
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
-                // Header tap expands/collapses; the checkbox is a separate control
-                // that selects or clears every available quant of the model.
                 Button { toggleExpanded(group.id) } label: {
                     ModelFamilyRow(
                         title: group.name,
@@ -1183,8 +1163,6 @@ private struct AddModelsView: View {
         }
     }
 
-    /// Quant chips grouped by source repo: a highlighted repo header, then that
-    /// repo's quant chips beneath it.
     private func quantChips(_ group: PresetModelGroup) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(group.quantSections, id: \.repo) { section in
@@ -1241,18 +1219,17 @@ private struct AddModelsView: View {
         return selected ? Color(.systemBackground) : .primary
     }
 
-    /// Header subtitle: selected-count once anything is picked, else the available
-    /// formats (GGUF / MLX) so a collapsed row still shows what it offers.
+    /// The selected count once anything is picked, else the available formats.
     private func quantSummary(_ group: PresetModelGroup) -> String {
         let selected = group.variants.filter { selectedEntryIDs.contains($0.id) }.count
         if selected > 0 { return "\(selected) selected" }
-        // Distinct file formats present (GGUF before MLX), by switching on each source.
         var formats: [String] = []
         for variant in group.variants {
             let label: String
             switch variant.source {
             case .mlx: label = "MLX"
-            case .ggufText, .ggufVision: label = "GGUF"
+            case .onnxGenai: label = "ONNX"
+            case .ggufText, .ggufVision, .ggufVisionSpeculative: label = "GGUF"
             case .appleFoundationText: label = "Apple Foundation"
             }
             if !formats.contains(label) { formats.append(label) }
@@ -1320,8 +1297,6 @@ private struct AddModelsView: View {
         return !available.isEmpty && available.allSatisfy { selectedEntryIDs.contains($0.id) }
     }
 
-    /// Select every available quant of the model (revealing them), or clear them
-    /// all when they're already selected.
     private func toggleAllQuants(_ group: PresetModelGroup) {
         let available = availableVariants(group)
         if allQuantsSelected(group) {
@@ -1333,10 +1308,8 @@ private struct AddModelsView: View {
     }
 
     private func isUnavailableForDownload(_ entry: CatalogEntry) -> Bool {
-        // Only single-file GGUF entries have a weight filename to key the
-        // unavailable set on; MLX is a repo directory and never blocks here.
-        // The key is a HuggingFace download key, so only that arm can be in the set — a
-        // catalog entry is always one, and any other arm has no download to block.
+        // Only a HuggingFace GGUF file has a download key to look up; a
+        // directory-shaped entry never blocks here.
         let filename: String
         switch entry.source {
         case let .ggufText(m):
@@ -1345,7 +1318,13 @@ private struct AddModelsView: View {
         case let .ggufVision(m):
             guard case let .huggingFace(_, weights, _, _, _) = m.source else { return false }
             filename = weights.value
-        case .mlx, .appleFoundationText: return false  // no single weight file to key on
+        case let .ggufVisionSpeculative(m):
+            guard case let .huggingFace(_, weights, _, _, _, _, _) = m.source else {
+                return false
+            }
+            filename = weights.value
+        case .mlx, .onnxGenai, .appleFoundationText:
+            return false
         }
         let key = LocalStorage.modelRelativePath(repo: entry.repoIdentifier, filename: filename)
         return unavailableDownloadKeys.contains(key)
@@ -1354,17 +1333,23 @@ private struct AddModelsView: View {
     private func startDownload() {
         let entries = selectedDownloadPresets
         guard !entries.isEmpty else { return }
-        // Each selection goes through `ensureModel`, so a quant already in the store is
-        // answered from it — tapping Download on installed weights refreshes their
-        // last-used stamp instead of starting a second transfer. Progress and errors keep
-        // surfacing through the coordinator, which is what the sheet below renders, so
-        // nothing here awaits before dismissing.
+        // Through `ensureModel`, so installed weights get their last-used stamp
+        // refreshed instead of a second transfer. Progress and errors surface through
+        // the coordinator, so nothing here awaits before dismissing.
         for entry in entries {
             Task {
-                _ = try? await ensureModel(entry.source, storage: downloadCoordinator.storage,
-                                           coordinator: downloadCoordinator,
-                                           familyId: entry.familyId, quant: entry.quant,
-                                           declaredSizeBytes: entry.sizeBytes)
+                do {
+                    _ = try await ensureModel(entry.source, ws: downloadCoordinator.ws,
+                                              coordinator: downloadCoordinator,
+                                              familyId: entry.familyId, quant: entry.quant,
+                                              declaredSizeBytes: entry.sizeBytes)
+                } catch let ModelStoreError.admission(refusal) {
+                    // Refused before any transfer existed, so the coordinator never saw it:
+                    // without this the tap would show neither a download row nor an alert.
+                    downloadCoordinator.errorMessage = refusal.localizedDescription
+                } catch {
+                    // Already reported through the coordinator.
+                }
             }
         }
         onDownloadStarted()
@@ -1372,8 +1357,8 @@ private struct AddModelsView: View {
     }
 }
 
-/// One catalog row per model, keyed by display name so a model's GGUF and MLX
-/// builds unify into a single expandable entry whose quants are chosen individually.
+/// One catalog row per model, keyed by display name so a model's GGUF and MLX builds
+/// share it.
 private struct PresetModelGroup: Identifiable {
     let id: String
     let name: String
@@ -1384,10 +1369,7 @@ private struct PresetModelGroup: Identifiable {
         ModelBrand.detect(name: name, hfRepo: repo)
     }
 
-    /// Variants split by source repo, one section per repo present, preserving
-    /// catalog order. The repo is the section's identity — a model whose quants span
-    /// repos (e.g. Ministral GGUF: Q4_0 from unsloth, K-quants from mistralai; or a
-    /// GGUF repo plus an MLX repo) shows each repo as its own labeled group.
+    /// Variants split by source repo, in catalog order.
     var quantSections: [(repo: String, entries: [CatalogEntry])] {
         var order: [String] = []
         var byRepo: [String: [CatalogEntry]] = [:]
@@ -1398,8 +1380,7 @@ private struct PresetModelGroup: Identifiable {
         return order.map { ($0, byRepo[$0] ?? []) }
     }
 
-    /// Groups the catalog by model id (display name), preserving first-occurrence
-    /// order, so GGUF and MLX variants of one model share a single row.
+    /// Preserves first-occurrence order.
     static func groups(from entries: [CatalogEntry]) -> [PresetModelGroup] {
         var order: [String] = []
         var byName: [String: [CatalogEntry]] = [:]
@@ -1416,6 +1397,6 @@ private struct PresetModelGroup: Identifiable {
 
 #Preview {
     ModelsView()
-        .environment(ModelStore(storage: FileStorage.production))
+        .environment(ModelStore(ws: PipetteWorkspace.production))
         .environment(DownloadCoordinator.shared)
 }

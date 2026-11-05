@@ -1,0 +1,6 @@
+{
+  "flavor": "jetson-orin-cuda-13",
+  "source": "remote_archive",
+  "type": "trt_edgellm",
+  "url": "https://example.com/trt-edgellm-server-4e3f9d23f052.tar.gz"
+}

@@ -1,12 +1,6 @@
 import Foundation
 
-/// Benchmark results on disk — the crate's `ResultsStore`
-/// (`pipette-cli/src/results/store.rs:29`).
-///
-/// A concrete filesystem handle over one directory, like ``IdentityStore`` and
-/// ``BenchmarkStore``: call sites take the store, and tests point one at scratch space.
-/// It replaces nine `Storage` protocol methods that returned URLs and left the IO to
-/// their callers.
+/// Benchmark results on disk: the crate's `ResultsStore` (`pipette-cli/src/results/store.rs`).
 ///
 /// ```text
 /// results/
@@ -15,17 +9,10 @@ import Foundation
 ///   remote/synced/<cellId>/{payload,extras,metrics,submission}.json
 /// ```
 ///
-/// A result is keyed by its cell id — already a UUID, and already documented on
-/// `JobCell` as doubling as the result directory name. The job it belonged to is
-/// recorded in the manifest, not in the path, which is what lets the layout match the
-/// crate's despite `jobs/` having no counterpart there.
-///
-/// **Two divergences, both deliberate.** The crate renames a result directory to the
-/// server-assigned job id on submission; here the cell id is stable and the server id
-/// goes in `submission.json`. And that file has no crate counterpart at all — it carries
-/// `serverJobId`, `submittedAt`, `errors` and `collector`, the last of which exists for
-/// collector-change resend, a feature the CLI does not have. The *location* is the
-/// authority on status; `submission.json` holds the details of the submission event.
+/// A result is keyed by its cell id; the job is recorded in the manifest, not the path.
+/// Unlike the crate, the directory is not renamed to the server job id on submission: that
+/// goes in `submission.json`, which has no crate counterpart (it also carries `collector`
+/// for collector-change resend). The location is the authority on status.
 nonisolated struct ResultsStore: Sendable {
     /// The workspace `results/` directory.
     let root: URL
@@ -38,7 +25,11 @@ nonisolated struct ResultsStore: Sendable {
     // MARK: - Paths
 
     func locationDir(_ location: BenchmarkResultLocation) -> URL {
-        root.appendingPathComponent(location.directory, isDirectory: true)
+        switch location {
+        case .local: root.appendingPathComponent("local", isDirectory: true)
+        case .remotePending: root.appendingPathComponent("remote/pending", isDirectory: true)
+        case .remoteSynced: root.appendingPathComponent("remote/synced", isDirectory: true)
+        }
     }
 
     /// `<location>/<id>/`, or nil when `id` is not a safe path component.
@@ -52,14 +43,32 @@ nonisolated struct ResultsStore: Sendable {
         resultDir(location, id)?.appendingPathComponent(Self.payloadName)
     }
 
+    func extrasPath(_ location: BenchmarkResultLocation, _ id: CellId) -> URL? {
+        resultDir(location, id)?.appendingPathComponent(Self.extrasName)
+    }
+
     func metricsPath(_ location: BenchmarkResultLocation, _ id: CellId) -> URL? {
         resultDir(location, id)?.appendingPathComponent(Self.metricsName)
     }
 
+    /// The crate's `has_valid_metrics`. A corrupt file reads as missing, so a later refresh
+    /// can replace it.
+    func hasValidMetrics(_ location: BenchmarkResultLocation, _ id: CellId) -> Bool {
+        guard let path = metricsPath(location, id),
+              FileManager.default.fileExists(atPath: path.path)
+        else { return false }
+        do {
+            _ = try Coding.decoder.decode(BenchmarkScoredResult.self, from: Data(contentsOf: path))
+            return true
+        } catch {
+            AppLog.results.warning("ignoring corrupt metrics for result \(id.value): \(error)")
+            return false
+        }
+    }
+
     // MARK: - Lookup
 
-    /// Where this result currently is, or nil when it has produced none. Checked
-    /// newest-first so a result mid-move resolves to its destination.
+    /// Checked newest-first so a result mid-move resolves to its destination.
     func location(of id: CellId) -> BenchmarkResultLocation? {
         [.remoteSynced, .remotePending, .local].first { location in
             guard let path = payloadPath(location, id) else { return false }
@@ -67,42 +76,29 @@ nonisolated struct ResultsStore: Sendable {
         }
     }
 
-    /// How far this result has travelled — the crate's location-derived ladder. `scored`
-    /// outranks `submitted` even without a submission record: a score can only have come
-    /// back for something the collector took.
+    /// As the crate's `load_list_entry` derives it. Only a synced result with a metrics file
+    /// that parses is scored.
     func state(of id: CellId) -> BenchmarkResultState? {
         guard let location = location(of: id) else { return nil }
-        if let metrics = metricsPath(location, id),
-           FileManager.default.fileExists(atPath: metrics.path) {
-            return .scored
+        switch location {
+        case .remoteSynced: return hasValidMetrics(.remoteSynced, id) ? .scored : .submitted
+        case .local, .remotePending: return .local
         }
-        return location.state
     }
 
-    /// The directory holding a submittable payload, or nil when there is none — the
-    /// sweep's entry point. `local/` never qualifies: that result was never sanctioned.
+    /// The sweep's entry point. `local/` never qualifies: that result was never sanctioned.
     func submittableDir(_ id: CellId) -> URL? {
         guard let location = location(of: id), location != .local else { return nil }
         return resultDir(location, id)
     }
 
-    /// Cells in `manifest` whose completed result is still on disk and has never been
-    /// uploaded.
-    ///
-    /// Answers "what can still go up", so it backs the job detail's "Submit N Results"
-    /// button. A cell from the generated `local/` catalog half is never submitted
-    /// (``JobCell/isSubmittable``, and `submittableDir` is nil for `.local`), so counting it
-    /// would promise to send work the sweep skips.
-    ///
-    /// Not the number to quote when warning about deletion — see
-    /// ``deletableResultCount(_:)``.
+    /// What can still go up (the "Submit N Results" count); excludes the `local/` half,
+    /// which the sweep skips. For deletion warnings use ``deletableResultCount(_:)``.
     func unsubmittedResultCount(_ manifest: JobManifest) -> Int {
         manifest.cells.filter(isUnsubmitted).count
     }
 
-    /// Whether this one cell's result is queued for upload and has never been acked. The single
-    /// spelling of the four clauses, shared with ``ResultUploader/hasStrandedResults(_:)``, which
-    /// needs the cells themselves rather than how many there are.
+    /// Queued for upload and never acked. Shared with ``ResultUploader/hasStrandedResults(_:)``.
     func isUnsubmitted(_ cell: JobCell) -> Bool {
         cell.runStatus == .completed
             && cell.isSubmittable
@@ -110,29 +106,25 @@ nonisolated struct ResultsStore: Sendable {
             && submittableDir(cell.cellId) != nil
     }
 
-    /// Cells in `manifest` holding a completed result that a device reset would destroy,
-    /// whether or not it could ever have been uploaded.
-    ///
-    /// Deliberately not ``unsubmittedResultCount(_:)``. That count excludes the generated
-    /// `local/` half, but `resetDeviceData()` removes the whole `results/` tree, so quoting
-    /// it in a deletion warning promises less than the reset takes — a device whose pending
-    /// work is all locally generated would be told it loses nothing.
+    /// Completed results a device reset would destroy. Includes the `local/` half that
+    /// ``unsubmittedResultCount(_:)`` skips, since `resetDeviceData()` removes all of `results/`.
     func deletableResultCount(_ manifest: JobManifest) -> Int {
         manifest.cells.filter {
             $0.runStatus == .completed && $0.serverJobId == nil && payloadPath(of: $0.cellId) != nil
         }.count
     }
 
-    /// Device-wide total of ``deletableResultCount(_:)`` over `manifests`. Stats a file per
-    /// cell, so pass the manifests already in hand rather than re-reading the job store.
+    /// Stats a file per cell, so pass the manifests already in hand rather than re-reading.
     func deletableResultCount(across manifests: [JobManifest]) -> Int {
         manifests.reduce(0) { $0 + deletableResultCount($1) }
     }
 
-    /// The payload / metrics file wherever the result currently is. Nil when it has
-    /// none — callers that only want to read do not need to know the location.
     func payloadPath(of id: CellId) -> URL? {
         location(of: id).flatMap { payloadPath($0, id) }
+    }
+
+    func extrasPath(of id: CellId) -> URL? {
+        location(of: id).flatMap { extrasPath($0, id) }
     }
 
     func metricsPath(of id: CellId) -> URL? {
@@ -141,8 +133,7 @@ nonisolated struct ResultsStore: Sendable {
 
     // MARK: - Writes
 
-    /// Write both halves of a result, as the crate's `save_result` does — one call so a
-    /// caller cannot forget the extras. Not atomic: a failure between the two leaves the
+    /// The crate's `save_result`. Not atomic: a failure between the two writes leaves the
     /// payload alone on disk.
     func saveResult(
         _ location: BenchmarkResultLocation, _ id: CellId,
@@ -163,11 +154,32 @@ nonisolated struct ResultsStore: Sendable {
         return try? Data(contentsOf: path)
     }
 
-    /// Move a result to its next location — the crate's `move_result_dir`, which is a
-    /// bare rename: no destination-exists special case, so a collision surfaces as an
-    /// error rather than a guess about which copy to discard.
-    ///
-    /// A no-op when the result is already there or has none.
+    /// The crate's `load_payload`: throws rather than answering nil, since a caller naming
+    /// the location expects a result there.
+    func loadPayload(_ location: BenchmarkResultLocation, _ id: CellId) throws -> [String: Any] {
+        guard let path = payloadPath(location, id) else {
+            throw ResultsStoreError.unsafeResultId(id.value)
+        }
+        guard let payload = try ResultPayload.readObject(at: path) else {
+            throw ResultsStoreError.noResult(id.value)
+        }
+        return payload
+    }
+
+    /// The crate's `save_metrics`.
+    func saveMetrics(
+        _ location: BenchmarkResultLocation, _ id: CellId, _ scored: BenchmarkScoredResult
+    ) throws {
+        guard let path = metricsPath(location, id) else {
+            throw ResultsStoreError.unsafeResultId(id.value)
+        }
+        try FileManager.default.createDirectory(
+            at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Coding.encoder.encode(scored).write(to: path, options: .atomic)
+    }
+
+    /// The crate's `move_result_dir`: a bare rename, so a collision surfaces as an error
+    /// rather than a guess about which copy to discard.
     func move(_ id: CellId, to destination: BenchmarkResultLocation) throws {
         guard let from = location(of: id), from != destination else { return }
         guard let source = resultDir(from, id), let target = resultDir(destination, id) else {
@@ -178,11 +190,8 @@ nonisolated struct ResultsStore: Sendable {
         try FileManager.default.moveItem(at: source, to: target)
     }
 
-    /// Drop the submission record and any score, keeping the result — a re-run of the
-    /// same cell has to reset how far it has travelled.
-    ///
-    /// No crate counterpart: the CLI mints a fresh result id per run, so a re-run is a
-    /// new directory. A cell id is stable here, so a re-run lands on top of itself.
+    /// Resets a re-run's progress. No crate counterpart: the CLI mints a result id per run,
+    /// but a cell id is stable, so a re-run lands on top of its previous result.
     func clearProgress(_ id: CellId) {
         deleteSubmission(id)
         if let metrics = metricsPath(of: id) {
@@ -190,8 +199,8 @@ nonisolated struct ResultsStore: Sendable {
         }
     }
 
-    /// Drop a result wherever it is. Called when its job is deleted — results no longer
-    /// live under `jobs/<jobId>/`, so removing that tree no longer takes them with it.
+    /// Called when its job is deleted: results don't live under `jobs/<jobId>/`, so removing
+    /// that tree doesn't take them.
     func delete(_ id: CellId) {
         guard let location = location(of: id), let dir = resultDir(location, id) else { return }
         try? FileManager.default.removeItem(at: dir)
@@ -219,7 +228,7 @@ nonisolated struct ResultsStore: Sendable {
         try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.submissionName))
     }
 
-    /// Every result id at a location, sorted — the crate's `list_ids`.
+    /// The crate's `list_ids`.
     func listIds(_ location: BenchmarkResultLocation) -> [CellId] {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: locationDir(location), includingPropertiesForKeys: [.isDirectoryKey])

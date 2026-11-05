@@ -1,7 +1,3 @@
-// Job detail (progress + results heatmap + rename/delete) and the sibling cell detail cover. Wired as their own
-// Navigation 3 destinations (Route.JobDetail, Route.CellDetail) mirrored from JobsUiState.Detail / .CellDetail —
-// see PipetteAppRoot for the state → backstack mirror. Chrome matches the Android tabs: Material 3 top app bar
-// with a back navigation icon and a "···" overflow menu.
 @file:Suppress("MagicNumber", "MaxLineLength", "TooManyFunctions", "CyclomaticComplexMethod", "LongMethod")
 
 package ai.liquid.pipette.compose.jobs
@@ -77,11 +73,7 @@ import androidx.compose.ui.unit.sp
 // Job detail
 // ---------------------------------------------------------------------------
 
-/**
- * Per-job detail — the "Job progress" surface when a run is active, or the results heatmap + resume/retry buttons when it's not. Chrome is a Material
- * 3 top app bar with a back nav icon and a "···" overflow menu (Rename, Delete). System back returns to the jobs list; the shell pops Route.JobDetail
- * in reaction to that state change.
- */
+/** Live progress while a run is active, otherwise the results heatmap. */
 @Composable
 fun JobDetailScreen(state: JobsUiState.Detail, onIntent: (JobsIntent) -> Unit) {
   BackHandler { onIntent(JobsIntent.BackToJobs) }
@@ -225,6 +217,7 @@ private fun RunningBlock(state: JobsUiState.Detail, onIntent: (JobsIntent) -> Un
         currentCellLabel = state.runCellLabel,
         progressText = state.runProgressText,
         coolingSinceMillis = state.coolingSinceMillis,
+        coolingMaxMillis = state.coolingMaxMillis,
         colors = JobActivityColors(primaryText = colors.label, secondaryText = colors.gray, accent = Color(0xFF60A5FA)),
       )
     }
@@ -435,10 +428,6 @@ private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String
 // Cell detail
 // ---------------------------------------------------------------------------
 
-/**
- * Full-bleed cell-detail cover — Material 3 top app bar (back nav icon), an info section (max-three property rows behind a "Show more" toggle), an
- * edge-to-edge separator, then the payload table. System back closes the cover rather than the app.
- */
 @Composable
 fun CellDetailScreen(state: JobsUiState.CellDetail, onIntent: (JobsIntent) -> Unit) {
   val cell = state.cell

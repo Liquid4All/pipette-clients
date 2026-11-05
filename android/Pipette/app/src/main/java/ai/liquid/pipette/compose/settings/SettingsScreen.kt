@@ -4,6 +4,7 @@
 package ai.liquid.pipette.compose.settings
 
 import ai.liquid.pipette.AccentKind
+import ai.liquid.pipette.DateFormats
 import ai.liquid.pipette.FeedbackDialog
 import ai.liquid.pipette.RegistrationData
 import ai.liquid.pipette.compose.AppFilterChip
@@ -21,6 +22,9 @@ import ai.liquid.pipette.compose.SectionTitle
 import ai.liquid.pipette.compose.accentColor
 import ai.liquid.pipette.compose.clickableNoRipple
 import ai.liquid.pipette.compose.theme.PipetteTheme
+import android.content.ClipData
+import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -42,9 +46,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.toClipEntry
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -53,6 +61,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 /** Settings tab (iOS SettingsView): Account, Device, About, Debugging sections in outlined cards. */
 @Composable
@@ -86,8 +95,9 @@ fun SettingsScreen(state: SettingsUiState, onIntent: (SettingsIntent) -> Unit) {
       PropertyRow("Email", state.clerkEmail ?: state.registration?.clerkPrimaryEmail ?: state.registration?.contactEmail ?: "—")
       IosDivider()
       PropertyRow("Organization", state.registration?.organization?.ifBlank { "—" } ?: "—")
+      AccountIdentityRows(state.registration)
       IosDivider()
-      PropertyRow("Registered", state.registration?.registeredAt ?: "—")
+      PropertyRow("Registered", state.registration?.registeredAt?.let(DateFormats::dateTime) ?: "—")
     }
     if (state.isRegistered) {
       // Snapshotted on the tap rather than read live, so the warning is settled before the dialog appears and its text cannot change while the
@@ -200,6 +210,75 @@ private fun signOutConfirmMessage(unsubmittedResultCount: Int): String {
   if (unsubmittedResultCount <= 0) return base
   val warning = pluralStringResource(ai.liquid.pipette.R.plurals.settings_sign_out_unsubmitted, unsubmittedResultCount, unsubmittedResultCount)
   return "$base\n\n$warning"
+}
+
+/**
+ * The two rows an operator needs when they look this device up on the management server: its `client_id` and the status the server last reported.
+ *
+ * The id is the row this card was missing. An operator has to approve a client server-side with its id, and nothing else in the app showed it, so the
+ * only way to read it was `verb=auth-whoami` over adb. `Status` sits beside it because approval is the question someone answers when they look the id
+ * up.
+ *
+ * `Status` is current as of the last launch, not as of this render. [ProfileRefreshService.refresh] reports the profile on every start and records
+ * the server's verdict on the registration; this row reads what it recorded. That is what an operator who just approved the device needs, because the
+ * value written at registration is `pending` for the life of the install.
+ *
+ * Drawn only once the device is registered: neither value exists before that, and two em-dashes say less than their absence does.
+ *
+ * A composable of its own rather than four more statements in [SettingsScreen], which is at detekt's complexity ceiling — the same reason
+ * [AnalyticsToggle] and [ResetButton] are separate.
+ */
+@Composable
+private fun AccountIdentityRows(registration: RegistrationData?) {
+  if (registration == null) return
+  IosDivider()
+  CopyableIdRow("Client ID", registration.clientId)
+  IosDivider()
+  PropertyRow("Status", registration.status.ifBlank { "—" })
+}
+
+/**
+ * A label and an identifier shown in full, which a tap copies.
+ *
+ * [PropertyRow] cannot serve, and the reason is why this is a sibling rather than a change to it: that row is `maxLines = 1, overflow = Ellipsis` at
+ * a fixed height, which suits the short values every other Settings line holds and truncates an identifier to something nobody can act on. Every
+ * other row on this screen depends on that behaviour.
+ *
+ * The value is monospaced and wraps, so an id is read a character at a time and confirmed against a server-side record without being copied first.
+ *
+ * From API 33 the platform shows its own copy confirmation, so the toast is emitted only below it. That is Android's own guidance rather than a
+ * preference: on API 33+ a second confirmation would double up.
+ */
+@Composable
+private fun CopyableIdRow(title: String, value: String) {
+  val colors = PipetteTheme.colors
+  val context = LocalContext.current
+  val clipboard = LocalClipboard.current
+  val scope = rememberCoroutineScope()
+  Row(
+    modifier =
+      Modifier.fillMaxWidth()
+        .clickableNoRipple {
+          scope.launch {
+            clipboard.setClipEntry(ClipData.newPlainText(title, value).toClipEntry())
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+              Toast.makeText(context, "$title copied", Toast.LENGTH_SHORT).show()
+            }
+          }
+        }
+        .padding(horizontal = 24.dp, vertical = 16.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(16.dp),
+  ) {
+    Text(title, style = TextStyle(fontSize = 16.5.sp), color = colors.label, maxLines = 1)
+    Text(
+      value,
+      style = TextStyle(fontSize = 14.sp, lineHeight = 19.sp, fontFamily = FontFamily.Monospace),
+      color = colors.gray,
+      modifier = Modifier.weight(1f),
+    )
+    Text("Copy", style = TextStyle(fontSize = 14.sp), color = colors.label, maxLines = 1)
+  }
 }
 
 @Composable

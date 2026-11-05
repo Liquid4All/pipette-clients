@@ -1,26 +1,29 @@
 [package]
 name = "pipette-ops"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
 anyhow.workspace = true
-log.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
 nutype.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-strum.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tracing.workspace = true
 
 pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
 tempfile.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true

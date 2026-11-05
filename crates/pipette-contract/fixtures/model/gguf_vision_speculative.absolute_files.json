@@ -1,0 +1,6 @@
+{
+  "mmproj": "/var/lib/pipette/models/mmproj-f16.gguf",
+  "model": "/var/lib/pipette/models/merged-f16.gguf",
+  "source": "absolute_files",
+  "type": "gguf_vision_speculative"
+}

@@ -1,55 +1,35 @@
 import Foundation
 
-// What the host *is* — the identity fields every benchmark submission carries,
-// mirroring `pipette-plan-types/src/device.rs`.
+// The host identity fields every submission carries: pipette-mgmt's
+// `crates/pipette-plan-types/src/device.rs`. `detectDeviceInfo()` produces the values.
 //
-// Shape and wire contract only, as upstream: `DeviceProbe.detectDeviceInfo()` is
-// what produces the values, matching the crate's split between this module and
-// `pipette_device::detect_device_info`.
-//
-// The crate spells the string fields as `TrimmedString`, a newtype that strips
-// surrounding whitespace on construction. That exists for the Windows detector,
-// whose `Win32_VideoController.Name` arrives padded and would otherwise reach the
-// server as a row distinct from its trimmed twin. Every value here comes from a
-// `sysctl` or a compiled-in mapping table, so there is nothing to trim and the
-// newtype is not ported.
+// The crate's string fields are `TrimmedString` (for padded Windows WMI values); nothing
+// here arrives padded (an operator label is trimmed in `detectDeviceInfo`), so the newtype
+// is not ported.
 
-/// Physical form factor of the device running the benchmark — the crate's
-/// `DeviceFormFactor`, lowercase on the wire to match the management server.
-///
-/// All six arms are ported even though a phone can only ever detect two of them:
-/// this is the server's taxonomy, not a capability claim, and narrowing it would
-/// make the enum look like an iOS invention rather than the crate's type.
-///
-/// The crate defaults to `desktop` when an old payload omits the field. There is no
-/// counterpart here because nothing on iOS decodes a form factor — `DeviceProbe`
-/// always sets an explicit value.
-///
-/// TODO: review — mirrors `device.rs:46`; six arms and the lowercase wire spelling
-/// checked against it.
+/// The crate's `DeviceFormFactor`. All six arms are ported though a phone detects two:
+/// it is the server's taxonomy. The crate's `desktop` default is not: a phone always
+/// detects its own, and the operator label in `device.json` decodes as an optional.
 nonisolated enum DeviceFormFactor: String, Sendable, Codable, CaseIterable {
     case phone, tablet, laptop, desktop, server, embedded
 }
 
-/// Device metadata sent alongside every benchmark submission — the crate's `DeviceInfo`.
-///
-/// Four fields iOS cannot source stay `nil` and elide on encode, rather than being
-/// dropped from the type: `deviceOsSecurityPatch` (no iOS API exposes one; Android
-/// reads `ro.build.version.security_patch`) and the GPU/NPU pairs (a unified-memory
-/// device has no separately addressable VRAM to report, and a `*_vram_bytes` without
-/// its matching `*_model` is a `400`). Keeping them means the struct is the crate's
-/// struct, and a platform that later gains a source has a field to fill.
-///
-/// TODO: review — mirrors `device.rs:74`; all twelve fields and their wire names
-/// checked against it.
+/// The crate's `DeviceInfo`. iOS leaves `deviceOsSecurityPatch` (no API exposes one) and
+/// the GPU/NPU fields (unified memory has no separate VRAM) `nil`; a `*_vram_bytes`
+/// without its `*_model` is a `400`.
 nonisolated struct DeviceInfo: Codable, Hashable, Sendable {
     var deviceName: String
     var deviceFormFactor: DeviceFormFactor
     var deviceOsName: String
     var deviceOsVersion: String
-    /// Precise OS build id, finer-grained than `deviceOsVersion` (e.g. `22F76`).
+    /// e.g. `22F76`.
     var deviceOsBuild: String?
     var deviceOsSecurityPatch: String?
+    /// The CPU architecture as Swift names it (`arm64`). The server derives the
+    /// `arch:` flag from it.
+    var deviceCpuArch: String?
+    /// The OS family (`iOS`). The server derives the `os_family:` flag from it.
+    var deviceOsFamily: String?
     var deviceChipModel: String
     var deviceRamBytes: UInt64
     var deviceGpuModel: String?
@@ -64,6 +44,8 @@ nonisolated struct DeviceInfo: Codable, Hashable, Sendable {
         case deviceOsVersion = "device_os_version"
         case deviceOsBuild = "device_os_build"
         case deviceOsSecurityPatch = "device_os_security_patch"
+        case deviceCpuArch = "device_cpu_arch"
+        case deviceOsFamily = "device_os_family"
         case deviceChipModel = "device_chip_model"
         case deviceRamBytes = "device_ram_bytes"
         case deviceGpuModel = "device_gpu_model"
@@ -71,4 +53,17 @@ nonisolated struct DeviceInfo: Codable, Hashable, Sendable {
         case deviceNpuModel = "device_npu_model"
         case deviceNpuVramBytes = "device_npu_vram_bytes"
     }
+}
+
+/// The crate's `CapabilityFlag`: an eligibility token a plan's `requires` lists and a
+/// client advertises (`os:ios`, `runtime:llama_cpp:b9999`, `job_retry`). The server
+/// matches on this canonical form and answers a non-canonical one with a `400`; reserved
+/// namespaces are the server's to check.
+nonisolated struct CapabilityFlag: ValidatedString {
+    let value: String
+    init(validated value: String) { self.value = value }
+    static func validate(_ value: String) -> Bool {
+        !value.isEmpty && !value.contains(where: \.isWhitespace) && value.lowercased() == value
+    }
+    static let rejection = ModelError.invalidCapabilityFlag
 }

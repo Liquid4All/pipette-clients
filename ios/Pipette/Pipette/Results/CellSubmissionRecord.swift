@@ -10,12 +10,10 @@ struct CellSubmissionRecord: nonisolated Codable, Equatable {
     let serverJobId: String?
     let submittedAt: String?
     let errors: [String]
-    /// The collector this result was submitted to, identified by its base URL —
-    /// the only stable collector identity we have (there is no server-issued
-    /// id). Lets a later sync detect results that belong to a *different*
-    /// collector and re-send them. Nil for records written before this field
-    /// existed, or for `.failed` records.
-    let collector: ServerURL?
+    /// The collector's base URL, its only stable identity, so a later sync can re-send
+    /// results that went to a different collector. Nil for `.failed` records and for
+    /// records written before this field existed.
+    let collector: ServerUrl?
 
     enum CodingKeys: String, CodingKey {
         case status
@@ -27,7 +25,7 @@ struct CellSubmissionRecord: nonisolated Codable, Equatable {
 
     static func submitted(
         serverJobId: String,
-        collector: ServerURL? = nil,
+        collector: ServerUrl? = nil,
         submittedAt: String = JobDateFormat.iso8601.string(from: Date())
     ) -> Self {
         CellSubmissionRecord(
@@ -47,11 +45,5 @@ struct CellSubmissionRecord: nonisolated Codable, Equatable {
             errors: errors,
             collector: nil
         )
-    }
-}
-
-enum ResultSubmissionFeatureGate {
-    nonisolated static func canSubmitResults(registration: IdentityRegistration?) -> Bool {
-        registration != nil
     }
 }

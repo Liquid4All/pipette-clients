@@ -2,10 +2,9 @@ import SwiftUI
 
 /// Marks a benchmark or result that came from the generated `local/` catalog half.
 ///
-/// The distinction is not cosmetic: the server never sanctioned these definitions, so
-/// their results are not submitted (``JobCell/isSubmittable``). Without the mark a user
-/// can pick one from the New Job screen, measure for an hour, and never learn that
-/// nothing was published — the run looks identical to a synced one at every step.
+/// The server never sanctioned these definitions, so their results are not submitted
+/// (``JobCell/isSubmittable``). Without the mark a local run looks identical to a synced
+/// one, and the user never learns nothing was published.
 struct LocalResultBadge: View {
     /// Shown alongside the badge where there is room to explain it.
     var showsCaption = false

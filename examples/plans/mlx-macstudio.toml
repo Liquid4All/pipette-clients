@@ -1,7 +1,4 @@
-# Example plan: unified pipette client, MLX runtime on a single Mac over SSH.
-#
-# State written to
-# .pipette-plan/plans/mlx-macstudio-example/state.jsonl.
+# Example plan: MLX on a single Mac over ssh.
 
 plan_id = "mlx-macstudio-example"
 benchmarks = [
@@ -14,11 +11,11 @@ benchmarks = [
 [[transports]]
 client_id   = "macstudio"
 type        = "ssh"
-host        = "boston-macstudio"
-user        = "yuri"
+host        = "mac-studio-1"
+user        = "pipette"
 port        = 22
-binary_path = "/Users/yuri/pipette/pipette"
-work_dir    = "/Users/yuri/pipette"
+binary_path = "/Users/pipette/pipette/pipette"
+work_dir    = "/Users/pipette/pipette"
 shell       = "posix"
 
 [retry]

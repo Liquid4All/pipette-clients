@@ -1,0 +1,6 @@
+{
+  "dir": "blobs",
+  "flavor": "redhat-x64",
+  "source": "relative_dir",
+  "type": "ovms"
+}

@@ -1,18 +1,64 @@
 [package]
 name = "pipette-subprocess"
-version = "0.1.0"
-edition = "2021"
-publish = false
-description = "Process plumbing shared by the pipette client crates: binary lookup, shell-quoted command echoing, SIGPIPE reset, and ^C teardown of spawned children."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Process plumbing shared by the pipette client crates: starting the programs a client runs, each leading a session of its own, with their output kept, and stopping them with everything they started, shell-quoted command echoing, SIGPIPE reset and the per-pipe guard under it, closing the descriptors a parent leaked, a server's loopback port, and teardown of spawned children on ^C, on a closed stderr for a command that asks for it, when their parent exits on Windows or, for those a killed CLI left running, at the next start."
 
 [lints]
 workspace = true
 
+# A run that dies without stopping what it started, for `tests/orphans.rs` and
+# `tests/windows.rs`.
+[[bin]]
+name = "start_and_wait"
+path = "tests/bin/start_and_wait.rs"
+test = false
+bench = false
+doc = false
+
+# A run ^C ends during a short command, for `tests/interrupt.rs`.
+[[bin]]
+name = "output_and_wait"
+path = "tests/bin/output_and_wait.rs"
+test = false
+bench = false
+doc = false
+
+# A run whose stderr reader closes, for `tests/closed_output.rs`.
+[[bin]]
+name = "log_and_wait"
+path = "tests/bin/log_and_wait.rs"
+test = false
+bench = false
+doc = false
+
+# A run that stops what it started, for `tests/windows.rs` to read what the
+# stop printed on the run's own streams.
+[[bin]]
+name = "start_and_stop"
+path = "tests/bin/start_and_stop.rs"
+test = false
+bench = false
+doc = false
+
+# anyhow stays out of [dependencies] so no signature can return it.
 [dependencies]
-anyhow.workspace = true
 ctrlc.workspace = true
-log.workspace = true
+pipette-plan-types.workspace = true
 shlex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+rstest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true

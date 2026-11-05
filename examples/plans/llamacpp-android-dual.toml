@@ -1,8 +1,5 @@
-# Example plan: unified pipette client, llama.cpp runtime on two Android devices.
-#
-# Two-ADB fleet running the matrix. One worker per device, both racing
-# through a shared queue. State written to
-# .pipette-plan/plans/llamacpp-android-dual-example/state.jsonl.
+# Example plan: llama.cpp on two Android devices over adb. One worker per
+# device, both pulling from a shared queue.
 
 plan_id = "llamacpp-android-dual-example"
 benchmarks = [
@@ -28,12 +25,10 @@ binary_path = "/data/local/tmp/pipette/pipette"
 work_dir    = "/data/local/tmp/pipette"
 shell       = "posix"
 
-# A phone attached to another box's adb server: the `adb` command runs there
-# over ssh, so this driver needs neither adb nor a tunnel. `port` is the ssh
-# port, `adb_port` the adb server port on `host`.
-#
-# `pre_exec` is needed when only that host's login profile — which
-# non-interactive ssh skips — puts `adb` on PATH.
+# A phone attached to another box: `adb` runs there over ssh, so this driver
+# needs neither adb nor a tunnel. `port` is the ssh port, `adb_port` the adb
+# server port on `host`. `pre_exec` is needed when only that host's login
+# profile puts `adb` on PATH, since non-interactive ssh skips it.
 #
 # [[transports]]
 # client_id   = "android-c"
@@ -56,9 +51,8 @@ models = [
   { type = "gguf_text", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-350M-GGUF", path = "LFM2.5-350M-Q4_K_M.gguf" },
 ]
 runtimes = [
-  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_version = "23dff81c4", flavor = "android-arm64-v8a" },
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", repository_version = "23dff81c4", flavor = "android-arm64-v8a" },
 ]
-# Per-cell flags: `threads` is authored once per benchmark it applies to.
 runtime_flags = [
   { benchmark_type = "prefill_throughput",  runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4 },
   { benchmark_type = "decode_throughput",   runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4 },

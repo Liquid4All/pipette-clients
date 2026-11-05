@@ -1,10 +1,17 @@
 package ai.liquid.pipette
 
+import ai.liquid.pipette.fakes.CpuAffinityFixtures.FOREGROUND
+import ai.liquid.pipette.fakes.CpuAffinityFixtures.TOP_APP
+import ai.liquid.pipette.fakes.CpuAffinityFixtures.snapshot
 import ai.liquid.pipette.fakes.FakeBenchmarkEngine
 import ai.liquid.pipette.fakes.FakeJobStore
 import ai.liquid.pipette.fakes.FakeReadinessGate
 import ai.liquid.pipette.fakes.FakeResultSubmitter
-import java.util.concurrent.Executor
+import ai.liquid.pipette.fakes.JobRunnerFixtures.DECODE_ID
+import ai.liquid.pipette.fakes.JobRunnerFixtures.DECODE_TYPE
+import ai.liquid.pipette.fakes.JobRunnerFixtures.cell
+import ai.liquid.pipette.fakes.JobRunnerFixtures.directExecutor
+import ai.liquid.pipette.fakes.JobRunnerFixtures.runner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,18 +21,8 @@ import org.junit.Test
  * the job finishes, so the assertions run against the final manifest state.
  */
 class JobRunnerTest {
-  private val directExecutor = Executor { it.run() }
-  private val decodeId = "decode_throughput_512_100"
-  private val decodeType = "decode_throughput"
-
-  private fun cell(modelPath: String, benchmarkId: String, benchmarkType: String?): JobCell =
-    JobCell(
-      benchmarkId = benchmarkId,
-      benchmarkType = benchmarkType,
-      modelPath = modelPath,
-      modelName = modelPath.substringAfterLast('/'),
-      runStatus = CellRunStatus.PENDING,
-    )
+  private val decodeId = DECODE_ID
+  private val decodeType = DECODE_TYPE
 
   private fun registration(): RegistrationData =
     RegistrationData(
@@ -36,13 +33,6 @@ class JobRunnerTest {
       contactEmail = "someone@example.com",
       registeredAt = "2026-06-08T12:00:00Z",
     )
-
-  private fun runner(
-    store: FakeJobStore,
-    engine: FakeBenchmarkEngine,
-    readiness: FakeReadinessGate = FakeReadinessGate(),
-    submitter: FakeResultSubmitter = FakeResultSubmitter(),
-  ): JobRunner = JobRunner(storage = store, engine = engine, submissionService = submitter, readiness = readiness, executor = directExecutor) {}
 
   @Test
   fun runsAllPendingCellsToCompletion() {
@@ -104,6 +94,130 @@ class JobRunnerTest {
     assertEquals(256, engine.loads.single().nUbatch)
   }
 
+  /**
+   * The invariant the resolved-flags path exists for: the values handed to the engine are the values recorded on the payload. Asserted on both
+   * branches, since the resident-load and fresh-load paths pass them separately.
+   */
+  @Test
+  fun theEngineLoadsWithTheValuesTheRecordReports() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine()
+    val authored = RuntimeFlagRef(numberGpuLayers = 12, ctxSize = 777, nUbatch = 64, loadMode = LlamacppLoadMode.MMAP)
+    val manifest =
+      JobManifest(
+        nGpuLayers = 99,
+        contextSize = 4096,
+        status = JobStatus.RUNNING,
+        prefillBatch = 256,
+        cells = mutableListOf(cell("/m/model.gguf", decodeId, decodeType, runtimeFlags = authored)),
+      )
+    store.saveJobManifest(manifest)
+
+    runner(store, engine).resume(manifest.jobId)
+
+    // The cell's own values reach the load, not the job's.
+    val load = engine.loads.single()
+    assertEquals(12, load.nGpuLayers)
+    assertEquals(777, load.contextSize)
+    assertEquals(64, load.nUbatch)
+    assertEquals(LlamacppLoadMode.MMAP, load.loadMode)
+    // And the payload reports exactly those.
+    assertEquals(authored, store.payloadWrites.single().runtimeFlags)
+  }
+
+  /** The same invariant on the fresh-load branch, which passes the values separately from the resident one. */
+  @Test
+  fun theFreshLoadBranchAlsoLoadsWithTheValuesTheRecordReports() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine()
+    val authored = RuntimeFlagRef(numberGpuLayers = 12, ctxSize = 777, nUbatch = 64, loadMode = LlamacppLoadMode.MMAP)
+    val manifest =
+      JobManifest(
+        nGpuLayers = 99,
+        contextSize = 4096,
+        status = JobStatus.RUNNING,
+        prefillBatch = 256,
+        cells = mutableListOf(cell("/m/model.gguf", "max_memory_usage_512", "max_memory_usage", runtimeFlags = authored)),
+      )
+    store.saveJobManifest(manifest)
+
+    runner(store, engine).resume(manifest.jobId)
+
+    val run = engine.runs.single()
+    assertTrue(run.fresh)
+    assertEquals(12, run.nGpuLayers)
+    assertEquals(777, run.contextSize)
+    assertEquals(64, run.nUbatch)
+    assertEquals(LlamacppLoadMode.MMAP, run.loadMode)
+    assertEquals(authored, store.payloadWrites.single().runtimeFlags)
+  }
+
+  /** A cell that authored nothing still records what the engine answered, rather than leaving the knobs unset. */
+  @Test
+  fun aCellThatAuthoredNothingRecordsTheEnginesAnswers() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine()
+    val manifest =
+      JobManifest(
+        nGpuLayers = 99,
+        contextSize = 4096,
+        status = JobStatus.RUNNING,
+        prefillBatch = 256,
+        cells = mutableListOf(cell("/m/model.gguf", decodeId, decodeType)),
+      )
+    store.saveJobManifest(manifest)
+
+    runner(store, engine).resume(manifest.jobId)
+
+    val reported = store.payloadWrites.single().runtimeFlags
+    assertEquals(99, reported?.numberGpuLayers)
+    assertEquals(256, reported?.nUbatch)
+    assertEquals(LlamacppLoadMode.READ, reported?.loadMode)
+    assertEquals(LlamacppLoadMode.READ, engine.loads.single().loadMode)
+  }
+
+  /**
+   * A knob this build cannot honor fails its cell rather than being ignored. Failing one cell, not the job: the runner's per-cell catch is what turns
+   * this into a FAILED status the user can see.
+   */
+  @Test
+  fun aCellAuthoringAnUnsupportedKnobFails() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine()
+    val manifest =
+      JobManifest(
+        nGpuLayers = 99,
+        contextSize = 4096,
+        status = JobStatus.RUNNING,
+        prefillBatch = 256,
+        cells =
+          mutableListOf(
+            cell("/m/model.gguf", decodeId, decodeType, runtimeFlags = RuntimeFlagRef(refused = mapOf("threads" to 6))),
+            cell("/m/other.gguf", decodeId, decodeType),
+          ),
+      )
+    store.saveJobManifest(manifest)
+
+    runner(store, engine).resume(manifest.jobId)
+
+    assertEquals(CellRunStatus.FAILED, manifest.cells.first().runStatus)
+    assertTrue(manifest.cells.first().errorMessage!!.contains("threads"))
+    // Nothing was loaded for the refused cell, and the job carried on to the next one.
+    assertEquals(1, engine.loads.size)
+    assertEquals(CellRunStatus.COMPLETED, manifest.cells[1].runStatus)
+  }
+
+  /**
+   * A cell's authored flags survive the job file, which is the only way they ever reach the runner: nothing in the app composes them today, so a
+   * hand-written job file is the entry point for the whole authored-flags path.
+   */
+  @Test
+  fun aCellsAuthoredFlagsRoundTripThroughItsJson() {
+    val authored = RuntimeFlagRef(numberGpuLayers = 12, ctxSize = 777, nUbatch = 64, loadMode = LlamacppLoadMode.MMAP)
+    val restored = JobCell.fromJson(cell("/m/model.gguf", decodeId, decodeType, runtimeFlags = authored).toJson())
+    assertEquals(authored, restored.runtimeFlags)
+  }
+
   @Test
   fun maxMemoryUsesFreshLoadPath() {
     val store = FakeJobStore()
@@ -127,6 +241,9 @@ class JobRunnerTest {
     // The fresh-load path must carry prefillBatch through to nUbatch, just
     // like the resident-load path asserted in prefillBatchFlowsToEngineLoad.
     assertEquals(256, engine.runs.single().nUbatch)
+    // And the resolved load mode, which only this branch passes (max_memory_usage is the
+    // benchmark whose whole point is observing the load).
+    assertEquals(LlamacppLoadMode.READ, engine.runs.single().loadMode)
   }
 
   @Test
@@ -545,6 +662,48 @@ class JobRunnerTest {
       .resume(manifest.jobId)
 
     assertEquals(listOf(true, false), holds)
+  }
+
+  /**
+   * Each payload must carry the cpuset reading taken for its own cell.
+   *
+   * `RemoteBenchmarkEngine` used to cache the first reading for the life of the `:benchmark` process, on the false premise that a process keeps the
+   * cpuset group it was assigned. Every cell then reported the first cell's group, so a run that ended in `/moderate` with the prime cores gone still
+   * wrote a clean-looking `/top-app` to its payload. A wrong field here is worse than a missing one, because anything auditing results by it reads it
+   * as evidence the cell was fine.
+   *
+   * The cache itself lived behind the binder and is only reachable on a device, so what is pinned here is the contract it violated: one read per
+   * cell, and the reading that cell got is the one that lands in its payload.
+   */
+  @Test
+  fun eachCellsPayloadCarriesItsOwnCpusetReadingRatherThanTheFirstCells() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine(resultJson = "{\"ok\":true}", commit = "abc123")
+    // Nothing here trips the guard: the demotion verdict is what fails a cell, and this fake reports
+    // none. This is the fail-open path, where the payload's own fields are the only account of where
+    // the cell ran, which is exactly where a stale reading does its damage.
+    engine.cpuAffinityPerCall =
+      listOf(snapshot(cpuset = TOP_APP), snapshot(cpuset = FOREGROUND, allowed = "0-1,4-5", allowedCount = 4, excludesTopTier = true))
+    val manifest =
+      JobManifest(
+        nGpuLayers = 99,
+        contextSize = 4096,
+        status = JobStatus.RUNNING,
+        cells = mutableListOf(cell("/m/model.gguf", decodeId, decodeType), cell("/m/model.gguf", decodeId, decodeType)),
+      )
+    store.saveJobManifest(manifest)
+
+    runner(store, engine).resume(manifest.jobId)
+
+    assertEquals(2, store.payloadWrites.size)
+    assertEquals(TOP_APP, store.payloadWrites[0].benchmarkCpuAffinity?.cpusetPath)
+    assertEquals(FOREGROUND, store.payloadWrites[1].benchmarkCpuAffinity?.cpusetPath)
+    // The derived fields have to move with the reading too. `excludes_top_tier` is the one a reader
+    // actually filters on, so a stale `false` there is the difference between a discarded result and
+    // a trusted one.
+    assertEquals(false, store.payloadWrites[0].benchmarkCpuAffinity?.excludesTopTier)
+    assertEquals(true, store.payloadWrites[1].benchmarkCpuAffinity?.excludesTopTier)
+    assertEquals("one read per cell", 2, engine.cpuAffinityReads)
   }
 
   @Test

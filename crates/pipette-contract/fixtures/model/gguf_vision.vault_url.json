@@ -1,0 +1,9 @@
+{
+  "custom_label": "acme LFM2-VL q4",
+  "mmproj": "/vault/resources/vault_1/content",
+  "model": "/vault/resources/vault_1/content",
+  "model_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "principal_id": "org_01936d",
+  "source": "vault_url",
+  "type": "gguf_vision"
+}

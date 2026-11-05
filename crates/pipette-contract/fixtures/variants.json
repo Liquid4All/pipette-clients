@@ -1,0 +1,1059 @@
+{
+  "BenchmarkDefinition": {
+    "asr_eval": [
+      "benchmark/asr_eval.asr-eval-corpus_1.evals-server@1.evals_server.json",
+      "benchmark/asr_eval.beams.json",
+      "benchmark/asr_eval.json"
+    ],
+    "asr_max_memory": [
+      "benchmark/asr_max_memory.json"
+    ],
+    "asr_throughput": [
+      "benchmark/asr_throughput.json"
+    ],
+    "decode_throughput": [
+      "benchmark/decode_throughput.json"
+    ],
+    "end_to_end_latency": [
+      "benchmark/end_to_end_latency.json"
+    ],
+    "eval": [
+      "benchmark/eval.json",
+      "benchmark/eval.max_context.json",
+      "benchmark/eval.pinned.json",
+      "benchmark/eval.seed_at_cap.json",
+      "benchmark/eval.unknown_id.json"
+    ],
+    "max_memory_usage": [
+      "benchmark/max_memory_usage.json"
+    ],
+    "prefill_throughput": [
+      "benchmark/prefill_throughput.json"
+    ],
+    "vl_max_memory": [
+      "benchmark/vl_max_memory.decode256.json",
+      "benchmark/vl_max_memory.json"
+    ],
+    "vl_spec_decode": [
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.json",
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.sampled.json"
+    ],
+    "vl_throughput": [
+      "benchmark/vl_throughput.json"
+    ],
+    "vlm_eval": [
+      "benchmark/vlm_eval.system.user.assistant.user.json",
+      "benchmark/vlm_eval.user.json",
+      "benchmark/vlm_eval.vlm-eval-corpus_1.evals-server@1.evals_server.json"
+    ]
+  },
+  "BenchmarkEvalCompletionStopReason": {
+    "doom_loop": [
+      "eval_completion/doom_loop.json"
+    ],
+    "eos": [
+      "eval_completion/eos.json"
+    ],
+    "failure": [
+      "eval_completion/failure.json"
+    ],
+    "truncated": [
+      "eval_completion/truncated.json"
+    ],
+    "unknown": [
+      "eval_completion/unknown.json"
+    ]
+  },
+  "BenchmarkFlags": {
+    "asr_eval_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/asr_eval.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "asr_eval_uv_vllm_torch": [
+      "benchmark_flags/asr_eval.uv_vllm.torch.json"
+    ],
+    "asr_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/asr_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "asr_throughput_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/asr_throughput.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "asr_throughput_llamacpp_ios_pipette_gguf_vision": [
+      "benchmark_flags/asr_throughput.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "decode_throughput_docker_sglang_torch": [
+      "benchmark_flags/decode_throughput.docker_sglang.torch.json"
+    ],
+    "decode_throughput_docker_vllm_torch": [
+      "benchmark_flags/decode_throughput.docker_vllm.torch.json"
+    ],
+    "decode_throughput_llamacpp_apk_pipette_gguf_text": [
+      "benchmark_flags/decode_throughput.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "decode_throughput_llamacpp_cli_stock_tools_gguf_text": [
+      "benchmark_flags/decode_throughput.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "decode_throughput_llamacpp_ios_pipette_gguf_text": [
+      "benchmark_flags/decode_throughput.llamacpp_ios_pipette.gguf_text.json",
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.decode_throughput.llamacpp_ios_pipette.gguf_text.json"
+    ],
+    "decode_throughput_mlx_ios_pipette_mlx": [
+      "benchmark_flags/decode_throughput.mlx_ios_pipette.mlx.json"
+    ],
+    "decode_throughput_mlx_macos_pipette_mlx": [
+      "benchmark_flags/decode_throughput.mlx_macos_pipette.mlx.json"
+    ],
+    "decode_throughput_onnx_genai_ios_pipette_onnx_genai": [
+      "benchmark_flags/decode_throughput.onnx_genai_ios_pipette.onnx_genai.json"
+    ],
+    "decode_throughput_ovms_openvino": [
+      "benchmark_flags/decode_throughput.ovms.openvino.json"
+    ],
+    "decode_throughput_uv_onnx_genai_onnx_genai": [
+      "benchmark_flags/decode_throughput.uv_onnx_genai.onnx_genai.json"
+    ],
+    "decode_throughput_uv_openvino_openvino": [
+      "benchmark_flags/decode_throughput.uv_openvino.openvino.json"
+    ],
+    "decode_throughput_uv_sglang_torch": [
+      "benchmark_flags/decode_throughput.uv_sglang.torch.json"
+    ],
+    "decode_throughput_uv_vllm_torch": [
+      "benchmark_flags/decode_throughput.uv_vllm.torch.json"
+    ],
+    "end_to_end_latency_docker_sglang_torch": [
+      "benchmark_flags/end_to_end_latency.docker_sglang.torch.json"
+    ],
+    "end_to_end_latency_docker_vllm_torch": [
+      "benchmark_flags/end_to_end_latency.docker_vllm.torch.json"
+    ],
+    "end_to_end_latency_llamacpp_apk_pipette_gguf_text": [
+      "benchmark_flags/end_to_end_latency.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "end_to_end_latency_llamacpp_cli_stock_tools_gguf_text": [
+      "benchmark_flags/end_to_end_latency.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "end_to_end_latency_llamacpp_ios_pipette_gguf_text": [
+      "benchmark_flags/end_to_end_latency.llamacpp_ios_pipette.gguf_text.json"
+    ],
+    "end_to_end_latency_mlx_ios_pipette_mlx": [
+      "benchmark_flags/end_to_end_latency.mlx_ios_pipette.mlx.json"
+    ],
+    "end_to_end_latency_mlx_macos_pipette_mlx": [
+      "benchmark_flags/end_to_end_latency.mlx_macos_pipette.mlx.json"
+    ],
+    "end_to_end_latency_onnx_genai_ios_pipette_onnx_genai": [
+      "benchmark_flags/end_to_end_latency.onnx_genai_ios_pipette.onnx_genai.json"
+    ],
+    "end_to_end_latency_ovms_openvino": [
+      "benchmark_flags/end_to_end_latency.ovms.openvino.json"
+    ],
+    "end_to_end_latency_uv_onnx_genai_onnx_genai": [
+      "benchmark_flags/end_to_end_latency.uv_onnx_genai.onnx_genai.json"
+    ],
+    "end_to_end_latency_uv_openvino_openvino": [
+      "benchmark_flags/end_to_end_latency.uv_openvino.openvino.json"
+    ],
+    "end_to_end_latency_uv_sglang_torch": [
+      "benchmark_flags/end_to_end_latency.uv_sglang.torch.json"
+    ],
+    "end_to_end_latency_uv_vllm_torch": [
+      "benchmark_flags/end_to_end_latency.uv_vllm.torch.json"
+    ],
+    "eval_docker_sglang_torch": [
+      "benchmark_flags/eval.docker_sglang.torch.json"
+    ],
+    "eval_docker_vllm_torch": [
+      "benchmark_flags/eval.docker_vllm.torch.json"
+    ],
+    "eval_llamacpp_cli_stock_tools_gguf_text": [
+      "benchmark_flags/eval.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "eval_mlx_macos_pipette_mlx": [
+      "benchmark_flags/eval.mlx_macos_pipette.mlx.json"
+    ],
+    "eval_uv_sglang_torch": [
+      "benchmark_flags/eval.uv_sglang.torch.json"
+    ],
+    "eval_uv_vllm_torch": [
+      "benchmark_flags/eval.uv_vllm.torch.json"
+    ],
+    "max_memory_usage_llamacpp_cli_stock_tools_gguf_text": [
+      "benchmark_flags/max_memory_usage.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "prefill_throughput_docker_sglang_torch": [
+      "benchmark_flags/prefill_throughput.docker_sglang.torch.json"
+    ],
+    "prefill_throughput_docker_vllm_torch": [
+      "benchmark_flags/prefill_throughput.docker_vllm.torch.json"
+    ],
+    "prefill_throughput_llamacpp_apk_pipette_gguf_text": [
+      "benchmark_flags/prefill_throughput.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "prefill_throughput_llamacpp_cli_stock_tools_gguf_text": [
+      "benchmark_flags/prefill_throughput.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "prefill_throughput_llamacpp_ios_pipette_gguf_text": [
+      "benchmark_flags/prefill_throughput.llamacpp_ios_pipette.gguf_text.json"
+    ],
+    "prefill_throughput_mlx_ios_pipette_mlx": [
+      "benchmark_flags/prefill_throughput.mlx_ios_pipette.mlx.json"
+    ],
+    "prefill_throughput_mlx_macos_pipette_mlx": [
+      "benchmark_flags/prefill_throughput.mlx_macos_pipette.mlx.json"
+    ],
+    "prefill_throughput_onnx_genai_ios_pipette_onnx_genai": [
+      "benchmark_flags/prefill_throughput.onnx_genai_ios_pipette.onnx_genai.json"
+    ],
+    "prefill_throughput_ovms_openvino": [
+      "benchmark_flags/prefill_throughput.ovms.openvino.json"
+    ],
+    "prefill_throughput_uv_onnx_genai_onnx_genai": [
+      "benchmark_flags/prefill_throughput.uv_onnx_genai.onnx_genai.json"
+    ],
+    "prefill_throughput_uv_openvino_openvino": [
+      "benchmark_flags/prefill_throughput.uv_openvino.openvino.json"
+    ],
+    "prefill_throughput_uv_sglang_torch": [
+      "benchmark_flags/prefill_throughput.uv_sglang.torch.json"
+    ],
+    "prefill_throughput_uv_vllm_torch": [
+      "benchmark_flags/prefill_throughput.uv_vllm.torch.json"
+    ],
+    "vl_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/vl_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vl_max_memory_trt_edgellm_gguf_vision": [
+      "benchmark_flags/vl_max_memory.trt_edgellm.gguf_vision.json"
+    ],
+    "vl_spec_decode_docker_sglang_torch": [
+      "benchmark_flags/vl_spec_decode.docker_sglang.torch.json"
+    ],
+    "vl_spec_decode_docker_sglang_torch_speculative": [
+      "benchmark_flags/vl_spec_decode.docker_sglang.torch_speculative.json"
+    ],
+    "vl_spec_decode_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/vl_spec_decode.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vl_spec_decode_llamacpp_cli_stock_tools_gguf_vision_speculative": [
+      "benchmark_flags/vl_spec_decode.llamacpp_cli_stock_tools.gguf_vision_speculative.json"
+    ],
+    "vl_spec_decode_llamacpp_ios_pipette_gguf_vision": [
+      "benchmark_flags/vl_spec_decode.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "vl_spec_decode_llamacpp_ios_pipette_gguf_vision_speculative": [
+      "benchmark_flags/vl_spec_decode.llamacpp_ios_pipette.gguf_vision_speculative.json"
+    ],
+    "vl_spec_decode_mlx_macos_pipette_mlx": [
+      "benchmark_flags/vl_spec_decode.mlx_macos_pipette.mlx.json"
+    ],
+    "vl_spec_decode_mlx_macos_pipette_mlx_speculative": [
+      "benchmark_flags/vl_spec_decode.mlx_macos_pipette.mlx_speculative.json"
+    ],
+    "vl_spec_decode_uv_sglang_torch": [
+      "benchmark_flags/vl_spec_decode.uv_sglang.torch.json"
+    ],
+    "vl_spec_decode_uv_sglang_torch_speculative": [
+      "benchmark_flags/vl_spec_decode.uv_sglang.torch_speculative.json"
+    ],
+    "vl_throughput_llamacpp_apk_pipette_gguf_vision": [
+      "benchmark_flags/vl_throughput.llamacpp_apk_pipette.gguf_vision.json"
+    ],
+    "vl_throughput_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/vl_throughput.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vl_throughput_llamacpp_ios_pipette_gguf_vision": [
+      "benchmark_flags/vl_throughput.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "vl_throughput_mlx_macos_pipette_mlx": [
+      "benchmark_flags/vl_throughput.mlx_macos_pipette.mlx.json"
+    ],
+    "vl_throughput_trt_edgellm_gguf_vision": [
+      "benchmark_flags/vl_throughput.trt_edgellm.gguf_vision.json"
+    ],
+    "vlm_eval_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/vlm_eval.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vlm_eval_uv_vllm_torch": [
+      "benchmark_flags/vlm_eval.uv_vllm.torch.json"
+    ]
+  },
+  "BenchmarkParams": {
+    "asr_eval": [
+      "benchmark_params/asr_eval.json"
+    ],
+    "asr_max_memory": [
+      "benchmark_params/asr_max_memory.json"
+    ],
+    "asr_throughput": [
+      "benchmark_params/asr_throughput.json"
+    ],
+    "decode_throughput": [
+      "benchmark_params/decode_throughput.json"
+    ],
+    "end_to_end_latency": [
+      "benchmark_params/end_to_end_latency.json"
+    ],
+    "eval": [
+      "benchmark_params/eval.json"
+    ],
+    "max_memory_usage": [
+      "benchmark_params/max_memory_usage.json"
+    ],
+    "prefill_throughput": [
+      "benchmark_params/prefill_throughput.json"
+    ],
+    "vl_max_memory": [
+      "benchmark_params/vl_max_memory.decode256.json",
+      "benchmark_params/vl_max_memory.json"
+    ],
+    "vl_spec_decode": [
+      "benchmark_params/vl_spec_decode.json"
+    ],
+    "vl_throughput": [
+      "benchmark_params/vl_throughput.json"
+    ],
+    "vlm_eval": [
+      "benchmark_params/vlm_eval.json"
+    ]
+  },
+  "ChatRole": {
+    "assistant": [
+      "benchmark/vlm_eval.system.user.assistant.user.json"
+    ],
+    "system": [
+      "benchmark/vlm_eval.system.user.assistant.user.json"
+    ],
+    "user": [
+      "benchmark/vlm_eval.system.user.assistant.user.json",
+      "benchmark/vlm_eval.user.json"
+    ]
+  },
+  "CorpusFormat": {
+    "asr-eval-corpus/1": [
+      "benchmark/asr_eval.asr-eval-corpus_1.evals-server@1.evals_server.json"
+    ],
+    "vl-spec-decode-corpus/1": [
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.json",
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.sampled.json"
+    ],
+    "vlm-eval-corpus/1": [
+      "benchmark/vlm_eval.vlm-eval-corpus_1.evals-server@1.evals_server.json"
+    ]
+  },
+  "DatasetAdapter": {
+    "evals-server@1": [
+      "benchmark/asr_eval.asr-eval-corpus_1.evals-server@1.evals_server.json",
+      "benchmark/vlm_eval.vlm-eval-corpus_1.evals-server@1.evals_server.json"
+    ],
+    "mmspec@1": [
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.json",
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.sampled.json"
+    ]
+  },
+  "DatasetUpstream": {
+    "evals_server": [
+      "benchmark/asr_eval.asr-eval-corpus_1.evals-server@1.evals_server.json",
+      "benchmark/vlm_eval.vlm-eval-corpus_1.evals-server@1.evals_server.json"
+    ],
+    "git": [
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.json",
+      "benchmark/vl_spec_decode.vl-spec-decode-corpus_1.mmspec@1.git.sampled.json"
+    ]
+  },
+  "DeviceFormFactor": {
+    "desktop": [
+      "device/desktop.json"
+    ],
+    "embedded": [
+      "device/embedded.json"
+    ],
+    "laptop": [
+      "device/laptop.json"
+    ],
+    "phone": [
+      "device/phone.json"
+    ],
+    "server": [
+      "device/server.json"
+    ],
+    "tablet": [
+      "device/tablet.json"
+    ]
+  },
+  "DockerIpcMode": {
+    "host": [
+      "runtime_flags/decode_throughput.docker_sglang.torch.host.json"
+    ],
+    "none": [
+      "runtime_flags/prefill_throughput.docker_sglang.torch.none.json"
+    ],
+    "private": [
+      "runtime_flags/end_to_end_latency.docker_sglang.torch.private.json"
+    ],
+    "shareable": [
+      "runtime_flags/eval.docker_sglang.torch.shareable.json"
+    ]
+  },
+  "GgufTextSource": {
+    "absolute_file": [
+      "model/gguf_text.absolute_file.json"
+    ],
+    "huggingface": [
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.decode_throughput.llamacpp_ios_pipette.gguf_text.json",
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.eval.llamacpp_ios_pipette.gguf_text.eval.gguf_text.json",
+      "model/gguf_text.huggingface.json",
+      "model/gguf_text.huggingface.pinned.json"
+    ],
+    "relative_file": [
+      "model/gguf_text.relative_file.json"
+    ],
+    "url": [
+      "model/gguf_text.url.json"
+    ],
+    "vault_url": [
+      "model/gguf_text.vault_url.json"
+    ]
+  },
+  "GgufVisionSource": {
+    "absolute_files": [
+      "model/gguf_vision.absolute_files.json"
+    ],
+    "huggingface": [
+      "model/gguf_vision.huggingface.json"
+    ],
+    "relative_files": [
+      "model/gguf_vision.relative_files.json"
+    ],
+    "url": [
+      "model/gguf_vision.url.json"
+    ],
+    "vault_url": [
+      "model/gguf_vision.vault_url.json"
+    ]
+  },
+  "GgufVisionSpeculativeSource": {
+    "absolute_files": [
+      "model/gguf_vision_speculative.absolute_files.json"
+    ],
+    "huggingface": [
+      "model/gguf_vision_speculative.huggingface.json"
+    ],
+    "relative_files": [
+      "model/gguf_vision_speculative.relative_files.json"
+    ],
+    "url": [
+      "model/gguf_vision_speculative.url.json"
+    ],
+    "vault_url": [
+      "model/gguf_vision_speculative.vault_url.json"
+    ]
+  },
+  "LlamacppApkPipetteFlavor": {
+    "android-arm64-v8": [
+      "runtime/llamacpp_apk_pipette.android-arm64-v8.json"
+    ]
+  },
+  "LlamacppCliStockToolsSource": {
+    "absolute_dir": [
+      "runtime/llamacpp_cli_stock_tools.absolute_dir.json"
+    ],
+    "github_release": [
+      "runtime/llamacpp_cli_stock_tools.github_release.json"
+    ],
+    "relative_dir": [
+      "runtime/llamacpp_cli_stock_tools.relative_dir.json"
+    ],
+    "remote_archive": [
+      "runtime/llamacpp_cli_stock_tools.remote_archive.json"
+    ],
+    "vault_remote_archive": [
+      "runtime/llamacpp_cli_stock_tools.vault_remote_archive.json"
+    ]
+  },
+  "LlamacppFlashAttention": {
+    "auto": [
+      "runtime_flags/prefill_throughput.llamacpp_cli_stock_tools.gguf_text.auto.json"
+    ],
+    "off": [
+      "runtime_flags/end_to_end_latency.llamacpp_cli_stock_tools.gguf_text.off.json"
+    ],
+    "on": [
+      "runtime_flags/decode_throughput.llamacpp_cli_stock_tools.gguf_text.on.json"
+    ]
+  },
+  "LlamacppIosPipetteFlavor": {
+    "ios-arm64": [
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.decode_throughput.llamacpp_ios_pipette.gguf_text.json",
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.eval.llamacpp_ios_pipette.gguf_text.eval.gguf_text.json",
+      "runtime/llamacpp_ios_pipette.ios-arm64.json",
+      "runtime/llamacpp_ios_pipette.ios-arm64.memory_only.json",
+      "runtime/llamacpp_ios_pipette.ios-arm64.private_thermal.json"
+    ]
+  },
+  "LlamacppLoadMode": {
+    "direct_io": [
+      "runtime_flags/eval.llamacpp_ios_pipette.gguf_text.direct_io.json"
+    ],
+    "mlock": [
+      "runtime_flags/end_to_end_latency.llamacpp_ios_pipette.gguf_text.mlock.json"
+    ],
+    "mmap": [
+      "runtime_flags/decode_throughput.llamacpp_ios_pipette.gguf_text.mmap.json"
+    ],
+    "mmap_mlock": [
+      "runtime_flags/max_memory_usage.llamacpp_ios_pipette.gguf_text.mmap_mlock.json"
+    ],
+    "none": [
+      "runtime_flags/prefill_throughput.llamacpp_ios_pipette.gguf_text.none.json"
+    ]
+  },
+  "MlxIosPipetteFlavor": {
+    "ios-arm64": [
+      "client_run_spec/mlx.huggingface.mlx_ios_pipette.ios-arm64.json",
+      "client_run_spec/mlx.vault_archive.mlx_ios_pipette.ios-arm64.json",
+      "runtime/mlx_ios_pipette.ios-arm64.json"
+    ]
+  },
+  "MlxMacosPipetteFlavor": {
+    "macos-arm64": [
+      "runtime/mlx_macos_pipette.macos-arm64.pip_requirements_text.json",
+      "runtime/mlx_macos_pipette.macos-arm64.relative_preinstalled.json"
+    ]
+  },
+  "Model": {
+    "apple_foundation_text": [
+      "client_run_spec/apple_foundation_text.apple_foundation.json",
+      "model/apple_foundation_text.json"
+    ],
+    "core_ai": [
+      "client_run_spec/core_ai.huggingface.core_ai_macos_pipette.json"
+    ],
+    "gguf_text": [
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.decode_throughput.llamacpp_ios_pipette.gguf_text.json",
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.eval.llamacpp_ios_pipette.gguf_text.eval.gguf_text.json",
+      "model/gguf_text.absolute_file.json",
+      "model/gguf_text.huggingface.json",
+      "model/gguf_text.huggingface.pinned.json",
+      "model/gguf_text.relative_file.json",
+      "model/gguf_text.url.json",
+      "model/gguf_text.vault_url.json"
+    ],
+    "gguf_vision": [
+      "model/gguf_vision.absolute_files.json",
+      "model/gguf_vision.huggingface.json",
+      "model/gguf_vision.relative_files.json",
+      "model/gguf_vision.url.json",
+      "model/gguf_vision.vault_url.json"
+    ],
+    "gguf_vision_speculative": [
+      "model/gguf_vision_speculative.absolute_files.json",
+      "model/gguf_vision_speculative.huggingface.json",
+      "model/gguf_vision_speculative.relative_files.json",
+      "model/gguf_vision_speculative.url.json",
+      "model/gguf_vision_speculative.vault_url.json"
+    ],
+    "mlx": [
+      "client_run_spec/mlx.huggingface.mlx_ios_pipette.ios-arm64.json",
+      "client_run_spec/mlx.vault_archive.mlx_ios_pipette.ios-arm64.json",
+      "model/mlx.absolute_dir.json",
+      "model/mlx.huggingface.json",
+      "model/mlx.huggingface.prefix.json",
+      "model/mlx.relative_dir.json",
+      "model/mlx.vault_archive.json"
+    ],
+    "mlx_speculative": [
+      "model/mlx_speculative.huggingface.huggingface.json"
+    ],
+    "onnx_genai": [
+      "model/onnx_genai.huggingface.json"
+    ],
+    "openvino": [
+      "model/openvino.huggingface.json"
+    ],
+    "torch": [
+      "model/torch.huggingface.json"
+    ],
+    "torch_speculative": [
+      "model/torch_speculative.huggingface.huggingface.json"
+    ]
+  },
+  "ModelFlags": {
+    "asr_eval_gguf_vision": [
+      "model_flags/asr_eval.gguf_vision.json"
+    ],
+    "asr_eval_torch": [
+      "model_flags/asr_eval.torch.json"
+    ],
+    "eval_gguf_text": [
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.eval.llamacpp_ios_pipette.gguf_text.eval.gguf_text.json",
+      "model_flags/eval.gguf_text.json",
+      "model_flags/eval.gguf_text.low.json"
+    ],
+    "eval_gguf_vision": [
+      "model_flags/eval.gguf_vision.json"
+    ],
+    "eval_mlx": [
+      "model_flags/eval.mlx.json"
+    ],
+    "eval_torch": [
+      "model_flags/eval.torch.high.json",
+      "model_flags/eval.torch.json",
+      "model_flags/eval.torch.medium.json"
+    ],
+    "vlm_eval_gguf_vision": [
+      "model_flags/vlm_eval.gguf_vision.json"
+    ],
+    "vlm_eval_torch": [
+      "model_flags/vlm_eval.torch.json"
+    ]
+  },
+  "ModelSource": {
+    "absolute_dir": [
+      "model/mlx.absolute_dir.json"
+    ],
+    "huggingface": [
+      "client_run_spec/core_ai.huggingface.core_ai_macos_pipette.json",
+      "client_run_spec/mlx.huggingface.mlx_ios_pipette.ios-arm64.json",
+      "model/mlx.huggingface.json",
+      "model/mlx.huggingface.prefix.json",
+      "model/mlx_speculative.huggingface.huggingface.json",
+      "model/onnx_genai.huggingface.json",
+      "model/openvino.huggingface.json",
+      "model/torch.huggingface.json",
+      "model/torch_speculative.huggingface.huggingface.json"
+    ],
+    "relative_dir": [
+      "model/mlx.relative_dir.json"
+    ],
+    "vault_archive": [
+      "client_run_spec/mlx.vault_archive.mlx_ios_pipette.ios-arm64.json",
+      "model/mlx.vault_archive.json"
+    ]
+  },
+  "OnnxGenaiIosPipetteFlavor": {
+    "ios-arm64": [
+      "runtime/onnx_genai_ios_pipette.ios-arm64.json"
+    ]
+  },
+  "OpenvinoGenerateHint": {
+    "best-perf": [
+      "runtime_flags/prefill_throughput.uv_openvino.openvino.best-perf.json"
+    ],
+    "fast-compile": [
+      "runtime_flags/decode_throughput.ovms.openvino.fast-compile.json"
+    ]
+  },
+  "OvmsSource": {
+    "absolute_dir": [
+      "runtime/ovms.absolute_dir.json"
+    ],
+    "github_release": [
+      "runtime/ovms.github_release.json"
+    ],
+    "relative_dir": [
+      "runtime/ovms.relative_dir.json"
+    ],
+    "remote_archive": [
+      "runtime/ovms.remote_archive.json"
+    ],
+    "vault_remote_archive": [
+      "runtime/ovms.vault_remote_archive.json"
+    ]
+  },
+  "ReasoningEffort": {
+    "high": [
+      "model_flags/eval.torch.high.json"
+    ],
+    "low": [
+      "model_flags/eval.gguf_text.low.json"
+    ],
+    "medium": [
+      "model_flags/eval.torch.medium.json"
+    ]
+  },
+  "Runtime": {
+    "apple_foundation": [
+      "client_run_spec/apple_foundation_text.apple_foundation.json",
+      "runtime/apple_foundation.json"
+    ],
+    "core_ai_macos_pipette": [
+      "client_run_spec/core_ai.huggingface.core_ai_macos_pipette.json"
+    ],
+    "docker_sglang": [
+      "runtime/docker_sglang.amd_gpu.json",
+      "runtime/docker_sglang.cpu.json",
+      "runtime/docker_sglang.nvidia_gpu.json"
+    ],
+    "docker_vllm": [
+      "runtime/docker_vllm.amd_gpu.json",
+      "runtime/docker_vllm.cpu.json",
+      "runtime/docker_vllm.nvidia_gpu.json"
+    ],
+    "llamacpp_apk_pipette": [
+      "runtime/llamacpp_apk_pipette.android-arm64-v8.json"
+    ],
+    "llamacpp_cli_stock_tools": [
+      "runtime/llamacpp_cli_stock_tools.absolute_dir.json",
+      "runtime/llamacpp_cli_stock_tools.github_release.json",
+      "runtime/llamacpp_cli_stock_tools.relative_dir.json",
+      "runtime/llamacpp_cli_stock_tools.remote_archive.json",
+      "runtime/llamacpp_cli_stock_tools.vault_remote_archive.json"
+    ],
+    "llamacpp_ios_pipette": [
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.decode_throughput.llamacpp_ios_pipette.gguf_text.json",
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.eval.llamacpp_ios_pipette.gguf_text.eval.gguf_text.json",
+      "runtime/llamacpp_ios_pipette.ios-arm64.json",
+      "runtime/llamacpp_ios_pipette.ios-arm64.memory_only.json",
+      "runtime/llamacpp_ios_pipette.ios-arm64.private_thermal.json"
+    ],
+    "mlx_ios_pipette": [
+      "client_run_spec/mlx.huggingface.mlx_ios_pipette.ios-arm64.json",
+      "client_run_spec/mlx.vault_archive.mlx_ios_pipette.ios-arm64.json",
+      "runtime/mlx_ios_pipette.ios-arm64.json"
+    ],
+    "mlx_macos_pipette": [
+      "runtime/mlx_macos_pipette.macos-arm64.pip_requirements_text.json",
+      "runtime/mlx_macos_pipette.macos-arm64.relative_preinstalled.json"
+    ],
+    "onnx_genai_ios_pipette": [
+      "runtime/onnx_genai_ios_pipette.ios-arm64.json"
+    ],
+    "ovms": [
+      "runtime/ovms.absolute_dir.json",
+      "runtime/ovms.github_release.json",
+      "runtime/ovms.relative_dir.json",
+      "runtime/ovms.remote_archive.json",
+      "runtime/ovms.vault_remote_archive.json"
+    ],
+    "trt_edgellm": [
+      "runtime/trt_edgellm.absolute_dir.json",
+      "runtime/trt_edgellm.relative_dir.json",
+      "runtime/trt_edgellm.remote_archive.json",
+      "runtime/trt_edgellm.vault_remote_archive.json"
+    ],
+    "uv_onnx_genai": [
+      "runtime/uv_onnx_genai.pip_requirements_text.json"
+    ],
+    "uv_openvino": [
+      "runtime/uv_openvino.absolute_preinstalled.json",
+      "runtime/uv_openvino.pip_requirements_text.json"
+    ],
+    "uv_sglang": [
+      "runtime/uv_sglang.pip_requirements_text.json"
+    ],
+    "uv_vllm": [
+      "runtime/uv_vllm.pip_requirements_text.json",
+      "runtime/uv_vllm.vault_wheelhouse.json"
+    ]
+  },
+  "RuntimeFlags": {
+    "asr_eval_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/asr_eval.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "asr_eval_uv_vllm_torch": [
+      "runtime_flags/asr_eval.uv_vllm.torch.json"
+    ],
+    "asr_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/asr_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "asr_max_memory_llamacpp_ios_pipette_gguf_vision": [
+      "runtime_flags/asr_max_memory.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "asr_throughput_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/asr_throughput.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "asr_throughput_llamacpp_ios_pipette_gguf_vision": [
+      "runtime_flags/asr_throughput.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "decode_throughput_docker_sglang_torch": [
+      "runtime_flags/decode_throughput.docker_sglang.torch.host.json"
+    ],
+    "decode_throughput_docker_vllm_torch": [
+      "runtime_flags/decode_throughput.docker_vllm.torch.float.json"
+    ],
+    "decode_throughput_llamacpp_apk_pipette_gguf_text": [
+      "runtime_flags/decode_throughput.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "decode_throughput_llamacpp_cli_stock_tools_gguf_text": [
+      "runtime_flags/decode_throughput.llamacpp_cli_stock_tools.gguf_text.on.json"
+    ],
+    "decode_throughput_llamacpp_ios_pipette_gguf_text": [
+      "runtime_flags/decode_throughput.llamacpp_ios_pipette.gguf_text.mmap.json"
+    ],
+    "decode_throughput_mlx_ios_pipette_mlx": [
+      "runtime_flags/decode_throughput.mlx_ios_pipette.mlx.json"
+    ],
+    "decode_throughput_ovms_openvino": [
+      "runtime_flags/decode_throughput.ovms.openvino.fast-compile.json"
+    ],
+    "decode_throughput_uv_openvino_openvino": [
+      "runtime_flags/decode_throughput.uv_openvino.openvino.json"
+    ],
+    "decode_throughput_uv_sglang_torch": [
+      "runtime_flags/decode_throughput.uv_sglang.torch.json"
+    ],
+    "decode_throughput_uv_vllm_torch": [
+      "runtime_flags/decode_throughput.uv_vllm.torch.bfloat16.json"
+    ],
+    "end_to_end_latency_docker_sglang_torch": [
+      "runtime_flags/end_to_end_latency.docker_sglang.torch.private.json"
+    ],
+    "end_to_end_latency_docker_vllm_torch": [
+      "runtime_flags/end_to_end_latency.docker_vllm.torch.json"
+    ],
+    "end_to_end_latency_llamacpp_apk_pipette_gguf_text": [
+      "runtime_flags/end_to_end_latency.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "end_to_end_latency_llamacpp_cli_stock_tools_gguf_text": [
+      "runtime_flags/end_to_end_latency.llamacpp_cli_stock_tools.gguf_text.off.json"
+    ],
+    "end_to_end_latency_llamacpp_ios_pipette_gguf_text": [
+      "runtime_flags/end_to_end_latency.llamacpp_ios_pipette.gguf_text.mlock.json"
+    ],
+    "end_to_end_latency_mlx_ios_pipette_mlx": [
+      "runtime_flags/end_to_end_latency.mlx_ios_pipette.mlx.json"
+    ],
+    "end_to_end_latency_ovms_openvino": [
+      "runtime_flags/end_to_end_latency.ovms.openvino.json"
+    ],
+    "end_to_end_latency_uv_openvino_openvino": [
+      "runtime_flags/end_to_end_latency.uv_openvino.openvino.json"
+    ],
+    "end_to_end_latency_uv_sglang_torch": [
+      "runtime_flags/end_to_end_latency.uv_sglang.torch.json"
+    ],
+    "end_to_end_latency_uv_vllm_torch": [
+      "runtime_flags/end_to_end_latency.uv_vllm.torch.float16.json"
+    ],
+    "eval_docker_sglang_torch": [
+      "runtime_flags/eval.docker_sglang.torch.shareable.json"
+    ],
+    "eval_docker_vllm_torch": [
+      "runtime_flags/eval.docker_vllm.torch.json"
+    ],
+    "eval_llamacpp_apk_pipette_gguf_text": [
+      "runtime_flags/eval.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "eval_llamacpp_cli_stock_tools_gguf_text": [
+      "runtime_flags/eval.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "eval_llamacpp_ios_pipette_gguf_text": [
+      "client_run_spec/gguf_text.huggingface.llamacpp_ios_pipette.ios-arm64.eval.llamacpp_ios_pipette.gguf_text.eval.gguf_text.json",
+      "runtime_flags/eval.llamacpp_ios_pipette.gguf_text.direct_io.json"
+    ],
+    "eval_mlx_ios_pipette_mlx": [
+      "runtime_flags/eval.mlx_ios_pipette.mlx.json"
+    ],
+    "eval_uv_sglang_torch": [
+      "runtime_flags/eval.uv_sglang.torch.json"
+    ],
+    "eval_uv_vllm_torch": [
+      "runtime_flags/eval.uv_vllm.torch.half.json",
+      "runtime_flags/eval.uv_vllm.torch.json"
+    ],
+    "max_memory_usage_docker_sglang_torch": [
+      "runtime_flags/max_memory_usage.docker_sglang.torch.json"
+    ],
+    "max_memory_usage_docker_vllm_torch": [
+      "runtime_flags/max_memory_usage.docker_vllm.torch.json"
+    ],
+    "max_memory_usage_llamacpp_apk_pipette_gguf_text": [
+      "runtime_flags/max_memory_usage.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "max_memory_usage_llamacpp_cli_stock_tools_gguf_text": [
+      "runtime_flags/max_memory_usage.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "max_memory_usage_llamacpp_ios_pipette_gguf_text": [
+      "runtime_flags/max_memory_usage.llamacpp_ios_pipette.gguf_text.mmap_mlock.json"
+    ],
+    "max_memory_usage_mlx_ios_pipette_mlx": [
+      "runtime_flags/max_memory_usage.mlx_ios_pipette.mlx.json"
+    ],
+    "max_memory_usage_ovms_openvino": [
+      "runtime_flags/max_memory_usage.ovms.openvino.json"
+    ],
+    "max_memory_usage_uv_openvino_openvino": [
+      "runtime_flags/max_memory_usage.uv_openvino.openvino.json"
+    ],
+    "max_memory_usage_uv_sglang_torch": [
+      "runtime_flags/max_memory_usage.uv_sglang.torch.json"
+    ],
+    "max_memory_usage_uv_vllm_torch": [
+      "runtime_flags/max_memory_usage.uv_vllm.torch.auto.json"
+    ],
+    "prefill_throughput_docker_sglang_torch": [
+      "runtime_flags/prefill_throughput.docker_sglang.torch.none.json"
+    ],
+    "prefill_throughput_docker_vllm_torch": [
+      "runtime_flags/prefill_throughput.docker_vllm.torch.json"
+    ],
+    "prefill_throughput_llamacpp_apk_pipette_gguf_text": [
+      "runtime_flags/prefill_throughput.llamacpp_apk_pipette.gguf_text.json"
+    ],
+    "prefill_throughput_llamacpp_cli_stock_tools_gguf_text": [
+      "runtime_flags/prefill_throughput.llamacpp_cli_stock_tools.gguf_text.auto.json"
+    ],
+    "prefill_throughput_llamacpp_ios_pipette_gguf_text": [
+      "runtime_flags/prefill_throughput.llamacpp_ios_pipette.gguf_text.none.json"
+    ],
+    "prefill_throughput_mlx_ios_pipette_mlx": [
+      "runtime_flags/prefill_throughput.mlx_ios_pipette.mlx.json"
+    ],
+    "prefill_throughput_ovms_openvino": [
+      "runtime_flags/prefill_throughput.ovms.openvino.json"
+    ],
+    "prefill_throughput_uv_openvino_openvino": [
+      "runtime_flags/prefill_throughput.uv_openvino.openvino.best-perf.json"
+    ],
+    "prefill_throughput_uv_sglang_torch": [
+      "runtime_flags/prefill_throughput.uv_sglang.torch.json"
+    ],
+    "prefill_throughput_uv_vllm_torch": [
+      "runtime_flags/prefill_throughput.uv_vllm.torch.float32.json"
+    ],
+    "vl_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/vl_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vl_max_memory_llamacpp_ios_pipette_gguf_vision": [
+      "runtime_flags/vl_max_memory.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "vl_max_memory_trt_edgellm_gguf_vision": [
+      "runtime_flags/vl_max_memory.trt_edgellm.gguf_vision.bf16.json",
+      "runtime_flags/vl_max_memory.trt_edgellm.gguf_vision.json"
+    ],
+    "vl_spec_decode_docker_sglang_torch": [
+      "runtime_flags/vl_spec_decode.docker_sglang.torch.json"
+    ],
+    "vl_spec_decode_docker_sglang_torch_speculative": [
+      "runtime_flags/vl_spec_decode.docker_sglang.torch_speculative.json"
+    ],
+    "vl_spec_decode_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/vl_spec_decode.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vl_spec_decode_llamacpp_cli_stock_tools_gguf_vision_speculative": [
+      "runtime_flags/vl_spec_decode.llamacpp_cli_stock_tools.gguf_vision_speculative.json"
+    ],
+    "vl_spec_decode_llamacpp_ios_pipette_gguf_vision": [
+      "runtime_flags/vl_spec_decode.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "vl_spec_decode_llamacpp_ios_pipette_gguf_vision_speculative": [
+      "runtime_flags/vl_spec_decode.llamacpp_ios_pipette.gguf_vision_speculative.json"
+    ],
+    "vl_spec_decode_mlx_macos_pipette_mlx": [
+      "runtime_flags/vl_spec_decode.mlx_macos_pipette.mlx.json"
+    ],
+    "vl_spec_decode_mlx_macos_pipette_mlx_speculative": [
+      "runtime_flags/vl_spec_decode.mlx_macos_pipette.mlx_speculative.json"
+    ],
+    "vl_spec_decode_uv_sglang_torch": [
+      "runtime_flags/vl_spec_decode.uv_sglang.torch.json"
+    ],
+    "vl_spec_decode_uv_sglang_torch_speculative": [
+      "runtime_flags/vl_spec_decode.uv_sglang.torch_speculative.json"
+    ],
+    "vl_throughput_llamacpp_apk_pipette_gguf_vision": [
+      "runtime_flags/vl_throughput.llamacpp_apk_pipette.gguf_vision.json"
+    ],
+    "vl_throughput_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/vl_throughput.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vl_throughput_llamacpp_ios_pipette_gguf_vision": [
+      "runtime_flags/vl_throughput.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "vl_throughput_trt_edgellm_gguf_vision": [
+      "runtime_flags/vl_throughput.trt_edgellm.gguf_vision.fp16.json",
+      "runtime_flags/vl_throughput.trt_edgellm.gguf_vision.w8a16.json"
+    ],
+    "vlm_eval_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/vlm_eval.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vlm_eval_uv_vllm_torch": [
+      "runtime_flags/vlm_eval.uv_vllm.torch.json"
+    ]
+  },
+  "SglangFlavor": {
+    "amd_gpu": [
+      "runtime/docker_sglang.amd_gpu.json"
+    ],
+    "cpu": [
+      "runtime/docker_sglang.cpu.json"
+    ],
+    "nvidia_gpu": [
+      "runtime/docker_sglang.nvidia_gpu.json"
+    ]
+  },
+  "TrtEdgellmPrecision": {
+    "bf16": [
+      "runtime_flags/vl_max_memory.trt_edgellm.gguf_vision.bf16.json"
+    ],
+    "fp16": [
+      "runtime_flags/vl_throughput.trt_edgellm.gguf_vision.fp16.json"
+    ],
+    "w8a16": [
+      "runtime_flags/vl_throughput.trt_edgellm.gguf_vision.w8a16.json"
+    ]
+  },
+  "TrtEdgellmSource": {
+    "absolute_dir": [
+      "runtime/trt_edgellm.absolute_dir.json"
+    ],
+    "relative_dir": [
+      "runtime/trt_edgellm.relative_dir.json"
+    ],
+    "remote_archive": [
+      "runtime/trt_edgellm.remote_archive.json"
+    ],
+    "vault_remote_archive": [
+      "runtime/trt_edgellm.vault_remote_archive.json"
+    ]
+  },
+  "UvRuntimeSource": {
+    "absolute_preinstalled": [
+      "runtime/uv_openvino.absolute_preinstalled.json"
+    ],
+    "pip_requirements_text": [
+      "runtime/mlx_macos_pipette.macos-arm64.pip_requirements_text.json",
+      "runtime/uv_onnx_genai.pip_requirements_text.json",
+      "runtime/uv_openvino.pip_requirements_text.json",
+      "runtime/uv_sglang.pip_requirements_text.json",
+      "runtime/uv_vllm.pip_requirements_text.json"
+    ],
+    "relative_preinstalled": [
+      "runtime/mlx_macos_pipette.macos-arm64.relative_preinstalled.json"
+    ],
+    "vault_wheelhouse": [
+      "runtime/uv_vllm.vault_wheelhouse.json"
+    ]
+  },
+  "VllmDtype": {
+    "auto": [
+      "runtime_flags/max_memory_usage.uv_vllm.torch.auto.json"
+    ],
+    "bfloat16": [
+      "runtime_flags/decode_throughput.uv_vllm.torch.bfloat16.json"
+    ],
+    "float": [
+      "runtime_flags/decode_throughput.docker_vllm.torch.float.json"
+    ],
+    "float16": [
+      "runtime_flags/end_to_end_latency.uv_vllm.torch.float16.json"
+    ],
+    "float32": [
+      "runtime_flags/prefill_throughput.uv_vllm.torch.float32.json"
+    ],
+    "half": [
+      "runtime_flags/eval.uv_vllm.torch.half.json"
+    ]
+  },
+  "VllmFlavor": {
+    "amd_gpu": [
+      "runtime/docker_vllm.amd_gpu.json"
+    ],
+    "cpu": [
+      "runtime/docker_vllm.cpu.json"
+    ],
+    "nvidia_gpu": [
+      "runtime/docker_vllm.nvidia_gpu.json"
+    ]
+  }
+}

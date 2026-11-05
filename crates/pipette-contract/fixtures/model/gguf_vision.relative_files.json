@@ -1,0 +1,6 @@
+{
+  "mmproj": "blobs/mmproj-f16.gguf",
+  "model": "blobs/model-Q4_0.gguf",
+  "source": "relative_files",
+  "type": "gguf_vision"
+}

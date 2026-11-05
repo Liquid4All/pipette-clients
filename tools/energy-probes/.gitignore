@@ -1,0 +1,5 @@
+# Probe binaries and sweep output are built/collected on the device, never committed.
+e
+smc
+ewrap
+*.txt

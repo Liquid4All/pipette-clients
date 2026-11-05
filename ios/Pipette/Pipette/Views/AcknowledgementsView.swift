@@ -1,10 +1,9 @@
 import LicenseList
 import SwiftUI
 
-/// Open source attributions, reachable from Settings. Swift package licenses
-/// (every SwiftPM dependency, incl. the MLX stack) are generated at build time
-/// by the LicenseList plugin; non-SwiftPM bundled components (the vendored
-/// llama.cpp) come from ThirdPartyLicenses.json.
+/// Open source attributions. SwiftPM licenses are generated at build time by the
+/// LicenseList plugin; non-SwiftPM components (vendored llama.cpp) come from
+/// ThirdPartyLicenses.json.
 struct AcknowledgementsView: View {
     @Environment(\.pillTabBarReservedHeight) private var pillTabBarReservedHeight
 

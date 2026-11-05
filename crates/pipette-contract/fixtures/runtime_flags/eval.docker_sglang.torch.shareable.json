@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "eval",
+  "ipc": "shareable",
+  "model_type": "torch",
+  "runtime_type": "docker_sglang"
+}

@@ -1,26 +1,34 @@
 [package]
 name = "pipette-mgmt-client"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
+base64.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 nutype.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tracing.workspace = true
 url.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 pipette-http.workspace = true
+# No build cost: every crate that depends on this one already depends on
+# pipette-plan-types.
+pipette-plan-types.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 httpmock.workspace = true
 rstest.workspace = true
+tempfile.workspace = true
 toml.workspace = true

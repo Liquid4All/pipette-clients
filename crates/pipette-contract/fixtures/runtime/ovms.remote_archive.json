@@ -1,0 +1,6 @@
+{
+  "flavor": "ubuntu24-x64",
+  "source": "remote_archive",
+  "type": "ovms",
+  "url": "https://example.com/ovms_ubuntu24_python_off.tar.gz"
+}

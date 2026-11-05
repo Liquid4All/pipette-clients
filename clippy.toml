@@ -1,0 +1,15 @@
+# A panicking index in a test fails that test the same way an `assert!` does,
+# so `indexing_slicing` (Cargo.toml) only gates code that ships.
+allow-indexing-slicing-in-tests = true
+
+# `status` and `spawn` give the child this process's stdout unless told
+# otherwise, and the CLI's stdout carries only a command's result (`console.rs`).
+disallowed-methods = [
+    { path = "std::process::Command::status", reason = "the child inherits stdout, which carries only the CLI's result: run it through pipette_subprocess, or set its stdout and #[expect] this with where it goes" },
+    { path = "std::process::Command::spawn", reason = "the child inherits stdout, which carries only the CLI's result: run it through pipette_subprocess, or set its stdout and #[expect] this with where it goes" },
+    { path = "reqwest::blocking::RequestBuilder::send", reason = "send through `pipette_http::send`, which keeps a refused request's body" },
+    { path = "reqwest::blocking::Client::execute", reason = "send through `pipette_http::send`, which keeps a refused request's body" },
+    { path = "reqwest::blocking::get", reason = "send through `pipette_http::send`, which keeps a refused request's body" },
+    { path = "reqwest::blocking::Response::error_for_status", reason = "drops the body that says why; send through `pipette_http::send`" },
+    { path = "reqwest::blocking::Response::error_for_status_ref", reason = "drops the body that says why; send through `pipette_http::send`" },
+]

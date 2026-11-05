@@ -162,6 +162,19 @@ object AnalyticsEvents {
   const val OUTCOME_FAILED = "failed"
 
   /**
+   * The run was stopped because the device moved the benchmark process to a worse scheduling group, or onto fewer cores, mid-measurement (see
+   * `CpusetWatcher`), rather than because a benchmark finished or failed on its own terms.
+   *
+   * Outranks [OUTCOME_CANCELLED] when both apply, which happens when a user cancel lands after the runner has already stopped on a demotion: what
+   * ended the run is the more useful fact than what was asked of it afterwards.
+   *
+   * Deliberately distinct from [OUTCOME_CANCELLED]: folding the two together is what would keep this failure invisible, and how often the device
+   * invalidates a run in the field is the number that says whether the guard earns its cost. Android-only for now, since iOS has no equivalent signal
+   * and its `analyticsOutcome` never emits this value.
+   */
+  const val OUTCOME_INTERRUPTED = "interrupted"
+
+  /**
    * Coarse, non-identifying label for a failure. Deliberately the exception's simple class name and nothing else: messages from this app's network
    * and registration paths embed the management-server URL and the contact email, and neither belongs in analytics.
    */

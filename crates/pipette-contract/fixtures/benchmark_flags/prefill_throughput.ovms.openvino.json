@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "prefill_throughput",
+  "model_type": "openvino",
+  "runtime_type": "ovms"
+}

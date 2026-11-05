@@ -6,11 +6,12 @@
 #   ./ios/build.sh           # build for the simulator (default)
 #   ./ios/build.sh sim       # build for the simulator (aarch64 sim slice)
 #   ./ios/build.sh device    # build for a physical device (needs signing)
-#   ./ios/build.sh --help     # this message
+#   ./ios/build.sh --help    # this message
 #
 # Options:
-#   --internal   compile in the private SoC die-temp read — internal builds
-#                only, never shipped. Equivalent to PIPETTE_PRIVATE_THERMAL=1.
+#   --internal   compile in the private SoC die-temp and kernel footprint-peak
+#                reads and the reclaim-ring flush: internal builds only, never
+#                shipped. Equivalent to PIPETTE_PRIVATE_THERMAL=1.
 #   --debug-ui   compile in the Settings "Debugging" card. Already on in Debug
 #                builds; this is how to get it in a local Release build.
 #                Equivalent to PIPETTE_DEBUG_UI=1. On Xcode Cloud the Internal
@@ -22,28 +23,16 @@
 # Builds Release by default; pass your own -configuration to override, e.g.
 #   ./ios/build.sh device -configuration Debug
 #
-# This wrapper owns the xcodebuild-layer concerns that build-llama.sh
-# structurally cannot (build-llama.sh runs as the "Build llama.cpp" phase
-# *inside* this xcodebuild invocation — it is invoked by xcodebuild, not the
-# reverse):
-#   - passes -skipPackagePluginValidation so the LicenseList build-tool plugin
-#     runs without the interactive "Trust & Enable" prompt a headless build
-#     can't answer, and -skipMacroValidation so the swift-syntax macros
-#     (MLXHuggingFaceMacros, swift-transformers) build without the same
-#     interactive macro-trust approval — a fresh checkout has never granted it;
-#   - pre-flights the Metal toolchain (required by the mlx-swift dependency)
-#     and prints an actionable install line instead of a 200-line wall of
-#     CompileMetalFile errors;
-#   - selects the right -destination for the chosen mode.
-#
-# The llama.cpp static library + `llama` module are produced automatically by
-# the "Build llama.cpp" phase (ios/build-llama.sh) that xcodebuild runs for us;
-# you do NOT need to run build-llama.sh first. See docs/pipette-ios/build.md.
+# Passes -skipPackagePluginValidation and -skipMacroValidation so the LicenseList
+# plugin and the swift-syntax macros build without the trust prompts a headless
+# build cannot answer, and checks for the Metal toolchain mlx-swift needs. The
+# "Build llama.cpp" phase (ios/build-llama.sh) runs inside xcodebuild, so there
+# is no need to run it first. See docs/pipette-ios/build.md.
 
 set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    sed -n '2,33s/^# \{0,1\}//p' "$0"
+    sed -n '2,34s/^# \{0,1\}//p' "$0"
     exit 0
 fi
 
@@ -75,10 +64,8 @@ esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="$REPO_ROOT/ios/Pipette/Pipette.xcodeproj"
 
-# Pre-flight: Xcode itself. Without it `xcodebuild` is either absent or is the
-# Command Line Tools shim (which can't build an .xcodeproj), so fail with an
-# actionable message instead of a raw "command not found" or a cryptic
-# "tool 'xcodebuild' requires Xcode" deep in the build.
+# Without the full Xcode app, `xcodebuild` is absent or the Command Line Tools
+# shim, which cannot build an .xcodeproj.
 if ! command -v xcodebuild >/dev/null 2>&1; then
     echo "error: 'xcodebuild' not found — the full Xcode app is required (the" >&2
     echo "  Command Line Tools alone can't build the Pipette .xcodeproj)." >&2
@@ -96,11 +83,9 @@ elif ! xcodebuild -version >/dev/null 2>&1; then
     exit 1
 fi
 
-# Pre-flight: the Metal toolchain is an on-demand Xcode component (Xcode 16+).
-# Without it the mlx-swift dependency fails every CompileMetalFile step with
-# "cannot execute tool 'metal' due to missing Metal Toolchain". We only block
-# when we POSITIVELY detect it's uninstalled — on older Xcode the subcommand
-# doesn't exist (no match), so we fall through and let the build proceed.
+# The Metal toolchain is an on-demand Xcode component; without it every
+# mlx-swift CompileMetalFile step fails. Block only when it is reported
+# uninstalled: an Xcode without the subcommand prints no match and builds on.
 if xcodebuild -showComponent MetalToolchain 2>/dev/null | grep -q "Status: uninstalled"; then
     echo "error: the Metal toolchain is not installed." >&2
     echo "  mlx-swift's Metal shaders cannot compile without it. Install with:" >&2
@@ -109,13 +94,9 @@ if xcodebuild -showComponent MetalToolchain 2>/dev/null | grep -q "Status: unins
     exit 1
 fi
 
-# Map the mode to an xcodebuild destination. Use a *generic* destination: a
-# plain build doesn't need a specific booted simulator, and naming a concrete
-# device ("iPhone 17 Pro") would break whenever that model isn't installed.
-#   - ARCHS=arm64 + ONLY_ACTIVE_ARCH=YES: the llama.cpp static lib is built
-#     arm64-only, so this avoids x86_64 link failures on the generic destination.
-#   - -skipPackagePluginValidation / -skipMacroValidation: see header. Both
-#     mirror what CI passes to xcodebuild, so a fresh/headless build matches CI.
+# Generic destinations below: a build needs no booted simulator, and a named
+# model breaks wherever it is not installed. ARCHS=arm64 + ONLY_ACTIVE_ARCH=YES:
+# the llama.cpp static lib is arm64-only, so x86_64 would fail to link.
 COMMON_ARGS=(
     -project "$PROJECT"
     -scheme Pipette
@@ -125,44 +106,41 @@ COMMON_ARGS=(
     ONLY_ACTIVE_ARCH=YES
 )
 
-# The SoC die-temp read (`soc_temp`) is a private API, so it is OFF by default —
-# the project defines nothing, and the CI / App Store archive never ships it (App
-# Review rejects private APIs). Opt in for internal on-device benchmarking:
-#   ./ios/build.sh device --internal
-# See docs/pipette-ios/private-thermal-release-build.md. Single-quoted so the shell
-# leaves `$(inherited)` for xcodebuild to expand (preserving lower-level defines).
-# Swift conditions accumulate into ONE setting. Two `SWIFT_ACTIVE_COMPILATION_CONDITIONS=`
-# arguments would not merge — the later one wins and the earlier condition is silently
-# lost, so `--internal --debug-ui` would quietly drop the private-thermal read.
+# The SoC die-temp read (`soc_temp`), the kernel footprint-peak read and the
+# reclaim-ring flush are private APIs, so they are off by default and never in
+# the App Store archive (App Review rejects private APIs). See
+# docs/pipette-ios/private-thermal-release-build.md.
+#
+# Swift conditions accumulate into ONE setting: a second
+# `SWIFT_ACTIVE_COMPILATION_CONDITIONS=` argument would replace the first, so
+# `--internal --debug-ui` would silently drop the private-thermal condition.
 SWIFT_CONDITIONS=()
 
 if [[ "${PIPETTE_PRIVATE_THERMAL:-}" == "1" ]]; then
-    echo "==> PIPETTE_PRIVATE_THERMAL=1 — enabling the private SoC die-temp read (internal builds only, never ship)"
+    echo "==> PIPETTE_PRIVATE_THERMAL=1 — enabling the private SoC die-temp and kernel footprint-peak reads and the reclaim-ring flush (internal builds only, never ship)"
     COMMON_ARGS+=('GCC_PREPROCESSOR_DEFINITIONS=$(inherited) PIPETTE_PRIVATE_THERMAL=1')
-    # Also expose it to Swift so the SoC collection path is compiled in (not just
-    # the ObjC read) — Swift can't see GCC_PREPROCESSOR_DEFINITIONS.
+    # Swift cannot see GCC_PREPROCESSOR_DEFINITIONS.
     SWIFT_CONDITIONS+=(PIPETTE_PRIVATE_THERMAL)
+    # The footprint-peak read and reclaim-ring flush for max_memory_usage.
+    # Swift-only, so no GCC define.
+    SWIFT_CONDITIONS+=(PIPETTE_PRIVATE_MEMORY)
 fi
 
-# Compiles in the Settings "Debugging" card for a local Release build, which is
-# otherwise the one configuration that cannot show it (`#if DEBUG` is false there).
-# On Xcode Cloud the same condition comes from the PIPETTE_DEBUG_UI environment
-# variable via ci_scripts/ci_pre_xcodebuild.sh; this flag is the local equivalent.
+# `#if DEBUG` is false in Release, so this is how a local Release build gets the
+# Settings "Debugging" card. Xcode Cloud gets it from
+# ios/Pipette/ci_scripts/ci_pre_xcodebuild.sh.
 if [[ "${PIPETTE_DEBUG_UI:-}" == "1" ]]; then
     echo "==> PIPETTE_DEBUG_UI=1 — compiling in the Settings debug card"
     SWIFT_CONDITIONS+=(PIPETTE_DEBUG_UI)
 fi
 
-# Single-quoted `$(inherited)` so the shell leaves it for xcodebuild to expand,
-# preserving lower-level defines (notably DEBUG in the Debug configuration).
+# `$(inherited)` is quoted here and above so xcodebuild, not the shell, expands
+# it, keeping lower-level defines (notably DEBUG in the Debug configuration).
 if [[ ${#SWIFT_CONDITIONS[@]} -gt 0 ]]; then
     COMMON_ARGS+=("SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) ${SWIFT_CONDITIONS[*]}")
 fi
 
-# Default to a Release build — it's what benchmark numbers need. The caller can
-# still pick another configuration by passing their own `-configuration` (e.g.
-# `-configuration Debug` for a faster, unoptimized build); we only inject the
-# default when the forwarded args don't already set one.
+# Release unless the caller passes -configuration: it is what benchmark numbers need.
 for arg in "$@"; do
     if [[ "$arg" == "-configuration" ]]; then
         CONFIG_SET=1
@@ -175,9 +153,7 @@ fi
 
 if [[ "$MODE" == "sim" ]]; then
     echo "==> Building Pipette for the iOS Simulator..."
-    # CODE_SIGNING_ALLOWED=NO is safe for the simulator only — it yields an
-    # arm64 .app that `simctl install` accepts. Device builds need a real
-    # signing identity, so we don't pass it below.
+    # Unsigned is fine for the simulator only: `simctl install` accepts it.
     xcodebuild build \
         "${COMMON_ARGS[@]}" \
         -destination 'generic/platform=iOS Simulator' \
@@ -185,11 +161,9 @@ if [[ "$MODE" == "sim" ]]; then
         "$@"
 else
     echo "==> Building Pipette for a physical iOS device..."
-    # Device builds require code signing; -allowProvisioningUpdates lets Xcode
-    # resolve a signing identity / provisioning profile automatically. This
-    # produces a signed .app in DerivedData but does NOT deploy it — install it
-    # on a connected device with `xcrun devicectl` (see the device run loop in
-    # docs/pipette-ios/build.md), or pass -derivedDataPath to locate the .app.
+    # -allowProvisioningUpdates lets Xcode resolve a signing identity and
+    # provisioning profile. This builds but does not install: use `xcrun
+    # devicectl` (docs/pipette-ios/build.md).
     xcodebuild build \
         "${COMMON_ARGS[@]}" \
         -destination 'generic/platform=iOS' \

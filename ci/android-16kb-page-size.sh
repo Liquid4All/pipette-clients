@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 #
-# Verify Android native-library compatibility with 16 KB page-size devices.
+# Verify Android native libraries load on 16 KB page-size devices.
 #
-# The check can run on a generated native-lib directory or on a packaged APK/AAB.
-# CI uses both: the generated directory catches our computed native libs close to
-# where they are produced, and the packaged artifact covers third-party .so files.
+# Takes a native-lib directory or a packaged APK/AAB. CI runs both: the directory
+# catches our own libs where they are built, the package covers third-party .so files.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then

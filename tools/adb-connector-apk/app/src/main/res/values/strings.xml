@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pipette ADB Connector</string>
+    <string name="enable_button">Enable wireless debugging</string>
+    <string name="force_button">Force re-arm (drops the current port)</string>
+    <string name="status_format">%1$s\n\n%2$s\n\n%3$s</string>
+    <string name="status_enabled">Wireless debugging is ON.\n\nadbd is listening on a random port, and it announces that port over mDNS. Find it from the host with host-connect.sh, which reads `adb mdns services` and then validates each entry.</string>
+    <string name="status_disabled">Wireless debugging is OFF.\n\nThe host cannot reach this device over adb.</string>
+    <string name="status_unknown">Wireless debugging state is unknown (setting never written on this device).</string>
+    <string name="watchdog_on">Periodic check: ON. Re-enables wireless debugging if something switches it off. Doze can stretch the interval well past 15 minutes on an unplugged device.</string>
+    <string name="watchdog_off">Periodic check: NOT REGISTERED. Reopen this app to schedule it.</string>
+    <string name="error_no_permission">Write refused: no WRITE_SECURE_SETTINGS.\n\nRun: adb shell pm grant ai.liquid.pipette.adbconnector android.permission.WRITE_SECURE_SETTINGS</string>
+    <string name="accessibility_service_label">Pipette wireless-debugging dialog accepter</string>
+    <string name="accessibility_service_description">Accepts the system\'s "Allow wireless debugging on this network?" dialog, so this device stays reachable over adb after it moves between access points. When the lab sets pipette_keep_screen_on, it also turns the screen back on while plugged in. Only receives events from the system UI.</string>
+    <string name="accepter_on">Dialog accepter: ON. Approves new access points by itself, so a roam no longer switches wireless debugging off.</string>
+    <string name="accepter_not_running">Dialog accepter: registered but NOT RUNNING. The system has not bound it; enable it once in Settings > Accessibility > Installed apps. The wifi rejoin monitor and the screen keeper are off with it.</string>
+    <string name="accepter_off">Dialog accepter: NOT REGISTERED. This device will lose wireless debugging when it moves to an access point it has not approved before.</string>
+    <string name="keeper_on">Screen keeper: ON. Turns the screen back on while plugged in. Set global pipette_keep_screen_on to 0 to let it sleep.</string>
+    <string name="keeper_off">Screen keeper: off (global pipette_keep_screen_on is not 1, or the dialog accepter is not running).</string>
+    <string name="error_generic">Write failed: %1$s. See logcat tag pipette-adb-connector.</string>
+</resources>

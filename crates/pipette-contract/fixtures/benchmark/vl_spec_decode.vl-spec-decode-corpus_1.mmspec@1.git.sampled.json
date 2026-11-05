@@ -1,0 +1,25 @@
+{
+  "benchmark_id": "vl_spec_decode_mmspec_test_gqa_k8_t0.8",
+  "benchmark_type": "vl_spec_decode",
+  "dataset": {
+    "adapter": "mmspec@1",
+    "bytes": 15955456,
+    "digest": "1862eedc832710f6c4776472d00d5ee4aa0a16d85d6a9c433398109f90239810",
+    "format": "vl-spec-decode-corpus/1",
+    "subset": "GQA",
+    "upstream": {
+      "digest": "2bd3c7b41707c10d91726e90545b9ec5d741ac947637c90e2f9d5fe6321fa8f7",
+      "identity": "2923603292c7dd463ad01a119f57965817778fc3",
+      "license": "Apache-2.0",
+      "revision": "290486861eabd746075ca776adb66175636c1fc0",
+      "source": "git",
+      "subpath": "dataset/MMSpec/test",
+      "url": "github.com/killthefullmoon/MMSpec"
+    },
+    "url": "/datasets/vl_spec_decode_mmspec_test_gqa_k8"
+  },
+  "parameter_batch_size": 1,
+  "parameter_draft_length": 8,
+  "parameter_max_tokens": 2048,
+  "parameter_temperature": 0.8
+}

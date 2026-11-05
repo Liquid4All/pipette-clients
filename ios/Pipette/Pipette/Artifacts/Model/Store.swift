@@ -1,67 +1,67 @@
 import Foundation
 
-/// Why a store operation could not answer — the crate's `ModelStoreError`, narrowed to
-/// the cases this client can reach.
+/// The crate's `ModelStoreError`, narrowed to the cases this client can reach.
 nonisolated enum ModelStoreError: Error, Equatable, LocalizedError {
-    /// No storage key: Apple Foundation ships with the OS, and a store-relative
-    /// coordinate is already inside a store.
+    /// Apple Foundation ships with the OS; a store-relative coordinate is already in a store.
     case notStorable(String)
-    /// The fetch reported success but the entry still does not resolve — a partial
-    /// install, or a projector that never landed.
+    /// An unsupported version, or a `stored` that is not the declared model's store form.
+    case corrupt(String)
+    case parse(path: String, source: String)
+    case io(doing: String, source: String)
+    /// A partial install, or a projector that never landed.
     case unresolvedAfterFetch(String)
-    /// The arm names weights this client cannot fetch — see `Model.isFetchableHere`.
-    /// Refused before waiting, since no transfer will ever be registered for it.
+    /// See `Model.isFetchableHere`. Refused before waiting, since no transfer will start.
     case notFetchableHere(String)
-    /// The fetch did not finish within the window.
+    case admission(AdmissionError)
+    /// The key omits the model type, so two directory models of one `org/repo` with no
+    /// `prefix` address one entry.
+    case typeCollision(key: String, stored: ModelType, requested: ModelType)
     case fetchTimedOut(String)
-    /// The transfer is paused, so waiting on it would hang the caller indefinitely.
+    /// Paused by a person, or the wait's one resume did not take; waiting would hang.
     case fetchPaused(String)
-    /// The transfer failed, with the reason it gave.
-    case fetchFailed(String, reason: String)
+    case fetch(model: String, source: String)
+    /// Fails every waiter. A caller that only stops waiting gets `CancellationError`, and
+    /// the transfer carries on for the others.
+    case fetchCancelled(String)
 
     var errorDescription: String? {
         switch self {
         case let .notStorable(name): "\(name) has no store entry to resolve."
+        case let .corrupt(detail): "stored model is corrupt: \(detail)"
+        case let .parse(path, reason): "parsing the manifest at \(path) failed: \(reason)"
+        case let .io(doing, reason): "\(doing): \(reason)"
         case let .unresolvedAfterFetch(name): "\(name) finished downloading but its files are missing."
         case let .notFetchableHere(name): "\(name) can't be downloaded on iOS."
-        case let .fetchTimedOut(name): "Downloading \(name) took too long."
+        case let .admission(refusal): refusal.errorDescription
+        case let .typeCollision(key, stored, requested):
+            "the store entry `\(key)` holds a \(stored.rawValue) model, but this cell names "
+                + "a \(requested.rawValue) model; give each of the two a `prefix` so they "
+                + "address separate entries, or remove this one"
+        case let .fetchTimedOut(name): "Downloading \(name) stopped making progress."
         case let .fetchPaused(name): "Downloading \(name) is paused."
-        case let .fetchFailed(name, reason): "Could not download \(name): \(reason)"
+        case let .fetch(model, reason): "Could not download \(model): \(reason)"
+        case let .fetchCancelled(name): "Downloading \(name) was cancelled."
         }
     }
 }
 
-/// The model store rooted at `modelsDir` — the Swift mirror of the crate's
-/// `ModelArtifactStore` (`pipette-artifacts/src/model/store.rs`).
+/// The crate's `ModelArtifactStore` (`crates/pipette-artifacts/src/model/store.rs`). It
+/// owns the layout, so callers ask it where an entry is instead of rebuilding
+/// `models/<key>/blobs/<subpath>`. Locations come from the manifest's `stored`, never from
+/// re-deriving the declared model's layout.
 ///
-/// One type owns the layout, so callers ask it where an entry is instead of rebuilding
-/// `models/<key>/blobs/<subpath>` themselves. Discovery, the installers and the run path
-/// each did that separately and agreed only by convention.
-///
-/// Narrower than the crate's in two documented ways. There is no `ensure` that fetches:
-/// downloading is `DownloadCoordinator`'s job — it is long-running, cancellable and
-/// reports progress to the UI, none of which a synchronous store call can carry — so
-/// `ensure` here is find-or-nil and the fetch stays with the coordinator. And `stored` is
-/// its own `StoredModel` rather than a `Model` with relative arms — same information, see
-/// that type for why.
-///
-/// Locations come from the manifest's `stored` (the crate's `bind_under`). An entry
-/// published before that field falls back to deriving from `declared`, which is what the
-/// per-variant rules below are for; they are the compatibility path, not the design.
+/// Directory installs stage and publish (`Staging.swift`); a GGUF install writes into the
+/// entry and `publishManifest` makes it one, because a vision model is two transfers.
 nonisolated struct ModelArtifactStore: Sendable {
     let modelsDir: URL
 
-    /// A model's store entry, `models/<key>`. Nil for a spec with no storage key (AFM
-    /// ships with the OS). Path only — nothing is created, so a reader cannot leave an
-    /// empty manifest-less directory behind for the sweeper to reclaim.
+    /// Path only: a reader must not leave an empty manifest-less directory behind.
     func entryDir(for declared: Model) -> URL? {
         ModelStorageKey.of(declared).map {
-            modelsDir.appendingPathComponent($0.value, isDirectory: true)
+            modelsDir.appendingPathComponent($0.relativeDir, isDirectory: true)
         }
     }
 
-    /// Create and backup-exclude an entry, returning it — the install side of the store.
-    /// Nil for a spec with no storage key.
     @discardableResult
     func prepareEntryDir(for declared: Model) -> URL? {
         entryDir(for: declared).map {
@@ -71,28 +71,61 @@ nonisolated struct ModelArtifactStore: Sendable {
         }
     }
 
-    /// The payload directory inside an entry, `<entry>/blobs`. Path only.
     func blobsDir(for declared: Model) -> URL? {
-        entryDir(for: declared)?.appendingPathComponent(Entry.blobsDirName, isDirectory: true)
+        ModelStorageKey.of(declared).map { modelsDir.appendingPathComponent($0.blobsDir, isDirectory: true) }
     }
 
-    /// The manifest of `declared`'s entry, or nil when this build cannot read one —
-    /// the crate's `find`. An unreadable manifest is not an entry: that is the rule the
-    /// quota accountant's garbage phase depends on.
-    func find(_ declared: Model) -> ModelManifest? {
-        entryDir(for: declared).flatMap { ModelManifest.forInstalledEntry(atDir: $0) }
+    /// The store form bound under the entry's `blobs/`: the `into` that
+    /// `ModelFetch.planDownloads` takes. Answerable before a byte exists, so the plan can
+    /// be made up front. Nil when there is no key or no store form.
+    func fetchDestination(for declared: Model) -> Model? {
+        guard let key = ModelStorageKey.of(declared) else { return nil }
+        return declared.toStored(base: key.blobsDir)?.underRoot(modelsDir)
     }
 
-    /// Every readable manifest under the root — the crate's `list`. Skips what it cannot
-    /// read rather than failing the listing, because the callers are discovery and the
-    /// UI, where one bad entry must not hide the rest.
-    func list() -> [ModelManifest] {
-        Self.entryDirectories(in: modelsDir).compactMap { ModelManifest.forInstalledEntry(atDir: $0) }
+    /// The crate's `find`: a pure read, no touch. An unusable manifest is an error, not an
+    /// absence. Whether the payload is on disk is `bound`'s question.
+    ///
+    /// Another type's manifest under the same key is `typeCollision` rather than returned,
+    /// which would fail far from the cause, at engine load.
+    func find(_ declared: Model) throws(ModelStoreError) -> ModelManifest? {
+        guard let entry = entryDir(for: declared) else {
+            throw .notStorable(declared.artifactName)
+        }
+        let url = ModelManifest.manifestURL(inEntryDir: entry)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let manifest = try Self.readManifest(at: url)
+        let stored = ModelType.of(manifest.declared)
+        let requested = ModelType.of(declared)
+        guard stored == requested else {
+            throw .typeCollision(key: ModelStorageKey.of(declared)?.value ?? entry.lastPathComponent,
+                                 stored: stored, requested: requested)
+        }
+        return manifest
     }
 
-    /// Drop `declared`'s entry whole — the crate's `remove`. One entry, one delete: a
-    /// vision model's projector and an MLX bundle's shards live inside it. Returns
-    /// whether anything was there to remove.
+    /// The crate's `list`. Skips dot-directories and children without a manifest. One
+    /// unusable manifest fails the whole listing, as in `find`; discovery, which must not
+    /// lose the store to one bad entry, walks the root itself.
+    func list() throws(ModelStoreError) -> [ModelManifest] {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: modelsDir.path) else { return [] }
+        let children: [URL]
+        do {
+            children = try fm.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: nil)
+        } catch {
+            throw .io(doing: "reading \(modelsDir.path)", source: error.localizedDescription)
+        }
+        var manifests: [ModelManifest] = []
+        for child in children where !child.lastPathComponent.hasPrefix(".") {
+            let url = ModelManifest.manifestURL(inEntryDir: child)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            manifests.append(try Self.readManifest(at: url))
+        }
+        return manifests.sorted { $0.declared.description < $1.declared.description }
+    }
+
+    /// The crate's `remove`. Returns whether anything was there.
     @discardableResult
     func remove(_ declared: Model) -> Bool {
         guard let dir = entryDir(for: declared),
@@ -106,101 +139,177 @@ nonisolated struct ModelArtifactStore: Sendable {
         }
     }
 
-    /// The bound `Model` for `declared`, fetching and publishing it first if the store
-    /// does not already hold it — the crate's `ensure` (`model/store.rs:177`).
+    /// The crate's `ensure`. `fetch` gets the caller's `declared`, token included, so a
+    /// gated download can authenticate; only what the store keeps is credential-free.
     ///
-    /// `fetch` is injected for the same reason it is upstream: the store owns find, touch,
-    /// publish and bind, while *how* bytes arrive belongs to the caller. On this client
-    /// that is `DownloadCoordinator`, so the closure — and therefore this — is `async`,
-    /// where the crate's is blocking.
-    ///
-    /// A hit stamps `last_used_at` and returns; a miss fetches and then requires the
-    /// entry to be resolvable, so "ensured" means the weights are on disk and located,
-    /// never merely that a transfer was started.
+    /// A miss must resolve after the fetch. Unlike the crate, a hit also needs the payload
+    /// on disk: a vision model publishes after each of its two transfers, so a manifest
+    /// beside half a payload is an ordinary state here. Also unlike the crate, a manifest
+    /// that does not decode is an error like any other unusable one, not a re-fetch, so
+    /// corruption surfaces instead of being overwritten.
     func ensure(_ declared: Model, fetch: (Model) async throws -> Void) async throws -> Model {
-        if let hit = bound(declared) {
-            if let dir = entryDir(for: declared) { ModelManifest.touchLastUsed(inEntryDir: dir) }
+        if let manifest = try find(declared), let hit = Self.bound(manifest, under: modelsDir) {
+            touch(manifest)
             return hit
         }
-        guard entryDir(for: declared) != nil else {
-            throw ModelStoreError.notStorable(declared.artifactName)
-        }
         try await fetch(declared)
-        guard let bound = bound(declared) else {
+        guard let manifest = try find(declared), let bound = Self.bound(manifest, under: modelsDir) else {
             throw ModelStoreError.unresolvedAfterFetch(declared.artifactName)
         }
         return bound
     }
 
-    /// Write the entry's manifest, measuring `blobs/` as it goes — the publish half of
-    /// the crate's `install_dir_computing_manifest`.
-    ///
-    /// The one place a manifest is created, so `blobsBytes` cannot be forgotten by an
-    /// installer. A vision model publishes twice (weights and projector arrive as
-    /// separate transfers); the second measurement supersedes the first, which is why
-    /// the size is taken here rather than passed in.
-    func publishManifest(for declared: Model, fetchedAt: Date = Date()) {
-        guard let entry = entryDir(for: declared), let blobs = blobsDir(for: declared) else { return }
-        ModelManifest(declared: declared, fetchedAt: fetchedAt,
-                      blobsBytes: DiskUsage.bytes(at: blobs),
-                      stored: declared.toStored(base: Entry.blobsDirName))
+    /// The publish half of the crate's `fetch_and_publish`, for GGUF installs. `fetchedAt`
+    /// is stamped here because publish is the first the store hears of a transfer. A
+    /// vision model publishes twice, so the size is measured here and the second write wins.
+    func publishManifest(for declared: Model) {
+        let storable = declared.withoutAuthToken
+        guard let key = ModelStorageKey.of(storable),
+              let stored = storable.toStored(base: key.blobsDir) else { return }
+        let entry = modelsDir.appendingPathComponent(key.relativeDir, isDirectory: true)
+        let blobs = modelsDir.appendingPathComponent(key.blobsDir, isDirectory: true)
+        let now = Date()
+        ModelManifest(fetchedAt: now, lastUsedAt: now, declared: storable, stored: stored,
+                      blobsBytes: entrySizeBytes(at: blobs))
             .writeQuietly(to: ModelManifest.manifestURL(inEntryDir: entry))
     }
 
-    /// `declared` as it exists on this device: the bound `Model`, whose arms are the
-    /// `Absolute*` ones — the crate's `bind_under`.
-    ///
-    /// One lookup for the whole entry, because a vision entry is *two* files that have to
-    /// agree. Answering "where are the weights" and "where is the projector" separately is
-    /// how they came to disagree in the first place; upstream's consumers destructure one
-    /// bound `Model` (`pipette-llamacpp/src/models.rs:36`) for exactly this reason.
-    ///
-    /// Reads the manifest's `stored`; falls back to deriving from `declared` for an entry
-    /// published before that field. Nil when the entry holds no payload — evicted or
-    /// half-installed, which is not runnable.
+    /// `find`, then the crate's `bind_under`. One lookup for the whole entry, so a vision
+    /// model's weights and projector cannot disagree. Nil when not stored, unusable, or
+    /// not all on disk.
     func bound(_ declared: Model) -> Model? {
-        guard let dir = entryDir(for: declared) else { return nil }
-        return Self.bound(inEntryDir: dir, declared: declared)
+        (try? find(declared)).flatMap { Self.bound($0, under: modelsDir) }
     }
 
-    /// The same, bound under a directory the caller already holds.
-    ///
-    /// Discovery and the quota survey walk the store root and must answer for the entry
-    /// they *found*, not for where the key says it should be — an entry in a misnamed
-    /// directory is still readable through its manifest, and recomputing the key would
-    /// make it invisible. `bind_under` takes the root it is given for the same reason.
-    static func bound(inEntryDir dir: URL, declared: Model) -> Model? {
-        let candidate = ModelManifest.forInstalledEntry(atDir: dir)?.stored?.bindUnder(dir)
-            ?? derivedBound(inEntryDir: dir, for: declared)
-        guard let candidate, let paths = candidate.boundPaths,
+    /// Nil unless every file it names is on disk (the crate's `payload_paths` rule): a
+    /// manifest is not evidence its bytes are still there.
+    static func bound(_ manifest: ModelManifest, under modelsDir: URL) -> Model? {
+        guard let bound = manifest.bindUnder(modelsDir), let paths = bound.boundPaths,
               FileManager.default.fileExists(atPath: paths.payload),
               paths.mmproj.map({ FileManager.default.fileExists(atPath: $0) }) ?? true
         else { return nil }
-        return candidate
+        return bound
     }
 
-    /// The bound weights path, for callers that need only that.
     func payloadPath(for declared: Model) -> String? { bound(declared)?.boundPaths?.payload }
 
-    /// The bound projector path; nil unless this is a vision entry.
     func mmprojPath(for declared: Model) -> String? { bound(declared)?.boundPaths?.mmproj }
 
-    /// Compatibility for an entry published before `stored`: rebuild the store form from
-    /// `declared` — which is exactly what `toStored` records — and bind that.
-    ///
-    /// Not a second layout rule: it calls `toStored`, so the derivation and the recorded
-    /// value cannot drift apart.
-    private static func derivedBound(inEntryDir dir: URL, for declared: Model) -> Model? {
-        declared.toStored(base: Entry.blobsDirName)?.bindUnder(dir)
+    /// The crate's `read_manifest`. The token is dropped first, so an in-memory `declared`
+    /// never carries a secret. An entry-relative `stored` is upgraded in place
+    /// (``upgradedFromEntryRelative(_:key:at:)``) rather than refused.
+    static func readManifest(at url: URL) throws(ModelStoreError) -> ModelManifest {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw .io(doing: "reading \(url.path)", source: error.localizedDescription)
+        }
+        var manifest: ModelManifest
+        do {
+            manifest = try Coding.decoder.decode(ModelManifest.self, from: data)
+        } catch {
+            // Older builds wrote records without `fetched_at` and `stored`.
+            guard let recovered = legacyManifest(data) else {
+                throw .parse(path: url.path, source: "\(error)")
+            }
+            manifest = recovered
+        }
+        manifest.declared = manifest.declared.withoutAuthToken
+        guard manifest.manifestVersion == ModelManifest.manifestVersion else {
+            throw .corrupt("unsupported manifest_version \(manifest.manifestVersion) "
+                           + "(expected \(ModelManifest.manifestVersion))")
+        }
+        guard let key = ModelStorageKey.of(manifest.declared) else {
+            throw .notStorable(manifest.declared.artifactName)
+        }
+        if manifest.stored != manifest.declared.toStored(base: key.blobsDir) {
+            guard let upgraded = upgradedFromEntryRelative(manifest, key: key, at: url) else {
+                throw .corrupt("stored form is not the declared model's local form")
+            }
+            manifest = upgraded
+        }
+        return manifest
     }
 
-    /// One level of the root: each child directory is a candidate entry, recognized only
-    /// through its manifest. Nothing is sniffed.
+    /// Re-root an entry-relative `stored` (`blobs/w.gguf`) onto `models/`
+    /// (`<key>/blobs/w.gguf`) and rewrite the file. A version bump would not have helped:
+    /// `find` errors on an unsupported version too, and the bytes on disk would never
+    /// re-download. Only paths at or under `blobs` qualify; anything else stays corrupt.
+    ///
+    /// Not re-derived from `declared`: an MLX subtree recorded `blobs` without its
+    /// `prefix`, so the derived form would name a directory that never held its files.
+    private static func upgradedFromEntryRelative(
+        _ manifest: ModelManifest, key: ModelStorageKey, at url: URL
+    ) -> ModelManifest? {
+        let blobs = Entry.blobsDirName
+        let paths = manifest.stored.storedRelativePaths
+        guard !paths.isEmpty,
+              paths.allSatisfy({ $0 == blobs || $0.hasPrefix("\(blobs)/") }),
+              let rerooted = manifest.stored.prefixingStoredPaths(with: key.value)
+        else { return nil }
+        var upgraded = manifest
+        upgraded.stored = rerooted
+        upgraded.writeQuietly(to: url)
+        AppLog.storage.info(
+            "model store: re-rooted \(key.value)'s stored paths onto the models root")
+        return upgraded
+    }
+
+    /// An older version-2 record with optional `fetched_at` and `stored`. `fetchedAt`
+    /// falls back to `lastUsedAt` (seeded from the same publish); a missing `stored` is
+    /// derived, as such records were always read. Nil lets the caller report the real
+    /// decode failure.
+    private static func legacyManifest(_ data: Data) -> ModelManifest? {
+        struct Legacy: Decodable {
+            let manifestVersion: Int
+            let fetchedAt: Date?
+            let lastUsedAt: Date
+            let declared: Model
+            let stored: Model?
+            let blobsBytes: Int64?
+
+            enum CodingKeys: String, CodingKey {
+                case manifestVersion = "manifest_version"
+                case fetchedAt = "fetched_at"
+                case lastUsedAt = "last_used_at"
+                case declared, stored
+                case blobsBytes = "blobs_bytes"
+            }
+        }
+        guard let legacy = try? Coding.decoder.decode(Legacy.self, from: data) else { return nil }
+        guard let stored = legacy.stored
+            ?? legacy.declared.withoutAuthToken.toStored(base: Entry.blobsDirName)
+        else { return nil }
+        return ModelManifest(
+            fetchedAt: legacy.fetchedAt ?? legacy.lastUsedAt,
+            lastUsedAt: legacy.lastUsedAt,
+            declared: legacy.declared,
+            stored: stored,
+            blobsBytes: legacy.blobsBytes)
+    }
+
+    /// The crate's `touch`. Best-effort: a read-only store must still resolve models.
+    private func touch(_ manifest: ModelManifest) {
+        guard let key = ModelStorageKey.of(manifest.declared) else { return }
+        var touched = manifest
+        touched.lastUsedAt = Date()
+        let entry = modelsDir.appendingPathComponent(key.relativeDir, isDirectory: true)
+        do {
+            try touched.encoded().write(to: ModelManifest.manifestURL(inEntryDir: entry), options: .atomic)
+        } catch {
+            AppLog.storage.debug("could not record last_used_at for \(key.value): \(error)")
+        }
+    }
+
+    /// Candidate entries, recognized later only through their manifest. Dot-directories
+    /// (`.staging`) are skipped, as the crate's `list` does.
     static func entryDirectories(in root: URL) -> [URL] {
         let children = (try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [])) ?? []
         return children.filter {
-            (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            !$0.lastPathComponent.hasPrefix(".")
+                && ((try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false)
         }
     }
 }

@@ -1,9 +1,5 @@
-# Locate cargo/rustc and generate a per-preset `cargo_wrapper` shell script.
-# The wrapper is the single place cargo is invoked; see cargo_wrapper.in's header
-# for why (toolchain env export + forced --target).
-#
-# Ported from inference_engine's cmake/cargo.cmake (Unix path only — pipette has
-# no Windows native build).
+# Locate cargo/rustc and generate the per-preset `cargo_wrapper` (see
+# cargo_wrapper.in), the one place cargo is invoked. Unix only.
 
 if(NOT CARGO_EXECUTABLE)
   find_program(CARGO_EXECUTABLE cargo)

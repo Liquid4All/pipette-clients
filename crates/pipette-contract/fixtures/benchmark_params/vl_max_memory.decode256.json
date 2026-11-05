@@ -1,0 +1,8 @@
+{
+  "benchmark_type": "vl_max_memory",
+  "decode_tokens": 256,
+  "image_height": 256,
+  "image_width": 256,
+  "num_images": 5,
+  "text_tokens": 1024
+}

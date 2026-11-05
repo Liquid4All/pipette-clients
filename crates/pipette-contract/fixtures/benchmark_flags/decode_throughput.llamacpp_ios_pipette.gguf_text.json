@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "decode_throughput",
+  "model_type": "gguf_text",
+  "runtime_type": "llamacpp_ios_pipette"
+}

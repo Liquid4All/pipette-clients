@@ -1,22 +1,12 @@
 import ClerkKit
 import SwiftUI
 
-/// The sign-in screen, one view per step of `EmailAuthState.Step`. Replaces
-/// ClerkKit's prebuilt `AuthView` with the same screens Android draws
-/// (`AuthGateScreen.kt`), so the two clients match.
+/// The sign-in screen, one view per step of `EmailAuthState.Step`. Draws the same
+/// screens as Android (`AuthGateScreen.kt`) instead of ClerkKit's prebuilt `AuthView`.
 ///
-/// The passwordless path is the short one: an address, then the 6-digit code.
-/// Off it hang a password sign-in for an account that has one (which App Review
-/// needs, since a reviewer cannot read a code sent to a mailbox we do not
-/// control: see `docs/pipette-ios/app-review.md`), the password a new account
-/// finishes registering with, a second-factor challenge, and the reset that
-/// gets a password onto an account with none.
-///
-/// The steps that ask the same question share a view rather than repeating it:
-/// `CodeStep` serves the two first-factor-shaped codes (the sign-in code and the
-/// reset code) and `SetPasswordStep` both password choices, as their Android
-/// counterparts do. A second-factor code is entered in `SecondFactorAnswer`
-/// instead, since it varies in width and can be alphanumeric.
+/// The short path is an address, then the 6-digit code. The password sign-in exists for
+/// App Review, whose reviewer cannot read a code sent to a mailbox we do not control
+/// (`docs/pipette-ios/app-review.md`).
 struct EmailCodeSignInView: View {
     @Environment(Clerk.self) private var clerk
     @State private var model = EmailAuthModel()
@@ -44,11 +34,8 @@ struct EmailCodeSignInView: View {
                     case .secondFactor:
                         SecondFactorStep(model: model)
                     case .resetCode:
-                        // Keyed on the generation so a resend Clerk accepted starts
-                        // an empty field: the digits already typed answer the code
-                        // it just replaced. Same device as `SecondFactorAnswer`'s
-                        // identity, one part shorter, since there is no factor to
-                        // switch between here.
+                        // Keyed on the generation so an accepted resend starts an empty
+                        // field: the typed digits answer the code it replaced.
                         CodeStep(
                             model: model,
                             then: "Enter it to choose a password.",
@@ -91,12 +78,10 @@ private struct EmailStep: View {
     init(model: EmailAuthModel, providers: [OAuthProviderInfo]) {
         self.model = model
         self.providers = providers
-        // Seeded rather than empty so coming back from a later step ("Use a
-        // different email") restores the address to edit.
+        // Seeded so "Use a different email" restores the address to edit.
         self._email = State(initialValue: model.state.email)
     }
 
-    /// Both actions on this step need an address and no request in flight.
     private var canSubmit: Bool {
         EmailAuthState.canSubmitEmail(email, submitting: model.state.submitting)
     }
@@ -140,9 +125,7 @@ private struct EmailStep: View {
 
         LegalNotice()
 
-        // The credential path, for an account that already has a password. Needs
-        // the address first, so it stays disabled until the field is filled and
-        // then carries that value forward rather than asking for it twice.
+        // Needs the address first, and carries it forward rather than asking twice.
         Button("Sign in with a password") {
             model.usePassword(email)
         }
@@ -152,9 +135,8 @@ private struct EmailStep: View {
         .disabled(!canSubmit)
         .padding(.top, 14)
 
-        // Social sign-in: one button per provider enabled in the Clerk dashboard.
-        // Absent entirely until the backend enables any — then the divider and the
-        // buttons appear without a client change.
+        // One button per provider enabled in the Clerk dashboard, so providers appear
+        // without a client change.
         if !providers.isEmpty {
             OrDivider()
                 .padding(.vertical, 16)
@@ -180,14 +162,9 @@ private struct EmailStep: View {
 
 // MARK: - Password step
 
-/// The credential path: sign an existing account in with its password, no code.
-///
-/// It exists because a store reviewer cannot read a code sent to a mailbox we do
-/// not control, the same reason Android added it, and it is offered to everyone
-/// because most accounts have a password. Not all do: a social sign-in or a
-/// dashboard invite creates one without, at any time, which is what the reset
-/// link below is for. It never registers: an unknown address is an error here,
-/// not a sign-up.
+/// Sign an existing account in with its password. Never registers: an unknown address
+/// is an error here. An account created by social sign-in or a dashboard invite has no
+/// password, which is what the reset link is for.
 private struct PasswordStep: View {
     let model: EmailAuthModel
 
@@ -234,10 +211,8 @@ private struct PasswordStep: View {
         )
         .padding(.top, 20)
 
-        // The way in for an account that has no password at all, as much as for a
-        // forgotten one. Labelled from the same constant the reset step's title
-        // and `noPasswordOnAccount` use, so the message that tells someone to tap
-        // this cannot end up naming something that isn't here.
+        // Also the way in for an account with no password. Shares its label with
+        // `noPasswordOnAccount`, so that message names a button that exists.
         Button(EmailAuthModel.setPasswordAction) {
             isFocused = false
             Task { await model.startPasswordReset(model.state.email) }
@@ -263,24 +238,15 @@ private struct PasswordStep: View {
 
 // MARK: - Code step
 
-/// Answering a 6-digit code Clerk emailed, for either strategy that sends one:
-/// the first-factor `email_code`, and the reset's `reset_password_email_code`.
-///
-/// One view for both, as Android has one `CodeStep`. They ask the same question
-/// with the same field and the same auto-submit; what differs is the sentence
-/// after the address, where the answer goes, and whether there is a resend. Two
-/// copies of this drifted apart on Android before it was shared, which is the
-/// reason to share it here before that happens rather than after.
+/// A 6-digit code Clerk emailed, for the first-factor `email_code` and the reset's
+/// `reset_password_email_code`. One view for both, as on Android.
 private struct CodeStep: View {
     let model: EmailAuthModel
-    /// Appended to "We sent a 6-digit code to <address>.", when the step needs to
-    /// say what the code is *for*. The first factor does not: a code that signs
-    /// you in needs no explaining.
+    /// Appended to "We sent a 6-digit code to <address>." to say what the code is for.
     var then: String?
     let onSubmit: (String) async -> Void
-    /// Absent on the first-factor step, which has no resend. Present on the
-    /// reset, where it is the only way back from a code that expired or a send
-    /// that failed, since that step offers nothing to switch to.
+    /// Only on the reset, where it is the only way back from an expired code or a
+    /// failed send.
     var onResend: (() async -> Void)?
 
     @State private var code = ""
@@ -310,12 +276,9 @@ private struct CodeStep: View {
         OtpCodeField(code: $code, length: Self.codeLength, isEnabled: !model.state.submitting)
             .padding(.top, 16)
             .onChange(of: code) { _, entered in
-                // A previous failure stops applying the moment the code is edited.
                 model.clearError()
-                // Auto-submit once every digit is in, the standard OTP affordance. This
-                // fires on edits only, so a rejected code sits there until the user
-                // changes it; editing back to full length submits the new attempt. The
-                // model's own in-flight guard covers the double-tap.
+                // Fires on edits only, so a rejected code sits until the user changes it.
+                // The model's in-flight guard covers the double-tap.
                 if entered.count == Self.codeLength {
                     submit()
                 }
@@ -346,20 +309,11 @@ private struct CodeStep: View {
 
 // MARK: - Choosing a password
 
-/// Choosing a password, for both steps that ask for one: finishing a new account
-/// (`createPassword`) and finishing a reset on an account that already exists
-/// (`resetPassword`).
+/// Choosing a password, for `createPassword` and `resetPassword`. One view for both,
+/// as on Android, so the stated minimum cannot differ between them.
 ///
-/// One view for both, as Android has one `SetPasswordStep`. Everything that
-/// matters is identical, the secure field, the stated minimum, the focus
-/// handling, and only the three strings differ. Sharing it is what keeps the
-/// minimum from being stated as one number on one step and another elsewhere,
-/// which `EmailAuthState.minimumPasswordLength` alone would not have caught once
-/// the hint text was duplicated too.
-///
-/// Clerk owns the real policy, so rejections still arrive in its words; the
-/// minimum here is stated up front because the rule is knowable before the user
-/// commits to anything.
+/// Clerk owns the real policy and rejects in its own words; the minimum is stated up
+/// front because it is knowable before the user commits.
 private struct SetPasswordStep: View {
     let model: EmailAuthModel
     let title: String
@@ -430,14 +384,10 @@ private struct SetPasswordStep: View {
 
 // MARK: - Second factor
 
-/// The code challenge: pick a factor (when more than one is offered), then answer
-/// it. Serves both an account's own two-step verification and Clerk's Client
-/// Trust device check, which differ only in wording. Mirrors Android's
-/// second-factor step.
-///
-/// The code for whichever factor is chosen has already been sent by the model —
-/// asking for a code this screen never requested was the dead end Android hit
-/// before it stopped waiting for a tap.
+/// The code challenge: pick a factor (when more than one is offered), then answer it.
+/// Serves both an account's two-step verification and Clerk's Client Trust device
+/// check, which differ only in wording. The model has already sent the chosen
+/// factor's code.
 private struct SecondFactorStep: View {
     let model: EmailAuthModel
 
@@ -452,11 +402,8 @@ private struct SecondFactorStep: View {
             .foregroundStyle(.primary)
 
         if let chosen {
-            // Identified by the factor and by which challenge this is, so either
-            // changing starts an empty field. A code typed for one factor is not a
-            // valid answer to another, and one already submitted is not an answer
-            // to the re-challenge that just emailed a fresh code. The reason is not
-            // part of this: it only ever changes on a new challenge, which the
+            // A new factor or a re-challenge starts an empty field: the typed code
+            // answers neither. The reason only changes on a new challenge, which the
             // generation already counts.
             SecondFactorAnswer(model: model, factor: chosen, reason: reason, canChangeMethod: options.count > 1)
                 .id(SecondFactorAnswer.Identity(factor: chosen, generation: model.state.challengeGeneration))
@@ -487,11 +434,9 @@ private struct SecondFactorStep: View {
         Self.useDifferentEmail(model)
     }
 
-    /// Ask for another code, shared by the two steps that can. The reset step's
-    /// only way back from an expired code or a failed send, and on a challenge
-    /// offering one delivered factor the only way back there too, since the
-    /// chooser is hidden with nothing to switch to. Android pairs the same button
-    /// with the same condition.
+    /// Shared by the reset step and a delivered second factor. It is the only way back
+    /// from an expired code or a failed send on the reset, and on a challenge offering a
+    /// single factor, where the chooser is hidden.
     fileprivate static func resendCode(
         _ model: EmailAuthModel,
         action: @escaping () async -> Void
@@ -506,13 +451,8 @@ private struct SecondFactorStep: View {
         .padding(.top, 14)
     }
 
-    /// The way back to the address field, shared by every step past the first.
-    /// It began as the way out of a challenge the user cannot answer, which is
-    /// still the case it matters most for: an account with MFA enrolled and no
-    /// access to its factor is otherwise stuck. It is also the only exit from
-    /// both password steps and from a reset whose code never arrived. Left on
-    /// this type because that is where it started; it belongs to none of them in
-    /// particular now.
+    /// The way back to the address field, shared by every step past the first. Without
+    /// it, an account with MFA enrolled and no access to its factor is stuck.
     fileprivate static func useDifferentEmail(_ model: EmailAuthModel) -> some View {
         Button("Use a different email") {
             model.changeEmail()
@@ -525,13 +465,11 @@ private struct SecondFactorStep: View {
     }
 }
 
-/// Entry for one chosen factor. Its own view so the typed code is scoped to the
-/// factor by identity rather than by remembering to clear it: the parent
-/// re-creates this on every switch, which is what makes a code typed for the
-/// authenticator app unable to be submitted against an emailed one.
+/// Entry for one chosen factor. Its own view so the typed code is scoped to the factor
+/// by identity: the parent re-creates it on every switch, so a code typed for one
+/// factor cannot be submitted against another.
 private struct SecondFactorAnswer: View {
-    /// What this view's `.id` is keyed on: a change to either part is a different
-    /// challenge and has to start an empty field.
+    /// What this view's `.id` is keyed on.
     struct Identity: Hashable {
         let factor: SecondFactor
         let generation: Int
@@ -557,8 +495,7 @@ private struct SecondFactorAnswer: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(.top, 6)
 
-        // A fixed-width numeric code gets the segmented field; a backup code is
-        // alphanumeric and varies in length, so it gets a plain one.
+        // A backup code is alphanumeric and varies in length, so it gets a plain field.
         if let digits = factor.digitCount {
             OtpCodeField(code: $code, length: digits, isEnabled: !model.state.submitting)
                 .padding(.top, 16)
@@ -589,16 +526,11 @@ private struct SecondFactorAnswer: View {
         )
         .padding(.top, 20)
 
-        // Only for a factor Clerk delivers: an authenticator app and a backup code
-        // have nothing to resend. On a challenge offering one delivered factor this
-        // is the only way back from a code that expired or a send that failed,
-        // since the chooser below is hidden with nothing to switch to. Android
-        // pairs the same button with the same condition.
+        // An authenticator app and a backup code have nothing to resend.
         if factor.needsSending {
             SecondFactorStep.resendCode(model) { await model.resendSecondFactorCode() }
         }
 
-        // Only worth offering when there is something else to switch to.
         if canChangeMethod {
             Button("Use a different method") {
                 model.changeSecondFactor()
@@ -621,9 +553,8 @@ private struct SecondFactorAnswer: View {
 
 // MARK: - Components
 
-/// Segmented one-time-code field: `length` equal-width cells, each showing one
-/// digit, backed by a single invisible text field that owns focus, the keypad
-/// and paste. The next cell to fill is outlined in the label colour.
+/// Segmented one-time-code field: digit cells drawn over a single invisible text
+/// field that owns focus, the keypad and paste.
 private struct OtpCodeField: View {
     @Binding var code: String
     let length: Int
@@ -633,9 +564,7 @@ private struct OtpCodeField: View {
 
     var body: some View {
         ZStack {
-            // Kept in the layout (not hidden) so it can hold the input session; its
-            // glyphs and caret are what the cells below draw, so it renders at a
-            // hair of opacity rather than being drawn twice.
+            // Near-zero opacity rather than hidden, so it keeps the input session.
             TextField("", text: digitsOnly)
                 .keyboardType(.numberPad)
                 .textContentType(.oneTimeCode)
@@ -654,9 +583,8 @@ private struct OtpCodeField: View {
         .disabled(!isEnabled)
     }
 
-    /// Filters on the way in, so the binding the caller watches only ever holds
-    /// digits and never overshoots `length` — a pasted "12 34 56" must not read as
-    /// a complete code and auto-submit before it is normalized.
+    /// Filters on the way in, so a pasted "12 34 56" cannot read as a complete code
+    /// and auto-submit before it is normalized.
     private var digitsOnly: Binding<String> {
         Binding(
             get: { code },
@@ -694,12 +622,8 @@ private struct OtpCodeField: View {
     }
 }
 
-/// Clickwrap notice under the email step's button, matching Android's
-/// `LegalNotice`.
-///
-/// It sits on the email step alone, because that is the only step that can
-/// register, and registering is what makes it necessary: the sign-up sends
-/// `legal_accepted` on the strength of this sentence. The links open in Safari.
+/// Clickwrap notice, matching Android's `LegalNotice`. Only on the email step, the only
+/// one that can register: the sign-up sends `legalAccepted` on the strength of it.
 private struct LegalNotice: View {
     var body: some View {
         Text(notice)
@@ -720,8 +644,6 @@ private struct LegalNotice: View {
         return text
     }
 
-    /// Underlined and in the label colour, so the two targets read as tappable
-    /// against the gray sentence around them.
     private func link(_ label: String, to url: String) -> AttributedString {
         var segment = AttributedString(label)
         segment.link = URL(string: url)
@@ -731,8 +653,6 @@ private struct LegalNotice: View {
     }
 }
 
-/// A centered "or" flanked by hairlines, separating the email form from the
-/// social buttons.
 private struct OrDivider: View {
     var body: some View {
         HStack(spacing: 12) {
@@ -751,8 +671,7 @@ private struct OrDivider: View {
     }
 }
 
-/// The filled capsule action — the same 48pt button `SetupView` registers with.
-/// Also used by the gate's unavailable state for its retry.
+/// The filled capsule action, styled like `SetupView`'s Register button.
 struct AuthPrimaryButton: View {
     let title: String
     let isEnabled: Bool
@@ -801,8 +720,7 @@ private struct AuthOutlineButton: View {
     }
 }
 
-/// The failure line under whichever field it belongs to. Renders nothing when
-/// there is no error, so it costs no space in the layout.
+/// Renders nothing when there is no error, so it costs no space.
 private struct AuthErrorText: View {
     let message: String?
 
@@ -837,8 +755,7 @@ private struct AuthErrorText: View {
         })
 }
 
-/// Drives the model to the code step so the preview renders it without a
-/// network round-trip.
+/// Starts at the code step, without a network round-trip.
 private struct CodeStepPreview: View {
     @State private var model = EmailAuthModel.previewAtCodeStep(email: "tester@example.com")
 

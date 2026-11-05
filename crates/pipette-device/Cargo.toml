@@ -1,8 +1,8 @@
 [package]
 name = "pipette-device"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 description = "Host identity, power, and thermal probes shared by the pipette client crates."
 
 [lints]
@@ -10,7 +10,8 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-log.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 
 pipette-plan-types.workspace = true
 
@@ -18,8 +19,19 @@ pipette-plan-types.workspace = true
 # CoreFoundation's retain/release rules are where hand-rolled FFI goes wrong,
 # so the typed wrappers earn their place over another `extern "C"` block.
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.10"
+core-foundation.workspace = true
 libc.workspace = true
+
+# `posix_fadvise`, to drop a model store's page cache (page_cache.rs).
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc.workspace = true
+
+# PDH and `D3DKMTQueryAdapterInfo`: the per-rep readings and the gate's GPU
+# temperature.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true

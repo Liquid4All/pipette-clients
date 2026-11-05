@@ -1,0 +1,3 @@
+# The MSI ships only the executable; do not require the VC++ redistributable.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

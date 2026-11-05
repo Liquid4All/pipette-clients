@@ -1,0 +1,7 @@
+{
+  "benchmark_id": "eval_future_eval_2026.06.1",
+  "benchmark_type": "eval",
+  "parameter_dataset_name": "2026.06.1",
+  "parameter_eval_id": "future_eval",
+  "parameter_max_tokens": 1024
+}

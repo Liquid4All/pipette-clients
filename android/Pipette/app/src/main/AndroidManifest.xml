@@ -86,6 +86,32 @@
              process at top-app. The activity re-inflates itself in
              onConfigurationChanged, so density and layout changes still render
              correctly. -->
+        <!-- Intent-driven benchmark entry point (PIP-437), the counterpart to iOS's
+             HeadlessRunner. Exported because `adb shell am start` cannot reach a
+             non-exported component, which is the whole automation path.
+
+             android:permission is what keeps "exported" from meaning "any installed
+             app can start a submitting benchmark under this device's identity". A
+             *custom* signature permission would not work: `adb shell` runs as the
+             shell uid, which holds no app-defined permissions, so the framework
+             would reject the automation path this exists for. A *platform*
+             permission shell already holds does work, and WRITE_SECURE_SETTINGS is
+             one: it is signature|privileged, so no third-party app can hold it,
+             while com.android.shell has it (it is what backs `adb shell settings
+             put`). The framework then does the check before this activity is
+             created. See HeadlessCaller for the rest of the reasoning.
+
+             excludeFromRecents + NoDisplay: it starts a job and finishes without
+             ever drawing, so it must not flash a blank window or leave a task card. -->
+        <activity
+            android:name=".headless.HeadlessRunActivity"
+            android:exported="true"
+            android:permission="android.permission.WRITE_SECURE_SETTINGS"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay" />
+
         <activity
             android:name=".BenchmarkActivity"
             android:process=":benchmark"

@@ -49,9 +49,9 @@ enum CompletedResultsCSVExporter {
         return "pipette-results-\(dateTitle)-\(jobPrefix).csv"
     }
 
-    static func csv(for manifest: JobManifest, storage: Storage) -> String {
-        csv(for: manifest, payloadsByCellId: payloadsByCellId(for: manifest, storage: storage),
-            store: storage.benchmarks)
+    static func csv(for manifest: JobManifest, ws: PipetteWorkspace) -> String {
+        csv(for: manifest, payloadsByCellId: payloadsByCellId(for: manifest, ws: ws),
+            store: ws.benchmarks)
     }
 
     static func csv(
@@ -127,9 +127,9 @@ enum CompletedResultsCSVExporter {
         }
     }
 
-    static func resultGroups(for manifest: JobManifest, storage: Storage) -> [CompletedRunModelResultGroup] {
-        let payloadsByCellId = payloadsByCellId(for: manifest, storage: storage)
-        return resultGroups(for: manifest, payloadsByCellId: payloadsByCellId, store: storage.benchmarks)
+    static func resultGroups(for manifest: JobManifest, ws: PipetteWorkspace) -> [CompletedRunModelResultGroup] {
+        let payloadsByCellId = payloadsByCellId(for: manifest, ws: ws)
+        return resultGroups(for: manifest, payloadsByCellId: payloadsByCellId, store: ws.benchmarks)
     }
 
     static func resultGroups(
@@ -217,7 +217,6 @@ enum CompletedResultsCSVExporter {
         for cell: JobCell, payload: [String: Any]?, in catalog: [String: BenchmarkItem] = [:]
     ) -> CompletedRunMetric? {
         guard let payload else { return nil }
-        // Resolve the cell's typed kind; an unknown/legacy type yields no metric.
         guard let type = BenchmarkType(rawValue: benchmarkType(for: cell, in: catalog)) else { return nil }
         let params = benchmarkParams(for: cell, in: catalog)
         do {
@@ -235,8 +234,6 @@ enum CompletedResultsCSVExporter {
         }
     }
 
-    /// CSV/heatmap display string for a computed metric — compact throughput,
-    /// millisecond latency, or a human byte size, keyed off the metric's unit.
     private static func displayValue(for metric: BenchmarkMetric) -> String {
         switch metric.unit {
         case "ms": return formatMilliseconds(metric.numericValue)
@@ -245,11 +242,11 @@ enum CompletedResultsCSVExporter {
         }
     }
 
-    static func payloadsByCellId(for manifest: JobManifest, storage: Storage) -> [CellId: [String: Any]] {
+    static func payloadsByCellId(for manifest: JobManifest, ws: PipetteWorkspace) -> [CellId: [String: Any]] {
         var payloads: [CellId: [String: Any]] = [:]
 
         for cell in manifest.cells {
-            if let payload = payloadAtKnownPath(for: cell, jobId: manifest.jobId, storage: storage) {
+            if let payload = payloadAtKnownPath(for: cell, jobId: manifest.jobId, ws: ws) {
                 payloads[cell.cellId] = payload
             }
         }
@@ -258,8 +255,7 @@ enum CompletedResultsCSVExporter {
     }
 
     static func quantLabel(for cell: JobCell) -> String {
-        // The typed source is the only place an MLX bit-width is recoverable; a GGUF
-        // source may still yield nil quant for an odd filename, hence "unknown".
+        // A GGUF source may yield nil quant for an odd filename, hence "unknown".
         let raw = cell.source.quant
         return (raw ?? "unknown")
             .lowercased()
@@ -267,8 +263,7 @@ enum CompletedResultsCSVExporter {
     }
 
     static func resultModelGroupKey(for cell: JobCell) -> String {
-        // The typed source's family id unifies a model's GGUF and MLX quants and is
-        // correct for MLX (where the dir name isn't a GGUF filename).
+        // Unifies a model's GGUF and MLX quants.
         cell.source.familyId
     }
 
@@ -286,15 +281,13 @@ enum CompletedResultsCSVExporter {
     }
 
     static func resultModelBrand(displayName: String, cells: [JobCell]) -> ModelBrand {
-        // The typed source's repo names the vendor. (Brand still keys off text — a
-        // redistributor's org must not override the packaged model's vendor.)
+        // Matched by family keyword over name and repo, not by the repo's org: a
+        // redistributor must not override the packaged model's vendor.
         let hfRepo = cells.first?.source.repo?.description
         return ModelBrand.detect(name: displayName, hfRepo: hfRepo)
     }
 
-    /// A by-id snapshot of `BenchmarkCatalog.all`, taken once per export/render.
-    /// `all` is recomputed on each access (re-reading the synced catalog), so the
-    /// per-cell helpers below take this snapshot rather than hitting `all` in a loop.
+    /// Taken once per export or render: `BenchmarkCatalog.all` re-reads the synced catalog on each call.
     static func catalogById(store: BenchmarkStore) -> [String: BenchmarkItem] {
         Dictionary(BenchmarkCatalog.all(store: store).map { ($0.benchmarkId, $0) }, uniquingKeysWith: { first, _ in first })
     }
@@ -302,8 +295,6 @@ enum CompletedResultsCSVExporter {
     static func parameterSummary(
         _ benchmarkId: String, in catalog: [String: BenchmarkItem] = [:]
     ) -> String? {
-        // Synced catalog first, then a structured-id parse, so a historical result
-        // whose benchmark left the catalog still resolves its parameters.
         guard let item = resolvedItem(benchmarkId, in: catalog), let type = item.type else { return nil }
         let params = item.rawJson
         switch type {
@@ -314,10 +305,18 @@ enum CompletedResultsCSVExporter {
             let prefill = PayloadScalars.uint(params, "parameter_prefill_tokens")
             let decode = PayloadScalars.uint(params, "parameter_decode_tokens")
             return prefill > 0 && decode > 0 ? "\(prefill)-\(decode)" : nil
-        case .vlThroughput:
+        case .vlThroughput, .vlMaxMemory:
             let width = PayloadScalars.uint(params, "parameter_image_width")
             let height = PayloadScalars.uint(params, "parameter_image_height")
             return width > 0 && height > 0 ? "\(width)x\(height)" : nil
+        case .asrThroughput, .asrMaxMemory:
+            let durationMs = PayloadScalars.uint(params, "parameter_audio_duration_ms")
+            return durationMs > 0 ? "\(durationMs)ms" : nil
+        case .vlSpecDecode:
+            // The draft length is what the catalog id's suffix names (`_k8`); the corpus is
+            // a pin, not a parameter.
+            let draftLength = PayloadScalars.uint(params, "parameter_draft_length")
+            return draftLength > 0 ? "k\(draftLength)" : nil
         case .eval:
             return nil
         }
@@ -337,18 +336,14 @@ enum CompletedResultsCSVExporter {
         resolvedItem(cell.benchmarkId, in: catalog)?.rawJson ?? [:]
     }
 
-    /// Resolve an id to an item for export: the synced catalog or a parsed ladder
-    /// definition (`BenchmarkCatalog.item(forId:in:)`), then a parsed `vl_throughput`
-    /// item for historical VL results — VL isn't on the run ladder, so its id parse
-    /// lives here rather than in the shared resolver.
+    /// Falls back to parsing a `vl_throughput` id here because VL isn't on the run ladder
+    /// the shared resolver parses, so historical VL results still resolve.
     private static func resolvedItem(
         _ benchmarkId: String, in catalog: [String: BenchmarkItem] = [:]
     ) -> BenchmarkItem? {
         BenchmarkCatalog.item(forId: benchmarkId, in: catalog) ?? vlItem(benchmarkId)
     }
 
-    /// A `vl_throughput` item reconstructed from its structured id, for historical
-    /// VL results whose params the synced catalog no longer lists.
     private static func vlItem(_ benchmarkId: String) -> BenchmarkItem? {
         guard let raw = parseVlParams(benchmarkId) else { return nil }
         return BenchmarkItem(
@@ -356,8 +351,7 @@ enum CompletedResultsCSVExporter {
             sampleCount: nil, rawJson: raw, definition: nil)
     }
 
-    /// Parse `vl_throughput_<W>x<H>_<text>_<decode>` into its `parameter_*` dict.
-    /// Returns nil for any non-VL or malformed id.
+    /// Parses `vl_throughput_<W>x<H>_<text>_<decode>`.
     private static func parseVlParams(_ benchmarkId: String) -> [String: Any]? {
         let prefix = "vl_throughput_"
         guard benchmarkId.hasPrefix(prefix) else { return nil }
@@ -374,8 +368,8 @@ enum CompletedResultsCSVExporter {
         ]
     }
 
-    private static func payloadAtKnownPath(for cell: JobCell, jobId: JobId, storage: Storage) -> [String: Any]? {
-        guard let path = storage.results.payloadPath(of: cell.cellId) else { return nil }
+    private static func payloadAtKnownPath(for cell: JobCell, jobId: JobId, ws: PipetteWorkspace) -> [String: Any]? {
+        guard let path = ws.results.payloadPath(of: cell.cellId) else { return nil }
         do {
             return try ResultPayload.readObject(at: path)
         } catch {

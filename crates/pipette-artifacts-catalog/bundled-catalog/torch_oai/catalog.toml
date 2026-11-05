@@ -1,0 +1,317 @@
+# Bundled vLLM / SGLang uv runtime catalog, keyed by the slug
+# `<server>@<server_version>+<build>.py<python_version>`. README.md beside this
+# file describes the columns.
+
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "cu121"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - NVIDIA CUDA 12.1.
+--extra-index-url https://download.pytorch.org/whl/cu121
+vllm==0.21.0
+'''
+
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "cu124"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - NVIDIA CUDA 12.4.
+--extra-index-url https://download.pytorch.org/whl/cu124
+vllm==0.21.0
+'''
+
+# Installs vLLM's CUDA wheel from PyPI (`--extra-index-url` redirects only
+# torch), so it does not run on an AMD GPU; kept so its slug stays
+# resolvable. Use a `rocm72*` row below.
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "rocm6"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - AMD ROCm 6.x.
+# ROCm wheels typically lag mainline; if no matching wheel is
+# published yet, roll back the server_version in this catalog entry.
+--extra-index-url https://download.pytorch.org/whl/rocm6.0
+vllm==0.21.0
+'''
+
+[[uv_vllm]]
+server_version = "0.21.0"
+build = "cpu"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.21.0 - CPU-only (smoke / dev). Not performance-tested.
+--extra-index-url https://download.pytorch.org/whl/cpu
+vllm==0.21.0
+'''
+
+# The PyPI `vllm==0.22.0` wheel is the CUDA 13 build (`vllm._C` links
+# libcudart.so.13), and `--extra-index-url` redirects only torch, so a sub-13
+# CUDA build must pin vLLM's `+cuNNN` release wheel by URL. 0.22.0 publishes
+# only `+cu129` (and `+cpu`); cu129 runs on any 12.x driver >= 550.54.14 via
+# CUDA minor-version compatibility (verified on an A10, driver 570.x).
+[[uv_vllm]]
+server_version = "0.22.0"
+build = "cu129"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.22.0 - NVIDIA CUDA 12.9, pinned by release-wheel URL (a bare
+# `vllm==0.22.0` would resolve to the CUDA 13 PyPI default). Runs on
+# 12.8 drivers via CUDA 12.x minor-version compatibility.
+--extra-index-url https://download.pytorch.org/whl/cu129
+https://github.com/vllm-project/vllm/releases/download/v0.22.0/vllm-0.22.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl
+'''
+
+[[uv_vllm]]
+server_version = "0.22.0"
+build = "cu130"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.22.0 - NVIDIA CUDA 13.0 (the default PyPI wheel). Needs a 580+
+# driver; will not load on a 12.x-only driver.
+--extra-index-url https://download.pytorch.org/whl/cu130
+vllm==0.22.0
+'''
+
+# vLLM 0.30.0 (released 2026-09-22). Same wheel layout as 0.22.0: the PyPI
+# `vllm==0.30.0` wheel is the CUDA 13 build (`nvidia-cutlass-dsl[cu13]`), and
+# the release page carries `+cu129` and `+cpu` wheels. Both resolve torch
+# 2.13.0 from the matching PyTorch index.
+[[uv_vllm]]
+server_version = "0.30.0"
+build = "cu129"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.30.0 - NVIDIA CUDA 12.9, pinned by release-wheel URL (a bare
+# `vllm==0.30.0` would resolve to the CUDA 13 PyPI default). Runs on
+# 12.8 drivers via CUDA 12.x minor-version compatibility.
+# torchcodec is pinned because the cu129 index stops at 0.16.0, so the
+# resolver otherwise takes PyPI's 0.17.0, a CUDA 13 build that fails to load
+# `libnvrtc.so.13` when vLLM imports it at start-up.
+--extra-index-url https://download.pytorch.org/whl/cu129
+https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl
+torchcodec==0.16.0+cu129
+'''
+
+[[uv_vllm]]
+server_version = "0.30.0"
+build = "cu130"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.30.0 - NVIDIA CUDA 13.0 (the default PyPI wheel). Needs a 580+
+# driver; will not load on a 12.x-only driver.
+--extra-index-url https://download.pytorch.org/whl/cu130
+vllm==0.30.0
+'''
+
+# The `+cpu` wheel is tagged manylinux_2_39, so it installs only on glibc 2.39
+# or newer (Ubuntu 24.04, Debian 13). Ubuntu 22.04 hosts refuse it at install.
+# The server also needs a host C++ compiler: torch inductor compiles its CPU
+# kernels with `g++` at start-up, and the engine dies without one.
+[[uv_vllm]]
+server_version = "0.30.0"
+build = "cpu"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.30.0 - CPU-only, pinned by release-wheel URL (the PyPI wheel is the
+# CUDA build).
+--extra-index-url https://download.pytorch.org/whl/cpu
+https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl
+'''
+
+# vLLM 0.32.0 (released 2026-10-18). Same wheel layout, torch 2.13.0 and host
+# needs as the 0.30.0 rows above, so cu129 keeps its torchcodec pin and cpu
+# needs glibc 2.39 and a host `g++`.
+[[uv_vllm]]
+server_version = "0.32.0"
+build = "cu129"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.32.0 - NVIDIA CUDA 12.9, pinned by release-wheel URL (a bare
+# `vllm==0.32.0` would resolve to the CUDA 13 PyPI default). Runs on
+# 12.8 drivers via CUDA 12.x minor-version compatibility.
+# torchcodec is pinned because the cu129 index stops at 0.16.0, so the
+# resolver otherwise takes PyPI's 0.17.0, a CUDA 13 build.
+--extra-index-url https://download.pytorch.org/whl/cu129
+https://github.com/vllm-project/vllm/releases/download/v0.32.0/vllm-0.32.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl
+torchcodec==0.16.0+cu129
+'''
+
+[[uv_vllm]]
+server_version = "0.32.0"
+build = "cu130"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.32.0 - NVIDIA CUDA 13.0 (the default PyPI wheel). Needs a 580+
+# driver; will not load on a 12.x-only driver.
+--extra-index-url https://download.pytorch.org/whl/cu130
+vllm==0.32.0
+'''
+
+[[uv_vllm]]
+server_version = "0.32.0"
+build = "cpu"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.32.0 - CPU-only, pinned by release-wheel URL (the PyPI wheel is the
+# CUDA build).
+--extra-index-url https://download.pytorch.org/whl/cpu
+https://github.com/vllm-project/vllm/releases/download/v0.32.0/vllm-0.32.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl
+'''
+
+# vLLM on AMD GPUs (ROCm 7.2), from vLLM's own ROCm wheel index: the PyPI
+# wheel is a CUDA build, and the index pins the ROCm torch, triton and aiter
+# each release was built against. One index per release,
+# `https://wheels.vllm.ai/rocm/<version>/rocm72<n>/`; each needs that ROCm (or
+# a newer 7.x) on the host. Up to 0.27.1 they install on glibc 2.35 (Ubuntu
+# 22.04); from 0.28.0 they need glibc 2.39, below. Verified on MI325X (gfx942,
+# ROCm 7.2.3, Ubuntu 22.04): installed with uv in about 30 s and served
+# LFM2-350M and LFM2.5-1.2B-Instruct (0.27.1 resolves transformers 5.x on its
+# own, so no pin is needed).
+[[uv_vllm]]
+server_version = "0.22.0"
+build = "rocm722"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.22.0 - AMD ROCm 7.2.2 (vLLM's ROCm wheel index).
+--extra-index-url https://wheels.vllm.ai/rocm/0.22.0/rocm722
+vllm==0.22.0+rocm722
+'''
+
+[[uv_vllm]]
+server_version = "0.27.1"
+build = "rocm723"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.27.1 - AMD ROCm 7.2.3 (vLLM's ROCm wheel index). The newest release
+# whose ROCm wheels install on glibc 2.35.
+--extra-index-url https://wheels.vllm.ai/rocm/0.27.1/rocm723
+vllm==0.27.1+rocm723
+'''
+
+# From 0.28.0 vLLM's ROCm wheels and their torch are manylinux_2_39: they
+# install on glibc 2.39 or newer (Ubuntu 24.04), and the host also needs
+# ROCm 7.2's own libraries (the torch wheel does not bundle libroctx64), plus
+# OpenMPI, elfutils' libdw, libsqlite3 and a C compiler, which Triton calls at
+# start-up. Verified on MI325X in an Ubuntu 24.04 container with the host's
+# ROCm 7.2.3 mounted: both served LFM2.5-1.2B-Instruct.
+[[uv_vllm]]
+server_version = "0.30.0"
+build = "rocm723"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.30.0 - AMD ROCm 7.2.3 (vLLM's ROCm wheel index). glibc 2.39.
+--extra-index-url https://wheels.vllm.ai/rocm/0.30.0/rocm723
+vllm==0.30.0+rocm723
+'''
+
+[[uv_vllm]]
+server_version = "0.31.0"
+build = "rocm723"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.31.0 - AMD ROCm 7.2.3 (vLLM's ROCm wheel index). glibc 2.39.
+--extra-index-url https://wheels.vllm.ai/rocm/0.31.0/rocm723
+vllm==0.31.0+rocm723
+'''
+
+# The first release with MiniCPM-V 4.7 (MiniCPMV4_7ForConditionalGeneration).
+[[uv_vllm]]
+server_version = "0.32.0"
+build = "rocm723"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# vLLM 0.32.0 - AMD ROCm 7.2.3 (vLLM's ROCm wheel index). glibc 2.39.
+--extra-index-url https://wheels.vllm.ai/rocm/0.32.0/rocm723
+vllm==0.32.0+rocm723
+'''
+
+[[uv_sglang]]
+server_version = "0.5.12.post1"
+build = "cu121"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.12.post1 - NVIDIA CUDA 12.1.
+--extra-index-url https://download.pytorch.org/whl/cu121
+sglang[all]==0.5.12.post1
+'''
+
+# SGLang publishes no ROCm wheels (on AMD it ships as the
+# lmsysorg/sglang-rocm images), so this resolves CUDA packages and does not
+# run on an AMD GPU; kept so its slug stays resolvable.
+[[uv_sglang]]
+server_version = "0.5.12.post1"
+build = "rocm6"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.12.post1 - AMD ROCm 6.x. Some `[all]` deps are NVIDIA-only.
+--extra-index-url https://download.pytorch.org/whl/rocm6.0
+sglang[all]==0.5.12.post1
+'''
+
+[[uv_sglang]]
+server_version = "0.5.12.post1"
+build = "cpu"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.12.post1 - CPU-only (smoke / dev). `[all]` skipped.
+--extra-index-url https://download.pytorch.org/whl/cpu
+sglang==0.5.12.post1
+'''
+
+# From 0.5.21 SGLang's compiled wheels depend on CUDA 13 packages
+# (`flashinfer_python[cu13]`, `nvidia-cutlass-dsl[cu13]`), so there is one row:
+# no sub-13 CUDA, ROCm or CPU build is published. `[all]` now means the
+# diffusion, HTTP/2 and tracing extras, which a text server does not need.
+#
+# The server JIT-compiles DeepGEMM kernels at start-up with the host's `nvcc`
+# and refuses one older than 12.9 ("NVCC version must be at least 12.9"). On
+# such a host, run the cell with `envs = ["SGLANG_ENABLE_JIT_DEEPGEMM=0"]`;
+# DeepGEMM serves FP8 models only, so a bf16 cell loses nothing.
+[[uv_sglang]]
+server_version = "0.5.21"
+build = "cu130"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.21 - NVIDIA CUDA 13.0. Needs a 580+ driver.
+--extra-index-url https://download.pytorch.org/whl/cu130
+sglang==0.5.21
+'''
+
+# SGLang 0.5.23 pins torch 2.14.1. PyTorch publishes no cu131 build, so this
+# cu130 row is also the CUDA 13.1 build: it runs on any 13.x driver (580+)
+# through CUDA minor-version compatibility. Verified on a Jetson AGX Thor
+# (aarch64, driver 595, CUDA 13.2).
+[[uv_sglang]]
+server_version = "0.5.23"
+build = "cu130"
+python_version = "3.12"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+requirements = '''
+# SGLang 0.5.23 - NVIDIA CUDA 13.0; also runs on CUDA 13.1. Needs a 580+ driver.
+--extra-index-url https://download.pytorch.org/whl/cu130
+sglang==0.5.23
+'''

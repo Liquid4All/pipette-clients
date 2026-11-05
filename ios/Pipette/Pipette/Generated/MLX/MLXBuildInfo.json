@@ -1,0 +1,5 @@
+{
+  "mlx_swift": {"repository_url": "github.com/ml-explore/mlx-swift", "tag": "0.32.3", "commit": "19601207e"},
+  "mlx_swift_lm": {"repository_url": "github.com/ml-explore/mlx-swift-lm", "tag": "3.32.3", "commit": "3b339ad6e"},
+  "swift_transformers": {"repository_url": "github.com/huggingface/swift-transformers", "tag": "1.3.4", "commit": "c21fdcde3"}
+}

@@ -2,10 +2,8 @@ package ai.liquid.pipette
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import com.google.crypto.tink.Aead
 import com.google.crypto.tink.subtle.Ed25519Sign
 import com.google.crypto.tink.subtle.Ed25519Verify
-import java.security.GeneralSecurityException
 import java.util.Base64
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -424,32 +422,180 @@ class SecretsTest {
     assertNull(prefs.getString("private_key_hex_enc", null))
   }
 
+  /** The accessor `auth-export` exists for: the promoted key, as the hex the wire format and both other clients already use. */
+  @Test
+  fun exportingReturnsThePromotedKeyAsHex() {
+    val publicKeyHex = secrets.generatePendingSigningKeyPair()
+    assertTrue(secrets.promotePendingPrivateKey())
+
+    val exported = secrets.exportPrivateKeyHex()
+
+    assertEquals(64, exported!!.length)
+    assertEquals("the exported hex is the stored one", storedSecret("private_key_hex"), exported)
+    // The identity the export names: a bundle carrying this hex signs for the public key the server holds.
+    assertEquals(publicKeyHex, publicKeyOf(exported.hexToBytesOrNull()!!).toHex())
+  }
+
+  @Test
+  fun exportingReturnsNullWithNoKey() {
+    assertNull(secrets.exportPrivateKeyHex())
+    // A staged-but-unpromoted key is not the identity either: the server has not accepted it, so exporting it would carry a key nothing recognizes.
+    secrets.generatePendingSigningKeyPair()
+    assertNull("a pending key must not be exportable", secrets.exportPrivateKeyHex())
+  }
+
   /**
-   * Models the AEAD semantics [Secrets] actually depends on, which Robolectric's Keystore can't provide: the associated data is bound into the
-   * ciphertext and a mismatch throws, so the slot-binding test exercises the real contract rather than a stub that ignores it.
+   * A legacy blob exports without being migrated.
    *
-   * It deliberately does NOT model two properties of the real AES-256-GCM, and no test here may rely on them: it provides no confidentiality (the
-   * plaintext sits verbatim after the AAD prefix), and it is deterministic (real GCM picks a fresh nonce per call, so re-encrypting would not
-   * reproduce a stored blob byte for byte).
-   *
-   * [failEncrypt] models the case the fail-safe write paths exist for: a Keystore that resolved at construction and then failed, which is a different
-   * branch of `seal` from a null AEAD and the only one that reaches the multi-slot editor transactions.
+   * Both halves matter. It exports, so an install that predates the Tink rewrite can still carry its identity to a new device. And it does not
+   * migrate, because printing a bundle must not rewrite key material — the same rule [Secrets.hasPrivateKey] follows for the same reason.
    */
-  private class FakeAead(private val failEncrypt: Boolean = false) : Aead {
-    override fun encrypt(plaintext: ByteArray, associatedData: ByteArray): ByteArray {
-      if (failEncrypt) throw GeneralSecurityException("keystore unavailable")
-      return byteArrayOf(associatedData.size.toByte()) + associatedData + plaintext
+  @Test
+  fun exportingALegacyKeyIsAPureRead() {
+    val seed = ByteArray(32) { (it + 13).toByte() }
+    storeLegacy("private_key_pkcs8", pkcs8(seed))
+
+    assertEquals(seed.toHex(), secrets.exportPrivateKeyHex())
+
+    assertNull("a pure read must not migrate", storedSecret("private_key_hex"))
+    assertNotNull("the legacy blob must survive an export", prefs.getString("private_key_pkcs8", null))
+  }
+
+  /**
+   * Pre-encryption plaintext exports too, and stays plaintext: the concession that keeps a not-yet-migrated install working through a Keystore
+   * outage.
+   */
+  @Test
+  fun exportingPlaintextDoesNotMigrateIt() {
+    val seed = ByteArray(32) { (it + 19).toByte() }
+    storePlaintextSecret("private_key_hex", seed.toHex())
+
+    assertEquals(seed.toHex(), secrets.exportPrivateKeyHex())
+
+    assertNotNull("a pure read must not migrate", prefs.getString("private_key_hex", null))
+    assertNull(prefs.getString("private_key_hex_enc", null))
+  }
+
+  /** The import path: stage, promote, and the device signs for the imported identity rather than one of its own. */
+  @Test
+  fun anImportedKeyRoundTripsThroughTheStagingSlot() {
+    val seed = ByteArray(32) { (it + 29).toByte() }
+
+    assertEquals(Secrets.KeyReplacement.REPLACED, secrets.replacePrivateKeyHex(seed.toHex(), expected = null))
+
+    assertSignsUnder(publicKeyOf(seed))
+    assertEquals(seed.toHex(), secrets.exportPrivateKeyHex())
+    assertNull("the staging slot is cleared by promotion", storedSecret("pending_private_key_hex"))
+  }
+
+  /** The slot holds one canonical spelling, so a bundle written in upper case does not leave the device storing hex in two forms. */
+  @Test
+  fun anImportedKeyIsStoredInOneCanonicalSpelling() {
+    val seed = ByteArray(32) { (it + 31).toByte() }
+
+    assertEquals(Secrets.KeyReplacement.REPLACED, secrets.replacePrivateKeyHex(seed.toHex().uppercase(), expected = null))
+
+    assertEquals(seed.toHex(), secrets.exportPrivateKeyHex())
+  }
+
+  /**
+   * An empty slot and a slot the Keystore cannot open are told apart, though both export as null.
+   *
+   * `auth-import` decides whether to refuse on this difference. A Keystore outage that reported as an empty slot would let an unforced import
+   * overwrite a key the next successful `unseal` returns.
+   */
+  @Test
+  fun anUnreadableKeyIsDistinguishedFromAnAbsentOne() {
+    val seed = ByteArray(32) { (it + 59).toByte() }
+    assertFalse("an empty slot is not unreadable", secrets.hasUnreadablePrivateKey())
+
+    assertEquals(Secrets.KeyReplacement.REPLACED, secrets.replacePrivateKeyHex(seed.toHex(), expected = null))
+    assertFalse("a key this process can open is not unreadable", secrets.hasUnreadablePrivateKey())
+
+    val outage = Secrets(context, aead = null)
+    assertNull("both states export as null", outage.exportPrivateKeyHex())
+    assertTrue("the slot still holds the key", outage.hasUnreadablePrivateKey())
+  }
+
+  /**
+   * An import over a key the caller never saw writes nothing.
+   *
+   * The race this closes: `auth-import` reads the promoted slot in `HeadlessFacts`, and a registration running on its own dispatcher can promote a
+   * key of its own before the import acts. Without the comparison the import overwrites that key unforced, because the `force=` gate already decided
+   * against a slot that no longer holds what it read.
+   */
+  @Test
+  fun anImportRefusesWhenThePromotedKeyChangedAfterTheCallerReadIt() {
+    val landed = ByteArray(32) { (it + 41).toByte() }
+    val importing = ByteArray(32) { (it + 43).toByte() }
+    assertEquals(Secrets.KeyReplacement.REPLACED, secrets.replacePrivateKeyHex(landed.toHex(), expected = null))
+
+    assertEquals(Secrets.KeyReplacement.KEY_CHANGED, secrets.replacePrivateKeyHex(importing.toHex(), expected = null))
+
+    assertEquals("the key the caller never saw survives", landed.toHex(), secrets.exportPrivateKeyHex())
+  }
+
+  /**
+   * An import while a registration holds the staging slot writes nothing.
+   *
+   * [Secrets.generatePendingSigningKeyPair] returns to its caller while the server round trip is still in flight, so the staged key is a public key
+   * the server may already have recorded. An import that promoted its own key over it would leave that client record unsignable.
+   */
+  @Test
+  fun anImportRefusesWhileARegistrationStagesItsOwnKey() {
+    val importing = ByteArray(32) { (it + 47).toByte() }
+    val registering = secrets.generatePendingSigningKeyPair()
+
+    assertEquals(Secrets.KeyReplacement.KEY_STAGED, secrets.replacePrivateKeyHex(importing.toHex(), expected = null))
+
+    assertNull("the import promoted nothing", secrets.exportPrivateKeyHex())
+    assertTrue("the registration can still complete", secrets.promotePendingPrivateKey())
+    val promoted = publicKeyOf(checkNotNull(secrets.exportPrivateKeyHex()?.hexToBytesOrNull()))
+    assertEquals("the registration's key promoted, not the import's", registering, promoted.toHex())
+  }
+
+  /**
+   * A rerun over the key a half-finished import staged completes the restore.
+   *
+   * The staging slot tells a registration in flight apart from an import that stopped between its two writes only by which key it holds. A rerun of
+   * the same bundle finds its own key there, so it promotes rather than reporting [Secrets.KeyReplacement.KEY_STAGED] at itself forever.
+   */
+  @Test
+  fun aRerunPromotesTheKeyAHalfFinishedImportStaged() {
+    val seed = ByteArray(32) { (it + 53).toByte() }
+    storePlaintextSecret("pending_private_key_hex", seed.toHex())
+
+    assertEquals(Secrets.KeyReplacement.REPLACED, secrets.replacePrivateKeyHex(seed.toHex().uppercase(), expected = null))
+
+    assertEquals(seed.toHex(), secrets.exportPrivateKeyHex())
+  }
+
+  /**
+   * A value that is not a 32-byte Ed25519 seed is refused rather than staged.
+   *
+   * Promotion would otherwise write a key `readPrivateKey` reads back as absent, leaving a device that reports itself registered and can sign nothing
+   * — the one outcome the whole seal-before-clear discipline exists to prevent.
+   */
+  @Test
+  fun stagingRefusesAValueThatIsNotAnEd25519Seed() {
+    for (bad in listOf("not hex", ByteArray(16) { 1 }.toHex(), "", "-1".repeat(32))) {
+      assertEquals("'$bad' must not be staged", Secrets.KeyReplacement.NOT_STAGED, secrets.replacePrivateKeyHex(bad, expected = null))
     }
 
-    override fun decrypt(ciphertext: ByteArray, associatedData: ByteArray): ByteArray {
-      // Every malformed input must surface as GeneralSecurityException, like a real AEAD: production code
-      // funnels these through runCatching, so a fake that threw IndexOutOfBounds would hide the difference.
-      val adSize = ciphertext.firstOrNull()?.toInt() ?: throw GeneralSecurityException("empty ciphertext")
-      if (adSize < 0 || 1 + adSize > ciphertext.size) throw GeneralSecurityException("truncated ciphertext")
-      val ad = ciphertext.copyOfRange(1, 1 + adSize)
-      if (!ad.contentEquals(associatedData)) throw GeneralSecurityException("associated data mismatch")
-      return ciphertext.copyOfRange(1 + adSize, ciphertext.size)
-    }
+    assertNull(storedSecret("pending_private_key_hex"))
+    assertFalse("nothing was staged, so there is nothing to promote", secrets.promotePendingPrivateKey())
+  }
+
+  /** A Keystore that cannot seal leaves the staging slot untouched, so a failed import writes nothing at all. */
+  @Test
+  fun stagingLeavesNothingBehindWhenTheKeyCannotBeSealed() {
+    val sealFails = Secrets(context, FakeAead(failEncrypt = true))
+
+    assertEquals(Secrets.KeyReplacement.NOT_STAGED, sealFails.replacePrivateKeyHex(ByteArray(32) { (it + 37).toByte() }.toHex(), expected = null))
+
+    assertNull(prefs.getString("pending_private_key_hex", null))
+    assertNull(prefs.getString("pending_private_key_hex_enc", null))
+    assertNull(secrets.exportPrivateKeyHex())
   }
 
   private companion object {

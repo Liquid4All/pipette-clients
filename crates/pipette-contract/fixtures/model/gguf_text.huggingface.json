@@ -1,0 +1,7 @@
+{
+  "org": "LiquidAI",
+  "path": "LFM2.5-350M-Q4_0.gguf",
+  "repo_name": "LFM2.5-350M-GGUF",
+  "source": "huggingface",
+  "type": "gguf_text"
+}

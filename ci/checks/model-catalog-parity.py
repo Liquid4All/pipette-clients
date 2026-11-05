@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""Pin the iOS and Android preset model catalogs to the same GGUF set.
+"""Hold the iOS and Android preset model catalogs to a declared divergence set.
 
-The two clients hand-maintain separate catalogs in different languages, so they
-drift silently: a model added to one is simply absent from the other, and
-nothing fails. That is how `LiquidAI/LFM2.5-230M-GGUF` and
-`LiquidAI/LFM2.5-8B-A1B-GGUF` sat on iOS only until a manual parity audit found
-them (PIP-435). This check turns the next divergence into a failed build.
+The two catalogs are hand-maintained in different languages and drift silently.
+They may legitimately differ (a model ships on a platform only when that
+platform's phone finished the ladder resident, without swapping), but every
+difference must be declared here with the device result behind it.
 
-Compared as a set of `(repo, quant)` pairs rather than repos alone: offering a
-quant on one platform and not the other is the same class of gap, and the
-catalogs agree at that granularity today.
+Both directions fail:
 
-Scope is deliberately GGUF only. MLX entries are Apple-silicon bundles with no
-Android counterpart, so they are not a divergence.
+- a row on one platform and not the other, not listed in `IOS_ONLY` /
+  `ANDROID_ONLY`, is undeclared drift;
+- a listed row that no longer diverges is a stale exemption, so the list
+  cannot only grow.
 
-If a model genuinely belongs on one platform only, this check is the wrong place
-to encode that: add it to both and gate it at the UI, or extend this script with
-an explicit, commented exception list. Do not simply delete the entry that fails.
+Two formats are compared, each on its own identity:
+
+- GGUF, as `(repo, quant)`: a quant offered on one platform only is a gap too;
+- ONNX Runtime GenAI, as `(repo, normalized prefix, declared revision)`: one repo
+  publishes several packages, and the same repo at another commit is other weights.
+
+MLX is excluded: Apple-silicon bundles have no Android counterpart.
+
+Do not resolve a failure by deleting the entry that fails. Either add it to the
+other catalog, or declare it below with its reason.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-IOS_CATALOG = Path("ios/Pipette/Pipette/Contracts/ModelSourceCatalog.swift")
+IOS_CATALOG = Path("ios/Pipette/Pipette/Models/CatalogEntry.swift")
 ANDROID_CATALOG = Path(
     "android/Pipette/app/src/main/java/ai/liquid/pipette/ModelTemplates.kt"
 )
@@ -34,10 +40,60 @@ ANDROID_CATALOG = Path(
 # `.gguf("Display Name", "org/repo", "QUANT", bytes: 123)`
 IOS_ENTRY = re.compile(r'\.gguf\(\s*"[^"]*",\s*"([^"]+)",\s*"([^"]+)"')
 
-# The `identifier` argument of a PresetModel: `"org/repo:QUANT"`. Matched on its
-# own rather than by position because Android wraps longer entries across lines,
-# and this shape appears nowhere else in the file.
+# A PresetModel's `"org/repo:QUANT"` identifier. Matched on its own, not by
+# position, because Android wraps longer entries across lines.
 ANDROID_ENTRY = re.compile(r'"([\w.\-]+/[\w.\-]+):([A-Za-z0-9_]+)"')
+
+# Row counters, compared with the coordinate count by `extract`. The lookbehind skips
+# the `data class PresetModel(` declaration; iOS's `func gguf(` has no leading dot.
+IOS_ROW = re.compile(r"\.gguf\(")
+ANDROID_ROW = re.compile(r"(?<!class )PresetModel\(")
+
+
+# Rows a platform offers alone, on purpose (PIP-511). Each catalog is the set of
+# configurations the results dashboard publishes for that handset's llama.cpp engine:
+#
+#   https://pipette.liquid.ai/results?hw=Galaxy+S26+Ultra+%2F+llama.cpp%3Aandroid-arm64-v8a
+#   https://pipette.liquid.ai/results?hw=iPhone+17+Pro+%2F+llama.cpp%3Aios
+#
+# `unsloth/Olmo-3-7B-Think-GGUF` has published cells on the iPhone 17 Pro and none on
+# the SM-S948U1 (Galaxy S26 Ultra).
+IOS_ONLY: set[tuple[str, str]] = {
+    ("unsloth/Olmo-3-7B-Think-GGUF", "Q4_K_M"),
+}
+
+ANDROID_ONLY: set[tuple[str, str]] = set()
+
+# `.onnxGenai("Display Name", "org/repo", prefix: "a/b", revision: "sha", bytes: 123)`,
+# wrapped across lines. Not a widened GGUF regex: an ONNX row could then satisfy the
+# GGUF row count and vanish from both comparisons.
+IOS_ONNX_ENTRY = re.compile(
+    r'\.onnxGenai\(\s*"[^"]*",\s*"([^"]+)",'
+    r'\s*prefix:\s*"([^"]*)",'
+    r'\s*revision:\s*"([^"]+)"'
+)
+# Anchored on the display-name literal: a bare `.onnxGenai(` also matches the enum
+# case the builder constructs in its own body.
+IOS_ONNX_ROW = re.compile(r'\.onnxGenai\(\s*"')
+
+# Android has no ONNX Runtime GenAI catalog yet (PIP-593). Any mention of ONNX there
+# fails, so the Android coordinate grammar gets written with its first rows instead of
+# comparing against an empty set forever.
+ANDROID_ONNX_MARKER = re.compile(r"onnx", re.IGNORECASE)
+
+# iOS-only because Android has no ONNX runtime yet; PIP-593 removes this set.
+IOS_ONLY_ONNX: set[tuple[str, str, str]] = {
+    (
+        "microsoft/Phi-3-mini-4k-instruct-onnx",
+        "cpu_and_mobile/cpu-int4-rtn-block-32",
+        "5f5f794c1c23c9d5ee142af85df02a6cc52d6945",
+    ),
+}
+
+
+def normalized_prefix(prefix: str) -> str:
+    """A repo subpath in one spelling: `a/b`, `/a/b` and `a//b/` compare equal."""
+    return "/".join(part for part in prefix.split("/") if part)
 
 
 def repo_root() -> Path:
@@ -50,29 +106,70 @@ def repo_root() -> Path:
     return Path(out.stdout.strip())
 
 
-def extract(path: Path, pattern: re.Pattern[str]) -> set[tuple[str, str]]:
+def extract(
+    path: Path, pattern: re.Pattern[str], row: re.Pattern[str], name: str
+) -> set[tuple[str, str]]:
+    """Every `(repo, quant)` in one catalog, refusing to read it partially.
+
+    `pattern` reads a row's coordinate; `row` counts the rows that are there. A
+    mismatch fails, so a row the coordinate regex cannot read is not skipped in
+    silence (Android's `DownloadCoordinator.parseDownloadInput` accepts more shapes
+    than `ANDROID_ENTRY`). Prose containing a row marker fails too, which is the
+    safe direction.
+    """
     if not path.exists():
         print(f"catalog not found: {path}", file=sys.stderr)
         raise SystemExit(1)
-    return set(pattern.findall(path.read_text(encoding="utf-8")))
+    text = path.read_text(encoding="utf-8")
+    found = pattern.findall(text)
+    authored = len(row.findall(text))
+    if len(found) != authored:
+        print(
+            f"{name}: read {len(found)} coordinates from {authored} catalog rows in "
+            f"{path}.\n  A row this check cannot parse is invisible to it, so an "
+            "undeclared divergence there would pass. Widen the coordinate regex, or "
+            "the row counter if the extra hit is prose.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return set(found)
 
 
-def report(title: str, missing: set[tuple[str, str]], target: Path) -> None:
-    if not missing:
+def extract_onnx(path: Path) -> set[tuple[str, str, str]]:
+    """Every `(repo, normalized prefix, revision)` in the iOS ONNX catalog.
+
+    Same read-it-all-or-fail rule as `extract`.
+    """
+    text = path.read_text(encoding="utf-8")
+    found = IOS_ONNX_ENTRY.findall(text)
+    authored = len(IOS_ONNX_ROW.findall(text))
+    if len(found) != authored:
+        print(
+            f"iOS ONNX: read {len(found)} coordinates from {authored} catalog rows in "
+            f"{path}.\n  A row this check cannot parse is invisible to it. Widen "
+            "IOS_ONNX_ENTRY, or IOS_ONNX_ROW if the extra hit is prose.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return {
+        (repo, normalized_prefix(prefix), revision) for repo, prefix, revision in found
+    }
+
+
+def report(title: str, rows: set[tuple[str, ...]], fix: str) -> None:
+    if not rows:
         return
-    print(f"{title} (add to {target}):", file=sys.stderr)
-    for repo, quant in sorted(missing):
-        print(f"  {repo}:{quant}", file=sys.stderr)
+    print(f"{title} ({fix}):", file=sys.stderr)
+    for row in sorted(rows):
+        print(f"  {':'.join(row)}", file=sys.stderr)
 
 
 def main() -> int:
     root = repo_root()
-    ios = extract(root / IOS_CATALOG, IOS_ENTRY)
-    android = extract(root / ANDROID_CATALOG, ANDROID_ENTRY)
+    ios = extract(root / IOS_CATALOG, IOS_ENTRY, IOS_ROW, "iOS")
+    android = extract(root / ANDROID_CATALOG, ANDROID_ENTRY, ANDROID_ROW, "Android")
 
-    # An empty side means the regex stopped matching (a refactor of either
-    # catalog's shape), not that a platform genuinely ships no models. Fail
-    # loudly rather than reporting a spurious set difference.
+    # An empty side means the regex stopped matching, not that a platform ships nothing.
     catalogs = (("iOS", ios, IOS_CATALOG), ("Android", android, ANDROID_CATALOG))
     for name, found, path in catalogs:
         if not found:
@@ -83,12 +180,60 @@ def main() -> int:
             )
             return 1
 
-    report("present on iOS but missing on Android", ios - android, ANDROID_CATALOG)
-    report("present on Android but missing on iOS", android - ios, IOS_CATALOG)
-    if ios != android:
+    # `stale` covers a declared row now on both platforms and one dropped from both.
+    sides = (
+        ("iOS", "Android", ios - android, IOS_ONLY, ANDROID_CATALOG),
+        ("Android", "iOS", android - ios, ANDROID_ONLY, IOS_CATALOG),
+    )
+    failed = False
+    for side, other, diverging, declared, add_to in sides:
+        undeclared = diverging - declared
+        stale = declared - diverging
+        report(
+            f"present on {side} but missing on {other}",
+            undeclared,
+            f"add to {add_to}, or declare it in this check",
+        )
+        report(
+            f"declared {side}-only but no longer diverging",
+            stale,
+            "drop from this check's exemption list",
+        )
+        failed = failed or bool(undeclared or stale)
+
+    android_text = (root / ANDROID_CATALOG).read_text(encoding="utf-8")
+    if ANDROID_ONNX_MARKER.search(android_text):
+        print(
+            f"the Android catalog ({ANDROID_CATALOG}) mentions ONNX, but this check "
+            "has no coordinate grammar for its rows. Add one beside IOS_ONNX_ENTRY "
+            "and compare both sides, then clear IOS_ONLY_ONNX of anything Android now "
+            "offers (PIP-593).",
+            file=sys.stderr,
+        )
         return 1
 
-    print(f"iOS and Android GGUF catalogs match ({len(ios)} entries)")
+    ios_onnx = extract_onnx(root / IOS_CATALOG)
+    undeclared_onnx = ios_onnx - IOS_ONLY_ONNX
+    stale_onnx = IOS_ONLY_ONNX - ios_onnx
+    report(
+        "present in the iOS ONNX catalog but not declared",
+        undeclared_onnx,
+        "declare it in IOS_ONLY_ONNX with its reason",
+    )
+    report(
+        "declared iOS-only ONNX but no longer in the catalog",
+        stale_onnx,
+        "drop from IOS_ONLY_ONNX",
+    )
+    failed = failed or bool(undeclared_onnx or stale_onnx)
+
+    if failed:
+        return 1
+
+    shared = len(ios & android)
+    divergent = len(IOS_ONLY) + len(ANDROID_ONLY)
+    print(f"GGUF catalogs agree on {shared} entries, {divergent} declared divergent")
+    print(f"ONNX: {len(ios_onnx)} iOS rows, all declared iOS-only pending PIP-593")
     return 0
 
 

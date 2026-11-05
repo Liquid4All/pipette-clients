@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "decode_throughput",
+  "dtype": "float",
+  "model_type": "torch",
+  "runtime_type": "docker_vllm"
+}

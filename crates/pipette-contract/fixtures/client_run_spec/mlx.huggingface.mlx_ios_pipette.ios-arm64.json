@@ -1,0 +1,30 @@
+{
+  "benchmark": "prefill_throughput_512",
+  "benchmark_flags": null,
+  "model": {
+    "org": "LiquidAI",
+    "repo_name": "LFM2.5-350M-MLX-4bit",
+    "source": "huggingface",
+    "type": "mlx"
+  },
+  "model_flags": null,
+  "runtime": {
+    "flavor": "ios-arm64",
+    "packages": {
+      "mlx_swift": {
+        "repository_url": "github.com/ml-explore/mlx-swift",
+        "repository_version": "0.25.6"
+      },
+      "mlx_swift_lm": {
+        "repository_url": "github.com/ml-explore/mlx-swift-examples",
+        "repository_version": "2.25.6"
+      },
+      "swift_transformers": {
+        "repository_url": "github.com/huggingface/swift-transformers",
+        "repository_version": "0.1.22"
+      }
+    },
+    "type": "mlx_ios_pipette"
+  },
+  "runtime_flags": null
+}

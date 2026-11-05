@@ -26,8 +26,7 @@ interface JobStore {
     modelName: String,
     modelPath: String,
     mmprojPath: String?,
-    nGpuLayers: Int,
-    contextSize: Int,
+    runtimeFlags: RuntimeFlagRef,
     runtimeVersion: String,
     runtimeCpuBackend: String?,
     // Not defaulted, unlike the diagnostic below: both are always known at the

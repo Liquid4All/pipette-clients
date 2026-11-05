@@ -1,0 +1,6 @@
+{
+  "flavor": "cpu",
+  "image_name": "lmsysorg/sglang",
+  "image_tag": "v0.5.0-xeon",
+  "type": "docker_sglang"
+}

@@ -1,0 +1,7 @@
+{
+  "benchmark_type": "vlm_eval",
+  "dataset_version": "2026.07.1",
+  "lmms_task": "mmstar",
+  "max_tokens": 1024,
+  "sample_count": 1
+}

@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "vlm_eval",
+  "model_type": "gguf_vision",
+  "runtime_type": "llamacpp_cli_stock_tools"
+}

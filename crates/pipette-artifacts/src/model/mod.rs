@@ -9,8 +9,8 @@ mod stored;
 
 pub(crate) mod fetch;
 
-pub(crate) use key::{bound_to, slug_from};
 pub use key::{ModelStorageKey, ModelStorageKeyError};
-pub use manifest::{ModelManifest, BLOBS_DIR_NAME, MANIFEST_VERSION};
+pub(crate) use key::{bound_to, slug_from};
+pub use manifest::{BLOBS_DIR_NAME, MANIFEST_VERSION, ModelManifest};
 pub use store::{ModelArtifactStore, ModelStoreError};
-pub use stored::{to_stored, under_root, ModelStoredError};
+pub use stored::{ModelStoredError, to_stored, under_root};

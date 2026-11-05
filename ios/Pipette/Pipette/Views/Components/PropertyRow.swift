@@ -1,12 +1,9 @@
 import SwiftUI
 
-/// A labeled detail row: a fixed-width title column on the left, arbitrary
-/// content on the right. Shared by `RunDetailHeaderView` and `CellDetailView`,
-/// which both previously hand-rolled this layout at slightly different
-/// densities — now a single consistent style.
+/// Layout shared by the `PropertyRow` lists in `RunDetailHeaderView` and
+/// `CellDetailView`.
 enum PropertyList {
-    /// Spacing between stacked `PropertyRow`s. Exposed so each list's container
-    /// can match without re-hardcoding the value.
+    /// Spacing between stacked `PropertyRow`s.
     static let rowGap: CGFloat = 16
     static let labelColumnWidth: CGFloat = 88
 }
@@ -33,9 +30,7 @@ struct PropertyRow<Content: View>: View {
     }
 }
 
-/// A property row whose value is a flow of chips, collapsing any chips beyond
-/// `limit` into an "N more" label. The single way labeled chip lists render
-/// across the run-detail header and cell-detail page, so they look identical.
+/// A property row whose value is a flow of chips.
 struct PropertyChipRow<Chip: View>: View {
     let title: String
     let values: [String]
@@ -52,12 +47,11 @@ struct PropertyChipRow<Chip: View>: View {
     }
 }
 
-/// The canonical chips used inside `PropertyChipRow`, so every property list
-/// renders models and values at the same size.
+/// The chips used inside `PropertyChipRow`, so every property list renders
+/// models and values at the same size.
 enum PropertyChip {
-    /// A model chip with brand logo. `brandSource` overrides which string the
-    /// brand is detected from, for when the displayed text is a prettified name
-    /// that differs from the raw model name.
+    /// `brandSource` is the raw model name to detect the brand from when `text`
+    /// is a prettified one.
     static func model(_ text: String, brandSource: String? = nil) -> some View {
         AppModelChip(
             text: text,

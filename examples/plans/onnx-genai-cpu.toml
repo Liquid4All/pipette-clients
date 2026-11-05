@@ -1,0 +1,28 @@
+# Example plan: ONNX GenAI on CPU on a Linux x86_64 host. The execution
+# provider belongs to the runtime install, and ONNX GenAI cells take no
+# runtime_flags.
+plan_id = "onnx-genai-cpu"
+benchmarks = [
+  "prefill_throughput_512",
+  "decode_throughput_512_100",
+  "end_to_end_latency_512_256",
+  "max_memory_usage_512",
+]
+
+[[transports]]
+client_id = "linux-cpu-1"
+type = "ssh"
+host = "linux-cpu-1"
+user = "eval"
+binary_path = "/home/eval/bin/pipette"
+work_dir = "/home/eval/pipette"
+shell = "posix"
+
+[[variants]]
+clients = ["linux-cpu-1"]
+models = [
+  { type = "onnx_genai", source = "huggingface", org = "microsoft", repo_name = "Phi-3-mini-4k-instruct-onnx", prefix = "cpu_and_mobile/cpu-int4-rtn-block-32" },
+]
+runtimes = [
+  { type = "uv_onnx_genai", server_version = "0.18.0", execution_provider = "cpu", python_version = "3.11", source = { type = "pip_requirements_text", contents = "flatbuffers==25.12.19\nnumpy==2.4.6\nonnxruntime==1.31.1\nonnxruntime-genai==0.18.0\npackaging==26.3\nprotobuf==7.36.2\n" } },
+]

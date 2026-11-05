@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Protection level is signature|privileged|development, so this stays ungranted on a plain
+      install; the `development` flag is what lets a lab device opt in with `pm grant`, and
+      `pm grant` only works for a permission the manifest declares. Same arrangement as the DUMP
+      declaration in android/Pipette's manifest.
+    -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Required to schedule a job with a connectivity constraint; JobScheduler throws
+         SecurityException without it. Normal permission, granted at install. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- ScreenKeeper holds the CPU through its re-wake delay. Normal permission. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@android:drawable/ic_menu_manage"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.Material.Light">
+
+        <!--
+          Being launchable is not cosmetic: a package installed but never started carries
+          FLAG_STOPPED and is excluded from broadcasts, so BootReceiver would never fire. A
+          force-stop returns it to that state. It also gives a human a way to re-arm from the
+          screen when the host cannot connect.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Must be exported: the sender is the system, which counts as an external caller for
+          the export check, so a non-exported receiver never sees BOOT_COMPLETED.
+
+          QUICKBOOT_POWERON is the OEM broadcast some Samsung firmware sends in place of
+          BOOT_COMPLETED when resuming from a fast boot. Harmless where it is not sent, and
+          it doubles as the only way to test this receiver — BOOT_COMPLETED is protected and
+          cannot be faked from a shell.
+
+          No custom action for re-arming from the host, on purpose: anything holding an adb
+          shell can write the setting directly, so an exported trigger would let any local
+          app enable wireless debugging and buy nothing.
+
+          Being exported with no permission does mean any local app can deliver either action
+          at any time, and QUICKBOOT_POWERON is not protected. The destructive path is
+          therefore gated in code on the device being near boot rather than on the action
+          name, so an arbitrary caller cannot use this to drop a live benchmark transport.
+          See BootReceiver.BOOT_WINDOW_MS.
+        -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Catches devices that lose wireless debugging without rebooting. -->
+        <service
+            android:name=".AdbWatchdogJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!--
+          Answers the "Allow wireless debugging on this network?" dialog. Exported because the
+          system is the only caller that binds it, and guarded by BIND_ACCESSIBILITY_SERVICE so
+          it is the only caller that can: that permission is held by system_server alone, which
+          makes the export unreachable by other apps.
+
+          The event and package filters live in the referenced XML, not here.
+        -->
+        <service
+            android:name=".WifiDebuggingDialogService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/wifi_debugging_dialog_service" />
+        </service>
+
+        <!-- Empty task affinity, so a wake never brings MainActivity forward. -->
+        <activity
+            android:name=".WakeActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:showWhenLocked="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:turnScreenOn="true" />
+    </application>
+
+</manifest>

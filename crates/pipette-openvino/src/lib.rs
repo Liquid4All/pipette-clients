@@ -1,20 +1,19 @@
 //! OpenVINO-backed pipette client: LFM2 exported to OpenVINO IR, served by
 //! `openvino-genai` in a uv-managed venv, on Intel CPU / iGPU / NPU.
 //!
-//! Not platform-gated, unlike `pipette-mlx`. OpenVINO ships x86_64 wheels for
-//! both Linux and Windows, and Windows is where Intel NPU hardware actually
-//! lives — so this is the first venv-backed runtime that has to work off Linux
-//! and macOS. The layout difference that implies (`Scripts\python.exe` rather
-//! than `bin/python`) is handled once in `pipette-venv`, not here.
-//!
-//! Execution is a one-shot Python driver per rep rather than a long-lived
-//! server; [`execute`] states why. `docs/openvino-ir.md` carries the
-//! measurements behind that and the other device limits this crate encodes.
+//! Runs on Linux and Windows (where Intel NPUs live). Not gated at compile
+//! time, unlike `pipette-mlx`: the client refuses any other OS at run time
+//! (`pipette-cli`'s `refuse_foreign_os`). Execution runs one in-house
+//! OpenAI-compatible server per cell, compiling one pipeline per process;
+//! [`execute`] states why. `docs/openvino-ir.md` carries the measurements
+//! behind the device limits this crate encodes.
 
-pub mod catalog;
-pub mod execute;
-pub mod flags;
-pub mod models;
-pub mod runtimes;
+mod completions;
+mod execute;
+mod flags;
+mod models;
+mod response;
+mod runtimes;
+mod server;
 
 pub use execute::run;

@@ -1,0 +1,15 @@
+{
+  "benchmark_type": "vl_throughput",
+  "envs": [
+    "TRT_STAGE_TIMERS=0"
+  ],
+  "model_type": "gguf_vision",
+  "precision": "w8a16",
+  "raw": [
+    "--robo-state",
+    "0.1,0.2",
+    "--robo-embodiment",
+    "0"
+  ],
+  "runtime_type": "trt_edgellm"
+}

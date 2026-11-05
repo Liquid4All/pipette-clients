@@ -3,55 +3,58 @@
   <ManuallySuppressedIssues/>
   <CurrentIssues>
     <ID>ComplexCondition:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$value.any { it == '"' || it == ',' || it == '\n' || it == '\r' }</ID>
+    <ID>ComplexCondition:CyclicLineRepeat.kt$CyclicLineRepeat$window &lt;= 0 || count &lt; 2 || minLen &lt;= 0 || counterMinLen &lt;= 0 || counterMinLen &gt; minLen || counterCount &lt; count || minPeriod &lt; 2 || maxPeriod &lt; minPeriod</ID>
+    <ID>ComplexCondition:LineRepeat.kt$LineRepeat$window &lt;= 0 || count &lt; 2 || minLen &lt;= 0 || counterMinLen &lt;= 0 || counterMinLen &gt; minLen || counterCount &lt; count</ID>
     <ID>CyclomaticComplexMethod:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$fun metric(cell: JobCell, payload: JSONObject?): CompletedRunMetric?</ID>
+    <ID>CyclomaticComplexMethod:CyclicLineRepeat.kt$CyclicLineRepeat$override fun check(bytes: ByteArray): Boolean</ID>
     <ID>CyclomaticComplexMethod:JobRunner.kt$JobRunner$private fun execute(jobId: String, flag: CancelFlag)</ID>
     <ID>CyclomaticComplexMethod:JobsScreen.kt$JobsScreen$private fun cellCard(manifest: JobManifest, cell: JobCell, position: Int, payload: JSONObject?, metric: CompletedRunMetric?): View</ID>
     <ID>CyclomaticComplexMethod:JobsScreen.kt$JobsScreen$private fun renderJobDetail(body: LinearLayout, manifest: JobManifest)</ID>
     <ID>CyclomaticComplexMethod:JobsScreen.kt$JobsScreen$private fun renderWizard(body: LinearLayout, step: Int)</ID>
     <ID>CyclomaticComplexMethod:JobsScreen.kt$JobsScreen$private fun resultsCard(manifest: JobManifest, payloads: Map&lt;String, JSONObject&gt;, metrics: Map&lt;String, CompletedRunMetric&gt;): View</ID>
+    <ID>CyclomaticComplexMethod:LineRepeat.kt$LineRepeat$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>CyclomaticComplexMethod:LlamaBenchmark.kt$LlamaBenchmark$fun parseBenchmarkDef(jsonStr: String): BenchmarkDef</ID>
+    <ID>CyclomaticComplexMethod:LlamaBenchmark.kt$LlamaBenchmark$fun runEvalImpl(def: BenchmarkDef, model: LlamaModel, progress: BenchmarkProgressCallback?, readiness: BenchmarkCooldownCallback?): JSONObject</ID>
     <ID>CyclomaticComplexMethod:MainActivity.kt$MainActivity$private fun pocketModeView(jobId: String): View</ID>
+    <ID>CyclomaticComplexMethod:NumericEnumeration.kt$NumericEnumeration$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>CyclomaticComplexMethod:PromptSeed.kt$PromptSeed$fun buildPromptTextFrom(seed: String, targetTokens: Int, count: (String) -&gt; Int): String</ID>
     <ID>CyclomaticComplexMethod:ResultSubmissionService.kt$ResultSubmissionService$override fun submit(manifest: JobManifest, registration: RegistrationData): ResultSubmissionOutcome</ID>
     <ID>CyclomaticComplexMethod:SettingsScreen.kt$SettingsScreen$override fun renderBody(body: LinearLayout)</ID>
+    <ID>CyclomaticComplexMethod:Thermal.kt$fun parseAndroidHalSensors(stdout: String): List&lt;AndroidTemperatureSensor&gt;?</ID>
+    <ID>CyclomaticComplexMethod:Thermal.kt$private fun androidTemperatureType(mType: Int): String?</ID>
     <ID>ImplicitDefaultLocale:JobsScreen.kt$JobsScreen$String.format("%.2f", double)</ID>
-    <ID>ImplicitDefaultLocale:Readiness.kt$Readiness$String.format("%.2f", headroom)</ID>
     <ID>LargeClass:JobsScreen.kt$JobsScreen : Screen</ID>
+    <ID>LargeClass:LlamaBenchmark.kt$LlamaBenchmark</ID>
     <ID>LongMethod:JobRunner.kt$JobRunner$private fun execute(jobId: String, flag: CancelFlag)</ID>
     <ID>LongMethod:JobsScreen.kt$JobsScreen$private fun renderJobDetail(body: LinearLayout, manifest: JobManifest)</ID>
     <ID>LongMethod:JobsScreen.kt$JobsScreen$private fun renderWizard(body: LinearLayout, step: Int)</ID>
     <ID>LongMethod:SettingsScreen.kt$SettingsScreen$override fun renderBody(body: LinearLayout)</ID>
+    <ID>LongParameterList:LlamaBenchmark.kt$LlamaBenchmark$( benchmarkJson: String, modelPath: String, nGpuLayers: Int, contextSize: Int, nUbatch: Int, loadMode: LlamacppLoadMode, mmprojPath: String?, progress: BenchmarkProgressCallback?, cooldown: BenchmarkCooldownCallback?, thermal: BenchmarkThermalCallback?, )</ID>
+    <ID>LongParameterList:LlamaBenchmark.kt$LlamaBenchmark$( model: LlamaModel, mtmd: MtmdContext, promptWithMarker: String, width: Int, height: Int, decodeTokens: Int, benchmarkId: String, progress: BenchmarkProgressCallback?, readiness: BenchmarkCooldownCallback?, thermal: BenchmarkThermalCallback?, )</ID>
+    <ID>LoopWithTooManyJumpStatements:CyclicLineRepeat.kt$CyclicLineRepeat$for</ID>
     <ID>LoopWithTooManyJumpStatements:JobRunner.kt$JobRunner$for</ID>
+    <ID>LoopWithTooManyJumpStatements:LlamaCpp.kt$LlamaCpp$for</ID>
     <ID>LoopWithTooManyJumpStatements:LocalStorage.kt$LocalStorage$while</ID>
     <ID>LoopWithTooManyJumpStatements:ResultSubmissionService.kt$ResultSubmissionService$for</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$100</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$1024</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$1056</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$128</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$2048</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$2080</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$256</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$32</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$384</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$4096</ID>
-    <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$512</ID>
+    <ID>LoopWithTooManyJumpStatements:RuneAccumulator.kt$RuneAccumulator.Companion$for</ID>
+    <ID>LoopWithTooManyJumpStatements:Thermal.kt$for</ID>
     <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkCatalog$6</ID>
     <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkContextSize$14</ID>
     <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkContextSize$4096</ID>
     <ID>MagicNumber:BenchmarkCatalog.kt$BenchmarkContextSize$8192L</ID>
     <ID>MagicNumber:BenchmarkDefinition.kt$BenchmarkType.EVAL$5</ID>
     <ID>MagicNumber:BenchmarkDefinition.kt$BenchmarkType.MAX_MEMORY_USAGE$3</ID>
+    <ID>MagicNumber:BenchmarkDefinition.kt$BenchmarkType.VLM_EVAL$6</ID>
     <ID>MagicNumber:BenchmarkDefinition.kt$BenchmarkType.VL_THROUGHPUT$4</ID>
     <ID>MagicNumber:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$0.0001</ID>
     <ID>MagicNumber:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$100.0</ID>
     <ID>MagicNumber:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$1000.0</ID>
     <ID>MagicNumber:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$8</ID>
-    <ID>MagicNumber:DataModels.kt$ByteFormat$1024.0</ID>
-    <ID>MagicNumber:DataModels.kt$ByteFormat$1024L</ID>
     <ID>MagicNumber:DataModels.kt$DateFormats$10</ID>
     <ID>MagicNumber:DataModels.kt$JobManifest.Companion$4096</ID>
     <ID>MagicNumber:DataModels.kt$JobManifest.Companion$99</ID>
     <ID>MagicNumber:DeviceInfo.kt$DeviceInfo$100</ID>
     <ID>MagicNumber:DeviceInfo.kt$DeviceInfo$600</ID>
-    <ID>MagicNumber:DownloadCoordinator.kt$DownloadCoordinator$1000L</ID>
     <ID>MagicNumber:DownloadCoordinator.kt$DownloadCoordinator.Companion$3</ID>
     <ID>MagicNumber:DownloadCoordinator.kt$DownloadCoordinator.Companion$5</ID>
     <ID>MagicNumber:JobRunner.kt$JobRunner.Companion$4096</ID>
@@ -63,6 +66,50 @@
     <ID>MagicNumber:JobsScreen.kt$JobsScreen$4</ID>
     <ID>MagicNumber:JobsScreen.kt$JobsScreen$6</ID>
     <ID>MagicNumber:JobsScreen.kt$JobsScreen$60</ID>
+    <ID>MagicNumber:LineRepeat.kt$32</ID>
+    <ID>MagicNumber:LlamaBenchmark.kt$LlamaBenchmark$128</ID>
+    <ID>MagicNumber:LlamaBenchmark.kt$LlamaBenchmark$14</ID>
+    <ID>MagicNumber:LlamaBenchmark.kt$LlamaBenchmark$1_000_000.0</ID>
+    <ID>MagicNumber:LlamaBenchmark.kt$LlamaBenchmark$256</ID>
+    <ID>MagicNumber:LlamaBenchmark.kt$LlamaBenchmark$512</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$0.3</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$0.32f</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$0.35f</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$0.38f</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$0.3f</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$0.45f</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$1024</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$128</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$1e-4</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$224</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$256</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$338</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$5</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$512</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$513</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$64</ID>
+    <ID>MagicNumber:LlamaBenchmarkTest.kt$LlamaBenchmarkTest$640</ID>
+    <ID>MagicNumber:LlamaCpp.kt$1024L</ID>
+    <ID>MagicNumber:LlamaCpp.kt$6</ID>
+    <ID>MagicNumber:LlamaCpp.kt$LlamaCpp$256</ID>
+    <ID>MagicNumber:LlamaCpp.kt$LlamaCpp$3</ID>
+    <ID>MagicNumber:LlamaCpp.kt$LlamaCpp$8L</ID>
+    <ID>MagicNumber:LlamaCpp.kt$MemoryAllocationPoller$20</ID>
+    <ID>MagicNumber:LlamaCppCheckJniTest.kt$LlamaCppCheckJniTest$128</ID>
+    <ID>MagicNumber:LlamaCppCheckJniTest.kt$LlamaCppCheckJniTest$16</ID>
+    <ID>MagicNumber:LlamaCppCheckJniTest.kt$LlamaCppCheckJniTest$20</ID>
+    <ID>MagicNumber:LlamaCppCheckJniTest.kt$LlamaCppCheckJniTest$256</ID>
+    <ID>MagicNumber:LlamaCppCheckJniTest.kt$LlamaCppCheckJniTest$32</ID>
+    <ID>MagicNumber:LlamaCppCheckJniTest.kt$LlamaCppCheckJniTest$64</ID>
+    <ID>MagicNumber:LlamaCppCheckJniTest.kt$LlamaCppCheckJniTest$8</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$100L</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$12L</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$200L</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$256L</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$300L</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$350L</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$4096L</ID>
+    <ID>MagicNumber:LlamaCppTest.kt$LlamaCppTest$450L</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$0.02</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$0.6f</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$0x1C</ID>
@@ -72,7 +119,6 @@
     <ID>MagicNumber:MainActivity.kt$MainActivity$0x9A</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$0xB4</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$0xD0</ID>
-    <ID>MagicNumber:MainActivity.kt$MainActivity$10</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$100</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$1000</ID>
     <ID>MagicNumber:MainActivity.kt$MainActivity$12</ID>
@@ -103,8 +149,39 @@
     <ID>MagicNumber:ManagementClient.kt$ManagementClient$15_000</ID>
     <ID>MagicNumber:ManagementClient.kt$ManagementClient$200</ID>
     <ID>MagicNumber:ManagementClient.kt$ManagementClient$299</ID>
-    <ID>MagicNumber:ModelTemplates.kt$PresetModel$1024.0</ID>
+    <ID>MagicNumber:Measurement.kt$Rep$1_000_000.0</ID>
+    <ID>MagicNumber:PromptSeed.kt$PromptSeed$1.20</ID>
     <ID>MagicNumber:Readiness.kt$Readiness$1000</ID>
+    <ID>MagicNumber:Readiness.kt$Readiness$1_000_000L</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$0x80</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$0xC0</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$0xE0</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$0xF0</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$0xF8</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$0xFF</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$3</ID>
+    <ID>MagicNumber:RuneAccumulator.kt$RuneAccumulator.Companion$4</ID>
+    <ID>MagicNumber:Thermal.kt$10</ID>
+    <ID>MagicNumber:Thermal.kt$11</ID>
+    <ID>MagicNumber:Thermal.kt$12</ID>
+    <ID>MagicNumber:Thermal.kt$13</ID>
+    <ID>MagicNumber:Thermal.kt$14</ID>
+    <ID>MagicNumber:Thermal.kt$15</ID>
+    <ID>MagicNumber:Thermal.kt$16</ID>
+    <ID>MagicNumber:Thermal.kt$17</ID>
+    <ID>MagicNumber:Thermal.kt$18</ID>
+    <ID>MagicNumber:Thermal.kt$19</ID>
+    <ID>MagicNumber:Thermal.kt$200.0</ID>
+    <ID>MagicNumber:Thermal.kt$3</ID>
+    <ID>MagicNumber:Thermal.kt$4</ID>
+    <ID>MagicNumber:Thermal.kt$5</ID>
+    <ID>MagicNumber:Thermal.kt$50.0</ID>
+    <ID>MagicNumber:Thermal.kt$6</ID>
+    <ID>MagicNumber:Thermal.kt$9</ID>
+    <ID>MagicNumber:Thermal.kt$AndroidThermalStatus.Companion$3</ID>
+    <ID>MagicNumber:Thermal.kt$AndroidThermalStatus.Companion$4</ID>
+    <ID>MagicNumber:Thermal.kt$AndroidThermalStatus.Companion$5</ID>
+    <ID>MagicNumber:Thermal.kt$AndroidThermalStatus.Companion$6</ID>
     <ID>MagicNumber:UiKit.kt$UiKit$0x14</ID>
     <ID>MagicNumber:UiKit.kt$UiKit$0x22</ID>
     <ID>MagicNumber:UiKit.kt$UiKit$0x88</ID>
@@ -123,37 +200,63 @@
     <ID>MagicNumber:UiKit.kt$UiKit$6</ID>
     <ID>MagicNumber:UiKit.kt$UiKit$8</ID>
     <ID>MagicNumber:UiKit.kt$UiKit$999</ID>
-    <ID>NestedBlockDepth:DownloadCoordinator.kt$DownloadCoordinator$private suspend fun awaitDownload(key: String, downloadId: Long, onProgress: (DownloadProgress) -&gt; Unit)</ID>
+    <ID>NestedBlockDepth:CyclicLineRepeat.kt$CyclicLineRepeat$override fun check(bytes: ByteArray): Boolean</ID>
     <ID>NestedBlockDepth:JobRunner.kt$JobRunner$private fun execute(jobId: String, flag: CancelFlag)</ID>
     <ID>NestedBlockDepth:JobRunner.kt$JobRunner.Companion$fun planCells( models: List&lt;ModelFile&gt;, mmprojFiles: List&lt;ModelFile&gt;, benchmarks: List&lt;BenchmarkDefinition&gt;, selectedMmprojPaths: Set&lt;String&gt;, ): MutableList&lt;JobCell&gt;</ID>
+    <ID>NestedBlockDepth:LineRepeat.kt$LineRepeat$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>NestedBlockDepth:LlamaBenchmark.kt$LlamaBenchmark$fun runEvalImpl(def: BenchmarkDef, model: LlamaModel, progress: BenchmarkProgressCallback?, readiness: BenchmarkCooldownCallback?): JSONObject</ID>
+    <ID>NestedBlockDepth:LlamaBenchmark.kt$LlamaBenchmark$private fun runVlMeasurements( model: LlamaModel, mtmd: MtmdContext, promptWithMarker: String, width: Int, height: Int, decodeTokens: Int, benchmarkId: String, progress: BenchmarkProgressCallback?, readiness: BenchmarkCooldownCallback?, thermal: BenchmarkThermalCallback?, ): JSONObject</ID>
+    <ID>NestedBlockDepth:NumericEnumeration.kt$NumericEnumeration$override fun check(bytes: ByteArray): Boolean</ID>
     <ID>NestedBlockDepth:ResultSubmissionService.kt$ResultSubmissionService$override fun submit(manifest: JobManifest, registration: RegistrationData): ResultSubmissionOutcome</ID>
+    <ID>NestedBlockDepth:Thermal.kt$fun parseAndroidHeadroom(stdout: String): Float?</ID>
+    <ID>ReturnCount:BlockRepeat.kt$BlockRepeat$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>ReturnCount:BlockRepeat.kt$BlockRepeat$override fun validate(): String?</ID>
     <ID>ReturnCount:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$fun metric(cell: JobCell, payload: JSONObject?): CompletedRunMetric?</ID>
     <ID>ReturnCount:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$fun modelDisplayName(cell: JobCell): String</ID>
     <ID>ReturnCount:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter$private fun csvNumber(value: Double): String</ID>
+    <ID>ReturnCount:CyclicLineRepeat.kt$CyclicLineRepeat$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>ReturnCount:CyclicLineRepeat.kt$CyclicLineRepeat$override fun validate(): String?</ID>
     <ID>ReturnCount:DataModels.kt$ByteFormat$fun fileSize(bytes: Long): String</ID>
     <ID>ReturnCount:DownloadCoordinator.kt$DownloadCoordinator.Companion$fun parseDownloadInput(input: String): ParsedDownload</ID>
     <ID>ReturnCount:DownloadCoordinator.kt$DownloadCoordinator.Companion$private fun normalizeHuggingFaceFileUrl(url: String): String</ID>
+    <ID>ReturnCount:ExactRepeat.kt$ExactRepeat$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>ReturnCount:ExactRepeat.kt$ExactRepeat$override fun validate(): String?</ID>
+    <ID>ReturnCount:ExactRepeat.kt$ExactRepeat$private fun exactSuffixRepeats(tail: ByteArray, period: Int, required: Int): Boolean</ID>
+    <ID>ReturnCount:LineRepeat.kt$LineRepeat$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>ReturnCount:LineRepeat.kt$LineRepeat$override fun validate(): String?</ID>
     <ID>ReturnCount:LocalStorage.kt$LocalStorage$override fun resolveModelPath(storedPath: String?): String?</ID>
     <ID>ReturnCount:LocalStorage.kt$LocalStorage.Companion$fun resolveModelPath(storedPath: String, modelsRoot: File): String?</ID>
     <ID>ReturnCount:MainActivity.kt$MainActivity$private fun estimatedTimeLeft(runnerState: RunnerState, progressFraction: Double): String?</ID>
+    <ID>ReturnCount:Measurement.kt$fun meanStddev(samples: List&lt;Double&gt;): Stats</ID>
+    <ID>ReturnCount:NumericEnumeration.kt$NumericEnumeration$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>ReturnCount:NumericEnumeration.kt$NumericEnumeration$override fun validate(): String?</ID>
+    <ID>ReturnCount:PromptSeed.kt$PromptSeed$fun buildPromptTextFrom(seed: String, targetTokens: Int, count: (String) -&gt; Int): String</ID>
+    <ID>ReturnCount:PromptSeed.kt$PromptSeed$private fun tailStep(text: String, current: Int, target: Int, budget: Budget, count: (String) -&gt; Int): TailStep?</ID>
     <ID>ReturnCount:Readiness.kt$Readiness$fun waitUntilReady(cancelFlag: CancelFlag, onStatus: (String, Long) -&gt; Unit, maxMillis: Long, pollMillis: Long): ReadinessOutcome</ID>
-    <ID>ReturnCount:Readiness.kt$Readiness$private fun nativeProbe(skipThermal: Boolean): Probe</ID>
-    <ID>ReturnCount:Readiness.kt$Readiness$private fun waitOnDeviceThermal( cancelFlag: CancelFlag, onStatus: (String, Long) -&gt; Unit, startedAt: Long, maxMillis: Long, pollMillis: Long, ): ReadinessOutcome</ID>
     <ID>ReturnCount:RemoteBenchmarkEngine.kt$RemoteBenchmarkEngine$override fun cpuBackendDescriptor(): String?</ID>
     <ID>ReturnCount:RemoteBenchmarkEngine.kt$RemoteBenchmarkEngine$override fun llamaCppCommit(): String</ID>
     <ID>ReturnCount:RemoteBenchmarkEngine.kt$RemoteBenchmarkEngine$private fun ensureBound(): IBenchmarkService</ID>
     <ID>ReturnCount:ResultSubmissionService.kt$ResultSubmissionService$fun submitCell(jobId: String, cellId: String, registration: RegistrationData): CellSubmissionRecord?</ID>
     <ID>ReturnCount:ResultSubmissionService.kt$ResultSubmissionService$private fun submittedServerJobId(jobId: String, cellId: String): String?</ID>
-    <ID>ThrowsCount:DownloadCoordinator.kt$DownloadCoordinator$private suspend fun awaitDownload(key: String, downloadId: Long, onProgress: (DownloadProgress) -&gt; Unit)</ID>
+    <ID>ReturnCount:RuneAccumulator.kt$RuneAccumulator$fun accumulate(bytes: ByteArray): String</ID>
+    <ID>ReturnCount:RuneAccumulator.kt$RuneAccumulator.Companion$internal fun completeUtf8Length(bytes: ByteArray): Int</ID>
+    <ID>ReturnCount:SuffixProbe.kt$SuffixProbe$override fun check(bytes: ByteArray): Boolean</ID>
+    <ID>ReturnCount:SuffixProbe.kt$SuffixProbe$override fun validate(): String?</ID>
+    <ID>ReturnCount:Thermal.kt$fun parseAndroidThermalStatus(stdout: String): AndroidThermalStatus?</ID>
+    <ID>ThrowsCount:LlamaBenchmark.kt$LlamaBenchmark$fun runMaxMemoryUsage( def: BenchmarkDef, modelPath: String, nGpuLayers: Int, contextSize: Int, nUbatch: Int, loadMode: LlamacppLoadMode, onModelLoaded: ((Int) -&gt; Unit)? = null, ): JSONObject</ID>
     <ID>TooGenericExceptionCaught:EngineActor.kt$EngineActor$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:JobRunner.kt$JobRunner$error: Throwable</ID>
+    <ID>TooGenericExceptionCaught:LlamaBenchmark.kt$LlamaBenchmark$err: Throwable</ID>
+    <ID>TooGenericExceptionCaught:LlamaBenchmark.kt$LlamaBenchmark$pollerError: Throwable</ID>
+    <ID>TooGenericExceptionCaught:LlamaBenchmark.kt$LlamaBenchmark$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:ManagementClient.kt$RegistrationService$error: Throwable</ID>
     <ID>TooGenericExceptionCaught:PipetteBenchmarkService.kt$PipetteBenchmarkService$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:ResultSubmissionService.kt$ResultSubmissionService$error: Throwable</ID>
     <ID>TooManyFunctions:CompletedResultsCsvExporter.kt$CompletedResultsCsvExporter</ID>
-    <ID>TooManyFunctions:DownloadCoordinator.kt$DownloadCoordinator</ID>
     <ID>TooManyFunctions:DownloadWorker.kt$DownloadWorker : CoroutineWorker</ID>
     <ID>TooManyFunctions:JobsScreen.kt$JobsScreen : Screen</ID>
+    <ID>TooManyFunctions:LlamaBenchmark.kt$LlamaBenchmark</ID>
+    <ID>TooManyFunctions:LlamaCpp.kt$LlamaCpp</ID>
     <ID>TooManyFunctions:LocalStorage.kt$LocalStorage : JobStore</ID>
     <ID>TooManyFunctions:MainActivity.kt$MainActivity : AppCompatActivity</ID>
     <ID>TooManyFunctions:MainViewModel.kt$MainViewModel : AndroidViewModel</ID>
@@ -163,12 +266,7 @@
     <ID>TooManyFunctions:Secrets.kt$Secrets</ID>
     <ID>TooManyFunctions:UiKit.kt$UiKit</ID>
     <ID>UnusedPrivateProperty:UiKit.kt$UiKit$private val serif: Typeface = Typeface.create("serif", Typeface.NORMAL)</ID>
-    <ID>UseCheckOrError:DownloadCoordinator.kt$DownloadCoordinator$throw IllegalStateException("Download failed: ${failureReason(snapshot.reason)}")</ID>
-    <ID>UseCheckOrError:DownloadCoordinator.kt$DownloadCoordinator$throw IllegalStateException("Download finished, but the downloaded file was not found")</ID>
-    <ID>UseCheckOrError:DownloadCoordinator.kt$DownloadCoordinator$throw IllegalStateException("Download was removed before it completed")</ID>
-    <ID>UseCheckOrError:DownloadCoordinator.kt$DownloadCoordinator$throw IllegalStateException("External app storage is not available")</ID>
     <ID>UseCheckOrError:JobsScreen.kt$JobsScreen$throw IllegalStateException("No payload is available for this cell")</ID>
-    <ID>UseCheckOrError:ManagementClient.kt$RegistrationService$throw IllegalStateException("Failed to save private key")</ID>
     <ID>WildcardImport:ExampleUnitTest.kt$import org.junit.Assert.*</ID>
   </CurrentIssues>
 </SmellBaseline>

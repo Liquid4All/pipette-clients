@@ -17,12 +17,9 @@ struct ModelGroup: Identifiable {
         paramLabel ?? files.first?.sizeFormatted ?? ""
     }
 
-    /// What of this family is already on disk, or nil when none of it is.
-    ///
-    /// Marks the *present* rather than the absent: the run screen offers the whole
-    /// catalog, so most rows are not downloaded and a "not downloaded" badge would be
-    /// noise on nearly every one. Nothing is blocked either way — a benchmark started
-    /// against an absent model fetches it before the cell runs.
+    /// What of this family is already on disk, or nil when none of it is. Marks the
+    /// present, not the absent: most catalog rows are not downloaded, and a run fetches
+    /// an absent model anyway.
     var downloadedHint: String? {
         let onDisk = files.filter(\.isDownloaded).count
         guard onDisk > 0 else { return nil }
@@ -33,26 +30,20 @@ struct ModelGroup: Identifiable {
         "\(files.count) quant\(files.count == 1 ? "" : "s")"
     }
 
-    /// True when the group's quants come from more than one repo (e.g.
-    /// Ministral: Q4_0 from unsloth, K-quants from mistralai). The signal to
-    /// label each quant with its source so the mix is legible.
+    /// The group's quants come from more than one repo (e.g. Ministral Q4_0 from
+    /// unsloth, K-quants from mistralai), so each quant is labelled with its source.
     var spansRepos: Bool {
         Set(files.map(\.hfRepo)).count > 1
     }
 }
 
 enum ModelCatalog {
-    /// Group downloaded files by **model identity** (normalized stem), not by
-    /// `hf_repo`. A single model whose quants are intentionally sourced from
-    /// different repos — e.g. Ministral Q4_0 from `unsloth` and its K-quants
-    /// from `mistralai` upstream — then shows as one card instead of two.
-    /// Each `DiscoveredModel` keeps its own `hfRepo`, so per-cell provenance and
-    /// reporting are unaffected.
+    /// Group downloaded files by model identity, not `hf_repo`, so a model whose quants
+    /// come from different repos shows as one card. Each `DiscoveredModel` keeps its own
+    /// `hfRepo`, so per-cell provenance is unaffected.
     static func groups(from models: [DiscoveredModel]) -> [ModelGroup] {
-        // Family identity: the spec's own `familyId` derivation, shared across a
-        // model's quants *and* formats — so a stamped catalog download and a
-        // sideloaded copy of the same file group together (the GGUF derivation is the
-        // normalized filename stem either way), and a model's GGUF and MLX builds unify.
+        // `familyId` is shared across quants and formats, so a catalog download and a
+        // sideloaded copy of the same file group together, as do GGUF and MLX builds.
         func key(_ model: DiscoveredModel) -> String {
             model.familyId
         }
@@ -67,8 +58,6 @@ enum ModelCatalog {
 
         return keys.compactMap { k in
             byKey[k].map { group in
-                // Prefer the declared family name, then stored provenance,
-                // then the filename stem.
                 let name = CatalogEntry.familyIdToName[k]
                     ?? group.first?.displayName
                     ?? LocalStorage.modelStem(from: group.first?.name ?? k)
@@ -82,37 +71,38 @@ enum ModelCatalog {
     }
 
     static func displayName(for key: String) -> String {
-        let repoName = key.contains("/") ? String(key.split(separator: "/").last!) : key
-        return repoName.hasSuffix("-GGUF") ? String(repoName.dropLast(5)) : repoName
+        // `last` rather than `last!`: a key of "/" contains a slash but splits to nothing.
+        let repoName = key.contains("/")
+            ? key.split(separator: "/").last.map(String.init) ?? key
+            : key
+        return LocalStorage.repoStem(repoName)
     }
 
-    /// Authored display name for a model *spec* (identity). Prefers the catalog's
-    /// repo→name map, then the family catalog keyed by the spec's `familyId`, then a
-    /// derived-stem fallback (for sideloads / repos absent from the catalog). The one
-    /// place a `Model` spec's user-facing name is resolved, so authored names don't
-    /// live on the enums.
+    /// Display name for a model spec: the catalog's repo name, then its family name,
+    /// then a derived stem for sideloads and uncatalogued repos. The one place a `Model`
+    /// spec's user-facing name is resolved.
     static func displayName(for model: Model) -> String {
         if let repo = model.repo, let name = CatalogEntry.repoToName[repo.description] { return name }
         if let name = CatalogEntry.familyIdToName[model.familyId] { return name }
-        // AFM has no repo/file to derive a name from; its authored display name is
-        // the engine label ("Apple Foundation"), not the raw "apple-foundation" slug.
+        // AFM has no repo or file to derive a name from.
         if case .appleFoundationText = model { return model.engineLabel }
-        // Sideload fallback: GGUF derives its stem from the weight filename; MLX has no
-        // file, so it falls back to the repo slug.
-        // `reference` names the weights whichever arm named them, so this holds for a
-        // sideload, a store form, and a URL alike.
+        // The GGUF arms prefer their repo because their references name a file
+        // (`{repo}:{path}`, `{a}+{b}`), which would label as the raw coordinate. The
+        // directory-shaped arms keep their reference, whose `prefix` tells same-repo
+        // siblings apart. A source with no repo derives from the weights.
         let key: String = switch model {
-        case let .ggufText(m): m.source.reference
-        case let .ggufVision(m): m.source.modelReference
+        case let .ggufText(m): model.repo?.description ?? m.source.reference
+        case let .ggufVision(m): model.repo?.description ?? m.source.weightsReference
+        case let .ggufVisionSpeculative(m):
+            model.repo?.description ?? m.source.vision.weightsReference
         case let .mlx(m): m.source.reference
+        case let .onnxGenai(m): m.source.reference
         case .appleFoundationText: model.familyId
         }
         return displayName(for: key)
     }
 
-    /// A clear, human-facing label for a downloaded model file: the family display
-    /// name plus its quant (e.g. `LFM 2.5 350M · Q4_K_M`) — never the raw on-disk
-    /// filename. Falls back to the family name alone when the quant is unknown.
+    /// Family name plus quant (e.g. `LFM 2.5 350M · Q4_K_M`), never the on-disk filename.
     static func displayLabel(for model: DiscoveredModel) -> String {
         let name = displayName(for: model.source)
         guard let quant = model.quant else { return name }
@@ -324,8 +314,7 @@ struct EmptyModelsPrompt: View {
 }
 
 extension EmptyModelsPrompt {
-    /// The "download models before you can start a job" prompt shown identically
-    /// by the Jobs list and New Job's model step. Only the tap action differs.
+    /// Shown by the Jobs list and New Job's model step; only the tap action differs.
     static func needModelsForJobs(action: @escaping () -> Void) -> EmptyModelsPrompt {
         EmptyModelsPrompt(
             message: "To create jobs, you need to first download\nmodels to select for benchmarking.",
@@ -419,10 +408,8 @@ struct QuantizationSelector: View {
     var subtitle: String = "Specify level of quantization to download"
     var disabledQuants: Set<QuantPill> = []
     var style: QuantizationSelectorStyle = .pills
-    // Whether the selection may be cleared entirely (e.g. the download sheet,
-    // where "nothing selected" just disables the Download button). Contexts
-    // where an empty selection is meaningless (the job wizard's quant filter)
-    // pass false, so deselecting falls back to "All quants" instead.
+    // False where an empty selection is meaningless (the job wizard's quant filter),
+    // so deselecting falls back to "All quants".
     var allowsEmptySelection: Bool = true
     @State private var clearedSelectionForDisabledQuants = false
 

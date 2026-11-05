@@ -1,13 +1,12 @@
-pub mod catalog;
-pub mod cleanup;
-pub mod execute;
+mod cell_flags;
+mod cleanup;
+mod completions;
+mod execute;
 mod flavor;
-pub mod memprobe;
-pub mod models;
-pub mod openai;
-pub mod preflight;
-pub mod runtimes;
-pub mod server;
-pub mod slug;
+mod launch;
+mod memprobe;
+mod models;
+mod response;
+mod server;
 
 pub use execute::run;

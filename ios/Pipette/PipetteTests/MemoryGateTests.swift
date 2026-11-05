@@ -39,9 +39,8 @@ final class MemoryGateTests: XCTestCase {
     }
 
     func testSnapshotIsNilForUnreadableModels() {
-        // Missing path → no size → nothing to measure or record. (The other
-        // nil arm — a zero jetsam budget — is the simulator's own behavior
-        // and not assertable from here.)
+        // The other nil arm, a zero jetsam budget, is the simulator's own behavior and
+        // not assertable from here.
         XCTAssertNil(MemoryGate.snapshot(modelPath: "/nonexistent/\(UUID().uuidString).gguf"))
     }
 

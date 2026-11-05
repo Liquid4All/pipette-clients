@@ -1,0 +1,143 @@
+name: Security
+
+# Kept in step with the same jobs in the other Pipette repositories.
+# `cargo deny check licenses` runs in build.yml's `rust-check` instead. Unfiltered: a new advisory lands with no diff at all.
+
+on:
+  push:
+    branches: [main]
+  # No `branches:` filter: it matches the PR base, so stacked PRs would skip the
+  # gate, and a skipped gate reads as green.
+  pull_request:
+  # New advisories are published without a commit here.
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # The schedule never cancels: a cancelled run reports as cancelled, not failed,
+  # so the daily scan would go missing quietly.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Tool pins live in ci/install-tool.sh, which Dependabot cannot see; bump them
+  # there. Every job reaches the network, so a timeout keeps a stall from sitting
+  # in progress for six hours.
+  cargo-deny:
+    name: supply chain (cargo-deny)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cargo-deny runs `cargo metadata`, so it needs a toolchain.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+
+      - name: Install cargo-deny (pinned, checksum-verified)
+        run: ci/install-tool.sh cargo-deny
+
+      - name: Advisories, bans and sources
+        # Policy lives in deny.toml. The -D flags turn stale `[advisories].ignore`
+        # and `[bans].skip` entries from exit-0 warnings into errors; lint levels
+        # can only be set here.
+        run: cargo deny check -D advisory-not-detected -D unnecessary-skip -D unmatched-skip advisories bans sources
+
+  unused-deps:
+    name: unused deps (cargo-machete)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-machete (pinned, checksum-verified)
+        run: ci/install-tool.sh cargo-machete
+
+      - name: Scan for unused dependencies
+        # The bare binary needs no toolchain. False positives (macro-only or
+        # `#[path]` uses) are suppressed in `[package.metadata.cargo-machete]`.
+        run: cargo-machete
+
+  secrets:
+    # A PR scans only `base..HEAD`, since a full-history scan would red every PR
+    # over a string one branch carries. Push and cron scan HEAD's full history,
+    # but not gitleaks's `--all`, which would judge every pushed branch against
+    # `main`'s allow-list.
+    name: secrets (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The range scan needs the merge base locally.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: ci/install-tool.sh gitleaks
+
+      - name: Scan (this pull request's commits; full history otherwise)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # The merge ref's HEAD^1 is the current base tip, so later merges to the
+          # base are not blamed on this PR. BASE_SHA is the fallback.
+          base=""
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            if git rev-parse --verify -q "HEAD^2" >/dev/null; then
+              base="$(git rev-parse HEAD^1)"
+            else
+              base="${BASE_SHA}"
+            fi
+          fi
+          # Anything unexpected falls through to full history: an empty range
+          # would scan zero commits and still report clean.
+          count=0
+          if [[ -n "${base}" ]] && git merge-base "${base}" HEAD >/dev/null 2>&1; then
+            count="$(git rev-list --count "${base}..HEAD")"
+          fi
+          echo "event=${GITHUB_EVENT_NAME} base=${base:-<none>} commits=${count}"
+          # --redact keeps secrets out of the log. --config is explicit because
+          # gitleaks silently falls back to its built-in rules without a file.
+          if [[ "${count}" -gt 0 ]]; then
+            echo ">> scanning ${count} commit(s) in ${base}..HEAD"
+            gitleaks git --redact --verbose --config .gitleaks.toml --log-opts="${base}..HEAD" .
+          else
+            echo ">> no usable commit range for this event -- scanning HEAD's FULL history"
+            # gitleaks's own defaults, minus `--all` (see the job comment).
+            gitleaks git --redact --verbose --config .gitleaks.toml \
+              --log-opts="--full-history --diff-filter=tuxdb HEAD" .
+          fi
+
+  security-complete:
+    # The one required context, so renaming a job's `name:` (its context) needs
+    # no ruleset edit.
+    needs: [cargo-deny, unused-deps, secrets]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify every gate succeeded
+        run: |
+          # Unlike build-complete, `skipped` fails: nothing here is filtered.
+          result='${{ join(needs.*.result, ',') }}'
+          echo "upstream results: $result"
+          case "$result" in
+            *failure*|*cancelled*|*skipped*)
+              echo "one or more upstream jobs did not succeed"
+              exit 1
+              ;;
+          esac

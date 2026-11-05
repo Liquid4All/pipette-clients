@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "vl_throughput",
+  "model_type": "gguf_vision",
+  "runtime_type": "llamacpp_apk_pipette"
+}

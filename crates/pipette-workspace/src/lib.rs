@@ -11,9 +11,8 @@ const TOML_MANIFEST_FILE: &str = "manifest.toml";
 
 #[derive(Debug)]
 pub enum InitResult {
-    /// Fresh init — manifest was created.
     Created(PathBuf),
-    /// Manifest already existed — subdirs were ensured but manifest untouched.
+    /// Subdirs were ensured; the manifest was left untouched.
     AlreadyExists(PathBuf),
 }
 
@@ -24,8 +23,7 @@ const WORKSPACE_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Manifest {
-    /// Layout schema version (see [`WORKSPACE_VERSION`]). Manifests written
-    /// before versioning omit it — they are the v1 layout, so default to 1.
+    /// Manifests written before versioning omit it: they are the v1 layout.
     #[serde(default = "default_manifest_version")]
     version: u32,
     created_at: String,
@@ -35,12 +33,8 @@ fn default_manifest_version() -> u32 {
     1
 }
 
-/// A validated handle to an initialized workspace.
-///
-/// The base workspace is generic — it knows nothing about benchmarks,
-/// identity, runtimes, or plans. It provides lifecycle (`init`/`open`)
-/// and path resolution (`root`). Domain-specific paths and data access
-/// belong on per-CLI wrapper types that encapsulate this.
+/// A validated handle to an initialized workspace. Generic: domain paths and
+/// data access belong on each CLI's wrapper type.
 #[derive(Debug)]
 pub struct Workspace {
     root: PathBuf,
@@ -128,7 +122,6 @@ impl Workspace {
     }
 }
 
-/// Write a fresh `manifest.toml` at the current layout version.
 fn write_manifest(manifest_path: &Path) -> anyhow::Result<()> {
     let manifest = Manifest {
         version: WORKSPACE_VERSION,
@@ -141,7 +134,6 @@ fn write_manifest(manifest_path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", manifest_path.display()))
 }
 
-/// Read and parse the TOML `manifest.toml`.
 fn read_manifest(manifest_path: &Path) -> anyhow::Result<Manifest> {
     let raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
@@ -176,14 +168,13 @@ fn migrate_legacy_manifest(root: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Return `<work_dir>/.<marker_name>`.
 pub fn storage_root(work_dir: &Path, marker_name: &str) -> PathBuf {
     work_dir.join(format!(".{marker_name}"))
 }
 
-/// Whether an initialized workspace exists under `<work_dir>/.<marker_name>` —
-/// a `manifest.toml`, or a legacy `manifest.json` that [`Workspace::open`]
-/// migrates. A cheap existence check; it neither reads nor parses the manifest.
+/// Whether `<work_dir>/.<marker_name>` holds a `manifest.toml`, or a legacy
+/// `manifest.json` that [`Workspace::open`] migrates. It neither reads nor
+/// parses the manifest.
 pub fn is_initialized(work_dir: &Path, marker_name: &str) -> bool {
     let root = storage_root(work_dir, marker_name);
     root.join(TOML_MANIFEST_FILE).exists() || root.join(JSON_MANIFEST_FILE).exists()
@@ -199,15 +190,11 @@ pub fn resolve_work_dir(work_dir_arg: Option<&Path>) -> anyhow::Result<PathBuf> 
     }
 }
 
-/// Ensure `work_dir` exists and holds an initialized `.<name>` workspace, or
-/// return an actionable error. A missing directory keeps the clear "does not
-/// exist" diagnostic (so a typo isn't mistaken for a missing workspace); a
-/// present-but-uninitialized directory yields a hint showing how to `init` at
-/// each place the resolver honors (`--work-dir` > `PIPETTE_WORK_DIR` > current
-/// dir).
+/// Ensure `work_dir` exists and holds an initialized `.<name>` workspace. A
+/// missing directory says "does not exist", so a typo isn't mistaken for a
+/// missing workspace; an uninitialized one gets a hint showing how to `init`.
 ///
-/// `name` is the client's marker/binary name (e.g. `"pipette-llamacpp"`) — used
-/// both to locate the workspace and to render the suggested commands.
+/// `name` is the client's marker and binary name (e.g. `"pipette"`).
 pub fn require_workspace(
     work_dir: &Path,
     work_dir_arg: Option<&Path>,
@@ -231,16 +218,9 @@ pub fn require_workspace(
     )
 }
 
-/// Message for a workspace-dependent command when no workspace exists at the
-/// resolved location. States where it looked, then how to create one.
-///
-/// `work_dir_arg` is the resolved `--work-dir` / `PIPETTE_WORK_DIR` value (or
-/// `None` when neither is set). When set, only the explicit `--work-dir` form
-/// is offered — a bare `init` could resolve through the env var — plus the
-/// current directory as a second option (collapsed to one line when the target
-/// already is the current directory). When unset, a bare `<name> init` targets
-/// the current directory and another dir is described in prose so a `<path>`
-/// placeholder is never mistaken for a real path.
+/// Where it looked, then how to create one. With `work_dir_arg` (the resolved
+/// `--work-dir` / `PIPETTE_WORK_DIR`) set, only the explicit `--work-dir` form
+/// is offered, since a bare `init` could resolve through the env var.
 fn not_initialized_hint(
     resolved_root: &Path,
     work_dir_arg: Option<&Path>,
@@ -464,12 +444,10 @@ mod tests {
             root.join("manifest.json"),
             r#"{"created_at":"2020-01-01T00:00:00Z"}"#,
         )?;
-        // The legacy marker still counts as initialized.
         assert!(is_initialized(&work, "test-tool"));
 
         let ws = Workspace::open(&work, "test-tool")?;
         assert_eq!(ws.root(), root);
-        // JSON replaced by TOML in place; created_at preserved.
         assert!(root.join("manifest.toml").exists());
         assert!(!root.join("manifest.json").exists());
         let raw = fs::read_to_string(root.join("manifest.toml"))?;

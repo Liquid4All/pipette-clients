@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Enforce the import-grouping convention rustfmt can't express.
 
-`use` imports — at file top level **and** inside nested modules — must form
+`use` imports, at file top level and inside nested modules, must form
 blank-line-separated groups, in this order:
 
   1. std / core / alloc
   2. third-party crates (crates.io)
   3. workspace crates (pipette_*)
-  4. crate-local, with first-segments ordered self → super → crate
+  4. crate-local, ordered self, super, crate
 
-rustfmt only knows std / external / local, so it can't split workspace crates
-from third-party. Within a group, rustfmt owns lexicographic order; this check
-only enforces the self/super/crate relative order inside the crate-local group
-(so `use crate::…` before `use super::*` is rejected).
+rustfmt cannot split workspace crates from third-party. Within a group rustfmt
+owns the order; this check only enforces self/super/crate in the crate-local one.
 
 Scope: every same-indent run of plain `use` statements (joined across
 multi-line `use a::{ ... };`). `pub use` re-exports are ignored. Comments and
@@ -32,7 +30,7 @@ RANK_NAME = {0: "std", 1: "third-party", 2: "workspace", 3: "crate-local"}
 
 USE = re.compile(r"^(\s*)use\s")
 PUB_USE = re.compile(r"^(\s*)pub(?:\([^)]*\))?\s+use\s")  # incl. pub(crate)/pub(super)
-# Comments + attributes stay inside the block (same as the old top-level check).
+# Comments and attributes do not end a block.
 NEUTRAL = re.compile(r"^\s*(//|#!?\[)")
 FIRST_SEGMENT = re.compile(r"\s*use\s+(?:r#)?([A-Za-z_][A-Za-z0-9_]*)")
 BLANK = re.compile(r"^\s*$")

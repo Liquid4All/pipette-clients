@@ -1,49 +1,59 @@
 # Building the Pipette Android App
 
-How to compile the `pipette-android` JNI library and build/test the app. For
-the architecture behind these artifacts (the Kotlin↔Rust JNI boundary, storage
-model, job runner, etc.), see [architecture.md](architecture.md).
+How to build the native library `libpipette_android.so`, and how to build, test,
+and run the app. For the architecture behind these artifacts (the engine
+flavors, the process boundary, storage, the job runner), see
+[architecture.md](architecture.md).
 
-The app currently targets `arm64-v8a` only.
+The app targets `arm64-v8a` only.
+
+The app has two engine flavors (see
+[architecture.md](architecture.md#engine-flavors)). `kotlinEngine` is the
+default, and every command on this page builds it unless it names `rustEngine`.
+With flavors, each Gradle task name includes the flavor:
+`assembleKotlinEngineDebug`, `installKotlinEngineDebug`,
+`testKotlinEngineDebugUnitTest`. A name without the flavor, such as
+`installDebug`, is ambiguous and fails.
 
 ## Quickstart
 
 Get a debug build running on a connected arm64 device or emulator. This is the
 fast path; each step links to its full treatment below.
 
-1. **Install the toolchain.** A fresh checkout needs a JDK, the Android SDK +
-   NDK, `cmake`, `ninja`, and Rust (rustup). `android/build.sh` checks for each,
-   but it *fails fast*. It stops at the first one that's missing and prints the
-   fix for that one only, so discovering them by re-running is a one-at-a-time
-   scavenger hunt. Install everything from [Prerequisites](#prerequisites) up
-   front instead, then the build sails through. (The wrapper auto-locates a JDK
-   and the Android SDK in standard install locations and exports `JAVA_HOME` /
-   `ANDROID_HOME` for you; you only need to set those yourself if yours live
-   somewhere unusual; see [Android SDK + components](#android-sdk--components).)
+1. **Install the toolchain.** A fresh checkout needs a JDK, the Android SDK and
+   NDK, `cmake`, `ninja`, and Rust (rustup). `android/build.sh` checks for each
+   tool. It stops at the first missing tool and prints the fix for that tool
+   only. Install everything in [Prerequisites](#prerequisites) first, so one
+   run finds everything.
+
+   The wrapper finds a JDK and the Android SDK in the standard install
+   locations and exports `JAVA_HOME` and `ANDROID_HOME`. Set them yourself only
+   if your installs are in other locations; see
+   [Android SDK + components](#android-sdk--components).
 
 2. **Build and install** onto the device/emulator:
 
    ```bash
-   ./android/build.sh installDebug
+   ./android/build.sh installKotlinEngineDebug
    ```
 
    The first run is slow: it builds the vendored llama.cpp/ggml native libraries.
 
-3. **Launch it.** Tap the **Pipette** icon, or start the activity explicitly. Mind
-   the names: a debug build installs under `ai.liquid.pipette.debug`, but the
-   activity class keeps its original namespace, so the component is
-   `…debug/ai.liquid.pipette.MainActivity` (see
-   [Inspecting devices](#inspecting-devices) for why):
+3. **Launch it.** Tap the **Pipette** icon, or start the activity explicitly. A
+   debug build installs under the package `ai.liquid.pipette.debug`, but the
+   activity class keeps the namespace `ai.liquid.pipette`. The component is thus
+   `…debug/ai.liquid.pipette.ComposeMainActivity` (see
+   [Inspecting devices](#inspecting-devices)):
 
    ```bash
-   "$ANDROID_HOME/platform-tools/adb" shell am start -n ai.liquid.pipette.debug/ai.liquid.pipette.MainActivity
+   "$ANDROID_HOME/platform-tools/adb" shell am start -n ai.liquid.pipette.debug/ai.liquid.pipette.ComposeMainActivity
    ```
 
 4. **Get past the sign-in screen.** The app is gated behind a Clerk sign-in, but
    a debug build needs **no Clerk setup** to get in:
 
-   - **No Clerk key configured (the default):** the gate falls straight through:
-     a debug build with a blank key opens directly to the UI, no sign-in shown.
+   - **No Clerk key configured (the default):** the gate is open, and the app
+     opens directly to the UI with no sign-in screen.
    - **A Clerk key is configured:** tap **"Skip sign-in (debug only)"** on the
      sign-in screen, or toggle **Settings → Account → "Bypass auth gate (debug
      only)"**. The bypass is debug-only and persists across restarts.
@@ -51,14 +61,12 @@ fast path; each step links to its full treatment below.
      `clerk.publishableKey.debug` (see [Clerk sign-in](#clerk-sign-in)) and use a
      `+clerk_test` email with the fixed code `424242`.
 
-5. **Confirm the engine is packaged.** The UI reports `Native benchmark engine
-   ready` once the native library is packaged and present (it isn't loaded until
-   the first benchmark runs; see [Inspecting devices](#inspecting-devices)).
-   You're now ready to add models on the Models tab and plan a job on the Jobs
-   tab.
+5. **Confirm the engine is packaged.** If the native library is missing from
+   the APK, the Jobs tab shows *"Native benchmark engine missing"* (see
+   [Inspecting devices](#inspecting-devices)). If it shows no such message, add
+   models on the Models tab and plan a job on the Jobs tab.
 
-Release builds are different: with no Clerk key they show *"Clerk not
-configured"* and the bypass is unavailable. See [Clerk sign-in](#clerk-sign-in).
+A release build with a Clerk key has no bypass. See [Clerk sign-in](#clerk-sign-in).
 
 ### Running on an emulator
 
@@ -79,7 +87,7 @@ AVDM="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
 "$ANDROID_HOME/platform-tools/adb" devices          # confirm it shows as emulator-5554
 ```
 
-Once it's booted, `./android/build.sh installDebug` installs onto it like any
+Once it's booted, `./android/build.sh installKotlinEngineDebug` installs onto it like any
 other device. An emulator is fine for exercising the UI and the job/download
 flow, but **its benchmark numbers are meaningless**. It runs on host CPU and
 doesn't throttle like real silicon, so use a physical device for any measurement
@@ -88,15 +96,20 @@ you care about.
 ## How to build
 
 ```bash
-./android/build.sh          # assemble the debug APK (:app:assembleDebug)
+./android/build.sh          # assemble the debug APK (:app:assembleKotlinEngineDebug)
 ./android/build.sh test     # compile + unit tests + assemble
 ./android/build.sh --help
 ```
 
-`android/build.sh` is the recommended entry point. It resolves and exports
-`JAVA_HOME` and `ANDROID_HOME`, initializes the vendored submodules, and verifies
-the NDK / CMake / Ninja / Rust toolchain are present (printing the exact fix
-for anything missing) before handing off to Gradle. It installs nothing, runs
+`android/build.sh` is the recommended entry point. Before it starts Gradle, it:
+
+- resolves and exports `JAVA_HOME` and `ANDROID_HOME`
+- initializes the vendored submodules that the Android build uses
+- checks that the NDK, CMake, Ninja, `cargo`, and `rustup` are present, and
+  prints the exact fix for a missing one
+
+`test` runs `:app:compileKotlinEngineDebugKotlin`,
+`:app:testKotlinEngineDebugUnitTest`, and `:app:assembleKotlinEngineDebug`. It installs nothing, runs
 no package managers, and does not write configuration files (notably no
 `local.properties`). Extra arguments are forwarded to `gradlew`.
 
@@ -110,11 +123,13 @@ directly.
 `android/build.sh` checks for everything in this section and points you at
 whatever is missing, but it can't install these for you, so set them up first.
 
-Two parts of the build pull in different tooling: Gradle/AGP compiles the Kotlin
-app, and `build-rust-android.sh` does a CMake build of the Rust + vendored
-llama.cpp native library. The Gradle wrapper (`./gradlew`) downloads Gradle
-itself, and the native script auto-adds the `aarch64-linux-android` Rust target,
-but everything below you provide.
+Two parts of the build use different tools. Gradle and AGP (the Android Gradle
+Plugin) compile the Kotlin app. A shell script does a CMake build of the native
+library and the vendored llama.cpp: `build-native-android.sh` for
+`kotlinEngine` (C++ only), and `build-rust-android.sh` for `rustEngine` (C++ and
+Rust). The Gradle wrapper (`./gradlew`) downloads Gradle itself, and
+`build-rust-android.sh` adds the `aarch64-linux-android` Rust target. You
+provide everything else below.
 
 ### A JDK to run Gradle
 
@@ -155,11 +170,12 @@ with `sdkmanager` (accept licenses first):
 export ANDROID_HOME=/path/to/android-sdk
 SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 yes | "$SDKM" --licenses
-"$SDKM" "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;<version>"
+"$SDKM" "platform-tools" "platforms;android-36.1" "build-tools;36.0.0" "ndk;<version>"
 ```
 
-- `platforms;android-36` matches the project's `targetSdk = 36` (`minSdk = 31`).
-- The **NDK** is required for the native build: `build-rust-android.sh` resolves
+- `platforms;android-36.1` matches the project's `compileSdk` (36, minor
+  level 1). `targetSdk` is 36 and `minSdk` is 31.
+- The **NDK** is required for the native build. Both native build scripts find
   it from `ANDROID_NDK_HOME` / `ANDROID_NDK`, else the newest under `$SDK/ndk`,
   so any recent version works (`"$SDKM" --list | grep ndk` shows the options).
 - AGP can auto-download the platform and build-tools once licenses are accepted,
@@ -167,8 +183,8 @@ yes | "$SDKM" --licenses
 
 ### CMake and Ninja (native build)
 
-`build-rust-android.sh` drives the vendored llama.cpp/ggml build through CMake
-and checks for **`cmake` and `ninja` on `PATH`**. These are the *system* tools,
+Both native build scripts drive the vendored llama.cpp/ggml build through CMake
+and check for **`cmake` and `ninja` on `PATH`**. These are the *system* tools,
 **not** the SDK's `cmake;` package (which the script does not use):
 
 ```bash
@@ -177,8 +193,10 @@ brew install cmake ninja
 
 ### Rust
 
-**Rust via [rustup](https://rustup.rs)** on `PATH`. The `aarch64-linux-android`
-target is added automatically by the native build, or up front:
+**Rust via [rustup](https://rustup.rs)** on `PATH`. Only the `rustEngine` build
+compiles Rust, but `android/build.sh` requires `cargo` and `rustup` for every
+build. `build-rust-android.sh` adds the `aarch64-linux-android` target, or you
+can add it first:
 
 ```bash
 rustup target add aarch64-linux-android
@@ -186,12 +204,15 @@ rustup target add aarch64-linux-android
 
 ### Vendored submodules
 
-`llama.cpp` and `kleidiai` are git submodules under `vendor/` and are compiled
-into the native library:
+The native library compiles three git submodules under `vendor/`: `llama.cpp`,
+`kleidiai`, and `sentry-native`. `android/build.sh` initializes them. To do it
+yourself:
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init --recursive -- vendor/llama.cpp vendor/kleidiai vendor/sentry-native
 ```
+
+The other submodules under `vendor/` are for other clients.
 
 ## Clerk sign-in
 
@@ -232,27 +253,27 @@ Every build logs which of these it is (`Clerk: sign-in ENABLED …` / `Clerk:
 sign-in DISABLED …`), which is also how a CI run shows whether the
 `CLERK_PUBLISHABLE_KEY` secret reached the build.
 
-`verifyReleaseClerkKey` runs on `assembleRelease` / `bundleRelease`. It does not
-require a key, since building without one is supported; it fails a key that is
-set but malformed, and warns when a release is built with sign-in disabled.
-Liquid's own distribution workflow additionally fails when the secret is missing,
-so only a fork can ship auth-off by accident.
+`verifyReleaseClerkKey` runs before every release `assemble` and `bundle` task
+(for example `assembleKotlinEngineRelease`). It does not require a key, because a
+build without one is supported. It fails a key that is set but malformed, and it
+warns when a release has sign-in disabled. Liquid's own distribution workflow
+also fails when the secret is missing, so only a fork can ship with auth off by
+accident.
 
-"Malformed" means the same thing in all three places that check it, and the rule
-is deliberately duplicated because none of them can call the others: a usable key
-is non-blank, starts with `pk_`, and contains no unexpanded `$(…)` or `${…}`
-placeholder.
+Three places check the key. None of them can call the others, so each has its
+own copy of the rule:
 
-| Checked by | Where | On a malformed key |
-|---|---|---|
-| `isCompleteKey` | `ClerkConfiguration.kt` (runtime) | treats the build as having no auth |
-| `verifyReleaseClerkKey` | `app/build.gradle.kts` (build time) | fails `assembleRelease` / `bundleRelease` |
-| "Verify the Clerk key is present" | `android-release-distribution.yml` (CI) | fails the distribution run |
+| Checked by | Where | Rule | On a failing key |
+|---|---|---|---|
+| `isCompleteKey` | `ClerkConfiguration.kt` (runtime) | non-blank, no unexpanded `$(…)` or `${…}` placeholder | treats the build as having no auth |
+| `verifyReleaseClerkKey` | `app/build.gradle.kts` (build time) | blank is allowed (with a warning); otherwise starts with `pk_` and passes `isCompleteKey` | fails every `assemble*Release` / `bundle*Release` task |
+| "Verify the Clerk key is present" | `android-release-distribution.yml` (CI) | non-empty and starts with `pk_` | fails the distribution run |
 
-The placeholder half matters because a prefix check alone accepts
-`pk_$(CLERK_PUBLISHABLE_KEY)`: the two build-time guards would pass it and the
-runtime would then treat it as no key at all, shipping a release with the gate
-open. Change the rule in one place and it has to change in all three.
+The runtime check does not test for `pk_`: a non-blank key without a placeholder
+goes to `Clerk.initialize`. The placeholder check matters because a prefix check
+alone accepts `pk_$(CLERK_PUBLISHABLE_KEY)`. The runtime treats that value as no
+key, so a release would ship with the gate open. If you change the rule, change
+it in all three places.
 
 ### Forking
 
@@ -287,10 +308,11 @@ default**:
 |---|---|---|---|
 | `CLERK_DEBUG_LOGGING` | `CLERK_DEBUG_LOGGING` | `clerk.debugLogging` | `false`, and always `false` for release |
 
-Turning it on logs every Frontend-API operation and error code, which is what you
-want when an auth failure is opaque. It also logs every request and response
-**body**, which puts credentials in logcat in the clear: the email-code OTP, the
-session JWT, and the password submitted by the password step. So switch it on
+Turning it on logs every Frontend-API operation and error code, which helps when
+an auth failure is unclear. It also logs every request and response **body**,
+which puts credentials in logcat in the clear: the email-code OTP (one-time
+password), the session JWT (JSON Web Token), and the password from the password
+step. So switch it on
 while you are debugging sign-in, and off again afterwards:
 
 ```properties
@@ -306,16 +328,28 @@ build from the app module:
 
 ```bash
 cd android/Pipette
-./gradlew :app:compileDebugKotlin :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:compileKotlinEngineDebugKotlin :app:testKotlinEngineDebugUnitTest :app:assembleKotlinEngineDebug
 ```
 
-The app build invokes the native Rust build automatically: the Gradle task
-`buildRustAndroidArm64` runs `android/Pipette/build-rust-android.sh`, which
-CMake-builds `pipette-android` plus the vendored llama.cpp/ggml for
-`aarch64-linux-android` and stages `libpipette_android.so` + `libc++_shared.so`
-into the generated `jniLibs`.
+For the `rustEngine` flavor, use the same task names with `RustEngine` in place
+of `KotlinEngine`. `:app:assembleDebug` builds both flavors.
 
-Manual native bridge check (no Gradle):
+The app build runs the native build automatically. Each flavor has its own
+Gradle task:
+
+| Flavor | Gradle task | Script | Output directory |
+|---|---|---|---|
+| `kotlinEngine` | `buildNativeAndroidArm64` | `build-native-android.sh` | `app/build/generated/kotlinJniLibs` |
+| `rustEngine` | `buildRustAndroidArm64` | `build-rust-android.sh` | `app/build/generated/rustJniLibs` |
+
+Each script CMake-builds the vendored llama.cpp/ggml for
+`aarch64-linux-android`, builds `libpipette_android.so` (from `jni.cpp` and the
+shim for `kotlinEngine`, from the `pipette-android` crate and the shim for
+`rustEngine`), and stages the `.so` files, with `libc++_shared.so`, into the
+output directory.
+
+To check the Rust crate without Gradle (it covers `rustEngine` only; on the host
+the crate compiles to stubs):
 
 ```bash
 cargo check -p pipette-android
@@ -323,7 +357,7 @@ cargo check -p pipette-android
 
 ### Native build options
 
-`build-rust-android.sh` honors a few environment overrides:
+Both native build scripts honor these environment overrides:
 
 - `ANDROID_NDK_HOME` / `ANDROID_NDK`: use a specific NDK instead of the newest
   under `$SDK/ndk`.
@@ -334,19 +368,19 @@ cargo check -p pipette-android
 
 ## Native build internals
 
-[Manual Gradle build](#manual-gradle-build) covers how the `buildRustAndroidArm64`
-task is wired into Gradle. This section is about what that build actually
-produces: not one native library but several. `build-rust-android.sh` CMake-builds
-llama.cpp/ggml as shared libraries (one CPU-backend variant per ARM feature
-level) links the Rust bridge (`libpipette_android.so`) against them, and stages
-every `.so` into Gradle's generated JNI libs directory. `useLegacyPackaging = true`
+[Manual Gradle build](#manual-gradle-build) covers how the native build tasks
+connect to Gradle. This section covers what the native build produces: several
+native libraries. The build script CMake-builds llama.cpp/ggml as shared
+libraries, with one CPU-backend variant per ARM feature level. It links
+`libpipette_android.so` against them and stages every `.so` into Gradle's
+generated JNI libs directory. `useLegacyPackaging = true`
 keeps them extracted to disk on install (the variant loader scans the lib
 directory).
 
 ### Per-CPU-variant backend dispatch
 
-The Android build does **not** hardcode a single ARM feature floor. Instead it
-mirrors inference_engine: llama.cpp/ggml is CMake-built with
+The Android build builds one CPU backend per ARM feature level: llama.cpp/ggml
+is CMake-built with
 `GGML_CPU_ALL_VARIANTS=ON` + `GGML_BACKEND_DL=ON` + `BUILD_SHARED_LIBS=ON`, which
 produces a separate runtime-loadable CPU backend per ARM feature level. The
 shipped set is an explicit allowlist (`SHIP_VARIANTS` in
@@ -359,44 +393,51 @@ shipped set is an explicit allowlist (`SHIP_VARIANTS` in
 | `libggml-cpu-android_armv8.2_2.so` | `armv8.2-a+dotprod+fp16` |
 | `libggml-cpu-android_armv8.6_1.so` | `armv8.6-a+dotprod+fp16+i8mm` |
 | `libggml-cpu-android_armv9.0_1.so` | `armv9-a` (SVE2) |
-| `libggml-cpu-android_armv9.2_1.so` | `armv9.2-a` (SVE2) |
-| `libggml-cpu-android_armv9.2_2.so` | `armv9.2-a` (SVE2, +extensions) |
+| `libggml-cpu-android_armv9.2_1.so` | `armv9.2-a` (SVE + SME) |
+| `libggml-cpu-android_armv9.2_2.so` | `armv9.2-a` (SVE + SVE2 + SME) |
+
+SVE and SVE2 are the Arm Scalable Vector Extensions; SME is the Scalable Matrix
+Extension.
 
 The base engine (`libllama.so` / `libmtmd.so` / `libggml.so` / `libggml-base.so`)
-ships alongside them. At startup `crates/pipette-android/native_loader.cpp`
+ships alongside them. At startup `android/native/native_loader.cpp`
 (called from the shim's `ensure_backend_init`, before `llama_backend_init`) scans
 the app's native-lib dir, calls each variant's `ggml_backend_score()` (returns 0
 when the CPU lacks the variant's required features), and registers the
-highest-scoring supported one. A single APK therefore runs optimally across the
-device fleet (using `i8mm` where present) without SIGILL'ing on CPUs below the
-build's feature floor (which a single fixed `-march=...+i8mm` build would do on
-pre-armv8.6 silicon). The threadpool API (perf-core affinity) lives in the
+highest-scoring supported one. A single APK thus uses the best variant on each
+device (for example `i8mm` where present). It never stops with SIGILL (an
+illegal-instruction signal) on a CPU below a fixed feature floor, which a single
+`-march=...+i8mm` build would do on pre-armv8.6 silicon. The threadpool API (perf-core affinity) lives in the
 variant `.so`, so the shim reaches it through the loader's
 `pipette_ggml_threadpool_*` wrappers. All `.so`s link `-Wl,-z,max-page-size=16384`
 for Android 15+ 16 KB pages.
 
-**armv9 variants are shipped, and we report what they do; break and all.** On an
-armv9 device the loader may select an SVE-based backend, but the SVE configuration
+**The armv9 variants ship, and Pipette reports what they do, including wrong
+output.** On an armv9 device the loader may select an SVE-based backend, but the SVE configuration
 llama.cpp assumes isn't guaranteed across mobile armv9 SoCs: SVE2 is mandatory in
-the ARMv9 spec, yet vendors diverge; Qualcomm omits it entirely, and vector
-length / feature support varies elsewhere. When the selected backend doesn't match
+the ARMv9 spec, yet vendors diverge: SVE is not usable on the Snapdragon 8 Gen 3
+([ggml-org/llama.cpp#10906](https://github.com/ggml-org/llama.cpp/pull/10906)),
+and vector length / feature support varies elsewhere. When the selected backend doesn't match
 the silicon, the symptom depends on the workload: some hit an outright crash (the
 `svcntb() == QK8_0` abort,
 [ggml-org/llama.cpp#8109](https://github.com/ggml-org/llama.cpp/issues/8109)),
-while the **LFM2A audio encoder instead returns incorrect, off-topic ASR** (TTS
-and vision are unaffected). We see the bad-output case on our armv9 Tensor test
-devices (Tensor G5 / Pixel 10); the exact root cause there isn't pinned down.
+while the **LFM2-Audio (`lfm2a`) audio encoder instead returns incorrect,
+off-topic transcripts** (TTS and vision are unaffected). The wrong-output case occurs on the armv9 Tensor test
+devices (Tensor G5 / Pixel 10); its exact root cause is not known.
 
-This is a backend-selection/configuration issue upstream of Pipette, not anything
-specific to the model. Pipette ships and measures the selected backend anyway, on
-purpose: it is a benchmark *harness*, so its job is to report how a device's stock
-inference behaves, not to debug or patch third-party inference. Treat affected
+This is a backend-selection and configuration issue in upstream llama.cpp, and it
+is not specific to the model. Pipette ships and measures the selected backend on
+purpose: it is a benchmark *harness*, and its job is to report how a device's
+stock inference behaves. Treat affected
 armv9 devices' audio-encoder accuracy numbers with this caveat until the upstream
 issue is fixed.
 
-Staging is **fail-closed**: `cmake/stage_android_jnilibs.cmake` copies the
-explicit `SHIP_VARIANTS` allowlist and the build *fails* if an expected variant is
-missing, rather than silently shipping or dropping one.
+Staging is **fail-closed** for unknown variants:
+`cmake/stage_android_jnilibs.cmake` copies only the variants in the explicit
+`SHIP_VARIANTS` allowlist. The build *fails* if ggml builds a variant that is not
+in the allowlist, or if it stages no variant at all. An allowlisted variant
+that ggml does not build is left out without an error, as long as one variant
+stages.
 
 ### KleidiAI (opt-in)
 
@@ -405,9 +446,9 @@ with `PIPETTE_ENABLE_KLEIDIAI=1` (e.g. `PIPETTE_ENABLE_KLEIDIAI=1 ./android/buil
 which adds `-DGGML_CPU_KLEIDIAI=ON` to the ggml CMake build.
 
 **Leave it off.** It has been measured slower than the stock ggml kernels on every
-SoC tested. The numbers below come from `liquid-edge-agent`, branch
-`dual-backend-npu-cpu`, running LFM2.5-2.6B-Tool as a **Q4_0** GGUF, with greedy
-output token-identical between arms:
+SoC tested. The numbers below come from an in-app test harness on SM8750,
+running a 2.6B-parameter model as a **Q4_0** GGUF, with greedy output
+token-identical between arms:
 
 | arm (SM8750, in-app, 12 turns/arm) | prefill tok/s | decode tok/s |
 |---|---|---|
@@ -422,12 +463,8 @@ like with like on CPU-variant dispatch: on SM8750 with a fixed-ISA build,
 217.22 pp** off; on a Tensor G5 with variant dispatch on, 13.22 ± 0.71 tg against
 **14.53 ± 0.83 tg** off.
 
-The earlier "~+17% prefill on a Tensor G5 with LFM2-350M Q4_0" claim that stood
-here came from a less controlled comparison and does not survive the interleaved
-one. Treat it as retracted.
-
-The flag is kept rather than deleted because the answer is per-SoC and upstream
-recommends the kernels. Re-measure before enabling it anywhere, and interleave the
+The flag stays because the result can differ per SoC and upstream recommends the
+kernels. Re-measure before enabling it anywhere, and interleave the
 arms: these differences are smaller than the drift across a warming device.
 
 **It also costs memory.** KleidiAI registers as a ggml *extra buffer type*, so its
@@ -435,16 +472,17 @@ tensors cannot take llama.cpp's zero-copy mmap path (`is_default_buft` is false 
 `llama-model.cpp`). They are allocated and repacked instead, which leaves the file
 mapping resident but never read: a 1.5 GB model measured `CPU_Mapped 1503.20 MiB`
 plus `CPU_KLEIDIAI 1306.14 MiB`, and turning mmap off recovered 1.27 GB of PSS
-(-41%). Pipette does not pay this today because the shim already loads with
-`LLAMA_LOAD_MODE_NONE` for the no-mmap benchmark contract, but anything reusing
-this build with mmap on will. On SME hardware there is a second cost: KleidiAI
+(proportional set size, -41%). By default the shim loads with
+`LLAMA_LOAD_MODE_NONE` (no mmap), so a cell pays this cost only if it sets the
+`load_mode` runtime flag to `mmap`. On SME hardware there is a second cost: KleidiAI
 packs each eligible tensor twice, once for the SME kernel and once for a non-SME
 fallback slot.
 
-Coverage is narrow. It only engages `Q4_0`, `Q8_0` and `F32` weights, never
-k-quants like Q4_K_M, so most of the catalog is unaffected either way. Note that
-KleidiAI is also the only place ggml has SME kernels, so a build with it off gets
-no SME acceleration. That is moot on current test hardware: the Tensor G5 reports
+Coverage is narrow. It only engages `Q4_0`, `Q8_0`, and `F32` weights, never
+k-quants like Q4_K_M, so most of the catalog is unaffected either way. KleidiAI is
+also the only place ggml has SME kernels, so a build with it off gets
+no SME acceleration. This does not
+matter on the test hardware: the Tensor G5 reports
 no `sme` in `/proc/cpuinfo` and has no `smidr_el1` sysfs node, so its two SME CPU
 variants score 0 and are never selected.
 
@@ -459,12 +497,13 @@ variants score 0 and are never selected.
 
 The release applicationId is `ai.liquid.pipette`, but the **debug build installs
 as `ai.liquid.pipette.debug`** (`applicationIdSuffix = ".debug"`, so a dev build
-sits alongside a release install). Note the activity *class* keeps the original
-namespace either way, so the fully-qualified launch component for a debug build is
-`ai.liquid.pipette.debug/ai.liquid.pipette.MainActivity`: the form used in the
-Quickstart's launch step. The bare `pkg/.MainActivity` shorthand instead resolves
-the class against the suffixed id and fails with *"Activity class … does not
-exist."* If in doubt, `resolve-activity` (below) prints the exact component.
+can be installed next to a release build). The activity *class* keeps the
+namespace `ai.liquid.pipette` in both builds. The launch component for a debug
+build is thus `ai.liquid.pipette.debug/ai.liquid.pipette.ComposeMainActivity`,
+as in the Quickstart's launch step. The short form `pkg/.ComposeMainActivity`
+resolves the class against the suffixed id and fails with *"Activity class …
+does not exist."* If you are not sure, `resolve-activity` (below) prints the
+exact component.
 
 To confirm what's actually installed and what its launchable component is:
 
@@ -475,10 +514,16 @@ To confirm what's actually installed and what its launchable component is:
 "$ANDROID_HOME/platform-tools/adb" shell cmd package resolve-activity --brief ai.liquid.pipette.debug | tail -1
 ```
 
-Once installed, the UI reports
-`Native benchmark engine ready` once `libpipette_android.so` is **packaged and
-present**; the main process checks this with a classloader path lookup and never
-loads the library itself. The `.so` is only ever `dlopen`ed in the isolated
-`:benchmark` process, lazily on the first benchmark call. So "ready" confirms the
-native build was packaged into the APK, not that the engine is resident; if it's
-missing instead, the UI says so and cells fail with an explicit error.
+If `libpipette_android.so` is not packaged in the APK, the Jobs tab shows
+*"Native benchmark engine missing"*, and cells fail with an explicit error. The
+check is a class-loader path lookup, so it confirms that the library is packaged,
+not that an engine is loaded. Benchmarks load the library in the `:benchmark`
+process on the first benchmark call.
+
+Read crash logs and the app's files (debug build; `run-as` needs the installed
+package id, so use the `.debug` package):
+
+```bash
+"$ANDROID_HOME/platform-tools/adb" logcat -b crash -d
+"$ANDROID_HOME/platform-tools/adb" shell run-as ai.liquid.pipette.debug find files -maxdepth 5 -type f | sort
+```

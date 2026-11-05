@@ -1,0 +1,6 @@
+{
+  "flavor": "cpu",
+  "image_name": "vllm/vllm-cpu",
+  "image_tag": "v0.10.0",
+  "type": "docker_vllm"
+}

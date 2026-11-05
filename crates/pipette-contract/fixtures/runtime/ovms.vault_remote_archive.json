@@ -1,0 +1,8 @@
+{
+  "custom_label": "acme OVMS build",
+  "flavor": "ubuntu22-x64",
+  "principal_id": "org_01936d",
+  "source": "vault_remote_archive",
+  "type": "ovms",
+  "url": "/vault/resources/vault_1/content"
+}

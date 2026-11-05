@@ -1,0 +1,12 @@
+{
+  "device_chip_model": "Google Tensor G4",
+  "device_cpu_arch": "arm64-v8a",
+  "device_form_factor": "embedded",
+  "device_name": "Pixel 9",
+  "device_os_build": "BP2A.250605.031",
+  "device_os_family": "Android",
+  "device_os_name": "Android",
+  "device_os_security_patch": "2026-09-05",
+  "device_os_version": "16",
+  "device_ram_bytes": 12884901888
+}

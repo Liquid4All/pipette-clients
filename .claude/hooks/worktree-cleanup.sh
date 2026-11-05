@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Claude Code worktree cleanup.
+# Claude Code worktree cleanup, run by the WorktreeRemove hook.
 # Mirrors the [cleanup] script in .codex/environments/environment.toml.
-# Fires from the WorktreeRemove hook, which passes the worktree directory being
-# removed as JSON on stdin (the ".directory" field). Runs only on actual
-# worktree removal — not on /clear or normal session exit.
+# The hook passes the removed worktree's directory as JSON on stdin (".directory").
 set -euo pipefail
 
 dir="$(python3 -c 'import sys, json; print(json.load(sys.stdin).get("directory", ""))' 2>/dev/null || true)"

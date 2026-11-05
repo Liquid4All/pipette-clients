@@ -1,6 +1,6 @@
-//! Management-server flows: registration, catalog/result sync, the planner
-//! worker protocol, and result recording. These drive the workspace stores
-//! but are the client's alone — no runtime crate performs them.
+//! Management-server flows: registration, catalog and result sync, claim
+//! parsing and the planner worker protocol. Client-only: no runtime crate
+//! performs them.
 
 use std::path::Path;
 
@@ -48,7 +48,9 @@ fn remove_dir_if_exists(dir: &Path) -> Result<()> {
 mod tests {
     use std::path::Path;
 
-    use pipette_plan_types::benchmark::{BenchmarkDefinition, PrefillThroughput};
+    use pipette_plan_types::{
+        BatchSize, BenchmarkDefinition, BenchmarkId, NonNegativeCount, PrefillThroughputBenchmark,
+    };
 
     use super::*;
     use crate::benchmarks::BenchmarkStore;
@@ -71,39 +73,56 @@ mod tests {
         let results = ResultsStore::new(root.path().join("results"));
 
         benchmarks.put_remote_index(&[])?;
+        crate::test_support::cache_remote(
+            &benchmarks,
+            serde_json::json!({
+                "benchmark_id": "remote-1",
+                "benchmark_type": "prefill_throughput",
+                "parameter_prefill_tokens": 1,
+            }),
+        )?;
+        assert!(crate::test_support::remote_detail_path(&benchmarks_root, "remote-1").exists());
         touch(&results.payload_path(BenchmarkResultLocation::RemotePending, "r-pending"))?;
         touch(&results.payload_path(BenchmarkResultLocation::RemoteSynced, "r-synced"))?;
         let evals = EvalCompletionsStore::new(root.path().join("evals"));
         touch(&evals.root().join("job-1/state.json"))?;
-        benchmarks.put(
-            pipette_plan_types::benchmark::BenchmarkSource::Local,
-            &BenchmarkDefinition::PrefillThroughput(PrefillThroughput {
-                benchmark_id: "local-1".into(),
-                parameter_prefill_tokens: 1,
-            }),
-        )?;
+        benchmarks.put_local(&BenchmarkDefinition::PrefillThroughput(
+            PrefillThroughputBenchmark {
+                benchmark_id: BenchmarkId::try_new("local-1".to_owned())?,
+                parameter_prefill_tokens: NonNegativeCount::try_new(1)?,
+                parameter_batch_size: BatchSize::one(),
+            },
+        ))?;
         touch(&results.payload_path(BenchmarkResultLocation::Local, "r-local"))?;
 
         clear_remote_state(&benchmarks, &results, &evals)?;
 
         assert!(!benchmarks_root.join("remote").exists());
-        assert!(!results
-            .location_dir(BenchmarkResultLocation::RemotePending)
-            .exists());
-        assert!(!results
-            .location_dir(BenchmarkResultLocation::RemoteSynced)
-            .exists());
+        assert!(
+            !results
+                .location_dir(BenchmarkResultLocation::RemotePending)
+                .exists()
+        );
+        assert!(
+            !results
+                .location_dir(BenchmarkResultLocation::RemoteSynced)
+                .exists()
+        );
         assert!(!evals.root().exists());
-        assert!(benchmarks
-            .get(&crate::benchmarks::SourcedBenchmarkId::new(
-                pipette_plan_types::benchmark::BenchmarkSource::Local,
-                pipette_plan_types::BenchmarkId::try_new("local-1".to_string())
-                    .map_err(|e| anyhow::anyhow!(e))?,
-            ))?
-            .is_some());
-        assert!(results
-            .payload_path(BenchmarkResultLocation::Local, "r-local")
-            .exists());
+        assert!(
+            benchmarks
+                .get(&crate::benchmarks::SourcedBenchmarkId::new(
+                    pipette_plan_types::BenchmarkSource::Local,
+                    pipette_plan_types::BenchmarkId::try_new("local-1".to_string())
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                ))?
+                .is_some()
+        );
+        assert!(
+            results
+                .payload_path(BenchmarkResultLocation::Local, "r-local")
+                .exists()
+        );
         Ok(())
     }
 }

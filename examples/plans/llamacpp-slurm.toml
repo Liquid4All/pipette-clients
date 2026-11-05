@@ -1,25 +1,16 @@
-# Example plan: unified pipette client, llama.cpp runtime dispatched as SLURM jobs.
+# Example plan: llama.cpp cells dispatched as SLURM jobs. Each cell is its own
+# blocking `srun`, and `parallelism = 8` holds up to 8 at once.
 #
-# Each matrix cell becomes its own `srun` allocation (synchronous —
-# `srun` blocks and propagates the job's exit code). `parallelism = 8`
-# below means the runner holds up to 8 blocking `srun` allocations at
-# once, i.e. up to 8 concurrent SLURM jobs spread across compute nodes.
-# State written to
-# .pipette-plan/plans/llamacpp-slurm-example/state.jsonl.
-#
-# Driver caveat: one `pipette-plan run` process owns all 8 allocations.
-# If it dies (logout, ssh drop) the jobs die with it — run it under
-# tmux/nohup. For a disconnect-resilient, detached alternative see
-# scripts/slurm/ (shard + sbatch; no long-lived driver).
+# One `pipette-ctl run` process owns every allocation: if it dies (logout, ssh
+# drop) the jobs die with it, so run it under tmux or nohup. scripts/slurm/
+# (shard + sbatch) has no long-lived driver.
 
 plan_id = "llamacpp-slurm-example"
 benchmarks = ["eval_smoke"]
 
-# pipette-plan runs ON the cluster login node and shells out to `srun`
-# directly. The command lands in a non-login shell that does NOT have
-# `srun` on PATH (the login profile, which is not sourced for non-login
-# `sh -c`, sets that up), so `pre_exec` re-establishes it. Use POSIX `.`
-# (not bash `source`) — slurm_local runs under `sh -c`, which may be dash.
+# pipette-ctl runs on the login node. Its non-login `sh -c` does not source the
+# profile that puts `srun` on PATH, so `pre_exec` does. Use POSIX `.`, not
+# `source`: that `sh` may be dash.
 [[transports]]
 client_id       = "cluster-login"
 type            = "slurm_local"
@@ -32,17 +23,14 @@ gpus            = 1
 cpus            = 8
 time_limit      = "02:00:00"
 mem             = "32G"
-# Per-job --output/--error files under <work_dir>/slurm-logs (omit to
-# stream task output to the driver). Each job is auto-named by its
-# benchmark/model, so `squeue` shows what's running instead of all `sh`.
+# Per-job `--output`/`--error` files (`%x-%j`) in this directory, relative to
+# where `srun` runs; omit it to stream task output to the driver.
 log_dir         = "slurm-logs"
 parallelism     = 8
 
-# Alternative: drive the same cluster from a laptop or CI box that is
-# NOT the login node. pipette-plan runs `ssh [user@]host "<srun cmd>"`
-# (same invocation style as the `ssh` transport: -o BatchMode=yes,
-# optional `port`). `pre_exec` runs on the remote side and is required
-# here because non-interactive ssh skips the login profile.
+# Alternative: drive the cluster from a box that is not the login node, which
+# runs `srun` on `host` over ssh. `pre_exec` runs there and is required because
+# non-interactive ssh skips the login profile.
 #
 # [[transports]]
 # client_id     = "cluster-over-ssh"
@@ -72,10 +60,8 @@ models = [
   { type = "gguf_text", source = "huggingface", org = "LiquidAI", repo_name = "LFM2.5-350M-GGUF", path = "LFM2.5-350M-Q4_K_M.gguf" },
 ]
 runtimes = [
-  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_version = "b9050", flavor = "linux-x64-vulkan" },
+  { type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", repository_version = "b9050", flavor = "linux-x64-vulkan" },
 ]
-# Run-driving knobs (HTTP-client timeout, doom-loop monitor, readiness gate),
-# keyed on (benchmark, runtime, model).
 benchmark_flags = [
   { benchmark_type = "eval", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", http_timeout_seconds = 600 },
 ]

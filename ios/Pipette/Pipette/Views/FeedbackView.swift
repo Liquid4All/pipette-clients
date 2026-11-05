@@ -1,20 +1,13 @@
 import Sentry
 import SwiftUI
 
-/// In-app user feedback / bug reporting, recorded as a Sentry User Feedback record via
-/// `SentrySDK.capture(feedback:)`. Mirrors the Android `FeedbackDialog` and the
-/// pipette-dashboard web flow: an optional category, a required message, and an optional
-/// email (prefilled from the signed-in Clerk user). The same category taxonomy is reused so
-/// the `category` tag means the same thing across web, Android, and iOS in Sentry.
+/// In-app feedback, recorded as a Sentry User Feedback record. Mirrors Android's
+/// `FeedbackDialog` and the pipette-dashboard web flow, with the same category taxonomy so
+/// the `category` tag means the same thing on every platform.
 ///
-/// Device / chip / OS / app-version tags are set once globally in `SentryConfiguration`, so
-/// they ride along with this feedback (and crashes) automatically; the per-submission
-/// `category` and the `source` ("ios-settings") tag are set on the scope around the capture
-/// (see `submit()`). The `source` tag matches the Android/web taxonomy so cross-platform
-/// `source` filtering includes iOS. No honeypot/min-interval spam guard — a native form has
-/// no bot surface.
+/// No honeypot or min-interval spam guard: a native form has no bot surface.
 struct FeedbackView: View {
-    /// Pre-fills the optional reply address (the signed-in Clerk email, when available).
+    /// Pre-fills the optional reply address (the signed-in Clerk email).
     let defaultEmail: String?
 
     @Environment(\.dismiss) private var dismiss
@@ -141,15 +134,12 @@ struct FeedbackView: View {
         }
     }
 
-    /// How a field's label is annotated. Modeled as one value so the required and optional
-    /// states are mutually exclusive (no nonsensical `required && optional`), and the hint
-    /// only exists where it's meaningful.
+    /// How a field's label is annotated. One value, so required and optional are exclusive.
     private enum FieldKind {
         case required
         case optional(hint: String? = nil)
     }
 
-    /// A labeled field group: a small caption (with an "*"/"(optional…)" suffix) above the control.
     private func field(
         label: String,
         kind: FieldKind,
@@ -184,14 +174,12 @@ struct FeedbackView: View {
             source: .custom
         )
 
-        // The static `capture(feedback:)` applies the *global* scope (the public SDK feedback
-        // API has no cloned-scope overload — only the lower-level client does), so set the
-        // feedback-only tags on the scope around the call and remove them immediately after,
-        // so they never ride along on a later crash. capture() applies the scope synchronously
-        // before returning, so the tags are baked into the feedback before the removal.
-        // `source` marks the submission origin (the iOS counterpart of Android's `source` tag,
-        // so cross-platform `source` filtering includes iOS); `category` is per-submission.
-        // Device / chip / os / app_version are already global.
+        // `capture(feedback:)` applies the global scope (the public API has no cloned-scope
+        // overload), so the feedback-only tags are set around the call and removed right
+        // after, so they never ride along on a later crash. capture() applies the scope
+        // synchronously, so the tags are baked in before the removal. `source` matches the
+        // Android and web tag so cross-platform filtering includes iOS. Device, chip, os and
+        // app_version are already global (`SentryConfiguration`).
         SentrySDK.configureScope { scope in
             scope.setTag(value: "ios-settings", key: "source")
             if let category {
@@ -204,43 +192,15 @@ struct FeedbackView: View {
             scope.removeTag(key: "category")
         }
 
-        // The feedback CONTENT stays in Sentry. PostHog records only that feedback was sent and
-        // under which category, so the funnel can show how often people reach for it. No message,
-        // no contact email.
+        // The feedback content stays in Sentry: PostHog gets only the category, never the
+        // message or contact email.
         Analytics.capture(AnalyticsEvents.feedbackSubmitted, [AnalyticsEvents.category: category?.id])
 
         didSubmit = true
     }
 }
 
-/// Optional feedback category. Kept in sync with the Android `FeedbackDialog` categories and
-/// pipette-dashboard's `FEEDBACK_CATEGORIES` so the `category` tag is consistent everywhere.
-enum FeedbackCategory: String, CaseIterable, Identifiable {
-    case reportBug = "report_bug"
-    case reportIncorrectData = "report_incorrect_data"
-    case requestModel = "request_model"
-    case requestRuntime = "request_runtime"
-    case requestHardware = "request_hardware"
-    case requestEval = "request_eval"
-    case other
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .reportBug: return "Report a bug"
-        case .reportIncorrectData: return "Report incorrect data"
-        case .requestModel: return "Request a model"
-        case .requestRuntime: return "Request a runtime"
-        case .requestHardware: return "Request hardware"
-        case .requestEval: return "Request an evaluation dataset"
-        case .other: return "Something else"
-        }
-    }
-}
-
 private extension View {
-    /// The app's standard rounded, hairline-bordered field box.
     func roundedFieldBackground() -> some View {
         background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(

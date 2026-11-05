@@ -11,7 +11,7 @@ struct CellDetailView: View {
     let cell: JobCell
 
     @Environment(\.pillTabBarReservedHeight) private var pillTabBarReservedHeight
-    @Environment(\.storage) private var storage
+    @Environment(\.ws) private var ws
     @State private var payload: [String: Any]?
     @State private var metrics: [[String: Any]]?
 
@@ -37,9 +37,18 @@ struct CellDetailView: View {
                     .padding(.top, 54)
                     .padding(.bottom, 34)
 
-                // Why this result has no submission state: it was never going to have one.
                 if !cell.isSubmittable {
                     LocalResultBadge(showsCaption: true)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 28)
+                }
+
+                if let note = MemoryFreshness.resultNote(
+                    type: cell.benchmarkType, completed: cell.runStatus == .completed,
+                    measuredAfterOtherWork: cell.measuredAfterOtherWork,
+                    publicBuild: !BuildFlavor.hasPrivateMemory
+                ) {
+                    NoticeCallout(message: note)
                         .padding(.horizontal, 24)
                         .padding(.bottom, 28)
                 }
@@ -63,13 +72,12 @@ struct CellDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Color(.systemBackground), for: .navigationBar)
         .task {
-            // File reads + JSON parsing happen off the main thread; only the
-            // resulting state assignment hops back onto it.
+            // Disk reads and JSON parsing run off the main thread.
             guard payload == nil else { return }
             guard let jobId else { return }
-            let storage = storage
+            let ws = ws
             let result = await Task.detached(priority: .userInitiated) {
-                Self.readPayload(jobId: jobId, for: cell, storage: storage)
+                Self.readPayload(jobId: jobId, for: cell, ws: ws)
             }.value
             payload = result.payload
             metrics = result.metrics
@@ -219,8 +227,7 @@ struct CellDetailView: View {
         }
     }
 
-    /// Detail-row rendering for a computed metric: fixed-precision throughput and
-    /// latency, or a human byte size. (CSV export renders the same metric compactly.)
+    /// CSV export renders the same metric more compactly.
     private func detailValue(for metric: BenchmarkMetric) -> String {
         switch metric.unit {
         case "ms": return String(format: "%.0f ms", metric.numericValue)
@@ -229,17 +236,15 @@ struct CellDetailView: View {
         }
     }
 
-    /// Reads a cell's payload (and optional metrics) from disk off the main
-    /// thread, returning the parsed JSON rather than mutating view state. Parse
-    /// failures are logged and surface as nil; an absent file is a normal nil.
+    /// Parse failures are logged and surface as nil; an absent file is a normal nil.
     private nonisolated static func readPayload(
         jobId: JobId,
         for cell: JobCell,
-        storage: Storage
+        ws: PipetteWorkspace
     ) -> (payload: [String: Any]?, metrics: [[String: Any]]?) {
         var payload: [String: Any]?
         do {
-            payload = try storage.results.payloadPath(of: cell.cellId)
+            payload = try ws.results.payloadPath(of: cell.cellId)
                 .flatMap { try ResultPayload.readObject(at: $0) }
         } catch {
             AppLog.results.error("payload parse failed for cell \(cell.cellId.value): \(error)")
@@ -247,7 +252,7 @@ struct CellDetailView: View {
 
         var metrics: [[String: Any]]?
         do {
-            let object = try storage.results.metricsPath(of: cell.cellId)
+            let object = try ws.results.metricsPath(of: cell.cellId)
                 .flatMap { try ResultPayload.readObject(at: $0) }
             metrics = object?["metrics"] as? [[String: Any]]
         } catch {
@@ -261,10 +266,10 @@ struct CellDetailView: View {
         BenchmarkCatalog.displayName(for: benchmarkType)
     }
 
-    /// This cell.s catalog entry. Resolved per access — both readers below re-run it,
-    /// so it takes the single-id lookup rather than reading the whole catalog.
+    /// Resolved on every access, so it takes the single-id lookup rather than
+    /// reading the whole catalog.
     private var catalogItem: BenchmarkItem? {
-        BenchmarkCatalog.item(forId: cell.benchmarkId, store: storage.benchmarks)
+        BenchmarkCatalog.item(forId: cell.benchmarkId, store: ws.benchmarks)
     }
 
     private var benchmarkType: String {
@@ -342,6 +347,27 @@ struct CellDetailView: View {
                 errorMessage: "Engine error: decode rc=-3.",
                 source: .previewSample
             )
+        )
+    }
+}
+
+#Preview("Cell Details · Max Memory after other work") {
+    NavigationStack {
+        CellDetailView(
+            cell: {
+                var cell = JobCell(
+                    cellId: CellId("preview-cell-memory"),
+                    benchmarkId: "max_memory_usage_512",
+                    benchmarkType: .maxMemoryUsage,
+                    runStatus: .completed,
+                    serverJobId: nil,
+                    errorMessage: nil,
+                    source: .previewSample
+                )
+                cell.measuredAfterOtherWork = true
+                return cell
+            }(),
+            previewPayload: ["benchmark_id": "max_memory_usage_512", "max_ram_bytes": 772934072]
         )
     }
 }

@@ -18,6 +18,8 @@ class JobController(
   host: HostHooks = HostHooks(),
   analytics: Analytics = NoOpAnalytics,
   isOnline: () -> Boolean = { true },
+  /** Fetches a cell's weights when they are not on disk. Null keeps the pre-provisioning behaviour; see [JobRunner]'s parameter of the same name. */
+  provisioner: ModelProvisioning? = null,
 ) {
   private val _state = MutableStateFlow(RunnerState())
   val state: StateFlow<RunnerState> = _state.asStateFlow()
@@ -31,6 +33,7 @@ class JobController(
       host = host,
       analytics = analytics,
       isOnline = isOnline,
+      provisioner = provisioner,
     ) {
       _state.value = it
     }
@@ -48,6 +51,11 @@ class JobController(
     contextSize: Int,
     prefillBatch: Int,
     contributeResults: Boolean,
+    /**
+     * What this job asks of the readiness gate. Defaulted so a caller with no opinion states one anyway: [RunReadiness.DEFAULT] is what puts the job
+     * on the client defaults, and the runner installs whatever the manifest ends up carrying at every run of it.
+     */
+    readiness: RunReadiness = RunReadiness.DEFAULT,
   ): String =
     runner.startNewJob(
       models = models,
@@ -58,6 +66,7 @@ class JobController(
       contextSize = contextSize,
       prefillBatch = prefillBatch,
       contributeResults = contributeResults,
+      readiness = readiness,
     )
 
   fun resume(jobId: String) = runner.resume(jobId)

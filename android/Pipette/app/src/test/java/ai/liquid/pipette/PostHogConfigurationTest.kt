@@ -73,17 +73,24 @@ class PostHogConfigurationTest {
    */
   @Test
   fun jobOutcomeReflectsCancellationThenManifestStatus() {
-    assertEquals(AnalyticsEvents.OUTCOME_FINISHED, jobOutcome(cancelled = false, status = JobStatus.COMPLETED))
-    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = true, status = JobStatus.PAUSED))
-    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = false, status = JobStatus.PAUSED))
+    assertEquals(AnalyticsEvents.OUTCOME_FINISHED, jobOutcome(cancelled = false, status = JobStatus.COMPLETED, interrupted = false))
+    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = true, status = JobStatus.PAUSED, interrupted = false))
+    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = false, status = JobStatus.PAUSED, interrupted = false))
     // Never written by this runner, but `JobStatus.fromWire` deserializes it, and a manifest from
     // another writer must not be reported as a failure. iOS treats `.cancelled` the same way.
-    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = false, status = JobStatus.CANCELLED))
+    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = false, status = JobStatus.CANCELLED, interrupted = false))
     // Cancelled on the final cell: the manifest is COMPLETED, but the run did not finish on its own.
-    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = true, status = JobStatus.COMPLETED))
+    assertEquals(AnalyticsEvents.OUTCOME_CANCELLED, jobOutcome(cancelled = true, status = JobStatus.COMPLETED, interrupted = false))
+    // A device-invalidated run is not a failure and lands on the same statuses a cancel does, so
+    // only this flag separates them; without it the funnel cannot show how often a demotion ends a
+    // run in the field.
+    assertEquals(AnalyticsEvents.OUTCOME_INTERRUPTED, jobOutcome(cancelled = false, status = JobStatus.PAUSED, interrupted = true))
+    // Both true: a cancel landing after the loop already broke on a demotion. The device's verdict is
+    // the one worth recording, and this is the only thing pinning that arm ordering.
+    assertEquals(AnalyticsEvents.OUTCOME_INTERRUPTED, jobOutcome(cancelled = true, status = JobStatus.PAUSED, interrupted = true))
     // Non-terminal or unreadable manifest: the run died.
-    assertEquals(AnalyticsEvents.OUTCOME_FAILED, jobOutcome(cancelled = false, status = JobStatus.RUNNING))
-    assertEquals(AnalyticsEvents.OUTCOME_FAILED, jobOutcome(cancelled = false, status = null))
+    assertEquals(AnalyticsEvents.OUTCOME_FAILED, jobOutcome(cancelled = false, status = JobStatus.RUNNING, interrupted = false))
+    assertEquals(AnalyticsEvents.OUTCOME_FAILED, jobOutcome(cancelled = false, status = null, interrupted = false))
   }
 
   /**

@@ -1,0 +1,26 @@
+{
+  "benchmark": "eval_math_500_2026.06.1",
+  "benchmark_flags": null,
+  "model": {
+    "org": "LiquidAI",
+    "path": "LFM2.5-350M-Q4_0.gguf",
+    "repo_name": "LFM2.5-350M-GGUF",
+    "source": "huggingface",
+    "type": "gguf_text"
+  },
+  "model_flags": {
+    "benchmark_type": "eval",
+    "model_type": "gguf_text"
+  },
+  "runtime": {
+    "flavor": "ios-arm64",
+    "repository_url": "github.com/ggml-org/llama.cpp",
+    "repository_version": "b10216",
+    "type": "llamacpp_ios_pipette"
+  },
+  "runtime_flags": {
+    "benchmark_type": "eval",
+    "model_type": "gguf_text",
+    "runtime_type": "llamacpp_ios_pipette"
+  }
+}

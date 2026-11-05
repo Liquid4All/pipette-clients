@@ -1,0 +1,72 @@
+[package]
+name = "pipette-ios-proxy"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Lets a Mac stand in for a tethered iPhone on the pipette management server"
+
+# A root workspace member so it shares the one lockfile: a separate lock for the
+# crates it path-depends on drifts silently. Off macOS `src/main.rs` gates every
+# module and leaves a `main` that refuses (the `pipette-mlx` shape), so only the
+# macOS leg of `rust-check` really lints and tests this package.
+[lints]
+workspace = true
+
+# Target-scoped so a non-macOS build compiles nothing but the refusal in `main.rs`.
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+# Decodes the `headlessrun auth export` token.
+base64.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+fastrand.workspace = true
+# A pulled archive's digest, and the SigV4 signature.
+hex.workspace = true
+# SigV4, with `sha2`: the workspace has no AWS SDK.
+hmac.workspace = true
+# Reads the provisioning profile `security cms -D` prints, whose dates and data
+# have no JSON form.
+plist.workspace = true
+# S3 listings and refusals.
+quick-xml.workspace = true
+# Names the status and the response `pipette_http::send` hands back.
+reqwest.workspace = true
+# Signals to child processes and `uname` (this Mac's name), without `unsafe`.
+rustix.workspace = true
+serde.workspace = true
+sha2.workspace = true
+strum.workspace = true
+# `preserve_order`: the spec's `runtime` and the submitted payload are forwarded
+# verbatim (DESIGN.md section 4), not alphabetised. It unifies across the workspace, which is safe
+# because `pipette_plan_types::canonical_json` sorts keys itself.
+serde_json = { workspace = true, features = ["preserve_order"] }
+# devicectl's `--json-output` files, atomic state writes, and a pull's scratch
+# directory.
+tempfile.workspace = true
+thiserror.workspace = true
+# `macros` for the `format_description!` the timestamp builder uses; the root
+# declares the rest of what this needs.
+time = { workspace = true, features = ["macros"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# `[client_releases] endpoint`, parsed.
+url.workspace = true
+wait-timeout.workspace = true
+
+# Auth, the typed bodies and every endpoint come from the shared client crates,
+# not a reimplementation here.
+pipette-http.workspace = true
+pipette-mgmt-client.workspace = true
+# For `ClientId`, the newtype `ClientIdentity` signs with.
+pipette-plan-types.workspace = true
+# `reset_sigpipe`, so `probe | head` exits instead of panicking.
+pipette-subprocess.workspace = true
+
+# Target-scoped: every test lives in a macOS-gated module.
+# `ed25519-dalek` verifies real requests' signatures against the pinned `v1`
+# payload; `pipette-mgmt-client` keeps its signer private.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+ed25519-dalek.workspace = true
+httpmock.workspace = true
+rstest.workspace = true

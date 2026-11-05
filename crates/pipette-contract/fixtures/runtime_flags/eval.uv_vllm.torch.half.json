@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "eval",
+  "dtype": "half",
+  "model_type": "torch",
+  "runtime_type": "uv_vllm"
+}

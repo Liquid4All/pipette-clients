@@ -1,89 +1,75 @@
-use anyhow::Context;
-use serde::{Deserialize, Serialize};
+//! Prefill throughput over `mlx_lm.server`, through [`measurement::prefill()`].
+//!
+//! The server reports no per-phase rates, so the reading is the time to the
+//! first token of a streamed one-token `/v1/completions`, on the client's clock.
 
-use pipette_ops::measurement;
-use pipette_ops::readiness::{ReadinessGate, RepObserver};
-use pipette_plan_types::result::BenchmarkResultData;
-use pipette_plan_types::run::RunRequest;
-use pipette_plan_types::run::RunResponse;
+use std::num::NonZeroUsize;
 
-use super::{server, throughput_http};
-use crate::models::require_mlx_model_dir;
-use crate::runtimes::require_mlx_python;
+use pipette_http::HttpClient;
+use pipette_memprobe::{Sampler, SupportedWatch};
+use pipette_ops::measurement::{
+    self, MeasurementObserver, MeasurementWarmup, PrefillMeasurementPerPromptReading,
+    PrefillMeasurementReading,
+};
+use pipette_ops::readiness::ReadinessGate;
+use pipette_ops::run_response::RunResponseBuilder;
+use pipette_plan_types::{
+    MlxMacosPipetteExtraRuntimeConfiguration, PrefillThroughputBenchmark, RunResponse,
+};
+use pipette_subprocess::start_process;
 
-const ENDPOINT: &str = "/prefill_throughput";
-
-#[derive(Debug, Serialize)]
-struct PrefillThroughputRequest {
-    prompt_tokens: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct PrefillThroughputResponse {
-    prompt_tps: f64,
-    prompt_tokens: u32,
-}
+use crate::models::ResolvedMlxModel;
+use crate::runtimes::ResolvedMlxPython;
+use crate::{completions, server, tokenizer};
 
 pub(super) fn run(
-    req: &RunRequest,
+    benchmark: &PrefillThroughputBenchmark,
+    venv_python: &ResolvedMlxPython,
+    model_dir: &ResolvedMlxModel,
     readiness_gate: ReadinessGate,
-    observer: &RepObserver,
+    observer: MeasurementObserver<'_>,
+    client_config: Option<&MlxMacosPipetteExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
-    let benchmark = req
-        .benchmark
-        .as_prefill_throughput()
-        .map_err(anyhow::Error::from)?;
-    let prefill_tokens = benchmark.parameter_prefill_tokens;
-    let venv_python = require_mlx_python(req)?;
-    let model_dir = require_mlx_model_dir(req)?;
+    let (prompt, eos_ids) = tokenizer::prompt(
+        venv_python,
+        model_dir,
+        benchmark
+            .parameter_prefill_tokens
+            .into_inner()
+            .unsigned_abs(),
+        server::TEXT_TRUSTS_REMOTE_CODE,
+    )?;
+    let request = completions::completion_request(&prompt, 1, &eos_ids);
+    let http = HttpClient::loopback("pipette", completions::TIMING_TIMEOUT)?;
 
     readiness_gate()?;
-    let server = server::start_server(&venv_python, &model_dir, None)?;
-
-    log::info!("{ENDPOINT}: warm-up run ({prefill_tokens}p)");
-    let warmup: PrefillThroughputResponse = throughput_http::post_json(
-        &server.base_url,
-        ENDPOINT,
-        &PrefillThroughputRequest {
-            prompt_tokens: prefill_tokens,
-        },
+    let port = pipette_subprocess::pick_server_port()?;
+    let url = server::url(port);
+    let completions_url = completions::url(&url);
+    let mut mlx_server = start_process(
+        server::TEXT_SERVER_MODULE,
+        server::text_command(venv_python, model_dir, port, client_config)?,
+        server::STOP_GRACE,
     )?;
-    measurement::expect_tokens("warmup prompt_tokens", warmup.prompt_tokens, prefill_tokens)?;
-
-    let measured = measurement::run(
-        ENDPOINT,
+    let sampler = Sampler::start(mlx_server.pid(), SupportedWatch::OBSERVE)?;
+    mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let result = measurement::prefill(
+        benchmark,
+        NonZeroUsize::try_from(measurement::REPS)?,
         readiness_gate,
         observer,
-        // No untimed per-rep setup: the server holds no state a rep resets.
-        |_| Ok(()),
-        |_| {
-            throughput_http::post_json::<_, PrefillThroughputResponse>(
-                &server.base_url,
-                ENDPOINT,
-                &PrefillThroughputRequest {
-                    prompt_tokens: prefill_tokens,
-                },
-            )
+        MeasurementWarmup::Once,
+        (),
+        |()| {
+            let generation = pipette_completions::stream(&http, &completions_url, &request)?;
+            let reading = PrefillMeasurementPerPromptReading::from_generation(&generation)?;
+            Ok(PrefillMeasurementReading::PerPrompt(vec![reading]))
         },
-        |idx, rep| {
-            let response = &rep.value;
-            measurement::expect_tokens("prompt_tokens", response.prompt_tokens, prefill_tokens)?;
-            throughput_http::validate_tps("prompt_tps", response.prompt_tps)
-                .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            throughput_http::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
-        },
-    )?;
-    let stats = measured.stats();
-    Ok(RunResponse {
-        executable: Some(server.executable.clone()),
-        command: server.command_preview.clone(),
-        ..RunResponse::new(
-            BenchmarkResultData::PrefillThroughput {
-                prefill_time_ms: stats.mean_ms,
-                prefill_time_ms_stddev: Some(stats.stddev_ms),
-            },
-            server.stdout(),
-            server.stderr(),
-        )
-    })
+    );
+    let (memory, _) = sampler.stop();
+    let result_data = result.map_err(|err| err.context(mlx_server.stop_with_tail()))?;
+    Ok(RunResponseBuilder::new(result_data)
+        .process(&mut mlx_server)
+        .memory(memory)
+        .build())
 }

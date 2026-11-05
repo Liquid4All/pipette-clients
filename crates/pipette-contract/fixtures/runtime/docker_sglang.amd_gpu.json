@@ -1,0 +1,6 @@
+{
+  "flavor": "amd_gpu",
+  "image_name": "lmsysorg/sglang",
+  "image_tag": "v0.5.0-rocm630",
+  "type": "docker_sglang"
+}

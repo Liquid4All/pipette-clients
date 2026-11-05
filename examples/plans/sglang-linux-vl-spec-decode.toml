@@ -1,0 +1,118 @@
+# Example plan: the VL spec-decode benchmark on SGLang.
+#
+# The SGLang twin of mlx-macos-vl-spec-decode.toml: the same six MMSpec
+# datasets through `sglang.launch_server` in a uv venv on an NVIDIA box, once
+# with the regular model (speculation off) and once with the drafter pair
+# (speculation on). The speedup is computed outside the management server from
+# the stored rows, never by a client. A batched measurement is its own benchmark
+# (`_bs<n>` ids), not a cell knob; SGLang batches continuously.
+#
+# `torch_speculative` names two repositories: the target for `--model-path` and
+# the drafter for `--speculative-draft-model-path`. The drafter repo is gated:
+# export `PIPETTE_HF_TOKEN` on the client, or its fetch 404s.
+#
+# The drafter path needs an SGLang fork the bundled `uv_sglang` catalog rows do
+# not carry, so the runtime is spelled out as the `pip_requirements_text` that
+# installs it; `server_version` only labels what `source.contents` pins.
+# Installing it needs a Rust toolchain on the client's PATH (the fork has a
+# Rust extension), and `sglang-kernel>=0.4.7` pins torch 2.13 / CUDA 13 wheels
+# (a 12.x driver runs them through minor-version compatibility).
+#
+# `SGLANG_ENABLE_JIT_DEEPGEMM=0` is in `envs`, not `raw`, because it is the
+# box's setting: DeepGEMM refuses to JIT with nvcc older than 12.9, and a bf16
+# 3B model never uses it. The server inherits the client's environment, so it
+# sees the client's `nvcc`, with the venv's `bin/` ahead on PATH.
+#
+# The benchmark ids are the management server's: its catalog serves the corpus
+# and there is no local form of this benchmark, so run `pipette sync` first. The
+# `_k8` suffix is `parameter_draft_length`; the catalog also publishes k7 and
+# k9, and listing those in both variants sweeps the draft length.
+
+plan_id = "sglang-linux-vl-spec-decode-example"
+benchmarks = [
+  "vl_spec_decode_mmspec_test_gqa_k8",
+  "vl_spec_decode_mmspec_test_textvqa_k8",
+  "vl_spec_decode_mmspec_test_charxiv_k8",
+  "vl_spec_decode_mmspec_test_mmmu_pro_k8",
+  "vl_spec_decode_mmspec_test_coco_k8",
+  "vl_spec_decode_mmspec_test_multi_turn_k8",
+]
+
+[[transports]]
+client_id   = "h100-box"
+type        = "ssh"
+host        = "h100-box"
+user        = "ubuntu"
+binary_path = "/home/ubuntu/bin/pipette"
+work_dir    = "/home/ubuntu/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 2
+
+
+# The regular model: speculation off. `raw` may carry no `--speculative-*`
+# flag on this row.
+[[variants]]
+clients = ["h100-box"]
+models = [
+  { type = "torch", source = "huggingface", org = "example-org", repo_name = "VLM-3B" },
+]
+runtime_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch", speculative_enabled = false, envs = ["SGLANG_ENABLE_JIT_DEEPGEMM=0"], raw = ["--mem-fraction-static", "0.60"] },
+]
+benchmark_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+]
+
+[[variants.runtimes]]
+type = "uv_sglang"
+server_version = "0.5.8.dev9924-g1a2b3c4d5"
+build = "cu130"
+python_version = "3.12"
+
+[variants.runtimes.source]
+type = "pip_requirements_text"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+contents = """
+# SGLang with VL speculative decoding: example-org/sglang
+# vl-draft-pr @ 1a2b3c4d5e (upstream main + the lm_head exposure on the VL
+# wrapper that the drafter needs).
+sglang[all] @ git+https://github.com/example-org/sglang.git@1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b#subdirectory=python
+# The fork's JIT kernels build with ninja at first use.
+ninja
+"""
+
+
+# The drafter pair: speculation on. The algorithm, the drafter and the block
+# size (`parameter_draft_length`) are derived and reserved in `raw`; the draft
+# attention backend is the cell's choice.
+[[variants]]
+clients = ["h100-box"]
+models = [
+  { type = "torch_speculative", target = { source = "huggingface", org = "example-org", repo_name = "VLM-3B" }, draft = { source = "huggingface", org = "example-org", repo_name = "VLM-3B-Draft-4L" } },
+]
+runtime_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch_speculative", speculative_enabled = true, envs = ["SGLANG_ENABLE_JIT_DEEPGEMM=0"], raw = ["--mem-fraction-static", "0.60", "--speculative-draft-attention-backend", "flashinfer"] },
+]
+benchmark_flags = [
+  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch_speculative", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+]
+
+[[variants.runtimes]]
+type = "uv_sglang"
+server_version = "0.5.8.dev9924-g1a2b3c4d5"
+build = "cu130"
+python_version = "3.12"
+
+[variants.runtimes.source]
+type = "pip_requirements_text"
+install_flags = ["--index-strategy", "unsafe-best-match"]
+contents = """
+# SGLang with VL speculative decoding: example-org/sglang
+# vl-draft-pr @ 1a2b3c4d5e (upstream main + the lm_head exposure on the VL
+# wrapper that the drafter needs).
+sglang[all] @ git+https://github.com/example-org/sglang.git@1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b#subdirectory=python
+# The fork's JIT kernels build with ninja at first use.
+ninja
+"""

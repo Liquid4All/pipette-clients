@@ -2,6 +2,10 @@
 
 // Release intentionally inherits production Clerk settings from Shared.xcconfig.
 
+// Xcode 27's LLVM sinks an async function's swifterror store into a phi, then crashes on
+// it (llvm/llvm-project#217372). Drop once Xcode Cloud's Xcode has the fix.
+OTHER_SWIFT_FLAGS = $(inherited) -Xllvm -simplifycfg-sink-common=false
+
 // Written by `ci_scripts/ci_pre_xcodebuild.sh` when the Xcode Cloud workflow sets
 // `PIPETTE_DEBUG_UI=1`, and absent otherwise — which is why the include is optional
 // (`#include?`): a missing file is not an error, so a local Release build and the

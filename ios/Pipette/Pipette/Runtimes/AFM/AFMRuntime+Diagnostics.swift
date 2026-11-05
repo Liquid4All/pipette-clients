@@ -1,14 +1,11 @@
 import Foundation
 import FoundationModels
 
-/// Dev-only diagnostics for the Apple foundation model — NOT part of the engine's
-/// benchmark API. These probes established the on-device tokenizer's behavior
-/// (the fixed template/BOS wrapper, exact generated-token counts, and the cap
-/// semantics) and are kept so the findings can be re-verified when the OS updates.
-/// Driven from the headless runner via `metrics=tokprobe|genprobe|capprobe|enforceprobe`.
+/// Dev-only probes that established the tokenizer wrapper, token counts and cap
+/// semantics `AFMRuntime` relies on; kept to re-verify them when the OS updates.
+/// Run headless with `metrics=tokprobe|genprobe|capprobe|enforceprobe`.
 extension AFMRuntime {
-    /// Probe `tokenCount` on short inputs to expose the fixed wrapper (template / BOS /
-    /// special tokens) vs. content tokens. `tokenCount("") > 0` ⇒ the wrapper is counted.
+    /// `tokenCount("") > 0` means the template wrapper is counted.
     nonisolated static func tokenProbe(progress: @escaping (String) -> Void) async {
         progress("availability=\(availabilityText())")
         guard #available(iOS 26.4, *) else { progress("tokenCount(for:) needs iOS 26.4+"); return }
@@ -21,9 +18,8 @@ extension AFMRuntime {
         }
     }
 
-    /// Generate with a small `maximumResponseTokens` cap, capture the output TEXT, then
-    /// re-tokenize it — checks whether "tokens generated" (the cap) equals "tokens in
-    /// the rendered output" (detokenize→retokenize is not always identity).
+    /// Whether the cap equals the re-tokenized output length (detokenize then retokenize
+    /// is not always identity).
     nonisolated static func generationTokenProbe(progress: @escaping (String) -> Void) async {
         progress("availability=\(availabilityText())")
         guard case .available = availability() else {
@@ -34,7 +30,7 @@ extension AFMRuntime {
         for cap in [1, 5, 10, 20] {
             do {
                 let session = LanguageModelSession()
-                let opts = GenerationOptions(sampling: .greedy, maximumResponseTokens: cap)
+                let opts = AFMRuntime.greedyOptions(maxTokens: cap)
                 var text = ""
                 for try await partial in session.streamResponse(to: "Write a long story about a dragon.", options: opts) {
                     text = partial.content
@@ -50,9 +46,8 @@ extension AFMRuntime {
         }
     }
 
-    /// Request a large cap (200) with prompts that naturally want a SHORT answer — does
-    /// the model stop at EOS, or pad to the cap? If it stops short, `maximumResponseTokens`
-    /// is a ceiling, so decode-throughput prompts must elicit open-ended output.
+    /// Whether short-answer prompts stop at EOS under a large cap; if so,
+    /// `maximumResponseTokens` is only a ceiling.
     nonisolated static func capRespectProbe(progress: @escaping (String) -> Void) async {
         progress("availability=\(availabilityText())")
         guard case .available = availability() else {
@@ -68,7 +63,7 @@ extension AFMRuntime {
         for p in prompts {
             do {
                 let session = LanguageModelSession()
-                let opts = GenerationOptions(sampling: .greedy, maximumResponseTokens: cap)
+                let opts = AFMRuntime.greedyOptions(maxTokens: cap)
                 var text = ""
                 for try await partial in session.streamResponse(to: p, options: opts) { text = partial.content }
                 let content = (await tokenCount(of: text)).map { $0 - wrapper } ?? -1
@@ -80,51 +75,36 @@ extension AFMRuntime {
         }
     }
 
-    /// EXPERIMENT (PIP AFM): does guided generation (constrained decoding) tank
-    /// decode throughput vs. free generation? Decodes a fixed `cap`-token workload
-    /// both ways and reports tokens/sec + the slowdown factor.
-    ///
-    /// RESULT (iPhone 17 Pro, iOS 26.x, thermal-gated ≤36°C, both orderings): guided
-    /// is within run-to-run noise of free (~0.96–0.97×, i.e. no penalty), so guided
-    /// generation is the preferred way to *enforce* a fixed token count for AFM
-    /// decode/e2e. Full write-up: docs/pipette-ios/afm-token-enforcement.md.
-    ///   - free:   plain `streamResponse` + a non-terminating counting prompt; the
-    ///             `maximumResponseTokens` cap binds → ~`cap` free-decoded tokens.
-    ///   - guided: `streamResponse(generating:)` of a `[String]` forced with
-    ///             `@Guide(.minimumCount(...))` (>> cap), so the cap truncates the
-    ///             array mid-stream → ~`cap` tokens decoded under a per-token logit
-    ///             mask + JSON structure. Same token budget, so the wall-time ratio
-    ///             is the constrained-decoding tax. Real device + Apple Intelligence.
+    /// Decode-time cost of guided (constrained) generation against free generation over
+    /// the same `cap`-token budget. Measured on iPhone 17 Pro, iOS 26.x, thermal-gated
+    /// at 36°C or below: guided is within noise of free (~0.96 to 0.97x). The shipping
+    /// path still uses free generation. Write-up: docs/pipette-ios/afm-token-enforcement.md.
     nonisolated static func enforcementProbe(progress: @escaping (String) -> Void) async {
         progress("availability=\(availabilityText())")
         guard case .available = availability() else {
             progress("model not available"); return
         }
         let cap = 100
-        let reps = 5
-        let opts = GenerationOptions(sampling: .greedy, maximumResponseTokens: cap)
+        let reps = BenchmarkMeasurement.reps
+        let opts = AFMRuntime.greedyOptions(maxTokens: cap)
         let freePrompt = AFMRuntime.countingSeed
         let guidedPrompt = "List as many short common English words as you can, one per element."
 
-        // Thermal readiness gate (PIPETTE_PRIVATE_THERMAL build → real SoC die temp):
-        // block before every measured rep until the device has cooled below the
-        // threshold, so heat can't confound the guided-vs-free comparison.
+        // Cool down before every rep so heat can't confound the comparison.
         let readiness = BenchmarkReadiness(cancelFlag: CancelFlag()) { progress("\($0)") }
         func cooled(_ label: String) -> Bool {
             switch readiness.waitUntilReady() {
             case .ready: return true
             case .cancelled: progress("\(label): cancelled"); return false
-            case .timedOut(let o): progress("\(label): readiness timed out (\(o)), skipping"); return false
+            case .timedOut(_, let o): progress("\(label): readiness timed out (\(o)), skipping"); return false
             }
         }
         func mean(_ a: [Double]) -> Double { a.isEmpty ? 0 : a.reduce(0, +) / Double(a.count) }
 
-        // Untimed warm-up (spins up the model out-of-process).
+        // Untimed: spins up the out-of-process model.
         _ = try? await freeDecodeMs(prompt: freePrompt,
-                                    opts: GenerationOptions(sampling: .greedy, maximumResponseTokens: 1))
+                                    opts: AFMRuntime.greedyOptions(maxTokens: 1))
 
-        // GUIDED first (guided → free) to invert the previous run's ordering; with the
-        // cooldown gate each rep starts from the same thermal baseline regardless.
         var guidedMs: [Double] = []
         for i in 0 ..< reps {
             guard cooled("guided r\(i + 1)") else { continue }
@@ -154,8 +134,6 @@ extension AFMRuntime {
                         fm, fm > 0 ? Double(cap) / (fm / 1000) : 0, fm > 0 ? gm / fm : 0))
     }
 
-    /// Free streamed generation; returns decode wall-time (first→last token) and the
-    /// re-tokenized output-token count.
     nonisolated private static func freeDecodeMs(prompt: String, opts: GenerationOptions) async throws -> (ms: Double, tokens: Int) {
         let session = LanguageModelSession()
         let clock = ContinuousClock()
@@ -169,17 +147,11 @@ extension AFMRuntime {
         let wrapper = await tokenCount(of: "") ?? 0
         let tokens = (await tokenCount(of: last)).map { max(0, $0 - wrapper) }
             ?? last.split(whereSeparator: { $0 == " " || $0 == "\n" }).count
-        return ((end - (firstAt ?? end)).milliseconds, tokens)
+        return (durationMs(end - (firstAt ?? end)), tokens)
     }
 
-    /// Guided streamed generation of a `.minimumCount`-forced `[String]`; returns
-    /// decode wall-time (first→last snapshot) and whether the cap truncated it.
-    ///
-    /// A throw *after* tokens have streamed is the expected cap truncation (the
-    /// `>>cap minimumCount` can't be satisfied within the budget) → a valid measured
-    /// rep. A throw *before* the first token is a real failure (availability, context,
-    /// etc.), not a cap event — it is re-thrown so the caller drops the rep and logs
-    /// the error, rather than averaging a bogus 0 ms sample or a false `cap bound ✓`.
+    /// A throw after tokens have streamed is the cap truncating the forced-length array,
+    /// a valid rep. A throw before the first token is a real failure and is rethrown.
     nonisolated private static func guidedDecodeMs(prompt: String, opts: GenerationOptions) async throws -> (ms: Double, capped: Bool) {
         let session = LanguageModelSession()
         let clock = ContinuousClock()
@@ -192,20 +164,18 @@ extension AFMRuntime {
                 end = clock.now
             }
         } catch {
-            if firstAt == nil { throw error }   // failed before any token → not a cap event
+            if firstAt == nil { throw error }
             capped = true
             end = clock.now
         }
         let e = end ?? clock.now
-        return ((e - (firstAt ?? e)).milliseconds, capped)
+        return (durationMs(e - (firstAt ?? e)), capped)
     }
-}
 
-/// Guided-generation target for `enforcementProbe`: an array forced far longer than
-/// the token cap, so constrained decoding keeps emitting elements until the cap
-/// truncates it — the vehicle for measuring the per-token constrained-decoding tax.
-@Generable
-private struct TokenBurst {
-    @Guide(.minimumCount(500))
-    var items: [String]
+    /// Forced far longer than the cap, so the cap truncates it mid-stream.
+    @Generable
+    fileprivate struct TokenBurst {
+        @Guide(.minimumCount(500))
+        var items: [String]
+    }
 }

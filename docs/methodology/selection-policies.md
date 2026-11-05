@@ -9,16 +9,19 @@ fixed.
 
 ## Principles
 
-- **No model preference.** We benchmark what is available on the market, and we
-  sweep every model across the same device-fit quant ladder rather than
+- **No model preference.** We benchmark models whose weights are published in
+  a format that a supported runtime can load, and we sweep every model across
+  the same device-fit quant ladder rather than
   hand-picking a flattering configuration for any one. The selection rules below
   are applied identically to our own models and everyone else's, and because
   every run records its full selection (model, weight source, quantization,
   runtime, version, flags), any result can be checked against this policy rather
   than taken on trust.
-- **Upstream, not hand-built.** Runtimes and weights are consumed from their
-  upstream or community sources, at published versions, rather than produced by
-  a private build step. This keeps a result reproducible from public artifacts.
+- **Upstream first.** Runtimes and weights come from their upstream or
+  community sources at published versions. Where upstream cannot run a model,
+  pipette runs a named public fork or a patched build, and the result records
+  its repository and version. This keeps a result reproducible from public
+  artifacts.
 - **Recorded, then comparable.** Whatever is chosen is recorded in the result
   artifact: model, quantization, weight source, runtime, runtime version, and
   effective flags. A comparison is valid only across runs whose recorded
@@ -31,16 +34,26 @@ fixed.
 
 ## Runtime Backends
 
-The unified `pipette` client drives four runtime backends (the iOS app is a
-fifth surface). Each consumes a specific weight format and sources its runtime
-from a specific upstream.
+The `pipette` CLI drives seven runtime backends: llama.cpp, MLX, Core AI,
+torch-oai (vLLM or SGLang), OpenVINO GenAI, ONNX Runtime GenAI, and OVMS.
+The iOS app runs llama.cpp, MLX, ONNX Runtime GenAI, and
+Apple Foundation; the Android app runs llama.cpp. Each backend consumes one
+weight format and takes its runtime from a public upstream at a pinned version,
+with these exceptions:
 
-| Runtime | Platforms | Weight format | Runtime source |
-| --- | --- | --- | --- |
-| `pipette-llamacpp` | macOS, Windows, Linux, Android | GGUF | `llama.cpp` official upstream release (`ggml-org/llama.cpp`), tag-pinned |
-| `pipette-ios` | iOS | GGUF | `llama.cpp` pinned in the app; re-pinned when a new model needs it |
-| `pipette-mlx` | macOS (Apple Silicon) | MLX | `mlx_lm` (PyPI), models loaded from the HuggingFace Hub |
-| `pipette-torch-oai` | Linux (Docker / uv) | HuggingFace safetensors | vLLM or SGLang, pinned in the bundled runtime catalog |
+- Apple Foundation: the model and the runtime ship with the OS.
+- Core AI: the engine ships with macOS. Pipette builds its Swift sidecar
+  locally against a pinned `apple/coreai-models` commit
+  ([Core AI](../pipette-cli/coreai.md)).
+
+Published iOS results come from a build of this app with the private-API flags
+on (`PIPETTE_PRIVATE_THERMAL`, `PIPETTE_PRIVATE_MEMORY`). These flags read the
+exact SoC die temperature and the kernel's footprint peak, which the public iOS
+API does not expose. App Review rejects such a build, so it runs only
+side-loaded on registered development devices, and anyone can make the same
+build from this repository
+([iOS results and the private-API build](README.md#ios-results-and-the-private-api-build)). How to name each runtime and model is in
+[Naming models, runtimes, and per-cell flags](../pipette-cli/models-and-runtimes.md).
 
 ## Weights Selection
 
@@ -48,12 +61,12 @@ The rule is the same across clients: prefer the model authors' published weights
 in the format the runtime consumes, and fall back to a well-known community
 conversion only when the authors do not publish that format.
 
-- **GGUF (`pipette-llamacpp`, `pipette-ios`).** Use the official upstream GGUF
+- **GGUF (llama.cpp).** Use the official upstream GGUF
   when the model authors publish one. When no official GGUF exists, the default
   source is the `unsloth` community conversions.
-- **MLX (`pipette-mlx`).** Use the `mlx-community` conversions from the
+- **MLX.** Use the `mlx-community` conversions from the
   HuggingFace Hub.
-- **HuggingFace safetensors (`pipette-torch-oai`).** vLLM and SGLang load the
+- **HuggingFace safetensors (torch-oai).** vLLM and SGLang load the
   model's upstream weights directly, so this path runs the published
   safetensors. Any quantization used follows the same rule (authors' published
   quant first, a community quant only as a fallback), and is recorded with the
@@ -64,19 +77,28 @@ conversion only when the authors do not publish that format.
 The quantization is chosen to fit the target device rather than fixed to a
 single level: we benchmark the common quants that fit a given device class.
 
-- **GGUF (`pipette-llamacpp`, `pipette-ios`).** The common set is `q4_0`,
-  `q4_k_m`, and `q5_k_m`. On laptops, which have more memory headroom, `q8_0`
+- **GGUF (llama.cpp).** The common set is `Q4_0`,
+  `Q4_K_M`, and `Q5_K_M`. On laptops, which have more memory headroom, `Q8_0`
   is also considered.
-- **MLX and HuggingFace safetensors (`pipette-mlx`, `pipette-torch-oai`).** The
+- **MLX and HuggingFace safetensors (MLX, torch-oai).** The
   quants are likewise chosen to fit the common devices for that runtime:
   usually 4- to 5-bit.
 
 A model is deliberately benchmarked at more than one quantization. The goal is
 not to report only a model's best configuration but to characterize how size
 trades off against speed and quality across the common quant levels: the
-scaling relationship, not a single headline number. Because quantization is
-part of the recorded selection, each point in that sweep stays reproducible, and
-a comparison between two models is only fair at the same quantization.
+scaling relationship, not a single headline number. Some families carry a single
+point anyway, which is a gap in coverage rather than an exception to the policy:
+a newly onboarded model enters at whatever quant its benchmark run measured, and
+some repos offer nothing else worth cataloging. The published results are the
+inventory of which. Each mobile app offers a GGUF preset row only when the results
+dashboard publishes a reading for it on the app's reference handset: the
+Galaxy S26 Ultra for Android and the iPhone 17 Pro for iOS. So a family shows
+one quant there exactly when the dashboard publishes one quant for that
+handset. Because
+quantization is part of the recorded selection, each point in that sweep stays
+reproducible, and a comparison between two models is
+only fair at the same quantization.
 
 The selected weight repository and quantization are part of the recorded
 selection and must match for two results to be compared.
@@ -134,44 +156,49 @@ are recorded with the result so the run stays reproducible and comparable.
 Recommendations that cannot be reproduced from public artifacts, or that would
 change what a benchmark measures rather than how well it runs, are not adopted.
 
-This invites a fair question: do providers who engage get their optimal setup
-while everyone else gets whatever we picked? The quant sweep above is what keeps
-that from being an asymmetry. We do not run unengaged models at a single
-arbitrary default. Every model is swept across the same device-fit quant ladder
+A provider that engages with us does not get an advantage over one that does
+not. The quant sweep above prevents that asymmetry. We do not run unengaged
+models at a single arbitrary default. Every model is swept across the same device-fit quant ladder
 (named above), so the common configurations are covered for engaged and
 unengaged models alike. A provider recommendation adds a specific point to that
-sweep; it does not grant a configuration that competitors were denied. And
-because the recommended quant comes from the same public ladder and is recorded
-in the selection like any other, a reader can see exactly which configuration
-produced a given number rather than having to infer it.
+sweep; it does not grant a configuration that competitors were denied. The
+recommended quant comes from the same public ladder, and the selection records
+it like any other. A reader can therefore see exactly which configuration
+produced a given number.
 
 ## Workflow: New Model
 
-1. Acquire whatever the market makes available; apply no model preference.
+1. Take the model's published weights; apply no model preference.
 2. Pick weights per client using the weights-selection rule above (authors'
    published format first, community fallback otherwise).
 3. If the model uses an architecture or feature the currently pinned runtime
    does not yet support, re-pin that runtime to a version that does (see
-   [Workflow: New Runtime](#workflow-new-runtime)). This is most common on
-   `pipette-ios`, where the pinned `llama.cpp` is re-pinned when a new model
-   needs it.
+   [Workflow: New Runtime](#workflow-new-runtime)). This is most common for
+   the apps' `llama.cpp` pin.
 4. Record the model identifier, weight source, and quantization with the result.
 
 ## Workflow: New Runtime
 
-Runtimes are adopted from upstream by moving a pin, never by forking behavior.
+Runtimes are adopted from upstream by moving a pin. Where upstream cannot run a
+model, the pin names a public fork or a patched build, and the result records
+its repository and version.
 
-- **`pipette-llamacpp`.** The runtime binary is downloaded from the official
+- **llama.cpp on the CLI.** The runtime binary is downloaded from the official
   `ggml-org/llama.cpp` GitHub releases at a specific tag. Adopting a newer
   upstream means selecting the newer release tag.
-- **`pipette-ios`.** The app pins a `llama.cpp` version. The pin is advanced to
-  the latest when convenient and re-pinned earlier when a new model requires a
-  feature only a newer `llama.cpp` provides.
-- **`pipette-torch-oai`.** vLLM and SGLang versions are pinned in the bundled
-  runtime catalog (the single source of truth for the bundled runtimes), one
-  entry per hardware build (CUDA, ROCm, CPU). Adopting a new upstream version
-  means adding or updating a catalog entry.
-- **`pipette-mlx`.** The `mlx_lm` version is sourced from PyPI.
+- **llama.cpp in the apps.** The apps compile the `vendor/llama.cpp` submodule.
+  The pin is advanced when convenient, and sooner when a new model needs a
+  feature only a newer `llama.cpp` provides. The iOS app also compiles the
+  `vendor/llamacpp-<name>` variant pins, and it applies a patch series to each
+  pin ([iOS build](../pipette-ios/build.md)).
+- **Catalog runtimes (MLX, torch-oai, OpenVINO, ONNX GenAI, OVMS).** The bundled
+  catalog pins each version; adopting a new upstream version means adding a
+  catalog entry. Each catalog's rules are in its README:
+  [mlx](../../crates/pipette-artifacts-catalog/bundled-catalog/mlx/README.md),
+  [torch_oai](../../crates/pipette-artifacts-catalog/bundled-catalog/torch_oai/README.md),
+  [openvino](../../crates/pipette-artifacts-catalog/bundled-catalog/openvino/README.md),
+  [onnx_genai](../../crates/pipette-artifacts-catalog/bundled-catalog/onnx_genai/README.md),
+  [ovms](../../crates/pipette-artifacts-catalog/bundled-catalog/ovms/README.md).
 
 In every case the runtime name and resolved version are recorded with the
 result, so a runtime change is visible to anyone comparing numbers.
@@ -189,12 +216,13 @@ read that way. Exact reproduction across time therefore also requires resolving
 the same underlying artifact or snapshot.
 
 For Hugging Face sources, a commit SHA in `revision` gives the recorded
-selection a stable repository coordinate across time. Tags and branches also
-resolve to immutable commits at a point in time, but the same ref may resolve to
-a different commit later; an omitted revision resolves to `main`. GGUF model
-specifications already support optional per-file SHA-256 fields when a digest is
-available. Directory-backed MLX, Torch, and OpenVINO model specifications do not
-currently expose equivalent per-file content digests.
+selection a stable repository coordinate across time. A tag or a branch
+resolves to one immutable commit at the moment it is read. The same ref can
+resolve to a different commit later, and an omitted revision resolves to
+`main`. A GGUF model specification carries an optional per-file SHA-256 field,
+and pipette checks the downloaded bytes against it. Directory-backed MLX,
+Torch, OpenVINO, and ONNX GenAI model specifications carry no equivalent per-file content
+digest.
 
 Each result also records the volatile run environment it was measured in: the
 device's power state and the thermal/cooling conditions it ran under. Those are
@@ -203,11 +231,8 @@ device state and the per-platform specifics.
 
 ## Code References
 
-The bundled vLLM and SGLang versions are pinned in
-[`bundled-catalog/catalog.toml`](../../crates/pipette-torch-oai/bundled-catalog/catalog.toml).
+The `llama.cpp` runtime is installed from `ggml-org/llama.cpp` GitHub releases by
+[the llama.cpp runtime installer](../../crates/pipette-artifacts/src/runtime/llamacpp.rs).
 
-The `llama.cpp` runtime is resolved from `ggml-org/llama.cpp` GitHub releases in
-[the llama.cpp runtime resolver](../../crates/pipette-llamacpp/src/runtimes.rs).
-
-MLX models are resolved from the HuggingFace Hub by the model store in
-[`pipette-ops`](../../crates/pipette-artifacts/src/model/fetch.rs).
+Hugging Face models are fetched, and GGUF `sha256` digests checked, by
+[the model fetch in pipette-artifacts](../../crates/pipette-artifacts/src/model/fetch.rs).

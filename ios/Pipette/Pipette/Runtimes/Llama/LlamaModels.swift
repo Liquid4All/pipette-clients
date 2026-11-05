@@ -1,49 +1,71 @@
 import Foundation
 
-// Bound GGUF path projection for a prepared `RunRequest` — the Swift counterpart of
-// `pipette-llamacpp/src/models.rs`, named for its engine as every file in this folder is.
-//
-// Install is `ensureModel`. This module only checks the bound model and returns host paths
-// for execute, which is why it sits beside the engine rather than in the store.
-//
-// Matches `req.model.bound` against the `absolute*` arms `bindUnder` produces, exactly as
-// the crate does. Two guarantees per call: the arm is this engine's, and the file is
-// really there.
+// The crate's `pipette-llamacpp/src/models.rs`: each type accepts one plan model kind, as its
+// `TryFrom<&Model>` does.
 
-nonisolated enum LlamaModels {
-    /// Bound main GGUF for text cells — the crate's `require_gguf_text`.
-    static func requireGgufText(_ req: RunRequest) throws -> String {
-        guard case let .ggufText(m) = req.model.bound,
-              case let .absoluteFile(path) = m.source else {
-            throw UnexpectedBoundModel(expected: "GgufText AbsoluteFile",
-                                       got: req.model.declared.artifactName)
+nonisolated struct ResolvedGgufTextModel: Equatable, Sendable {
+    let path: String
+
+    init(_ model: Model) throws {
+        guard case let .ggufText(m) = model, case let .absoluteFile(path) = m.source else {
+            throw UnexpectedBoundModel(expected: "GgufText AbsoluteFile", got: model.description)
         }
-        return try requireFile(path.value, "GGUF text model")
+        self.path = try requireFile(path.value, "GGUF text model")
     }
+}
 
-    /// Bound weights + projector for vision cells — the crate's `require_gguf_vision`.
-    ///
-    /// Returns `(model, mmproj)`. The projector is checked, not assumed: an entry bound
-    /// without one has no `absoluteFiles` arm to match, which is what this refuses by name.
-    ///
-    /// Called from the `vl_throughput` arm, as upstream calls it from `vl_throughput.rs`
-    /// alone — the one benchmark plan-types gives gguf_vision a variant for. That arm is
-    /// still unsupported here (image-embed is future work), so this is the half of the
-    /// module that lands with it.
-    static func requireGgufVision(_ req: RunRequest) throws -> (model: String, mmproj: String) {
-        guard case let .ggufVision(m) = req.model.bound,
+nonisolated struct ResolvedGgufVisionModel: Equatable, Sendable {
+    let backbone: String
+    let mmproj: String
+
+    init(_ model: Model) throws {
+        guard case let .ggufVision(m) = model,
               case let .absoluteFiles(path, mmprojPath) = m.source else {
             throw UnexpectedBoundModel(expected: "GgufVision AbsoluteFiles",
-                                       got: req.model.declared.artifactName)
+                                       got: model.description)
         }
-        return (try requireFile(path.value, "GGUF vision model"),
-                try requireFile(mmprojPath.value, "GGUF mmproj"))
+        try self.init(backbone: path.value, mmproj: mmprojPath.value)
     }
 
-    private static func requireFile(_ path: String, _ what: String) throws -> String {
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw BoundPathMissing(what: what, path: path)
+    /// The crate's `vision_files`.
+    fileprivate init(backbone: String, mmproj: String) throws {
+        self.backbone = try requireFile(backbone, "GGUF vision model")
+        self.mmproj = try requireFile(mmproj, "GGUF mmproj")
+    }
+}
+
+nonisolated struct ResolvedGgufVisionSpeculativeModel: Equatable, Sendable {
+    let vision: ResolvedGgufVisionModel
+    /// `nil` when the drafter is merged into the backbone: DSpark's release ships one gguf
+    /// holding both.
+    let draft: String?
+
+    init(_ model: Model) throws {
+        guard case let .ggufVisionSpeculative(m) = model,
+              case let .absoluteFiles(path, mmprojPath, draftPath) = m.source else {
+            throw UnexpectedBoundModel(expected: "GgufVisionSpeculative AbsoluteFiles",
+                                       got: model.description)
         }
-        return path
+        vision = try ResolvedGgufVisionModel(backbone: path.value, mmproj: mmprojPath.value)
+        draft = try draftPath.map { try requireFile($0.value, "GGUF drafter") }
+    }
+}
+
+private nonisolated func requireFile(_ path: String, _ what: String) throws -> String {
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+          !isDirectory.boolValue
+    else { throw BoundPathMissing(what: what, path: path) }
+    return path
+}
+
+/// The crate's `require_file` bail: a half-completed ensure or bind, named before the engine
+/// fails to load it.
+nonisolated struct BoundPathMissing: Error, Equatable, LocalizedError {
+    let what: String
+    let path: String
+
+    var errorDescription: String? {
+        "bound \(what) is not a file: \(path) (ensure/bind may be incomplete)"
     }
 }

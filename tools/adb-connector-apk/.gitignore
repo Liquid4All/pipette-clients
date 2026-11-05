@@ -1,0 +1,7 @@
+.gradle/
+build/
+app/build/
+local.properties
+.kotlin/
+# Where CI renames the APK before uploading it; running those steps by hand drops it here too.
+pipette-adb-connector.apk

@@ -5,9 +5,8 @@ edition = "2021"
 publish = false
 description = "Multi-process Windows GPU memory attribution experiment for the peak-memory methodology"
 
-# Standalone workspace — keeps this Windows-only tool out of the main
-# pipette-clients workspace so `cargo build --workspace` on Mac/Linux
-# doesn't try to compile it.
+# Standalone workspace: keeps this Windows-only tool out of `cargo build
+# --workspace` on Mac and Linux.
 [workspace]
 
 [dependencies]

@@ -1,8 +1,8 @@
 [package]
 name = "pipette-coreai"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -14,9 +14,8 @@ workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 anyhow.workspace = true
-log.workspace = true
 pipette-http.workspace = true
-pipette-memprobe-metal.workspace = true
+pipette-memprobe.workspace = true
 pipette-ops.workspace = true
 pipette-plan-types.workspace = true
 pipette-subprocess.workspace = true
@@ -24,7 +23,8 @@ reqwest = { workspace = true, features = ["blocking"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 rstest.workspace = true
+tempfile.workspace = true

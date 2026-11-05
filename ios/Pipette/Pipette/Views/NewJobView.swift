@@ -1,26 +1,20 @@
 import SwiftUI
 import UIKit
 
-/// Creates and runs a new job via a four-step wizard: pick a runtime, then the
-/// models (+ quant filter), the benchmarks, then review & run. The runtime is chosen
-/// first and filters both downstream lists — only that engine's models and only the
-/// benchmarks it can run are offered — so a job targets a single runtime. Cells are
-/// the cartesian product of the resolved model files × selected benchmarks, executed
-/// sequentially.
+/// Creates and runs a new job via a four-step wizard: runtime, models, benchmarks,
+/// review. The runtime comes first and filters both lists, so a job targets a single
+/// runtime.
 struct NewJobView: View {
     @Environment(JobRunner.self) private var jobRunner
     @Environment(JobStore.self) private var jobStore
     @Environment(ModelStore.self) private var modelStore
-    @Environment(\.storage) private var storage
+    @Environment(\.ws) private var ws
     @Environment(\.dismiss) private var dismiss
 
-    /// Invoked after the run loop is launched. The host navigation stack uses
-    /// this to replace NewJobView with the JobDetailView for the new job so
-    /// the user sees live progress in the detail screen instead of inline.
+    /// Invoked after the run starts; the host pushes the job's detail page.
     var onStarted: (JobId) -> Void = { _ in }
 
-    /// Invoked from the empty state's "Go to Models" button. The host pops this
-    /// screen and switches to the Models tab so the user can download models.
+    /// Invoked from the empty state's "Go to Models" button.
     var onGoToModels: () -> Void = {}
 
     enum Step: Int, CaseIterable {
@@ -28,8 +22,7 @@ struct NewJobView: View {
     }
 
     @State private var step: Step = .runtime
-    /// The engine this job targets. Chosen on step 1; nil until picked. Changing it
-    /// re-seeds the downstream selections (`seedSelectionsForRuntime`).
+    /// Nil until picked. Changing it re-seeds the downstream selections.
     @State private var selectedRuntime: RuntimeKind?
 
     @State private var benchmarks: [BenchmarkItem] = []
@@ -44,8 +37,7 @@ struct NewJobView: View {
     @State private var expandedBenchmarkTypes: Set<String> = []
     @State private var selectedBenchmarks: Set<String> = []
     @State private var selectedMmproj: Set<String> = []  // keyed by path
-    // Opt-in default; only ever used when `canSubmitResults` (registration) also
-    // holds — see `shouldAutoSubmitResults`, which ANDs the two.
+    // Only takes effect with `canSubmitResults` (see `shouldAutoSubmitResults`).
     @State private var contributeResults: Bool = LocalStorage.defaultContributeResults
     @State private var didApplyInitialSelections: Bool = false
     @State private var startBlockedMessage: String?
@@ -60,7 +52,7 @@ struct NewJobView: View {
     #else
     @State private var nGpuLayers: Int = 99
     #endif
-    // Prefill batch applied to both runtimes (llama n_ubatch / MLX prefill chunk).
+    // llama's n_ubatch and MLX's prefill chunk.
     @State private var prefillBatch: Int = 512
     private let prefillBatchOptions = [256, 512, 1024, 2048]
 
@@ -70,11 +62,8 @@ struct NewJobView: View {
         item.type?.isVisionLanguage == true
     }
 
-    /// A base model is VL-capable iff it names a projector or one can be paired with it.
-    /// A `.ggufVision` coordinate names both files itself — discovery returns the two as
-    /// a single entry, so there is no separate mmproj row to match. Otherwise VL-ness is
-    /// a pairing of two separately-discovered files: primary match is shared `hfRepo`,
-    /// fallback is a normalized filename-stem match for sideloads.
+    /// A `.ggufVision` coordinate names its projector itself. Otherwise a projector
+    /// pairs by shared `hfRepo`, falling back to a filename-stem match for sideloads.
     nonisolated private static func isVlCompatible(_ model: DiscoveredModel, mmprojFiles: [DiscoveredModel]) -> Bool {
         if case .ggufVision = model.source { return true }
         let stem = LocalStorage.normalizedModelStem(model.name)
@@ -85,15 +74,10 @@ struct NewJobView: View {
         return false
     }
 
-    /// Whether `model`'s runtime can run `benchmark` at all — the enum-driven
-    /// capability check (`isBenchmarkSupported`), independent of the VL model-pairing
-    /// gate. Support is config-independent, so the exact knobs don't matter; we pass
-    /// the wizard's current config for a faithful `Runtime`. A benchmark whose type we
-    /// don't recognize is treated as runnable (the runtime decides at execution time).
+    /// Independent of the VL pairing gate. An unrecognized benchmark type counts as
+    /// runnable; the runtime decides at execution time.
     private func runtimeSupports(_ benchmark: BenchmarkItem, on model: DiscoveredModel) -> Bool {
-        guard let bt = BenchmarkType(type: benchmark.benchmarkType) else { return true }
-        // A capability query, so the engine alone answers it — no cell settings exist
-        // yet at this point in the wizard.
+        guard let bt = benchmark.type else { return true }
         return isBenchmarkSupported(bt, on: RuntimeKind(model.source))
     }
 
@@ -107,50 +91,36 @@ struct NewJobView: View {
 
     // MARK: - Model grouping & quant resolution
 
-    /// Runtimes with at least one model the run screen can offer — on device or in the
-    /// catalog, since a benchmark may be started against either. AFM appears whenever
-    /// it's available, since `Storage.availableModels` injects it as a model file.
+    /// Runtimes with at least one offerable model, on device or in the catalog. AFM
+    /// appears whenever available, since `availableModels()` injects it as a model.
     private var availableRuntimes: [RuntimeKind] {
         let kinds = Set(models.map { RuntimeKind($0.source) })
         return RuntimeKind.allCases.filter { kinds.contains($0) }
     }
 
-    /// Everything the run screen can offer: what is on disk, plus the rest of the
-    /// catalog. A benchmark may be started against a model that has not been fetched —
-    /// `RunCell.prepare` calls `ensureModel` before the cell runs — so restricting the
-    /// list to downloads was a UI rule the run path never needed.
+    /// What is on disk plus the rest of the catalog: `RunCell.prepare` fetches an
+    /// absent model before the cell runs.
     ///
-    /// Downloaded rows win a collision, since only they know the real on-disk size and
-    /// path; the catalog's figure is the declared download size.
-    ///
-    /// Collision is judged by `reference` — the crate's identity for a coordinate — not
-    /// by the whole `Model`. Equality there also covers the integrity metadata a plan may
-    /// carry (`sha256`), which the catalog never states, so a model downloaded for a
-    /// claimed job would otherwise fail to match its own catalog row and list twice.
+    /// Downloaded rows win a collision, since only they know the real size and path.
+    /// Collision is judged by `description` (the crate's `Display`), not `Model`
+    /// equality, which also compares a plan's `sha256` that the catalog never states.
     nonisolated static func offerable(downloaded: [DiscoveredModel]) -> [DiscoveredModel] {
         var byReference: [String: DiscoveredModel] = [:]
         for entry in CatalogEntry.catalog {
-            byReference[entry.source.reference] = DiscoveredModel(catalog: entry)
+            byReference[entry.source.description] = DiscoveredModel(catalog: entry)
         }
-        for model in downloaded { byReference[model.source.reference] = model }
-        // A stable order the list can rely on: family, then quant, then the coordinate.
+        for model in downloaded { byReference[model.source.description] = model }
         return byReference.values.sorted {
-            ($0.familyId, $0.quant ?? "", $0.source.reference)
-                < ($1.familyId, $1.quant ?? "", $1.source.reference)
+            ($0.familyId, $0.quant ?? "", $0.source.description)
+                < ($1.familyId, $1.quant ?? "", $1.source.description)
         }
     }
 
-    /// The VL coordinates to run `model` as — one per cell.
+    /// The VL coordinates to run `model` as, one per cell.
     ///
-    /// A model discovered as `.ggufVision` already names its projector, and that
-    /// coordinate is the portable declared form `RunCell.prepare` binds; re-deriving it
-    /// from host paths would throw that away. It is one cell, not one per selected
-    /// projector, since the pairing is not the user's to choose.
-    ///
-    /// A sideloaded base has no such coordinate — its projector was discovered as a
-    /// separate row — so the pair is named by the two host paths, which exist only once
-    /// both are downloaded. An undownloaded pair yields nothing rather than a cell that
-    /// cannot name its own files.
+    /// A `.ggufVision` model keeps its portable declared coordinate, as one cell: its
+    /// pairing is not the user's to choose. A sideloaded base is paired by host paths,
+    /// so an undownloaded pair yields nothing rather than a cell that cannot name its files.
     nonisolated static func visionSources(
         for model: DiscoveredModel, mmprojFiles: [DiscoveredModel]
     ) -> [Model] {
@@ -164,19 +134,12 @@ struct NewJobView: View {
         }
     }
 
-    /// Models belonging to the selected runtime — the pool the model step draws from.
-    /// Empty until a runtime is picked, so a job targets a single engine.
     private var eligibleModels: [DiscoveredModel] {
-        // Every discovered model carries a manifest (typed provenance), so all are
-        // eligible — discovery already rejected anything manifest-less.
         guard let rt = selectedRuntime else { return [] }
         return models.filter { RuntimeKind($0.source) == rt }
     }
 
-    /// Benchmarks the selected runtime can run — `isBenchmarkSupported` applied up
-    /// front so the benchmark step only offers runnable options (VL is additionally
-    /// gated per-model by an mmproj for llama.cpp). An unrecognized type is kept; the
-    /// runtime decides at run time.
+    /// VL is additionally gated per model by a projector. An unrecognized type is kept.
     private var runtimeBenchmarks: [BenchmarkItem] {
         guard let rt = selectedRuntime else { return [] }
         let runtime = rt
@@ -187,8 +150,6 @@ struct NewJobView: View {
     }
 
     private var modelGroups: [ModelGroup] {
-        // All downloaded models, regardless of engine — there is no runtime picker;
-        // a job's cells run on whatever engine each selected model implies.
         ModelCatalog.groups(from: eligibleModels)
     }
 
@@ -201,11 +162,8 @@ struct NewJobView: View {
         }
     }
 
-    /// Quant pills with no matching downloaded file among the selected models
-    /// (or all of the runtime's models while nothing is selected yet). Grayed
-    /// out and unselectable so the filter can only name quants the job could
-    /// actually run. Search never affects this — it filters the model list,
-    /// not the pills.
+    /// Quant pills with no matching file among the selected models (or all of them
+    /// while nothing is selected), so the filter only names quants the job could run.
     private var unavailableQuants: Set<QuantPill> {
         let relevantGroups = selectedModelKeys.isEmpty
             ? modelGroups
@@ -221,15 +179,14 @@ struct NewJobView: View {
         return selectedQuants.contains { $0.matches(quant) }
     }
 
-    /// Concrete GGUF files to run: selected groups × the active quant filter.
+    /// Selected groups narrowed by the quant filter.
     private var resolvedModelFiles: [DiscoveredModel] {
         modelGroups
             .filter { selectedModelKeys.contains($0.key) }
             .flatMap { group in group.files.filter { quantMatchesFilter($0.quant) } }
     }
 
-    /// Selected models that have no on-disk file matching the chosen quant.
-    /// Surfaced as a pre-run warning; they are skipped at run time.
+    /// Selected models with no file matching the chosen quant, surfaced as a warning.
     private var modelsMissingQuant: [ModelGroup] {
         guard !selectedQuants.contains(.all) else { return [] }
         return modelGroups
@@ -237,16 +194,20 @@ struct NewJobView: View {
             .filter { group in !group.files.contains { quantMatchesFilter($0.quant) } }
     }
 
-    /// Non-VL cells = non_vl_benchmarks × model files.
-    /// VL cells = vl_benchmarks × vl_compatible_model_files × mmproj; plain LLMs
-    /// are skipped because they cannot run VL benchmarks.
-    private var cellCount: Int {
-        let selectedItems = benchmarks.filter { selectedBenchmarks.contains($0.benchmarkId) }
+    private var cellCount: Int { countCells { _ in true } }
+
+    private var memoryCellCount: Int {
+        countCells { MemoryFreshness.isMemory(BenchmarkType(rawValue: $0.benchmarkType)) }
+    }
+
+    private func countCells(_ include: (BenchmarkItem) -> Bool) -> Int {
+        let selectedItems = benchmarks.filter {
+            selectedBenchmarks.contains($0.benchmarkId) && include($0)
+        }
         let resolved = resolvedModelFiles
-        // Mirror `start()`'s per-(model, benchmark) expansion: drop pairs the model's
-        // runtime can't run, then count 1 cell per non-VL pair and one per (VL pair ×
-        // compatible model × mmproj). Keeping this in lockstep with the loop is what
-        // makes the review step's zero-cell gate honest.
+        // Follows `start()`'s expansion so the review step's zero-cell gate is honest.
+        // It counts one cell per selected mmproj where `start()` may make fewer: one for
+        // a `.ggufVision` model, none for a model that is not downloaded yet.
         return resolved.reduce(0) { total, model in
             total + selectedItems.reduce(0) { sub, benchmark in
                 guard runtimeSupports(benchmark, on: model) else { return sub }
@@ -344,8 +305,7 @@ struct NewJobView: View {
         .lowPowerModeWarning(isPresented: $lowPowerWarningPending) { start() }
     }
 
-    /// When the selected models lose their last VL-compatible file, auto-deselect
-    /// any VL benchmarks so the user isn't left with an invalid configuration.
+    /// Deselect VL benchmarks once no selected model is VL-compatible.
     private func pruneVlBenchmarksIfNeeded() {
         if !hasVlModelSelected {
             let vlIds = Set(benchmarks.filter(Self.isVlBenchmark).map { $0.benchmarkId })
@@ -383,8 +343,7 @@ struct NewJobView: View {
         }
     }
 
-    /// The empty runtime/model states have no advanceable action, so we drop the
-    /// Back/Next footer there and let the "Go to Models" button stand alone.
+    /// The empty states have nothing to advance to, so "Go to Models" stands alone.
     private var showFooter: Bool {
         switch step {
         case .runtime: return !availableRuntimes.isEmpty
@@ -538,9 +497,8 @@ struct NewJobView: View {
                 searchField
                 modelList
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // Quant filtering only applies to GGUF/llama.cpp, which ships several
-                // quants per family. MLX is uniformly 4-bit and AFM has none, so the
-                // filter stays at "all" (matching every file) and the section is hidden.
+                // Only llama.cpp ships several quants per family; elsewhere the filter
+                // stays at "all".
                 if selectedRuntime == .llamaCpp {
                     quantSection
                 }
@@ -594,8 +552,7 @@ struct NewJobView: View {
             selectedQuants: $selectedQuants,
             subtitle: "Select the level of compression to use",
             disabledQuants: unavailableQuants,
-            // An empty quant filter would resolve zero model files, so
-            // deselecting here falls back to "All quants" instead.
+            // An empty quant filter would resolve zero model files.
             allowsEmptySelection: false
         )
     }
@@ -618,8 +575,6 @@ struct NewJobView: View {
                 benchmarkSearchField
                 benchmarkSelectionCard
 
-                // MMProjectors multi-select — only visible when a VL benchmark is
-                // selected. VL cells require pairing a base model with a projector.
                 if isVlSelected {
                     mmprojSelectionCard
                 }
@@ -720,6 +675,18 @@ struct NewJobView: View {
                         .foregroundStyle(.secondary)
                         .lineSpacing(5)
                         .fixedSize(horizontal: false, vertical: true)
+                    if !BuildFlavor.hasPrivateMemory,
+                       MemoryFreshness.isMemory(BenchmarkType(rawValue: group.type)) {
+                        Label {
+                            Text(MemoryFreshness.pickerNote)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                        }
+                        .font(.system(size: 13))
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -760,8 +727,6 @@ struct NewJobView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        // The secondary-fill background already groups the options under their
-        // benchmark, so a leading hierarchy line here would be duplicative.
         .overlay(alignment: .top) {
             BenchmarkDetailSeparator()
         }
@@ -977,18 +942,26 @@ struct NewJobView: View {
                 WizardStepHeader(title: "Review & run")
 
                 reviewSummaryCard
-                // Prefill batch picker hidden for now — every job runs at the default
-                // batch (512). Re-enable by uncommenting `prefillBatchControl` once the
-                // llama.cpp executables honor the batch too (#407), so iOS and executable
-                // runs stay comparable (the control + state are kept).
+                // Hidden, so every job runs at batch 512, until the llama.cpp executables
+                // honor the batch too (#407) and iOS and executable runs stay comparable.
                 // prefillBatchControl
                 if canSubmitResults {
                     reviewContributionToggle
                 }
 
+                if let notice = MemoryFreshness.runNotice(
+                    .newJob, publicBuild: !BuildFlavor.hasPrivateMemory,
+                    memoryCells: memoryCellCount, totalCells: cellCount,
+                    ranEngineWork: ProcessMemory.hasRunEngineWork
+                ) {
+                    NoticeCallout(message: notice.message, isWarning: notice.isWarning,
+                                  font: .caption)
+                }
+
                 if !modelsMissingQuant.isEmpty {
-                    reviewWarning(
-                        "\(modelsMissingQuant.map(\.name).joined(separator: ", ")) \(modelsMissingQuant.count == 1 ? "has" : "have") no \(quantSummary) build downloaded and will be skipped."
+                    NoticeCallout(
+                        message: "\(modelsMissingQuant.map(\.name).joined(separator: ", ")) \(modelsMissingQuant.count == 1 ? "has" : "have") no \(quantSummary) build downloaded and will be skipped.",
+                        font: .caption
                     )
                 }
             }
@@ -999,14 +972,12 @@ struct NewJobView: View {
         .background(Color(.systemBackground))
     }
 
-    /// Prefill batch knob — sets llama's `n_ubatch` and MLX's prefill chunk for
-    /// every cell in the job. Applies to both runtimes.
     private var prefillBatchControl: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Prefill batch")
                     .font(.system(size: 15, weight: .medium))
-                Text(MLXFeatureFlag.visibleInUI ? "llama n_ubatch · MLX prefill chunk" : "llama n_ubatch")
+                Text(MlxFeatureFlag.visibleInUI ? "llama n_ubatch · MLX prefill chunk" : "llama n_ubatch")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1073,7 +1044,7 @@ struct NewJobView: View {
     }
 
     private var canSubmitResults: Bool {
-        ResultSubmissionFeatureGate.canSubmitResults(registration: storage.identity.getRegistration())
+        ResultSubmissionFeatureGate.canSubmitResults(registration: ws.registration.get())
     }
 
     private var reviewQuantLabels: [String] {
@@ -1164,18 +1135,6 @@ struct NewJobView: View {
         )
     }
 
-    private func reviewWarning(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(14)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
     private func reviewQuantLabel(_ pill: QuantPill) -> String {
         pill.label
     }
@@ -1193,37 +1152,32 @@ struct NewJobView: View {
     private func loadData() {
         let all = modelStore.models
         // mmproj files are regular .gguf files, distinguished only by filename.
-        // Upstream HF repos publish them as `mmproj-*.gguf` alongside the base
-        // model. Split so users pick them from a dedicated section when VL
-        // benchmarks are selected.
         models = Self.offerable(
             downloaded: all.filter { $0.name.range(of: "mmproj", options: .caseInsensitive) == nil })
         mmprojFiles = all.filter { $0.name.range(of: "mmproj", options: .caseInsensitive) != nil }
-        benchmarks = BenchmarkCatalog.selectable(store: storage.benchmarks)
+        benchmarks = BenchmarkCatalog.selectable(store: ws.benchmarks)
 
         guard !didApplyInitialSelections else { return }
-        // No runtime is chosen yet, so there's nothing to pre-select — the model and
-        // benchmark selections are seeded when a runtime is picked
-        // (`seedSelectionsForRuntime`). mmproj defaults to all-selected so VL pairing
-        // works the moment a VL benchmark is picked.
+        // Model and benchmark selections are seeded when a runtime is picked. Every
+        // projector starts selected so VL pairing works as soon as a VL benchmark is.
         selectedMmproj = Set(mmprojFiles.map(\.path))
         didApplyInitialSelections = true
     }
 
     private func syncBenchmarksOnVisit() {
         guard !isSyncingBenchmarks else { return }
-        guard let registration = storage.identity.getRegistration() else { return }
+        guard let registration = ws.registration.get() else { return }
 
         isSyncingBenchmarks = true
         let serverUrl = registration.serverUrl
-        let storage = storage
+        let ws = ws
         let shouldSeedAfterSync = benchmarks.isEmpty
 
         Task.detached {
             do {
                 _ = try await BenchmarkSyncCoordinator.shared.sync(
                     serverUrl: serverUrl,
-                    storage: storage
+                    ws: ws
                 )
                 await MainActor.run {
                     loadData()
@@ -1240,10 +1194,6 @@ struct NewJobView: View {
         }
     }
 
-    /// Re-seed the downstream selection whenever the runtime changes (or is first
-    /// chosen): clear the model picks, restore the quant filter to "all", and
-    /// pre-select every benchmark the new runtime supports — pruning VL when the
-    /// runtime has no VL-capable model (llama.cpp only).
     private func seedSelectionsForRuntime() {
         selectedModelKeys = []
         selectedQuants = QuantPill.allSelection()
@@ -1260,10 +1210,8 @@ struct NewJobView: View {
 
     // MARK: - Actions
 
-    /// Gate the run on Low Power Mode: it throttles CPU/GPU clocks and skews
-    /// results, so warn before starting. `start()` proceeds directly when it's off.
     private func attemptStart() {
-        if DeviceProbe.detectPowerSaveMode() {
+        if detectPowerSaveMode() {
             lowPowerWarningPending = true
         } else {
             start()
@@ -1271,30 +1219,22 @@ struct NewJobView: View {
     }
 
     private func start() {
-        // Build cells as cartesian product
         let selectedBenchmarkItems = benchmarks.filter { selectedBenchmarks.contains($0.benchmarkId) }
         let selectedModelItems = resolvedModelFiles
         let selectedMmprojItems = mmprojFiles.filter { selectedMmproj.contains($0.path) }
 
-        // Model outer, benchmark inner: the job runner loads each model once
-        // and runs all of its benchmarks in a row before unloading. Grouping
-        // by model here is what makes that reuse kick in.
+        // Model outer, benchmark inner: the runner loads each model once and runs
+        // all of its benchmarks before unloading.
         var cells: [JobCell] = []
         for model in selectedModelItems {
             for benchmark in selectedBenchmarkItems {
-                // Skip pairs this model's runtime can't run (e.g. AFM prefill / max-memory
-                // / VL) — mirrors the VL model-pairing skip below; no unsupported cell is
-                // created, so the run doesn't fail late at execution time.
+                // No unsupported cell is created, so the run doesn't fail late.
                 guard runtimeSupports(benchmark, on: model) else { continue }
                 let isVl = Self.isVlBenchmark(benchmark)
                 let benchmarkType = benchmark.type
                 if isVl {
-                    // Skip base models without a paired mmproj — plain LLMs
-                    // cannot run VL benchmarks even if the user selected them.
                     guard Self.isVlCompatible(model, mmprojFiles: mmprojFiles) else { continue }
-                    // The projector is part of the cell's source: `GgufVisionSource` names
-                    // both files, so a VL cell is one coordinate rather than a text source
-                    // carrying a projector path beside it.
+                    // `GgufVisionSource` names both files, so a VL cell is one coordinate.
                     for source in Self.visionSources(for: model, mmprojFiles: selectedMmprojItems) {
                         cells.append(JobCell(
                             cellId: CellId(UUID().uuidString),
@@ -1330,11 +1270,10 @@ struct NewJobView: View {
             }
         }
 
-        // The largest window any selected cell will load with, as the engine sizes them —
-        // a job-level summary for the record. No cell reads it: each is sized from its own
-        // benchmark at load.
+        // The largest window any selected cell asks for, for the record only: each cell
+        // is sized from its own benchmark at load.
         let jobContextSize = selectedBenchmarkItems
-            .compactMap { $0.definition.map { Int(LlamaRuntimeFlags.contextSize(for: $0)) } }
+            .compactMap { $0.definition.map { Int(LlamaRuntimeFlags.ctxSize(for: $0)) } }
             .max() ?? 0
 
         let shouldAutoSubmitResults = canSubmitResults && contributeResults
@@ -1347,18 +1286,15 @@ struct NewJobView: View {
             contributeResults: shouldAutoSubmitResults,
             jobRunner: jobRunner,
             jobStore: jobStore,
-            storage: storage
+            ws: ws
         ) else {
             startBlockedMessage = "Pause or finish the current job before starting another one."
             return
         }
 
-        // Starting a job drops straight into Pocket Mode; JobDetailView presents
-        // it when it appears for this job.
+        // JobDetailView presents Pocket Mode when it appears for this job.
         jobRunner.pocketModeRequestedJobId = jobId
 
-        // Hand off to the host navigation stack, which replaces this view
-        // with JobDetailView(jobId:) so the user watches progress there.
         onStarted(jobId)
     }
 }
@@ -1462,13 +1398,12 @@ struct ChipFlowLayout: Layout {
 #Preview("New Job") {
     NewJobView()
         .environment(JobRunner())
-        .environment(JobStore(storage: FileStorage.production))
-        .environment(ModelStore(storage: FileStorage.production))
+        .environment(JobStore(ws: PipetteWorkspace.production))
+        .environment(ModelStore(ws: PipetteWorkspace.production))
 }
 
-/// Standalone preview of the Low Power Mode warning — the simulator always
-/// reports Low Power Mode off, so this is the only way to see the dialog in the
-/// canvas. Run the preview live (▶) to interact with it.
+/// The simulator always reports Low Power Mode off, so this is the only way to see
+/// the warning in the canvas.
 #Preview("Low Power Mode Warning") {
     struct WarningPreview: View {
         @State private var isPresented = true

@@ -1,7 +1,3 @@
-// Full-screen "Create a job" wizard (iOS NewJobView equivalent): three steps — Models, Benchmarks, Review — with a
-// fixed Android chrome above and a Back / Next / Run footer below. Wired as its own Navigation 3 destination
-// (Route.CreateJob) rather than an inline sealed-state variant of JobsScreen — the shell mirrors JobsUiState.Wizard
-// onto the backstack, so predictive back and system back animate through Nav3.
 @file:Suppress("MagicNumber", "MaxLineLength", "TooManyFunctions", "CyclomaticComplexMethod")
 
 package ai.liquid.pipette.compose.jobs
@@ -65,18 +61,12 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/**
- * Full-screen "Create a job" destination. System back steps through wizard pages one at a time; the first step's back closes the flow (dispatching
- * [JobsIntent.CancelWizard]), so the shell will pop the Nav3 entry.
- */
+/** The new-job wizard (iOS NewJobView). Back on the first step dispatches [JobsIntent.CancelWizard], which pops the Nav3 entry. */
 @Composable
 fun CreateJobScreen(state: JobsUiState.Wizard, onIntent: (JobsIntent) -> Unit) {
   val colors = PipetteTheme.colors
-  // Back on any step > 0 rewinds the wizard; step 0 back exits the flow.
   BackHandler { if (state.step > 0) onIntent(JobsIntent.WizardGoToStep(state.step - 1)) else onIntent(JobsIntent.CancelWizard) }
   Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
-    // Material 3 top app bar with a back nav icon — matches the Add models flow. The step-progress
-    // underline sits directly under the toolbar (parity with the previous inline header).
     AndroidTopAppBar(
       title = stringResource(R.string.job_wizard_title),
       navigationIcon = {

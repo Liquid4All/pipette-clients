@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "prefill_throughput",
+  "ipc": "none",
+  "model_type": "torch",
+  "runtime_type": "docker_sglang"
+}

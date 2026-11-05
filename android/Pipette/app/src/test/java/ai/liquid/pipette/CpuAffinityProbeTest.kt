@@ -35,7 +35,13 @@ class CpuAffinityProbeTest {
 
   @Test
   fun buildSnapshot_flagsSamsungDemotion() {
-    val snap = CpuAffinityProbe.buildSnapshot(cpusetPath = "/moderate", allowedList = "0-5", availableProcessors = 6, maxFreqByCpu = samsungMaxFreq)
+    val snap =
+      CpuAffinityProbe.buildSnapshot(
+        cpusetPath = "/moderate",
+        allowedList = "0-5",
+        availableProcessors = 6,
+        sweep = CpuFreqSweep(samsungMaxFreq, possibleCpus = 8),
+      )
     assertEquals("/moderate", snap.cpusetPath)
     assertEquals("0-5", snap.allowedCpus)
     assertEquals(6, snap.allowedCount)
@@ -61,7 +67,13 @@ class CpuAffinityProbeTest {
 
   @Test
   fun buildSnapshot_pixelKeepsPrimeCore() {
-    val snap = CpuAffinityProbe.buildSnapshot(cpusetPath = "/foreground", allowedList = "0-8", availableProcessors = 9, maxFreqByCpu = pixelMaxFreq)
+    val snap =
+      CpuAffinityProbe.buildSnapshot(
+        cpusetPath = "/foreground",
+        allowedList = "0-8",
+        availableProcessors = 9,
+        sweep = CpuFreqSweep(pixelMaxFreq, possibleCpus = 9),
+      )
     assertEquals("/foreground", snap.cpusetPath)
     assertEquals(9, snap.allowedCount)
     assertEquals("8", snap.topTierCpus)
@@ -70,10 +82,21 @@ class CpuAffinityProbeTest {
 
   @Test
   fun buildSnapshot_missingFrequenciesLeaveTopTierNull() {
-    val snap = CpuAffinityProbe.buildSnapshot(cpusetPath = null, allowedList = "0-3", availableProcessors = 4, maxFreqByCpu = emptyMap())
+    val snap =
+      CpuAffinityProbe.buildSnapshot(
+        cpusetPath = null,
+        allowedList = "0-3",
+        availableProcessors = 4,
+        sweep = CpuFreqSweep(emptyMap(), possibleCpus = 4),
+      )
     assertNull(snap.topTierCpus)
     assertFalse(snap.excludesTopTier)
-    assertEquals(0, snap.totalCpus)
+    // The four cpuN directories exist even though not one of their frequencies could be read, so the device has four CPUs and the sweep covered none
+    // of them. Derived from the map alone this used to report zero CPUs, which understated the SoC and made an empty sweep indistinguishable from a
+    // device with no cores at all.
+    assertEquals(4, snap.totalCpus)
+    assertEquals(0, snap.sweptCpus)
+    assertFalse(snap.sweepComplete)
   }
 
   @Test
@@ -82,13 +105,66 @@ class CpuAffinityProbeTest {
     // still be 8 (max index 7 + 1), not 7 (entry count) — else the
     // allowed/total summary undercounts the SoC.
     val gapped = samsungMaxFreq.filterKeys { it != 3 }
-    val snap = CpuAffinityProbe.buildSnapshot(cpusetPath = "/moderate", allowedList = "0-5", availableProcessors = 6, maxFreqByCpu = gapped)
+    val snap =
+      CpuAffinityProbe.buildSnapshot(
+        cpusetPath = "/moderate",
+        allowedList = "0-5",
+        availableProcessors = 6,
+        sweep = CpuFreqSweep(gapped, possibleCpus = 8),
+      )
     assertEquals(8, snap.totalCpus)
+    assertEquals(7, snap.sweptCpus)
+    assertFalse("seven of eight cores read is not a complete sweep", snap.sweepComplete)
+  }
+
+  /**
+   * The case a max-index total cannot see: the *prime* core is the one that dropped out.
+   *
+   * An offline core has no `cpufreq` directory, so cpu7 vanishing takes the top tier with it. Derived from the surviving indices alone, totalCpus
+   * would be 7 and the sweep would look complete at 7 of 7, leaving `topTierCpus` naming the 2.6 GHz cluster that the process is perfectly free to
+   * run on. The directory listing is what keeps the denominator honest.
+   */
+  @Test
+  fun buildSnapshot_aMissingPrimeCoreStillCountsAgainstTheSweep() {
+    val primeParked = samsungMaxFreq.filterKeys { it != 7 }
+    val snap =
+      CpuAffinityProbe.buildSnapshot(
+        cpusetPath = "/foreground",
+        allowedList = "0-6",
+        availableProcessors = 7,
+        sweep = CpuFreqSweep(primeParked, possibleCpus = 8),
+      )
+
+    assertEquals("the listing knows about the parked core even though the sweep could not read it", 8, snap.totalCpus)
+    assertEquals(7, snap.sweptCpus)
+    assertFalse(snap.sweepComplete)
+    // The trap this exists for: the surviving maximum looks like a prime tier, and it is fully allowed.
+    assertEquals("4-6", snap.topTierCpus)
+    assertFalse("which reads as healthy, and is why sweepComplete has to be consulted", snap.excludesTopTier)
+  }
+
+  @Test
+  fun buildSnapshot_aCompleteSweepSaysSo() {
+    val snap =
+      CpuAffinityProbe.buildSnapshot(
+        cpusetPath = "/moderate",
+        allowedList = "0-5",
+        availableProcessors = 6,
+        sweep = CpuFreqSweep(samsungMaxFreq, possibleCpus = 8),
+      )
+    assertEquals(8, snap.sweptCpus)
+    assertTrue(snap.sweepComplete)
   }
 
   @Test
   fun snapshot_jsonRoundTrips() {
-    val snap = CpuAffinityProbe.buildSnapshot(cpusetPath = "/moderate", allowedList = "0-5", availableProcessors = 6, maxFreqByCpu = samsungMaxFreq)
+    val snap =
+      CpuAffinityProbe.buildSnapshot(
+        cpusetPath = "/moderate",
+        allowedList = "0-5",
+        availableProcessors = 6,
+        sweep = CpuFreqSweep(samsungMaxFreq, possibleCpus = 8),
+      )
     assertEquals(snap, CpuAffinitySnapshot.fromJson(snap.toJson()))
   }
 

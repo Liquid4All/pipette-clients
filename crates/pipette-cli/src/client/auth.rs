@@ -1,100 +1,112 @@
-//! Client registration and profile ops against the management server.
-//!
-//! Local identity files (keys, `registration.json`, `device.json`) are owned
-//! by [`IdentityStore`] — this module holds only the flows that talk to the
-//! server or combine both.
+//! Client registration and profile ops against the management server. The
+//! local identity files belong to [`ClientRegistrationStore`] and
+//! [`ClientDeviceStore`]; this module holds only the flows that talk to the
+//! server.
 
 use pipette_http::HttpClient;
 use pipette_mgmt_client::{
-    generate_keypair_hex,
-    types::{ClientProfile, RegisterRequest, UpdateClientRequest},
-    MgmtClient, PreauthKey,
+    ClientPreauthKey, ContactEmail, ServerUrl, client_api, generate_keypair,
+    types::{ClientProfile, DeviceProfileFields, RegisterRequest, UpdateClientRequest},
 };
-use pipette_plan_types::device::{DeviceFormFactor, TrimmedString};
+use pipette_plan_types::{ClientId, DeviceFormFactor, TrimmedString};
 
 use crate::error::{Error, Result};
-use crate::identity::{DeviceLabels, IdentityRegistration, IdentityStore};
+use crate::identity::{
+    ClientDeviceStore, ClientRegistrationStore, DeviceLabels, IdentityRegistration,
+};
 
 pub struct RegisterInput {
-    pub server_url: String,
     pub organization: String,
-    pub contact_email: String,
+    pub contact_email: ContactEmail,
     pub client_details: String,
     pub device_name: Option<String>,
     pub device_form_factor: Option<DeviceFormFactor>,
-    /// Optional pre-auth key sent with the registration request; transient,
-    /// never persisted.
-    pub preauth_key: Option<PreauthKey>,
+    /// Sent with the registration request, never persisted.
+    pub preauth_key: Option<ClientPreauthKey>,
 }
 
-/// Register a new client into `identity`.
+/// Register a new client into `registration_store`, pinning the labels it
+/// registers with into `device`. The request carries the CPU architecture and
+/// the OS family, so the server derives the `arch:` and `os_family:` flags
+/// before the worker first reports the full profile.
 pub fn register(
-    identity: &IdentityStore,
-    client: &MgmtClient,
+    registration_store: &ClientRegistrationStore,
+    device: &ClientDeviceStore,
+    server: &ServerUrl,
     http: &HttpClient,
     input: RegisterInput,
 ) -> Result<IdentityRegistration> {
-    identity.ensure_empty()?;
-    log::info!("registering client against {}", input.server_url);
+    registration_store.ensure_empty()?;
+    tracing::info!(
+        url = %server,
+        device_cpu_arch = pipette_device::CPU_ARCH,
+        device_os_family = pipette_device::OS_FAMILY,
+        "registering client"
+    );
     // An operator can run `auth set-device` before `auth register` to pin
     // labels for local benchmarks; preserve those when the corresponding
     // `RegisterInput` field isn't supplied.
-    let prior = identity.get_device_labels()?;
+    let prior = device.get()?;
     let (device_name, device_form_factor) =
         merge_labels_for_register(input.device_name, input.device_form_factor, prior);
-    // `device.json` is independent of the registration (`ensure_empty` ignores
-    // it, `clear_registration_material` preserves it), so write it before the
-    // server call: an I/O failure aborts before a client_id is committed
-    // instead of discarding an explicit `--device-name` after the fact.
-    identity.put_device_labels(&DeviceLabels {
+    // `device.json` is its own store, untouched by `ensure_empty` and by the
+    // rollback below, so write it before the server call: an I/O failure aborts
+    // before a client_id is committed instead of discarding an explicit
+    // `--device-name` after the fact.
+    device.put(&DeviceLabels {
         device_name,
         device_form_factor,
     })?;
-    let (private_key_hex, public_key_hex) = generate_keypair_hex()?;
+    let (private_key, public_key_hex) = generate_keypair()?;
     // Register before persisting the keypair: a rejected key (401/403) then
     // leaves no registration material on disk, so the operator can retry
     // without `auth reset`.
-    let response = client.register(
+    let response = client_api::register(
+        server,
         http,
         RegisterRequest {
             public_key: public_key_hex.clone(),
             organization: input.organization,
             contact_email: input.contact_email,
             client_details: input.client_details,
-            preauth_key: input.preauth_key,
-            device: Default::default(),
+            client_preauth_key: input.preauth_key,
+            device: DeviceProfileFields {
+                device_cpu_arch: Some(pipette_device::CPU_ARCH.to_string()),
+                device_os_family: Some(pipette_device::OS_FAMILY.to_string()),
+                ..Default::default()
+            },
         },
     )?;
     let registration = IdentityRegistration {
-        client_id: response.client_id,
-        server_url: input.server_url,
+        // Checked rather than trusted: the id is assigned by the server, but it
+        // is this client that will sign with it, and an empty one, or one
+        // outside the server's charset, would sign as nobody.
+        client_id: ClientId::try_new(response.client_id).map_err(Error::RegisteredId)?,
+        // The normalized URL, so what lands on disk is the base every later
+        // request is built and signed against.
+        server_url: server.clone(),
     };
     // The server has committed (client_id assigned; a preauth key, if used, is
     // now spent). The private key + registration.json are the load-bearing
     // identity; if either fails to persist we can't recover the key, so roll
     // back to unblock a clean retry and report the client_id.
-    identity
-        .put_private_key(&private_key_hex)
-        .and_then(|()| identity.put_public_key(&public_key_hex))
-        .and_then(|()| identity.put_registration(&registration))
+    registration_store
+        .put_private_key(&private_key)
+        .and_then(|()| registration_store.put_public_key(&public_key_hex))
+        .and_then(|()| registration_store.put(&registration))
         .map_err(|source| {
-            let _ = identity.clear_registration_material();
+            let _ = registration_store.clear();
             Error::RegistrationPersisted {
-                client_id: registration.client_id.clone(),
+                client_id: registration.client_id.to_string(),
                 source: Box::new(source),
             }
         })?;
     Ok(registration)
 }
 
-/// Merge `register`'s `RegisterInput` device fields with whatever is
-/// already in `device.json`. The rule is "explicit user value beats prior;
-/// otherwise inherit prior": `register` is allowed to narrow but never to
-/// clobber an existing label with `None`.
-///
-/// Empty / whitespace-only `device_name` strings count as "no value" (via
-/// [`non_empty_trimmed`]), so the operator can't accidentally erase a
-/// pinned name by passing `""` either.
+/// An explicit value beats the label already in `device.json`; a missing one,
+/// or a blank `device_name`, inherits it, so `register` never erases a pinned
+/// label.
 pub(crate) fn merge_labels_for_register(
     device_name: Option<String>,
     device_form_factor: Option<DeviceFormFactor>,
@@ -102,66 +114,36 @@ pub(crate) fn merge_labels_for_register(
 ) -> (Option<TrimmedString>, Option<DeviceFormFactor>) {
     (
         device_name
-            .and_then(non_empty_trimmed)
+            .and_then(DeviceLabels::supplied_name)
             .or(prior.device_name),
         device_form_factor.or(prior.device_form_factor),
     )
 }
 
-/// Update local device labels in `device.json` (the single label store).
+/// This client's server-side profile, live from `GET /clients/me`.
 ///
-/// Does *not* require a prior `auth register`. A fresh workspace can call
-/// `auth set-device` to record labels for local-only `benchmarks run`.
-pub fn set_device(
-    identity: &IdentityStore,
-    device_name: Option<String>,
-    device_form_factor: Option<DeviceFormFactor>,
-) -> Result<DeviceLabels> {
-    if device_name.is_none() && device_form_factor.is_none() {
-        return Err(Error::SetDeviceEmpty);
-    }
-    let mut labels = identity.get_device_labels()?;
-    if let Some(name) = device_name {
-        labels.device_name = non_empty_trimmed(name);
-    }
-    if let Some(form_factor) = device_form_factor {
-        labels.device_form_factor = Some(form_factor);
-    }
-    identity.put_device_labels(&labels)?;
-    Ok(labels)
-}
-
-fn non_empty_trimmed(value: String) -> Option<TrimmedString> {
-    let trimmed: TrimmedString = value.into();
-    if trimmed.as_ref().is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
+/// The destination comes out of the same store as the signing key: a profile
+/// fetched from anywhere else would describe a client this key does not sign
+/// for.
 pub fn fetch_profile(
-    identity: &IdentityStore,
-    client: &MgmtClient,
+    registration: &ClientRegistrationStore,
     http: &HttpClient,
 ) -> Result<ClientProfile> {
-    let auth = identity.signing_identity()?;
-    Ok(client.me(http, &auth)?)
+    let auth = registration.signing_identity()?;
+    Ok(client_api::me(&registration.server_url()?, http, &auth)?)
 }
 
-/// Update the server-side `client_details` for the registered client via
-/// `PATCH /clients/me`. Unlike the device labels (`set_device`, local
-/// `device.json`), `client_details` lives only on the server — so this is the
-/// one `auth set-device` field that reaches the network and requires a
-/// registered identity. Returns the updated profile.
+/// `PATCH /clients/me` with new `client_details`. Unlike the device labels in
+/// `device.json`, `client_details` lives only on the server, so it is the one
+/// `auth set-device` field that needs a registered identity.
 pub fn update_client_details(
-    identity: &IdentityStore,
-    client: &MgmtClient,
+    registration: &ClientRegistrationStore,
     http: &HttpClient,
     client_details: String,
 ) -> Result<ClientProfile> {
-    let auth = identity.signing_identity()?;
-    Ok(client.update_me(
+    let auth = registration.signing_identity()?;
+    Ok(client_api::update_me(
+        &registration.server_url()?,
         http,
         &auth,
         UpdateClientRequest {
@@ -175,12 +157,21 @@ pub fn update_client_details(
 mod tests {
     use anyhow::Context;
 
+    use pipette_plan_types::PrincipalIdError;
+
     use super::*;
 
-    fn identity() -> anyhow::Result<(tempfile::TempDir, IdentityStore)> {
+    /// Both stores over one `identity/`, as the workspace mints them.
+    fn stores() -> anyhow::Result<(
+        tempfile::TempDir,
+        ClientRegistrationStore,
+        ClientDeviceStore,
+    )> {
         let tmp = tempfile::tempdir()?;
-        let id = IdentityStore::new(tmp.path().join("identity"));
-        Ok((tmp, id))
+        let root = tmp.path().join("identity");
+        let id = ClientRegistrationStore::new(&root);
+        let device = ClientDeviceStore::new(&root);
+        Ok((tmp, id, device))
     }
 
     fn prior_labels(use_prior: bool) -> DeviceLabels {
@@ -192,20 +183,6 @@ mod tests {
         } else {
             DeviceLabels::default()
         }
-    }
-
-    #[test]
-    fn set_device_writes_device_json_without_registration() -> anyhow::Result<()> {
-        let (_tmp, id) = identity()?;
-        set_device(&id, Some("dev box".into()), Some(DeviceFormFactor::Desktop))?;
-        let labels = id.get_device_labels()?;
-        assert_eq!(
-            labels.device_name.as_ref().map(AsRef::as_ref),
-            Some("dev box")
-        );
-        assert_eq!(labels.device_form_factor, Some(DeviceFormFactor::Desktop));
-        assert!(id.get_registration()?.is_none());
-        Ok(())
     }
 
     #[rstest::rstest]
@@ -245,50 +222,55 @@ mod tests {
         Ok(HttpClient::new("pipette-test/0")?)
     }
 
-    fn register_input(
-        server_url: &str,
-        preauth_key: Option<&str>,
-    ) -> anyhow::Result<RegisterInput> {
+    fn server_url(server: &httpmock::MockServer) -> anyhow::Result<ServerUrl> {
+        Ok(ServerUrl::try_new(server.base_url())?)
+    }
+
+    fn register_input(preauth_key: Option<&str>) -> anyhow::Result<RegisterInput> {
         Ok(RegisterInput {
-            server_url: server_url.into(),
             organization: "LiquidAI".into(),
-            contact_email: "user@example.com".into(),
+            contact_email: ContactEmail::try_new("user@example.com")?,
             client_details: "ci box".into(),
             device_name: None,
             device_form_factor: None,
-            preauth_key: preauth_key.map(PreauthKey::try_new).transpose()?,
+            preauth_key: preauth_key.map(ClientPreauthKey::try_new).transpose()?,
         })
     }
 
-    #[test]
-    fn register_rejection_leaves_no_identity_on_disk() -> anyhow::Result<()> {
+    /// A registration the server refuses, or answers with an id this client
+    /// could not sign as, leaves no identity on disk, so a retry needs no
+    /// `auth reset`. Labels are written ahead of the server call and survive
+    /// the failure, as if the operator had run `auth set-device`.
+    #[rstest::rstest]
+    #[case::rejected(401, "preauth key expired", |e: &Error| matches!(e, Error::Mgmt(_)))]
+    #[case::unusable_id(
+        200,
+        r#"{"client_id":"ev1.a","status":"approved"}"#,
+        |e: &Error| matches!(e, Error::RegisteredId(PrincipalIdError::Charset { ch: '.', .. }))
+    )]
+    fn register_failure_leaves_no_identity_on_disk(
+        #[case] status: u16,
+        #[case] body: &str,
+        #[case] refused: fn(&Error) -> bool,
+    ) -> anyhow::Result<()> {
         use httpmock::prelude::*;
+
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/clients/register");
-            then.status(401).body("preauth key expired");
+            then.status(status).body(body);
         });
-        let (_tmp, id) = identity()?;
-        let client = MgmtClient::new(server.base_url())?;
-        let http = test_http()?;
-        let mut input = register_input(&server.base_url(), Some("preauth_dead.key"))?;
+        let (_tmp, id, device) = stores()?;
+        let mut input = register_input(Some("preauth_dead.key"))?;
         input.device_name = Some("lab box".into());
-        let err = register(&id, &client, &http, input)
+        let err = register(&id, &device, &server_url(&server)?, &test_http()?, input)
             .err()
-            .context("a 401 must fail registration")?;
-        assert!(
-            matches!(err, Error::Mgmt(_)),
-            "expected mgmt error, got {err:?}"
-        );
+            .context("the registration must fail")?;
+        assert!(refused(&err), "got {err:?}");
         assert!(id.get_private_key()?.is_none());
-        assert!(id.get_registration()?.is_none());
-        // Labels are written ahead of the server call and survive the failure,
-        // as if the operator had run `auth set-device`.
+        assert!(id.get()?.is_none());
         assert_eq!(
-            id.get_device_labels()?
-                .device_name
-                .as_ref()
-                .map(AsRef::as_ref),
+            device.get()?.device_name.as_ref().map(AsRef::as_ref),
             Some("lab box")
         );
         Ok(())
@@ -301,28 +283,60 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/clients/register")
-                .body_contains("preauth_live.key");
+                // The current field name, not the `preauth_key` alias.
+                .body_includes("\"client_preauth_key\"")
+                .body_includes("preauth_live.key");
             then.status(200)
                 .body(r#"{"client_id":"c-1","status":"approved"}"#);
         });
-        let (_tmp, id) = identity()?;
-        let client = MgmtClient::new(server.base_url())?;
+        let (_tmp, id, device) = stores()?;
+        let server_url = server_url(&server)?;
         let http = test_http()?;
         let registration = register(
             &id,
-            &client,
+            &device,
+            &server_url,
             &http,
-            register_input(&server.base_url(), Some("preauth_live.key"))?,
+            register_input(Some("preauth_live.key"))?,
         )?;
-        assert_eq!(registration.client_id, "c-1");
+        assert_eq!(registration.client_id.as_ref(), "c-1");
         mock.assert();
 
-        let reg = id.require_registration()?;
+        let reg = id.require()?;
         let persisted = serde_json::to_string(&reg)?;
         assert!(
             !persisted.contains("preauth"),
             "preauth key must not be persisted, got: {persisted}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn register_sends_the_arch_and_os_family() -> anyhow::Result<()> {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/clients/register")
+                .json_body_includes(
+                    serde_json::json!({
+                        "device_cpu_arch": std::env::consts::ARCH,
+                        "device_os_family": std::env::consts::OS,
+                    })
+                    .to_string(),
+                );
+            then.status(200)
+                .body(r#"{"client_id":"c-1","status":"approved"}"#);
+        });
+        let (_tmp, id, device) = stores()?;
+        register(
+            &id,
+            &device,
+            &server_url(&server)?,
+            &test_http()?,
+            register_input(None)?,
+        )?;
+        mock.assert();
         Ok(())
     }
 
@@ -335,23 +349,21 @@ mod tests {
             then.status(200)
                 .body(r#"{"client_id":"c-1","status":"approved"}"#);
         });
-        let (_tmp, id) = identity()?;
-        let client = MgmtClient::new(server.base_url())?;
+        let (_tmp, id, device) = stores()?;
+        let server_url = server_url(&server)?;
         let http = test_http()?;
-        let mut input = register_input(&server.base_url(), None)?;
+        let mut input = register_input(None)?;
         input.device_name = Some("lab box".into());
         input.device_form_factor = Some(DeviceFormFactor::Server);
-        register(&id, &client, &http, input)?;
+        register(&id, &device, &server_url, &http, input)?;
 
-        // Labels land in device.json…
-        let labels = id.get_device_labels()?;
+        let labels = device.get()?;
         assert_eq!(
             labels.device_name.as_ref().map(AsRef::as_ref),
             Some("lab box")
         );
         assert_eq!(labels.device_form_factor, Some(DeviceFormFactor::Server));
-        // …and the registration carries no device fields at all.
-        let reg = id.require_registration()?;
+        let reg = id.require()?;
         let persisted = serde_json::to_string(&reg)?;
         assert!(
             !persisted.contains("device_"),
@@ -372,22 +384,17 @@ mod tests {
         let patch = server.mock(|when, then| {
             when.method(httpmock::Method::PATCH)
                 .path("/clients/me")
-                .body_contains("M4 Max, 36GB");
+                .body_includes("M4 Max, 36GB");
             then.status(200).body(
                 r#"{"client_id":"c-1","organization":"o","client_details":"M4 Max, 36GB","contact_email":"a@b.com","status":"approved"}"#,
             );
         });
-        let (_tmp, id) = identity()?;
-        let client = MgmtClient::new(server.base_url())?;
+        let (_tmp, id, device) = stores()?;
+        let server_url = server_url(&server)?;
         let http = test_http()?;
-        register(
-            &id,
-            &client,
-            &http,
-            register_input(&server.base_url(), None)?,
-        )?;
+        register(&id, &device, &server_url, &http, register_input(None)?)?;
 
-        let profile = update_client_details(&id, &client, &http, "M4 Max, 36GB".to_string())?;
+        let profile = update_client_details(&id, &http, "M4 Max, 36GB".to_string())?;
 
         assert_eq!(profile.client_details, "M4 Max, 36GB");
         patch.assert();
@@ -403,18 +410,20 @@ mod tests {
             then.status(200)
                 .body(r#"{"client_id":"c-1","status":"approved"}"#);
         });
-        let (_tmp, id) = identity()?;
-        let client = MgmtClient::new(server.base_url())?;
+        let (_tmp, id, device) = stores()?;
+        let server_url = server_url(&server)?;
         let http = test_http()?;
-        register(
-            &id,
-            &client,
-            &http,
-            register_input(&server.base_url(), None)?,
-        )?;
+        register(&id, &device, &server_url, &http, register_input(None)?)?;
         let auth = id.signing_identity()?;
-        assert_eq!(auth.client_id, "c-1");
-        assert!(!auth.private_key_hex.is_empty());
+        assert_eq!(auth.client_id.as_ref(), "c-1");
+        // The stored halves are a pair: the public key on disk is the one the
+        // key it signs with derives.
+        assert_eq!(
+            id.get_public_key()?,
+            Some(pipette_mgmt_client::public_key_hex_from_private(
+                &auth.private_key_hex
+            )?)
+        );
         Ok(())
     }
 }

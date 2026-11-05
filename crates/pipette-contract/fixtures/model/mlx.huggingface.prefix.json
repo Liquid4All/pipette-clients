@@ -1,0 +1,7 @@
+{
+  "org": "LiquidAI",
+  "prefix": "4bit",
+  "repo_name": "LFM2.5-350M-MLX",
+  "source": "huggingface",
+  "type": "mlx"
+}

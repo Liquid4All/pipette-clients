@@ -1,0 +1,10 @@
+{
+  "benchmark_type": "vlm_eval",
+  "max_model_len": 49152,
+  "model_type": "torch",
+  "parallel": 64,
+  "raw": [
+    "--trust-remote-code"
+  ],
+  "runtime_type": "uv_vllm"
+}

@@ -1,12 +1,18 @@
 import Foundation
 import Network
 
+/// The reachability `DownloadCoordinator` reads, behind a seam so a test fixes the answer
+/// rather than depending on the machine and on a monitor only the app's launch starts.
+protocol NetworkReachable: Sendable {
+    nonisolated var isConnected: Bool { get }
+
+    /// Separates a reported `isConnected == false` from the pessimistic default an unwarmed
+    /// monitor answers with. A caller that treats the two alike declines online work on an
+    /// online device.
+    nonisolated var hasReading: Bool { get }
+}
+
 /// Always-on network reachability, backed by one shared `NWPathMonitor`.
-///
-/// Two uses: a synchronous `isConnected` read so work that can only succeed
-/// online (the per-cell result upload) skips itself when offline instead of
-/// firing a doomed request; and an `onReconnect` callback so the download
-/// coordinator can auto-resume transfers a connectivity drop interrupted.
 ///
 /// `nonisolated` (not the project-default `@MainActor`) and lock-guarded so the
 /// off-main benchmark run loop can read `isConnected` synchronously.
@@ -17,7 +23,7 @@ nonisolated final class NetworkReachability: @unchecked Sendable {
     private let queue = DispatchQueue(label: "ai.liquid.pipette.reachability", qos: .utility)
     private let lock = NSLock()
     private var satisfied = false
-    private var hasReading = false
+    private var receivedReading = false
     private var started = false
     private var reconnectHandler: (@Sendable () -> Void)?
 
@@ -26,20 +32,19 @@ nonisolated final class NetworkReachability: @unchecked Sendable {
             guard let self else { return }
             let now = path.status == .satisfied
             self.lock.lock()
-            // Fire only on a genuine offline→online transition — never on the
-            // first reading (the pessimistic `false` default isn't a real
-            // "was offline" state).
-            let reconnected = self.hasReading && !self.satisfied && now
+            // Not on the first reading: the pessimistic `false` default is not
+            // a real "was offline" state.
+            let reconnected = self.receivedReading && !self.satisfied && now
             self.satisfied = now
-            self.hasReading = true
+            self.receivedReading = true
             let handler = self.reconnectHandler
             self.lock.unlock()
             if reconnected { handler?() }
         }
     }
 
-    /// Begin watching the network path. Idempotent; call once at launch so
-    /// `isConnected` is accurate before the first benchmark cell completes.
+    /// Idempotent. Call at launch so `isConnected` is accurate before the first
+    /// benchmark cell completes.
     func start() {
         lock.lock()
         let alreadyStarted = started
@@ -49,23 +54,29 @@ nonisolated final class NetworkReachability: @unchecked Sendable {
         monitor.start(queue: queue)
     }
 
-    /// Register a handler fired when connectivity returns (the path transitions
-    /// from unsatisfied back to satisfied). Not fired for the initial reading.
-    /// A single handler; a later registration replaces the previous one.
+    /// Fired on an unsatisfied-to-satisfied transition, not for the initial
+    /// reading. One handler: a later registration replaces the previous one.
     func onReconnect(_ handler: @escaping @Sendable () -> Void) {
         lock.lock()
         reconnectHandler = handler
         lock.unlock()
     }
 
-    /// Latest observed reachability. Thread-safe. Pessimistic until the monitor
-    /// first reports a satisfied path — a not-yet-warmed monitor skips (and thus
-    /// delays) an upload rather than firing a doomed offline request. The monitor
-    /// delivers the current path within milliseconds of `start`, long before the
-    /// first cell finishes, so an online run uploads from the first cell on.
+    /// Pessimistic until the monitor first reports a satisfied path. The monitor
+    /// reports within milliseconds of `start`, long before the first cell finishes.
+    /// That default suits a caller who asks again later (the per-cell upload gate);
+    /// a caller who acts on the answer once reads `hasReading` first.
     var isConnected: Bool {
         lock.lock()
         defer { lock.unlock() }
         return satisfied
     }
+
+    var hasReading: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedReading
+    }
 }
+
+extension NetworkReachability: NetworkReachable {}

@@ -200,9 +200,7 @@ fun PipetteAppRoot() {
   }
 }
 
-// Adding more Nav3 entries pushed this scaffold past detekt's default 15-branch threshold. The branchiness is inherent
-// to a top-level tab container that hosts every route + the state → backstack mirror + the pill-bar visibility check;
-// splitting it further doesn't buy readability. Keep the suppression scoped to just this function.
+// One branch per route plus the backstack mirrors; splitting the tab container would not read better.
 @Suppress("CyclomaticComplexMethod")
 @Composable
 private fun Chrome(
@@ -215,26 +213,23 @@ private fun Chrome(
   val jobsState by jobsVm.state.collectAsStateWithLifecycle()
   val modelsState by modelsVm.state.collectAsStateWithLifecycle()
   val settingsState by settingsVm.state.collectAsStateWithLifecycle()
-  // Top-level tab container: NavDisplay animates between the three tabs. Each screen renders its own
-  // header and handles its own full-screen covers (Jobs wizard/detail, Add Models, acknowledgements,
-  // feedback) inline, so there is no shared app bar here.
+  // Top-level tab container: NavDisplay animates between the three tabs. Each screen renders its own header
+  // and its own full-screen covers (Jobs wizard/detail, acknowledgements, feedback) inline, so there is no
+  // shared app bar here. Add models is a separate destination, Route.AddModels.
   val backStack = rememberNavBackStack(shellState.selectedTab.toRoute())
   LaunchedEffect(shellState.selectedTab) {
     val root = shellState.selectedTab.toRoute()
-    // Reset the stack to the tab's root on tab switch. This also drops any pushed detail (e.g. Add models)
-    // so switching tabs doesn't strand a nested screen behind the scenes.
+    // Reset the stack to the tab's root on tab switch. The reset also drops any pushed detail, such as
+    // Add models, so a hidden tab keeps no nested screen on the backstack.
     if (backStack.lastOrNull() != root) {
       backStack.clear()
       backStack.add(root)
     }
   }
-  // Mirror the Models VM's addModelsOpen flag onto the backstack: opening the flow pushes Route.AddModels,
-  // closing it (via the back button, system back, or a successful download) pops the entry. The VM stays
-  // the source of truth so nothing else in the app has to know about the nav wiring. Keyed on the selected
-  // tab too so that returning to Models with the flow still open (the VM keeps its state across tab
-  // switches) re-pushes Route.AddModels after the tab-switch effect above clears the stack — otherwise the
-  // user comes back to a blank list. Guarded to no-op while another tab is active so we don't push a Models
-  // route onto Jobs/Settings.
+  // Mirror the Models VM's addModelsOpen flag onto the backstack. The open flag pushes Route.AddModels, and
+  // the closed flag removes it. Three actions clear the flag: the back button, system back, and the start of
+  // a download. The VM stays the source of truth, so no other component needs to know the nav wiring.
+  // Keyed on the tab too: the reset above clears the stack, so returning to Models with the flow open re-pushes it.
   LaunchedEffect(modelsState.addModelsOpen, shellState.selectedTab) {
     if (shellState.selectedTab != Tab.MODELS) return@LaunchedEffect
     val hasAddModels = backStack.contains(Route.AddModels)
@@ -242,17 +237,9 @@ private fun Chrome(
     else if (!modelsState.addModelsOpen && hasAddModels) backStack.remove(Route.AddModels)
   }
 
-  // Mirror the Jobs VM's sealed state variant onto the backstack: JobList stays on Route.Jobs, Wizard pushes
-  // Route.CreateJob, Detail pushes Route.JobDetail, CellDetail stacks Route.CellDetail on top of Route.JobDetail
-  // (since a cell detail is always opened from a job detail). Popping any of those (predictive back, system
-  // back, in-body back button) reduces to the equivalent JobsIntent, which flips the state back so the mirror
-  // stays consistent. The VM remains the source of truth.
-  //
-  // Keyed on the selected tab too so that returning to Jobs after switching tabs mid-Detail (the tab-switch
-  // effect above clears the stack to just Route.Jobs) re-pushes the wizard / detail / cell entries; without
-  // this the list would render blank because JobsScreen renders nothing when the state is a non-JobList
-  // variant, and the next interaction that assumed a live JobDetail entry would crash. Guarded to no-op
-  // while another tab is active so we don't push Jobs routes on top of Models/Settings.
+  // Mirror the Jobs VM's state onto the backstack; the VM stays the source of truth, and every back path
+  // reduces to a JobsIntent. Keyed on the tab so returning to Jobs mid-detail re-pushes the entries instead
+  // of showing a blank list (JobsScreen renders nothing for non-list states).
   LaunchedEffect(jobsState, shellState.selectedTab) {
     if (shellState.selectedTab != Tab.JOBS) return@LaunchedEffect
     val wantWizard = jobsState is JobsUiState.Wizard
@@ -262,8 +249,7 @@ private fun Chrome(
     val hasDetail = backStack.contains(Route.JobDetail)
     val hasCell = backStack.contains(Route.CellDetail)
     if (wantWizard && !hasWizard) backStack.add(Route.CreateJob) else if (!wantWizard && hasWizard) backStack.remove(Route.CreateJob)
-    // The cell detail is opened from the job detail, so the shell keeps Route.JobDetail underneath it while
-    // the cell is on top. Detail == true covers both the plain-Detail state and CellDetail.
+    // A cell detail always opens from a job detail, so Route.JobDetail stays underneath it.
     val needsDetail = wantDetail || wantCell
     if (needsDetail && !hasDetail) backStack.add(Route.JobDetail) else if (!needsDetail && hasDetail) backStack.remove(Route.JobDetail)
     if (wantCell && !hasCell) backStack.add(Route.CellDetail) else if (!wantCell && hasCell) backStack.remove(Route.CellDetail)
@@ -290,9 +276,7 @@ private fun Chrome(
           entry<Route.Jobs> { JobsScreen(jobsState, jobsVm::onIntent) }
           entry<Route.Models> { ModelsScreen(modelsState, modelsVm::onIntent) }
           entry<Route.AddModels> { AddModelsScreen(modelsState, modelsVm::onIntent) }
-          // The wizard/detail/cell entries need a JobsUiState variant to render; during the pop animation the
-          // state has already flipped back, so latch the last non-null variant and keep rendering it while the
-          // Nav3 entry animates out. Once the state matches again the latch is refreshed to the live value.
+          // The state flips back before the pop animation ends, so each entry latches its last variant to animate out.
           entry<Route.CreateJob> {
             var last by remember { mutableStateOf<JobsUiState.Wizard?>(null) }
             (jobsState as? JobsUiState.Wizard)?.let { last = it }

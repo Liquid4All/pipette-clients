@@ -1,0 +1,43 @@
+# Pinned OpenVINO Model Server release assets, one row per `tag` + `flavor`.
+# `sha256` is the digest upstream publishes beside the asset; there is no
+# `url`, since a `github_release` derives it. See README.md.
+
+[[ovms]]
+tag = "v2026.4.0"
+flavor = "windows-x64"
+sha256 = "46d03114c97abfe05f2c5a8fde772c655aeef541ee254c23f402f81a616474e3"
+
+[[ovms]]
+tag = "v2026.4.0"
+flavor = "ubuntu22-x64"
+sha256 = "a5a9e4a4a48dbd30a5d18f9088d2a030758f788d13e9ff14d891e008083756ab"
+
+[[ovms]]
+tag = "v2026.4.0"
+flavor = "ubuntu24-x64"
+sha256 = "cc5caad0e859b249fac586847fa922c9f57e1c910abd2233a57b3cca0172fb91"
+
+[[ovms]]
+tag = "v2026.4.0"
+flavor = "redhat-x64"
+sha256 = "40bbd66b37558bd3fb0314b51d9c06ddfcdfd4eec9b57de51c64afa5fcddb0b2"
+
+[[ovms]]
+tag = "v2026.4.1"
+flavor = "windows-x64"
+sha256 = "1bc2372d81bb4767829a7bf513745bd481ccbfec9550e278804ebe2051e3b678"
+
+[[ovms]]
+tag = "v2026.4.1"
+flavor = "ubuntu22-x64"
+sha256 = "9c6f438fa5ef861870af0884f0c65bee7f84f9d00ebc7b8c9ed0703c0dd90046"
+
+[[ovms]]
+tag = "v2026.4.1"
+flavor = "ubuntu24-x64"
+sha256 = "2b7198671a9e99e030b408601733fbd61798d8a741337c867b96eb41c295b3f8"
+
+[[ovms]]
+tag = "v2026.4.1"
+flavor = "redhat-x64"
+sha256 = "92209b34c5e7ecc0cde06d4835688f4aa321a194207edab81fc0e84009ab1f5d"

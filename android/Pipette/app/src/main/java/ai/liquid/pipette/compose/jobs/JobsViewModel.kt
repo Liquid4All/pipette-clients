@@ -119,6 +119,7 @@ sealed interface JobsUiState {
     val runCellLabel: String,
     val runProgressText: String,
     val coolingSinceMillis: Long?,
+    val coolingMaxMillis: Long,
     val thermalLabel: String,
     val thermalAccent: AccentKind,
     val contributeResults: Boolean,
@@ -243,7 +244,17 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
 
   private fun cachedManifests(): List<JobManifest> = manifestsCache ?: storage.loadAllJobManifests().also { manifestsCache = it }
 
-  private fun cachedModels(): List<ai.liquid.pipette.ModelFile> = modelsCache ?: storage.availableModels().also { modelsCache = it }
+  /**
+   * What the run screen may offer: the models on disk plus the rest of the preset catalog.
+   *
+   * Widened from `availableModels()` because the run path fetches what it does not have ([ai.liquid.pipette.ModelProvisioning]), so restricting the
+   * picker to downloads was a rule the runner never needed. Its visible effect is that a device with an empty models directory can start a run at
+   * all, which is also why the `hasModels` gate below now answers on offers rather than on files.
+   *
+   * Only this view model widens. The Models tab keeps listing what is actually on disk, since its job is managing storage rather than planning a run.
+   */
+  private fun cachedModels(): List<ai.liquid.pipette.ModelFile> =
+    modelsCache ?: ModelCatalog.offerable(storage.availableModels()).also { modelsCache = it }
 
   private fun invalidateData() {
     manifestsCache = null
@@ -714,7 +725,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
     // models lack is just skipped for those models later (resolveSelectedFiles drops missing files).
     val availableQuantFilters = availableQuantFiltersFor(quantSourceGroups())
     val selectedBenchmarks = BenchmarkCatalog.selectable.filter { selectedBenchmarkIds.contains(it.benchmarkId.toString()) }
-    val hasVlBenchmarkSelected = selectedBenchmarks.any { it.type == BenchmarkType.VL_THROUGHPUT }
+    val hasVlBenchmarkSelected = selectedBenchmarks.any { it.type.requiresVisionProjector }
     val plannedCells =
       JobRunner.planCells(models = runnableModels, mmprojFiles = mmprojs, benchmarks = selectedBenchmarks, selectedMmprojPaths = selectedMmprojPaths)
 
@@ -733,7 +744,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
             key = it.key,
             label = modelGroupLabel(it),
             name = it.name,
-            sizeLabel = ByteFormat.fileSize(it.files.sumOf { f -> f.sizeBytes }),
+            sizeLabel = modelGroupSizeLabel(it),
             checked = selectedModelKeys.contains(it.key),
           )
         },
@@ -785,7 +796,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
       .groupBy { it.benchmarkType }
       .toSortedMap(compareBy<String> { BenchmarkCatalog.typeRank(it) })
       .map { (type, items) ->
-        val isVlGroupDisabled = type == BenchmarkType.VL_THROUGHPUT.wire && !hasVlModelSelected
+        val isVlGroupDisabled = BenchmarkType.fromWire(type)?.requiresVisionProjector == true && !hasVlModelSelected
         val enabledItems = if (isVlGroupDisabled) emptyList() else items
         val allGroupSelected = enabledItems.isNotEmpty() && enabledItems.all { selectedBenchmarkIds.contains(it.benchmarkId.toString()) }
         val anySelected = items.any { selectedBenchmarkIds.contains(it.benchmarkId.toString()) }
@@ -801,7 +812,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
             items
               .sortedBy { it.label }
               .map { item ->
-                val itemDisabled = item.type == BenchmarkType.VL_THROUGHPUT && !hasVlModelSelected
+                val itemDisabled = item.type.requiresVisionProjector && !hasVlModelSelected
                 BenchmarkItemUi(
                   id = item.benchmarkId.toString(),
                   label = item.label,
@@ -853,6 +864,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
       runCellLabel = if (running) runnerState.currentCellLabel else "",
       runProgressText = if (running) runnerState.currentProgressText else "",
       coolingSinceMillis = if (running) runnerState.coolingSinceMillis else null,
+      coolingMaxMillis = runnerState.coolingMaxMillis,
       // Only read the thermal signals when running — the row is rendered only in the running branch,
       // and the reads (getThermalHeadroom, a per-process ~1 Hz budget) shouldn't fire on every
       // paused/completed detail render where they'd never be shown.
@@ -1043,9 +1055,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
     }
 
   private fun pruneVlBenchmarks() {
-    selectedBenchmarkIds.removeAll(
-      BenchmarkCatalog.selectable.filter { it.type == BenchmarkType.VL_THROUGHPUT }.map { it.benchmarkId.toString() }.toSet()
-    )
+    selectedBenchmarkIds.removeAll(BenchmarkCatalog.selectable.filter { it.type.requiresVisionProjector }.map { it.benchmarkId.toString() }.toSet())
   }
 
   private fun ensureMmprojSelectionInitialized(mmprojs: List<ai.liquid.pipette.ModelFile>) {
@@ -1063,6 +1073,21 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
 
   private fun modelGroupLabel(group: ModelGroup): String =
     "${group.name}\n${group.quantSummary} - ${ByteFormat.fileSize(group.files.sumOf { it.sizeBytes })}"
+
+  /**
+   * The subtitle under a model group's name: its total size, plus how many of its quants a run would have to fetch first.
+   *
+   * A group can mix quants that are on disk with ones only the catalog knows about, now that the run screen offers both, and the count is also the
+   * disclosure that the size beside it is partly a declared estimate rather than a measurement.
+   *
+   * On [ModelGroupRowUi.sizeLabel] rather than on [modelGroupLabel] because `ModelSelectRow` renders `name` and `sizeLabel`; the row's `label`
+   * reaches no composable on this screen.
+   */
+  private fun modelGroupSizeLabel(group: ModelGroup): String {
+    val size = ByteFormat.fileSize(group.files.sumOf { it.sizeBytes })
+    val pending = group.files.count { !it.onDisk }
+    return if (pending == 0) size else "$size · $pending to download"
+  }
 
   private fun modelGroupMatchesSearch(group: ModelGroup, query: String): Boolean {
     val q = query.trim().lowercase()
@@ -1100,7 +1125,9 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
   private fun missingQuantWarning(groups: List<ModelGroup>): String {
     val names = groups.joinToString(", ") { it.name }
     val verb = if (groups.size == 1) "has" else "have"
-    return "$names $verb no ${quantSummaryForWarning()} build downloaded and will be skipped."
+    // "available" rather than "downloaded": a build the catalog offers is now runnable without being on disk, so the models this warns about are the
+    // ones with no such build at all, downloaded or offered.
+    return "$names $verb no ${quantSummaryForWarning()} build available and will be skipped."
   }
 
   private fun plannedJobSummary(

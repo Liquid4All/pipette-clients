@@ -74,6 +74,33 @@ class ResultsGridTest {
     assertFalse(mem!!.higherIsBetter)
   }
 
+  // --- Result row naming (CompletedResultsCsvExporter.modelDisplayName) ---
+
+  @Test
+  fun modelDisplayNameStripsEitherCasingOfTheGgufSuffix() {
+    // A repo absent from the preset catalog, so both lookups miss and the derived-name
+    // arm runs. Lowercase `-gguf` is a real publisher spelling (`prism-ml` uses it).
+    fun named(repo: String) =
+      CompletedResultsCsvExporter.modelDisplayName(
+        JobCell(
+          benchmarkId = "decode_throughput_512_100",
+          benchmarkType = "decode_throughput",
+          modelPath = "/models/Made-Up-Model-Q4_0.gguf",
+          modelName = repo,
+          runStatus = CellRunStatus.COMPLETED,
+        )
+      )
+
+    assertEquals("Made Up Model", named("someorg/Made-Up-Model-gguf"))
+    assertEquals("Made Up Model", named("someorg/Made-Up-Model-GGUF"))
+
+    // Bonsai 27B left the catalog in the same change that made the strip
+    // case-insensitive, so a stored run of it now reaches this arm. The two edits cancel
+    // and keep the historical label intact; case-sensitively the row would read
+    // "Bonsai 27B gguf". Pinned on the repo slug alone, which is what this arm reads.
+    assertEquals("Bonsai 27B", named("prism-ml/Bonsai-27B-gguf"))
+  }
+
   private fun cell(benchmarkId: String, type: String) =
     JobCell(
       benchmarkId = benchmarkId,

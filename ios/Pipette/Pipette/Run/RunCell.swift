@@ -1,167 +1,392 @@
 import Foundation
 
-// One cell, from a coordinate to what it measured — the Swift counterpart of
+// One cell, from a coordinate to what it measured: the Swift counterpart of
 // `crates/pipette-cli/src/run.rs`. Not `Run.swift`: plan-types' `run.rs` already holds that
 // basename, and one Swift module cannot have two.
 //
-// Steps of upstream's `prepare` with no counterpart here: no runtime to ensure (this binary
-// *is* the runtime, so `Runtime.thisBuild` supplies both halves), no GPU preflight (no
-// driver that can break independently of the client), and no spec-names-this-body check (a
-// caller resolves the body from the cell's own id, so there is no second spelling to
-// disagree). `require_desktop_runtime` inverts: `ClientRunSpec.validated` refuses a claim naming a
-// desktop runtime before a cell exists.
-//
-// No `run_cell` either — the memory gate and the load line run between `prepare` and
-// `dispatch`, and the record is `PayloadBuilder`'s to write into the results store.
+// Unlike upstream's `prepare`: no runtime to ensure (this binary is the runtime) and no GPU
+// preflight. A memory preflight takes its place, since the jetsam budget is a phone's
+// failure mode. `require_desktop_runtime` has no counterpart: `Runtime` cannot decode a
+// desktop runtime, so `runSpecFromClaim(_:)` refuses one before a cell exists.
+
+/// What one finished cell hands back: the crate's `(BenchmarkSubmissionPayload,
+/// BenchmarkResultExtras, Option<EvalRunDigest>)`.
+nonisolated struct FinishedRun: Sendable {
+    let payload: BenchmarkSubmissionPayload
+    let extras: BenchmarkResultExtras
+    let evalCheckpoint: EvalRunDigest?
+}
 
 nonisolated enum RunCell {
-    /// The request for one cell: ensure the model, then name every axis.
+    /// The crate's `run_cell`. Recording is the caller's (`recordResult`).
     ///
-    /// `progress` reports the ensure's transfer, which can run for minutes on a model the
-    /// quota sweep reclaimed — without it a caller cannot tell a download from a hang.
-    /// Takes the cell whole — the crate's `prepare(spec, benchmark, …)`, which copies
-    /// `spec.model` and `spec.runtime_flags` into the request rather than rebuilding them
-    /// from parts. There is no per-knob argument list here to forget a knob from.
-    ///
-    /// `benchmark` arrives beside the spec, not inside it, for the reason upstream gives:
-    /// the spec names a benchmark id, and resolving it against a catalog is the caller's
-    /// business.
+    /// `readiness` builds the wait from the resolved policy: the policy is a plan decision,
+    /// while how a phone waits (the cancel flag, the UI status) is the caller's.
+    /// `preflight` gets the request and the model's weight against the jetsam budget, so the
+    /// caller can stamp its crash sentinel first. An eval also returns its checkpoint digest:
+    /// the caller retires it with `finalizeEvalCheckpoint` once the result is saved or accepted.
+    static func runCell(
+        spec: ClientRunSpec,
+        benchmark: BenchmarkDefinition,
+        ws: PipetteWorkspace,
+        coordinator: DownloadCoordinator,
+        readiness: (ResolvedReadiness) -> ReadinessCallback,
+        cancelled: @escaping () -> Bool = { false },
+        fetchProgress: ProgressSink? = nil,
+        jobId: JobId? = nil,
+        preflight: (RunRequest, MemoryGate.Snapshot?) async -> Void = { _, _ in },
+        progress: @escaping (BenchmarkProgress) -> Void = { _ in }
+    ) async throws -> FinishedRun {
+        // Ahead of prepare: its ensure can download weights for minutes, and a stall or a
+        // failure in there is only attributable if the cell is already named.
+        AppLog.jobRun.info("run: \(spec)")
+        // Also before prepare, so a cell that refuses on battery says so before the download.
+        try await refuseOnBattery(benchmark)
+        let request = try await prepare(spec: spec, benchmark: benchmark, ws: ws,
+                                        coordinator: coordinator, progress: fetchProgress,
+                                        jobId: jobId)
+
+        // Never blocking: a barely fitting run is a legitimate benchmark, and the caller's
+        // sentinel turns a kill into an explained failure. Apple Foundation has no bound path.
+        let memory = request.model.bound.boundPaths
+            .flatMap { MemoryGate.snapshot(modelPath: $0.payload) }
+        await preflight(request, memory)
+
+        // Resolved here, not inside the gate: the same value has to drive the wait and the
+        // record, or the result describes a run that did not happen.
+        let policy = resolveReadiness(maxWait: readinessMaxWait(request),
+                                      thermal: readinessThermalGate(request))
+        let wait = readiness(policy)
+
+        let (response, telemetry) = try await dispatchRun(
+            request, ws: ws, readiness: policy,
+            waitUntilReady: { wait.waitUntilReady(observing: $0) },
+            cancelled: cancelled, progress: progress)
+        let record = try await finishedRunPayload(
+            deviceStore: ws.device, req: request, outcome: response, telemetry: telemetry)
+        // The identity every engine opened its checkpoint under: this request.
+        let evalCheckpoint: EvalRunDigest? = if case .eval = request.benchmark {
+            try runRequestDigest(request)
+        } else {
+            nil
+        }
+        return FinishedRun(payload: record.payload, extras: record.extras,
+                           evalCheckpoint: evalCheckpoint)
+    }
+
+    /// The crate's `finalize_eval_checkpoint`. Until the result is saved or accepted, the
+    /// checkpoint is what a lost result is rebuilt from. Best-effort: one left behind is
+    /// resumed, whole, by the next run of the cell.
+    static func finalizeEvalCheckpoint(ws: PipetteWorkspace, digest: EvalRunDigest?) {
+        guard let digest else { return }
+        do {
+            try ws.evalCompletions.finalize(digest)
+        } catch {
+            AppLog.jobRun.warning(
+                "eval checkpoint not finalized digest=\(digest.value) error=\(error.localizedDescription)")
+        }
+    }
+
+    /// Only `vl_spec_decode` is checked: a ratio whose arms ran under different power states is
+    /// no measurement, and the server records the state without rejecting.
+    static func refuseOnBattery(_ benchmark: BenchmarkDefinition) async throws {
+        guard benchmark.benchmarkType == .vlSpecDecode else { return }
+        let power = await detectPowerState()
+        switch powerVerdict(power.powerState) {
+        case .stable:
+            return
+        case .moving:
+            throw RuntimeError.engine(
+                "`\(benchmark.benchmarkId)` measures two arms against each other, so it "
+                    + "refuses to start while the power state can move under it "
+                    + "(device_power_state=\(power.powerState.map(\.rawValue) ?? "nil"), "
+                    + "battery \(power.batteryLevel.map { "\($0)" } ?? "nil")%). Run it on AC "
+                    + "with the battery near full.")
+        case .unknown:
+            AppLog.jobRun.warning(
+                "`\(benchmark.benchmarkId)` could not read this device's power state; it must "
+                    + "be on AC with the battery near full, or the two arms are not comparable")
+        }
+    }
+
+    enum PowerVerdict: Equatable {
+        /// On external power and not charging: the one state that holds still.
+        case stable
+        /// On battery, or charging: a fast-charging battery throttles the GPU even on AC.
+        case moving
+        /// Undetectable: refusing would make the cell unrunnable wherever the state is unread.
+        case unknown
+    }
+
+    static func powerVerdict(_ state: DevicePowerState?) -> PowerVerdict {
+        switch state {
+        case .pluggedInNotCharging: .stable
+        case .charging, .notCharging: .moving
+        case nil: .unknown
+        }
+    }
+
+    /// The crate's `prepare`: ensure the model, then name every axis. Takes the spec whole so
+    /// there is no per-knob argument list to forget a knob from. `progress` reports the
+    /// ensure's transfer, which can run for minutes; without it a download looks like a hang.
     static func prepare(
         spec: ClientRunSpec,
         benchmark: BenchmarkDefinition,
-        storage: Storage,
+        ws: PipetteWorkspace,
         coordinator: DownloadCoordinator,
-        progress: ((FetchProgress) -> Void)? = nil
+        progress: ProgressSink? = nil,
+        jobId: JobId? = nil
     ) async throws -> RunRequest {
+        // The payload's id and the eval digest come from the body, so a mismatch would
+        // record a cell that never ran.
+        guard spec.benchmark == benchmark.benchmarkId else {
+            throw RunCellError.benchmarkMismatch(spec: spec.benchmark.value,
+                                                 body: benchmark.benchmarkId.value)
+        }
+        // The cell the flag groups must name, from the *resolved* body: the claim path
+        // checked them against the type it could guess from the id, which a body is free
+        // to contradict. Upstream validates twice for the same reason.
+        let cell: FlagAxes = (benchmark.benchmarkType, RuntimeType.of(spec.runtime),
+                              ModelType.of(spec.model))
         let declared = spec.model
-        // Apple Foundation ships with the OS: nothing to ensure, and the two halves are
-        // equal because there is no path to bind — the same reason `alreadyBound` exists
-        // for a runtime the store holds but cannot relocate.
+        // Apple Foundation ships with the OS: nothing to ensure and no path to bind.
         let model: DeclaredBound<Model>
         if case .appleFoundationText = declared {
             model = .alreadyBound(declared)
         } else {
-            // `ensureModel` already answers with the bound form — the declared spec with
-            // its source rewritten to the `absolute*` arms — so the pair is just the two
-            // values, not a third type built from them.
-            let bound = try await ensureModel(declared, storage: storage,
-                                              coordinator: coordinator, progress: progress)
+            let bound = try await ensureModel(declared, ws: ws,
+                                              coordinator: coordinator, jobId: jobId,
+                                              progress: progress)
             guard bound.boundPaths != nil else {
                 throw ModelStoreError.unresolvedAfterFetch(declared.artifactName)
             }
             model = DeclaredBound(declared: declared, bound: bound)
         }
 
-        // Both halves are this build, even when `spec.runtime` names something else: a
-        // claim may pin a llama version this binary is not, and the descriptor a result
-        // carries has to be what actually compiled. The claim's declaration is checked
-        // (and logged when it differs) where the claim is read, not silently adopted here.
+        // A llama.cpp cell loads its build before anything is measured, so the load's time
+        // and pages stay out of the cell's windows. The build is the one that a headless
+        // `runtime=` named (already loaded), or main if the run named none.
+        if case .llamacppIosPipette = Runtime.thisBuild(for: declared) {
+            try LlamaPins.load(LlamaPins.current)
+        }
+        // The build this process runs, even when `spec.runtime` names another version: the
+        // descriptor a result carries has to be what actually ran. `ClientRunSpec.validated`
+        // checks the claim's runtime kind and private APIs against this build, not its version.
         let runtime = Runtime.thisBuild(for: declared)
         return RunRequest(
             runtime: .alreadyBound(runtime),
             model: model,
-            // A knob the cell does not carry is a construction error, and swallowing it
-            // would run on engine defaults and report those as what the cell asked for —
-            // the failure this whole path exists to prevent. `noSuchCombination` is the
-            // other answer: AFM, and a vision model outside `vl_throughput`, genuinely have
-            // no variant, and the engine refuses those again when it derives its own.
-            runtimeFlags: try spec.runtimeFlags.flatMap { ref -> RuntimeFlags? in
-                do {
-                    return try ref.resolve()
-                } catch RuntimeFlagResolveError.noSuchCombination {
-                    return nil
-                }
-            },
-            benchmarkFlags: try spec.benchmarkFlags.flatMap { ref -> BenchmarkFlags? in
-                do {
-                    return try ref.resolve()
-                } catch RuntimeFlagResolveError.noSuchCombination {
-                    return nil
-                }
-            },
+            runtimeFlags: try resolved(spec.runtimeFlags, cell: cell),
+            // The claim path refuses every model-flag knob, so this is `nil` or a variant
+            // with nothing set.
+            modelFlags: try resolved(spec.modelFlags, cell: cell),
+            benchmarkFlags: try resolved(spec.benchmarkFlags, cell: cell),
             benchmark: benchmark)
     }
 
-    /// Run one prepared request — the crate's `dispatch_run`, whole: bind the thermal
-    /// series, route to an engine, attach what was measured.
-    ///
-    /// Routing is on the **bound runtime**, as upstream states its rule: "the bound runtime
-    /// `prepare` produces is the only thing `dispatch_run` matches on". The model is not
-    /// consulted. Each engine checks the model it was handed through its own `require*`
-    /// (`LlamaModels.requireGgufText`, `MLXModels.requireMlxModelDir`,
-    /// `AFMModels.requireAppleFoundation`), which is where upstream puts that check too —
-    /// so a mismatched pair fails by name, in the engine that would have loaded it.
-    ///
-    /// The loaded resource is assembled inside the engine's own scope (`withInference` /
-    /// `MLXRuntime.withFreshModel`) and never escapes; nothing here owns a model.
-    ///
-    /// The thermal series is owned and attached here, not by the caller: the engine reports
-    /// each rep through the opaque `RepObserver` and never sees the probe, so owning it here
-    /// is what keeps a caller from silently recording no readings.
-    ///
-    /// `readiness` arrives already resolved, as upstream takes it: resolving inside the
-    /// gate would let the wait and the record describe different policies.
-    ///
-    /// `storage` is here for the eval checkpoint alone, and the *store* travels down rather
-    /// than an open session: upstream hands each engine `&ws.eval_completions()` and lets
-    /// the eval executor open it, because only that executor knows whether the benchmark
-    /// has samples to resume at all.
-    static func dispatch(
-        _ request: RunRequest,
-        storage: Storage,
-        readiness: @escaping () -> ReadinessOutcome,
-        isCancelled: @escaping () -> Bool = { false },
-        progress: @escaping (BenchmarkProgress) -> Void = { _ in }
-    ) async throws -> RunResponse {
-        // Inference must run off the main actor: it relies on JobExecutor's `Task.detached`
-        // plus this whole layer being `nonisolated`, and on JobRunner's single-running-job
-        // guard for non-concurrency (the actor isolation that used to serialize runs is
-        // gone). Assert the off-main half so a future re-isolation is caught in dev/CI
-        // rather than silently freezing the UI during a run again. (`Thread.isMainThread`
-        // is banned in async contexts, so use the C `pthread_main_np`.)
-        assert(pthread_main_np() == 0, "RunCell.dispatch must not execute on the main thread")
+    /// Upstream's `validate_spec_flags` then the `TryFrom` to a variant. Both refuse rather
+    /// than drop: otherwise a group naming another cell resolves to that cell's variant, and
+    /// a triple with no variant runs on engine defaults reported as what the cell asked for.
+    private static func resolved(_ ref: RuntimeFlagRef?, cell: FlagAxes) throws -> RuntimeFlags? {
+        guard let ref else { return nil }
+        try check((ref.benchmarkType, ref.runtimeType, ref.modelType),
+                  group: "runtime_flags", cell: cell)
+        return try ref.resolve()
+    }
 
-        let series = ThermalSeries()
-        let observer = RepObserver(started: { series.start() }, finished: { series.finish() })
-        let evalCompletions = storage.evalCompletions
+    private static func resolved(_ ref: BenchmarkFlagRef?, cell: FlagAxes) throws -> BenchmarkFlags? {
+        guard let ref else { return nil }
+        try check((ref.benchmarkType, ref.runtimeType, ref.modelType),
+                  group: "benchmark_flags", cell: cell)
+        return try ref.resolve()
+    }
 
-        // Each engine module overlays its own flags (`LlamaRuntimeFlags`, `MLXRuntimeFlags`)
-        // and that one value is both loaded with and reported — so a result records what
-        // ran rather than the unset a cell carried. A triple plan-types defines no variant
-        // for is refused there, before anything loads.
-        func respond(_ result: BenchmarkResult, _ ran: RuntimeFlags?,
-                     engineLog: String = "") -> RunResponse {
-            var out = RunResponse(resultData: result)
-            out.runtimeFlags = ran
-            out.benchmarkFlags = request.benchmarkFlags
-            out.stderr = engineLog
-            return out
+    /// Skips the runtime axis: a `ModelFlagRef` carries none, as the crate's
+    /// `matches(bt, model)` reads none.
+    private static func resolved(_ ref: ModelFlagRef?, cell: FlagAxes) throws -> ModelFlags? {
+        guard let ref else { return nil }
+        try check((ref.benchmarkType, cell.runtime, ref.modelType),
+                  group: "model_flags", cell: cell)
+        return try ref.resolve()
+    }
+
+    private static func check(_ carried: FlagAxes, group: String, cell: FlagAxes) throws {
+        guard carried == cell else {
+            throw RunCellError.flagsAreNotForThisCell(group: group, carried: carried, cell: cell)
         }
+    }
 
+    /// The crate's `dispatch_run`. Routes on the bound runtime only; each engine checks the
+    /// model it was handed, so a mismatched pair fails in the engine that would load it.
+    ///
+    /// The rep series is owned here, not by the caller, so a caller can't silently record no
+    /// readings. `readiness` arrives already resolved: resolving twice could straddle a
+    /// change, and the gate and the record must agree. `ws` carries the eval store rather
+    /// than an open session: only the eval executor knows whether there are samples to resume.
+    static func dispatchRun(
+        _ request: RunRequest,
+        ws: PipetteWorkspace,
+        readiness: ResolvedReadiness,
+        waitUntilReady: @escaping (_ observe: @escaping (ReadinessStatus) -> Void)
+            -> ReadinessOutcome,
+        cancelled: @escaping () -> Bool = { false },
+        progress: @escaping (BenchmarkProgress) -> Void = { _ in }
+    ) async throws -> (response: RunResponse, telemetry: RepTelemetry) {
+        // Inference must run off the main actor (JobExecutor's `Task.detached` plus this
+        // layer being `nonisolated`); JobRunner's single-running-job guard serializes runs.
+        // `Thread.isMainThread` is banned in async contexts, hence `pthread_main_np`.
+        assert(pthread_main_np() == 0, "RunCell.dispatchRun must not execute on the main thread")
+        // iOS-only, not in the crate's `dispatch_run`: a later memory cell asks whether this
+        // process ran anything before it. On exit, so this cell's own bracket reads clean.
+        defer { ProcessMemory.markEngineWork() }
+
+        let gateWaitRecorder = GateWaitRecorder()
+        let readinessGate: ReadinessGate = {
+            gateWaitRecorder.begin()
+            try waitUntilReady(gateWaitRecorder.observe).get()
+            gateWaitRecorder.pass()
+        }
+        // Sampled outside the timed window: the sensor read is one IPC round trip per
+        // sensor.
+        let series = ThermalSeries<RepSample>()
+        // The corpus traversal is one rep and reports its own samples.
+        let reps = RepProgress(total: request.benchmark.benchmarkType == .vlSpecDecode
+                                   ? nil : BenchmarkMeasurement.reps,
+                               progress: progress)
+        // Sampled inside the device readings, so their IPC stays out of the clock window.
+        let clocks = RepClocks(marker: request.benchmark.benchmarkId.value)
+        let observer = MeasurementObserver(onBeforeRepStart: {
+                                               try series.start(RepSample(
+                                                   device: detectDeviceReadings(),
+                                                   gate: gateWaitRecorder.take()))
+                                               clocks.repStarting()
+                                           },
+                                           onAfterRepEnd: {
+                                               clocks.repEnded()
+                                               try series.finish(RepSample(
+                                                   device: detectDeviceReadings(),
+                                                   gate: nil))
+                                               reps.finished()
+                                           })
+
+        // The whole request, so a new field is logged too; `AuthToken` redacts itself.
+        AppLog.jobRun.info("dispatch: \(request)")
         var response: RunResponse
         switch request.runtime.bound {
         case .llamacppIosPipette:
-            let llamaFlags = try LlamaRuntimeFlags.forRun(request)
-            response = respond(try await LlamaBenchmark.run(
-                request, flags: llamaFlags, evalCompletions: evalCompletions,
-                gate: { try readinessGate(readiness) }, observer: observer,
-                isCancelled: isCancelled, progress: progress), llamaFlags,
-                engineLog: LlamaCpp.capturedLoadLog)
+            response = try await LlamaExecute.run(
+                request, runContext: ws, readinessGate: readinessGate, observer: observer,
+                isCancelled: cancelled, progress: progress)
         case .mlxIosPipette:
-            let mlxFlags = try MLXRuntimeFlags.forRun(request)
-            response = respond(try await MLXRuntime.run(
-                request, flags: mlxFlags, evalCompletions: evalCompletions,
-                readiness: readiness, observer: observer,
-                isCancelled: isCancelled, progress: progress), mlxFlags)
+            response = try await MlxExecute.run(
+                request, runContext: ws, readinessGate: readinessGate, observer: observer,
+                isCancelled: cancelled, progress: progress)
+        case .onnxGenaiIosPipette:
+            response = try await OnnxGenaiExecute.run(
+                request, readinessGate: readinessGate, observer: observer)
         case .appleFoundation:
-            // Apple Foundation has no flags variant upstream either, so there is nothing
-            // to overlay and nothing to report.
-            response = respond(try await AFMRuntime.run(
-                request, evalCompletions: evalCompletions, readiness: readiness,
-                observer: observer,
-                isCancelled: isCancelled, progress: progress), nil)
+            response = try await AFMRuntime.run(
+                request, runContext: ws, readinessGate: readinessGate, observer: observer,
+                isCancelled: cancelled, progress: progress)
         }
-        response.thermal = series.runThermal
-        return response
+        // A series that cannot be paired fails the run here, as the crate's `take` does.
+        let telemetry = RepTelemetry.fromReps(try series.take())
+        response.benchmarkFlags = try resolvedFlags(request, readiness: readiness)
+        return (response, telemetry)
+    }
+
+    /// The deadline this cell authored, or `nil` to defer to the environment, then the
+    /// default.
+    static func readinessMaxWait(_ request: RunRequest) -> Duration? {
+        request.benchmarkFlags?.readiness?.maxWaitSecs.map(Duration.fromSecs)
+    }
+
+    /// What this cell says about the thermal criterion, keeping "waive it", "require it"
+    /// and "didn't say" apart as the crate does: `unset` defers to
+    /// `PIPETTE_READINESS_SKIP_THERMAL`.
+    static func readinessThermalGate(_ request: RunRequest) -> ThermalGate {
+        switch request.benchmarkFlags?.readiness?.skipThermal {
+        case true?: .skip
+        case false?: .enforce
+        case nil: .unset
+        }
+    }
+
+    /// The crate's `resolved_flags`: the plan's entry with the readiness block filled in from
+    /// what actually applied, since the authored block may leave it to platform defaults.
+    /// `nil` rather than `{}` when nothing resolved: the server NULLs an empty object anyway.
+    static func resolvedFlags(_ request: RunRequest,
+                              readiness: ResolvedReadiness) throws -> BenchmarkFlags? {
+        var ref = try request.benchmarkFlagsRef()
+        // Which cells gate is also encoded in whether their flag variant carries a
+        // readiness field: two spellings of one fact.
+        if request.benchmark.benchmarkType.gatesOnReadiness {
+            ref.readiness = ReadinessOverrides(maxWaitSecs: readiness.maxWaitSecs(),
+                                               skipThermal: readiness.skipThermal())
+        }
+        do {
+            let flags = try ref.resolve()
+            return reportsNothing(flags) ? nil : flags
+        } catch BenchmarkFlagsError.noSuchCombination {
+            // A cell the flag schema does not model (Apple Foundation, and the kinds with
+            // no iOS variant) has nothing to report: not a failure.
+            return nil
+        }
+    }
+
+    /// The crate's `reports_nothing`.
+    static func reportsNothing(_ flags: BenchmarkFlags) -> Bool {
+        (try? flags.submissionValue()) == "{}"
+    }
+}
+
+/// The checks `prepare` makes before anything is fetched or loaded.
+nonisolated enum RunCellError: Error, Equatable, LocalizedError {
+    case benchmarkMismatch(spec: String, body: String)
+    case flagsAreNotForThisCell(group: String, carried: FlagAxes, cell: FlagAxes)
+
+    var errorDescription: String? {
+        switch self {
+        case let .benchmarkMismatch(spec, body):
+            "spec names benchmark `\(spec)` but the resolved body is `\(body)`"
+        case let .flagsAreNotForThisCell(group, carried, cell):
+            "\(group) for \(Self.render(carried)) do not match resolved cell \(Self.render(cell))"
+        }
+    }
+
+    /// Hand-written: an enum carrying tuples gets no synthesized `==`.
+    static func == (lhs: RunCellError, rhs: RunCellError) -> Bool {
+        switch (lhs, rhs) {
+        case let (.benchmarkMismatch(leftSpec, leftBody), .benchmarkMismatch(rightSpec, rightBody)):
+            leftSpec == rightSpec && leftBody == rightBody
+        case let (.flagsAreNotForThisCell(leftGroup, leftCarried, leftCell),
+                  .flagsAreNotForThisCell(rightGroup, rightCarried, rightCell)):
+            leftGroup == rightGroup && leftCarried == rightCarried && leftCell == rightCell
+        default:
+            false
+        }
+    }
+
+    private static func render(_ axes: FlagAxes) -> String {
+        "\(axes.benchmark.rawValue) \u{d7} \(axes.runtime.rawValue) \u{d7} \(axes.model.rawValue)"
+    }
+}
+
+/// Each measured rep as `.attempt` progress, the screen's "Measurement n/5"; the CLI only
+/// logs it. `@unchecked Sendable`: only the entry's sequential rep loop calls it.
+nonisolated final class RepProgress: @unchecked Sendable {
+    private let total: Int?
+    private let progress: (BenchmarkProgress) -> Void
+    private var completed = 0
+
+    init(total: Int?, progress: @escaping (BenchmarkProgress) -> Void) {
+        self.total = total
+        self.progress = progress
+    }
+
+    func finished() {
+        guard let total else { return }
+        completed += 1
+        progress(.attempt(completed: completed, total: total))
     }
 }

@@ -1,31 +1,31 @@
-//! `benchmarks` — catalog ops (`list` / `show` / `init-local`) and **`run`**.
-//!
-//! - Catalog commands manage **benchmark** definitions in the workspace store.
-//! - `benchmarks run` starts one **run** of a benchmark: build [`ClientRunSpec`],
-//!   prepare [`pipette_plan_types::run::RunRequest`], then [`crate::run::run_cell`].
-//!
-//! See `docs/architecture.md` (“Benchmark vs run vs execute”).
+//! `benchmarks`: the catalog commands (`list`, `show`, `init-local`) and `run`,
+//! which builds a [`ClientRunSpec`] and hands it to [`crate::run::run_cell`].
+//! See `docs/architecture.md` ("Benchmark vs run vs execute").
+
+use std::io::Write;
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use tabled::Tabled;
 
 use pipette_http::HttpClient;
-use pipette_plan_types::benchmark::BenchmarkDefinition;
-use pipette_plan_types::result::BenchmarkResultData;
 use pipette_plan_types::{
-    is_compatible, BenchmarkFlagRef, BenchmarkFlags, BenchmarkId, BenchmarkType, ClientRunSpec,
-    Model, ModelFlagRef, ModelFlags, ModelType, ReadinessOverrides, Runtime, RuntimeFlags,
-    RuntimeType,
+    AsrDecoding, AsrEvalBenchmark, AudioChannels, AudioDurationMillis, AudioSampleRate, BatchSize,
+    BenchmarkDefinition, BenchmarkFlagRef, BenchmarkFlags, BenchmarkId, BenchmarkResultData,
+    BenchmarkType, ClientRunSpec, EvalBenchmark, Model, ModelFlagRef, ModelFlags, ModelType,
+    NonNegativeCount, PositiveCount, PositiveSeconds, ReadinessOverrides, Runtime, RuntimeFlags,
+    RuntimeType, SamplingTemperature, SeedRule, SkinCelsius,
 };
+use pipette_programs::ExternalPrograms;
 
 use crate::artifact_ref::{resolve_model_arg, resolve_runtime_arg};
-use crate::benchmarks::{seed_standard_local, SourcedBenchmarkId};
-use crate::commands::print_table_or;
-use crate::doomloop_cli::DoomloopCliArgs;
+use crate::benchmarks::{SourcedBenchmarkId, seed_standard_local};
+use crate::client_configuration::ClientConfiguration;
+use crate::commands::write_table_or;
+use crate::console::Console;
 use crate::hf_auth::inject_env_hf_token;
-use crate::results::{record_and_maybe_submit_run, RecordSubmitOutcome};
-use crate::run::run_cell;
+use crate::results::{RecordSubmitOutcome, record_and_maybe_submit_run};
+use crate::run::{finalize_eval_checkpoint, refuse_foreign_os, run_cell};
 use crate::workspace::PipetteWorkspace;
 
 /// List, inspect, and run benchmarks
@@ -36,7 +36,6 @@ pub struct BenchmarkArgs {
 }
 
 #[derive(Subcommand, Debug)]
-#[allow(clippy::large_enum_variant)] // BenchmarkRunArgs carries the full CLI surface; boxing it ripples through all call sites
 pub enum BenchmarkCommand {
     /// List available benchmarks
     List(BenchmarkListArgs),
@@ -53,7 +52,8 @@ pub enum BenchmarkCommand {
 pub struct BenchmarkListArgs {
     /// Only list benchmarks of this type: prefill-throughput,
     /// decode-throughput, end-to-end-latency, max-memory-usage, eval,
-    /// vl-throughput (the underscore spellings are accepted too)
+    /// vlm-eval, vl-throughput, vl-max-memory, vl-spec-decode, asr-throughput,
+    /// asr-max-memory (the underscore spellings are accepted too)
     #[arg(long)]
     pub benchmark_type: Option<BenchmarkType>,
 }
@@ -65,9 +65,8 @@ pub struct BenchmarkShowArgs {
     pub benchmark_ref: SourcedBenchmarkId,
 }
 
-/// One row of `benchmarks list` — the reference to pass to `run`/`show` plus
-/// its kind. The catalog is runtime-agnostic, so this is identical across
-/// clients.
+/// One row of `benchmarks list`: the reference to pass to `run`/`show`, and its
+/// kind.
 #[derive(Tabled)]
 struct BenchmarkRow {
     #[tabled(rename = "BENCHMARK")]
@@ -77,15 +76,15 @@ struct BenchmarkRow {
 }
 
 impl BenchmarkListArgs {
-    fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
-        print_table_or(&self.rows(ws)?, "No benchmarks.");
+    fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
+        write_table_or(console.out(), &self.rows(ws)?, "No benchmarks.")?;
         Ok(())
     }
 
-    /// The local + remote catalog rows honoring `--benchmark-type`, split out
-    /// so the filtering/labeling is testable without capturing stdout.
+    /// The catalog rows honoring `--benchmark-type`, split out so the filtering
+    /// is testable without capturing stdout.
     fn rows(&self, ws: &PipetteWorkspace) -> anyhow::Result<Vec<BenchmarkRow>> {
-        use pipette_plan_types::benchmark::BenchmarkSource;
+        use pipette_plan_types::BenchmarkSource;
 
         Ok([BenchmarkSource::Local, BenchmarkSource::Remote]
             .into_iter()
@@ -114,67 +113,360 @@ impl BenchmarkListArgs {
     }
 }
 
+fn resolve_benchmark(
+    ws: &PipetteWorkspace,
+    reference: &SourcedBenchmarkId,
+) -> anyhow::Result<BenchmarkDefinition> {
+    ws.benchmarks()
+        .get(reference)?
+        .ok_or_else(|| anyhow::anyhow!("unknown benchmark reference `{reference}`"))
+}
+
 impl BenchmarkShowArgs {
-    fn execute(self, ws: &PipetteWorkspace) -> anyhow::Result<()> {
+    fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
         let reference = self.benchmark_ref;
-        let def = ws
-            .benchmarks()
-            .get(&reference)?
-            .ok_or_else(|| anyhow::anyhow!("unknown benchmark reference `{reference}`"))?;
-        print_benchmark(&def, reference.source());
-        Ok(())
+        let def = resolve_benchmark(ws, &reference)?;
+        write_benchmark(console.out(), &def, reference.source())
     }
 }
 
-fn print_benchmark(
-    def: &pipette_plan_types::benchmark::BenchmarkDefinition,
-    source: pipette_plan_types::benchmark::BenchmarkSource,
-) {
-    use pipette_plan_types::benchmark::BenchmarkDefinition;
-    println!("id:      {}", def.benchmark_id());
-    println!("type:    {}", def.benchmark_type());
-    println!(
+/// What `show` prints: the identity, then the parameters of the variant.
+fn write_benchmark(
+    out: &mut dyn Write,
+    def: &pipette_plan_types::BenchmarkDefinition,
+    source: pipette_plan_types::BenchmarkSource,
+) -> anyhow::Result<()> {
+    use pipette_plan_types::BenchmarkDefinition;
+    writeln!(out, "id:      {}", def.benchmark_id())?;
+    writeln!(out, "type:    {}", def.benchmark_type())?;
+    writeln!(
+        out,
         "source:  {}",
         match source {
-            pipette_plan_types::benchmark::BenchmarkSource::Local => "local",
-            pipette_plan_types::benchmark::BenchmarkSource::Remote => "remote",
+            pipette_plan_types::BenchmarkSource::Local => "local",
+            pipette_plan_types::BenchmarkSource::Remote => "remote",
         }
-    );
+    )?;
     match def {
         BenchmarkDefinition::PrefillThroughput(b) => {
-            println!("prefill: {} tokens", b.parameter_prefill_tokens);
+            writeln!(out, "prefill: {} tokens", b.parameter_prefill_tokens)?;
+            write_batch_size(out, b.parameter_batch_size)?;
         }
         BenchmarkDefinition::DecodeThroughput(b) => {
-            println!("prefill: {} tokens", b.parameter_prefill_tokens);
-            println!("decode:  {} tokens", b.parameter_decode_tokens);
+            writeln!(out, "prefill: {} tokens", b.parameter_prefill_tokens)?;
+            writeln!(out, "decode:  {} tokens", b.parameter_decode_tokens)?;
+            write_batch_size(out, b.parameter_batch_size)?;
         }
         BenchmarkDefinition::EndToEndLatency(b) => {
-            println!("prefill: {} tokens", b.parameter_prefill_tokens);
-            println!("decode:  {} tokens", b.parameter_decode_tokens);
+            writeln!(out, "prefill: {} tokens", b.parameter_prefill_tokens)?;
+            writeln!(out, "decode:  {} tokens", b.parameter_decode_tokens)?;
+            write_batch_size(out, b.parameter_batch_size)?;
         }
         BenchmarkDefinition::MaxMemoryUsage(b) => {
-            println!("prefill: {} tokens", b.parameter_prefill_tokens);
+            writeln!(out, "prefill: {} tokens", b.parameter_prefill_tokens)?;
         }
         BenchmarkDefinition::Eval(b) => {
-            println!("eval:    {}", b.parameter_eval_id);
-            println!("dataset: {}", b.parameter_dataset_name);
-            println!("max_tok: {}", b.parameter_max_tokens);
+            writeln!(out, "eval:    {}", b.parameter_eval_id)?;
+            writeln!(out, "dataset: {}", b.parameter_dataset_name)?;
+            writeln!(out, "max_tok: {}", b.parameter_max_tokens)?;
             if let Some(choices) = &b.parameter_mcq_choices {
-                println!("mcq:     {}", choices.join(", "));
+                writeln!(out, "mcq:     {}", choices.join(", "))?;
+            }
+            write_eval_sampling(out, b)?;
+            if let Some(samples) = &b.samples {
+                writeln!(out, "samples: {}", samples.len())?;
+            }
+        }
+        BenchmarkDefinition::AsrMaxMemory(b) => {
+            write_asr_clip(
+                out,
+                b.parameter_audio_duration_ms,
+                b.parameter_audio_sample_rate_hz,
+                b.parameter_audio_channels,
+                b.parameter_text_tokens,
+            )?;
+            writeln!(out, "decode:  {} tokens", b.parameter_decode_tokens)?;
+        }
+        BenchmarkDefinition::AsrThroughput(b) => {
+            write_asr_clip(
+                out,
+                b.parameter_audio_duration_ms,
+                b.parameter_audio_sample_rate_hz,
+                b.parameter_audio_channels,
+                b.parameter_text_tokens,
+            )?;
+            writeln!(out, "decode:  {} tokens", b.parameter_decode_tokens)?;
+        }
+        BenchmarkDefinition::VlThroughput(b) => write_vl_shape(
+            out,
+            b.parameter_image_width,
+            b.parameter_image_height,
+            b.parameter_text_tokens,
+            b.parameter_num_images,
+            Some(b.parameter_decode_tokens),
+        )?,
+        BenchmarkDefinition::VlMaxMemory(b) => write_vl_shape(
+            out,
+            b.parameter_image_width,
+            b.parameter_image_height,
+            b.parameter_text_tokens,
+            b.parameter_num_images,
+            b.parameter_decode_tokens,
+        )?,
+        BenchmarkDefinition::VlmEval(b) => {
+            writeln!(out, "task:    {}", b.parameter_lmms_task)?;
+            writeln!(out, "dataset: {}", b.parameter_dataset_version)?;
+            writeln!(out, "count:   {}", b.parameter_sample_count)?;
+            writeln!(out, "max_tok: {}", b.parameter_max_tokens)?;
+            if let Some(choices) = &b.parameter_mcq_choices {
+                writeln!(out, "mcq:     {}", choices.join(", "))?;
+            }
+            writeln!(out, "decode:  {}", vlm_eval_decoding(b))?;
+            if let Some(profile) = &b.parameter_prompt_profile {
+                writeln!(out, "profile: {}", profile.as_str())?;
+            }
+            if let Some(dataset) = &b.dataset {
+                writeln!(out, "corpus:  {} ({} bytes)", dataset.format, dataset.bytes)?;
             }
             if let Some(samples) = &b.samples {
-                println!("samples: {}", samples.len());
+                writeln!(out, "samples: {}", samples.len())?;
+            }
+            if let Some(recipe) = &b.recipe {
+                write_recipe(out, recipe)?;
             }
         }
-        BenchmarkDefinition::VlThroughput(b) => {
-            println!(
-                "image:   {}×{}",
-                b.parameter_image_width, b.parameter_image_height
-            );
-            println!("text:    {} tokens", b.parameter_text_tokens);
-            println!("decode:  {} tokens", b.parameter_decode_tokens);
+        BenchmarkDefinition::AsrEval(b) => write_asr_eval(out, b)?,
+        BenchmarkDefinition::VlSpecDecode(b) => {
+            writeln!(
+                out,
+                "draft_k: {} tokens per step (with speculation on)",
+                b.parameter_draft_length
+            )?;
+            writeln!(out, "max_tok: {}", b.parameter_max_tokens)?;
+            writeln!(
+                out,
+                "batch:   {} sample(s) in flight",
+                b.parameter_batch_size
+            )?;
+            write_temperature(out, b.parameter_temperature, None)?;
+            write_corpus(out, &b.dataset)?;
         }
     }
+    Ok(())
+}
+
+/// A catalog entry's recipe: whose settings it holds, the models it covers
+/// and the sources the settings come from.
+fn write_recipe(
+    out: &mut dyn Write,
+    recipe: &pipette_plan_types::VlmEvalRecipe,
+) -> anyhow::Result<()> {
+    let thinking = recipe
+        .enable_thinking
+        .map_or_else(|| "unset".to_owned(), |on| on.to_string());
+    writeln!(
+        out,
+        "recipe:  {} (enable_thinking = {thinking})",
+        recipe.family
+    )?;
+    recipe
+        .models
+        .iter()
+        .try_for_each(|line| match &line.mmproj {
+            Some(mmproj) => writeln!(out, "model:   {} with {mmproj}", line.repo),
+            None => writeln!(out, "model:   {}", line.repo),
+        })?;
+    recipe
+        .sources
+        .iter()
+        .try_for_each(|source| writeln!(out, "source:  {source}"))?;
+    Ok(())
+}
+
+/// An asr_eval's dataset, profile, decoding, corpus and recipe. Its clips are
+/// its corpus, downloaded at run time, so there is no sample count beyond the
+/// one it declares.
+fn write_asr_eval(out: &mut dyn Write, b: &AsrEvalBenchmark) -> anyhow::Result<()> {
+    writeln!(out, "task:    {}", b.parameter_asr_task.as_str())?;
+    writeln!(out, "dataset: {}", b.parameter_dataset_version)?;
+    writeln!(out, "count:   {}", b.parameter_sample_count)?;
+    writeln!(out, "profile: {}", b.parameter_prompt_profile)?;
+    writeln!(out, "max_tok: {}", b.parameter_max_tokens)?;
+    if b.beam_search() {
+        // The penalties the run uses: each the entry's, else its card's
+        // (MiniCPM-o's repetition 1.2), as the client and mgmt resolve them.
+        let decoding = b
+            .effective_decoding()
+            .with_context(|| format!("{}: its decoding", b.benchmark_id))?;
+        let AsrDecoding::Beams(beams) = decoding else {
+            anyhow::bail!("{}: a beam entry resolved to sampling", b.benchmark_id);
+        };
+        writeln!(
+            out,
+            "beams:   {} (repetition penalty {}, length penalty {})",
+            beams.num_beams.into_inner(),
+            beams.repetition_penalty.into_inner(),
+            beams.length_penalty.into_inner(),
+        )?;
+    } else {
+        write_temperature(out, b.sampling_temperature(), None)?;
+        if let Some(seed) = b.parameter_seed {
+            writeln!(
+                out,
+                "seed:    {seed} (seed_rule={})",
+                seed_rule_name(b.parameter_seed_rule)
+            )?;
+        }
+    }
+    if let Some(dataset) = &b.dataset {
+        writeln!(out, "corpus:  {} ({} bytes)", dataset.format, dataset.bytes)?;
+    }
+    if let Some(recipe) = &b.recipe {
+        write_recipe(out, recipe)?;
+    }
+    Ok(())
+}
+
+/// What an eval cell samples at. The temperature prints whatever its source,
+/// so two ids can be compared; an unpinned cut does not, because none is sent.
+fn write_eval_sampling(out: &mut dyn Write, benchmark: &EvalBenchmark) -> anyhow::Result<()> {
+    let source = if benchmark.parameter_temperature.is_some() {
+        "pinned"
+    } else {
+        "eval-id policy"
+    };
+    write_temperature(out, benchmark.sampling_temperature()?, Some(source))?;
+    if let Some(top_p) = benchmark.parameter_top_p {
+        writeln!(out, "top_p:   {top_p}")?;
+    }
+    if let Some(top_k) = benchmark.parameter_top_k {
+        writeln!(out, "top_k:   {top_k}")?;
+    }
+    if let Some(min_p) = benchmark.parameter_min_p {
+        writeln!(out, "min_p:   {min_p}")?;
+    }
+    if let Some(seed) = benchmark.parameter_seed {
+        writeln!(out, "seed:    {seed} (offset by the #k repeat index)")?;
+    }
+    Ok(())
+}
+
+/// One `temp:` line for every kind that has one, so the key means the same
+/// thing across entries. `source` says where an eval's came from; a corpus
+/// entry has only the one. Greedy is the reference procedure, worth naming
+/// beside a bare `0`.
+fn write_temperature(
+    out: &mut dyn Write,
+    temperature: SamplingTemperature,
+    source: Option<&str>,
+) -> anyhow::Result<()> {
+    let greedy = (temperature == SamplingTemperature::greedy()).then_some("greedy");
+    let notes: Vec<&str> = source.into_iter().chain(greedy).collect();
+    if notes.is_empty() {
+        writeln!(out, "temp:    {temperature}")?;
+    } else {
+        writeln!(out, "temp:    {temperature} ({})", notes.join(", "))?;
+    }
+    Ok(())
+}
+
+/// The requests the cell keeps in flight, printed even at the reference size:
+/// a reader comparing two entries should not have to know that an absent
+/// field means one.
+fn write_batch_size(out: &mut dyn Write, batch_size: BatchSize) -> anyhow::Result<()> {
+    writeln!(out, "batch:   {batch_size} request(s) in flight")?;
+    Ok(())
+}
+
+/// `greedy` at temperature 0 (or none set), then every knob the entry sets.
+/// Unset knobs are sent neutral, so the line is the whole decode.
+fn vlm_eval_decoding(b: &pipette_plan_types::VlmEvalBenchmark) -> String {
+    let temperature = b.sampling_temperature().as_f64();
+    let lead = if temperature > 0.0 {
+        format!("temperature={temperature}")
+    } else {
+        "greedy".to_owned()
+    };
+    std::iter::once(Some(lead))
+        .chain([
+            b.parameter_top_p.map(|v| format!("top_p={}", v.as_f64())),
+            b.parameter_top_k.map(|v| format!("top_k={}", i32::from(v))),
+            b.parameter_min_p.map(|v| format!("min_p={}", v.as_f64())),
+            b.parameter_presence_penalty
+                .map(|v| format!("presence_penalty={}", v.as_f64())),
+            b.parameter_repeat_penalty
+                .map(|v| format!("repeat_penalty={}", v.as_f64())),
+            b.parameter_seed.map(|v| {
+                format!(
+                    "seed={} seed_rule={}",
+                    i64::from(v),
+                    seed_rule_name(b.parameter_seed_rule)
+                )
+            }),
+            b.parameter_image_tokens
+                .map(|v| format!("image_tokens={}", v.into_inner())),
+        ])
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// How a seeded vlm_eval or asr_eval derives each sample's seed, named even
+/// when the entry names no rule: the two draw differently (a shared seed
+/// biases a vLLM run), and a reader should not have to know that an absent
+/// field means the repeat offset.
+fn seed_rule_name(rule: Option<SeedRule>) -> &'static str {
+    match rule {
+        None => "repeat_offset",
+        Some(SeedRule::PerSampleSha256) => "per_sample_sha256",
+    }
+}
+
+fn write_corpus(out: &mut dyn Write, dataset: &pipette_plan_types::Dataset) -> anyhow::Result<()> {
+    writeln!(out, "corpus:  {} ({})", dataset.format, dataset.adapter)?;
+    writeln!(
+        out,
+        "subset:  {}",
+        dataset.subset.as_deref().unwrap_or("(all)")
+    )?;
+    writeln!(out, "bytes:   {}", dataset.bytes)?;
+    writeln!(out, "digest:  {}", dataset.digest)?;
+    writeln!(out, "upstream:{}", dataset.upstream.reference())?;
+    if let Some(license) = dataset.upstream.license() {
+        writeln!(out, "license: {license}")?;
+    }
+    Ok(())
+}
+
+fn write_vl_shape(
+    out: &mut dyn Write,
+    width: PositiveCount,
+    height: PositiveCount,
+    text: NonNegativeCount,
+    images: NonNegativeCount,
+    decode: Option<PositiveCount>,
+) -> anyhow::Result<()> {
+    writeln!(out, "image:   {width}×{height}")?;
+    writeln!(out, "text:    {text} tokens")?;
+    if let Some(decode) = decode {
+        writeln!(out, "decode:  {decode} tokens")?;
+    }
+    writeln!(out, "images:  {images}")?;
+    Ok(())
+}
+
+/// The clip's format as well as its length: two entries of one length can
+/// differ in format.
+fn write_asr_clip(
+    out: &mut dyn Write,
+    duration: AudioDurationMillis,
+    rate: AudioSampleRate,
+    channels: AudioChannels,
+    text: NonNegativeCount,
+) -> anyhow::Result<()> {
+    writeln!(out, "audio:   {duration} ms, {rate} Hz, {channels} ch")?;
+    writeln!(out, "text:    {text} tokens")?;
+    Ok(())
 }
 
 const RUN_LONG_ABOUT: &str = "\
@@ -236,8 +528,8 @@ Examples:
 
   # OpenVINO picks its device per cell, so the venv is shared across cpu/gpu/npu
   pipette benchmarks run --benchmark local/prefill_throughput_512 \\
-    --model 'openvino://repo=LiquidAI/LFM2.5-350M-ov&prefix=int4-sym-cw' \\
-    --runtime 'uv-openvino://version=2026.2.1' \\
+    --model 'openvino://repo=OpenVINO/LFM2.5-350M-int8-ov' \\
+    --runtime 'uv-openvino://version=2026.4.1' \\
     --runtime-flags '{\"device\":\"cpu\"}'
 
   # re-run against what's already installed, by digest prefix
@@ -246,21 +538,51 @@ Examples:
 
 CELL SETTINGS (--runtime-flags) -- which are legal depends on all three axes:
   llama.cpp x gguf_text
-    prefill / decode / max-memory   threads, number_gpu_layers, mmap,
-                                    flash_attention, raw
+    prefill / decode / max-memory   threads, number_gpu_layers, mmap, load_mode,
+                                    flash_attention, envs, raw
     end-to-end / eval               the above, plus ctx_size, no_cache
+    eval                            and parallel, the llama-server slot count
   llama.cpp x gguf_vision
-    vl                              threads, number_gpu_layers, mmap,
-                                    flash_attention, ctx_size, no_cache, raw
+    vl / asr                        threads, number_gpu_layers, mmap, load_mode,
+                                    flash_attention, ctx_size, no_cache, envs, raw
+                                    (asr refuses a raw slot count, reasoning flag or
+                                    chat-template flag)
+    vlm_eval                       the above, plus parallel, the llama-server
+                                    slot count (an unpinned ctx_size is
+                                    calibrated per slot and multiplied by it);
+                                    whether a model thinks is a model flag,
+                                    --model-enable-thinking, as on eval
+    asr_eval                        the vlm_eval settings; an unpinned
+                                    ctx_size is sized per slot from the
+                                    clips' durations, a beam entry runs one
+                                    slot, and thinking is off: the model
+                                    flags state enable_thinking = false
   docker-vllm x torch               tensor_parallel_size, dtype, max_model_len,
                                     prefix_caching, gpus, shm_size, ipc, envs, raw
+    eval                            and parallel, the client's in-flight request
+                                    count (the engine batches; nothing is argv),
+                                    and repetition_detection, vLLM's own
+                                    request field: {min_pattern_size,
+                                    max_pattern_size, min_count}
   uv-vllm x torch                   the above, minus gpus / shm_size / ipc
-  docker-sglang x torch             tensor_parallel_size, prefix_caching, gpus,
+    vlm_eval, asr_eval              and parallel, as on eval (no
+                                    repetition_detection); raw and envs take
+                                    only the speed, memory, device and logging
+                                    settings the plan types list
+  docker-sglang x torch            tensor_parallel_size, prefix_caching, gpus,
                                     shm_size, ipc, envs, raw
+    eval                            and parallel, as above
   uv-sglang x torch                 tensor_parallel_size, prefix_caching, envs, raw
+    eval                            and parallel, as above
   uv-openvino x openvino            device, max_prompt_len, min_response_len,
                                     generate_hint
+  ovms x openvino                   the above, plus prefix_caching (unset means
+                                    off; OVMS itself defaults it on)
+  trt-edgellm x gguf_vision         precision (fp16, bf16, w8a16), envs, raw;
+                                    vl_throughput and vl_max_memory only
+  uv-onnx-genai x onnx_genai        none: any setting is refused ({} is a no-op)
   mlx-macos-pipette x mlx           none: any setting is refused ({} is a no-op)
+  core-ai-macos-pipette x core_ai   none: any setting is refused ({} is a no-op)
 
 `raw` takes verbatim argv tokens, and refuses any that alias a typed setting or
 that the benchmark owns for that cell.
@@ -272,11 +594,6 @@ Gated Hugging Face weights: set PIPETTE_HF_TOKEN.
 
 Full notation reference: docs/pipette-cli/models-and-runtimes.md";
 
-/// The `benchmarks run` flag surface. NOTE: the plan runner's
-/// `RunnableCell::build_argv` still emits the legacy flat
-/// `--model`/`--runtime` refs and `--mmproj`; reconciling it with these JSON/URI
-/// refs (and dropping `--mmproj`) is PIP-344 step 5, when the runner is repointed
-/// at this unified binary.
 #[derive(Args, Debug)]
 pub struct BenchmarkRunArgs {
     /// Benchmark reference: `<id>` or `remote/<id>` (synced catalog), or
@@ -309,22 +626,47 @@ pub struct BenchmarkRunArgs {
     /// Model-generation settings, as one plan-form JSON object —
     /// `'{"model_type":"mlx","benchmark_type":"eval","enable_thinking":true}'`
     /// (a one-element array is also accepted). Unlike `--runtime-flags` this
-    /// one *requires* its `model_type` / `benchmark_type` axes. Eval benchmarks
-    /// only. Mutually exclusive with `--model-enable-thinking`.
+    /// one *requires* its `model_type` / `benchmark_type` axes. Eval and vlm_eval
+    /// benchmarks only. Mutually exclusive with `--model-enable-thinking`.
     #[arg(long)]
     pub model_flags: Option<String>,
+    /// Run-driving settings as one JSON object, a claim's `benchmark_flags`
+    /// without its axis keys: `'{"readiness":{"max_wait_secs":900}}'`. A setting
+    /// the cell does not carry is an error. Mutually exclusive with the four
+    /// single-setting flags below, which are its shorthand.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "http_timeout_seconds",
+            "bench_timeout_seconds",
+            "readiness_max_wait_secs",
+            "readiness_skip_thermal",
+            "readiness_skin_below_c",
+        ]
+    )]
+    pub benchmark_flags: Option<String>,
     /// HTTP timeout in seconds for the client's calls to the local server.
-    /// Accepted on the cells that drive one over HTTP — eval, end-to-end-latency
-    /// and vl — and rejected elsewhere.
+    /// Accepted on the cells that drive one over HTTP — eval, end-to-end-latency,
+    /// vl and asr — and rejected elsewhere.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub http_timeout_seconds: Option<u64>,
+    /// Wall-clock deadline in seconds for the whole measured workload, after
+    /// which it is killed and the run reports a wedge. Accepted on the
+    /// peak-memory cells, max-memory, vl-max-memory and asr-max-memory, and on
+    /// vl-spec-decode. Raise it for a device slow enough that the built-in 600 s
+    /// default false-kills a legitimate run. On vl-max-memory and
+    /// asr-max-memory it sits alongside `--http-timeout-seconds`, which bounds
+    /// one request rather than the run.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub bench_timeout_seconds: Option<u64>,
     /// Override the readiness wait ceiling (seconds) before the measurement.
     /// Valid only on the timing benchmarks that gate on device readiness
-    /// (prefill / decode / end-to-end-latency / vl); on eval or max-memory the
-    /// `(benchmark, runtime, model)` cell carries no readiness knob, so it is
-    /// rejected. Set `PIPETTE_READINESS_MAX_WAIT_SECS` directly for an ungated
-    /// override: it is read by the readiness gate itself, so unlike this flag it
-    /// stays harmless on the cells that carry no readiness setting.
+    /// (prefill / decode / end-to-end-latency / vl / asr-throughput); on eval or
+    /// a peak-memory cell the `(benchmark, runtime, model)` cell carries no
+    /// readiness knob, so it is rejected. Set `PIPETTE_READINESS_MAX_WAIT_SECS`
+    /// directly for an ungated override: it is read by the readiness gate
+    /// itself, so unlike this flag it stays harmless on the cells that carry no
+    /// readiness setting.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub readiness_max_wait_secs: Option<u64>,
     /// Waive the *thermal* readiness criterion for this cell, keeping the load
@@ -333,9 +675,23 @@ pub struct BenchmarkRunArgs {
     /// patience, so a cell run with it is not comparable to a gated one.
     #[arg(long)]
     pub readiness_skip_thermal: bool,
+    /// Android CLI gate: the hottest live skin sensor must read below this
+    /// whole-degree Celsius threshold (1–110).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=110))]
+    pub readiness_skin_below_c: Option<u32>,
+    /// Android CLI gate: what to do if a touch is held on the touchscreen.
+    /// `off` skips touch detection. `wait` holds the gate until the touch
+    /// clears or the readiness deadline passes. `fail` fails the cell after
+    /// about 9 s. This flag overrides
+    /// `PIPETTE_READINESS_HELD_TOUCH` and `[readiness.android] held_touch`.
+    /// The gate waits when no mode is configured. It is not a cell setting, so
+    /// `--benchmark-flags` does not carry it. Other platforms reject it.
+    #[arg(long, value_name = "off|wait|fail")]
+    pub readiness_held_touch: Option<pipette_readiness::HeldTouch>,
     /// Convenience for a single `enable_thinking` model flag: derives the axes
-    /// from the cell, so it needs no JSON. Eval benchmarks only. Mutually
-    /// exclusive with `--model-flags`.
+    /// from the cell, so it needs no JSON. Eval, vlm_eval and asr_eval
+    /// benchmarks only (an asr_eval cell runs only with `false`).
+    /// Mutually exclusive with `--model-flags`.
     #[arg(long)]
     pub model_enable_thinking: Option<bool>,
     /// Submit the result to the management server immediately after the run.
@@ -343,102 +699,122 @@ pub struct BenchmarkRunArgs {
     /// always stays on disk, and passing this does not change that.
     #[arg(long)]
     pub sync: bool,
-    // Last on purpose: this group carries a `next_help_heading`, which clap
-    // applies to every argument declared after it.
-    #[command(flatten)]
-    pub doomloop: DoomloopCliArgs,
 }
 
 impl BenchmarkArgs {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
-        self.command.execute(ws, http)
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        client_config: &ClientConfiguration,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
+        self.command
+            .execute(ws, http, client_config, programs, console)
     }
 }
 
 impl BenchmarkCommand {
-    pub fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
+    /// `client_config` and `programs` reach `run` alone: listing and seeding
+    /// spawn nothing.
+    pub fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        client_config: &ClientConfiguration,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
         match self {
             // The catalog is runtime-agnostic; init-local seeds the union of
             // every runtime's supported benchmark types.
             BenchmarkCommand::InitLocal => {
                 let summary = seed_standard_local(&ws.benchmarks(), BenchmarkType::ALL)?;
-                println!(
+                writeln!(
+                    console.out(),
                     "Wrote standard local benchmarks: {} created, {} updated",
-                    summary.created, summary.updated
-                );
+                    summary.created,
+                    summary.updated
+                )?;
                 Ok(())
             }
-            BenchmarkCommand::List(args) => args.execute(ws),
-            BenchmarkCommand::Show(args) => args.execute(ws),
-            BenchmarkCommand::Run(args) => args.execute(ws, http),
+            BenchmarkCommand::List(args) => args.execute(ws, console),
+            BenchmarkCommand::Show(args) => args.execute(ws, console),
+            BenchmarkCommand::Run(args) => args.execute(ws, http, client_config, programs, console),
         }
     }
 }
 
 impl BenchmarkRunArgs {
-    fn execute(self, ws: &PipetteWorkspace, http: &HttpClient) -> anyhow::Result<()> {
-        // Parse → run_cell → CLI finish (local record + optional submit).
+    fn execute(
+        self,
+        ws: &PipetteWorkspace,
+        http: &HttpClient,
+        client_config: &ClientConfiguration,
+        programs: &ExternalPrograms,
+        console: &mut dyn Console,
+    ) -> anyhow::Result<()> {
         let sync = self.sync;
-        // The catalog side is this client's business: it picks the filing location
-        // and stops here — the run takes the resolved body, not the address.
+        let held_touch = self.readiness_held_touch;
+        crate::run::ensure_held_touch_on_android(held_touch)?;
+        // The catalog side is this client's business: it picks the filing
+        // location, and the run takes the resolved body, not the address.
         let location = self.benchmark_ref.source().into();
         let (spec, benchmark) = self.into_client_run_spec(ws)?;
+        // The definition's type, not the result data's: `vl_max_memory` reuses
+        // the `MaxMemoryUsage` result variant, so deriving the label from the
+        // data would print `type: max_memory_usage` for a VL memory run.
+        let benchmark_type = benchmark.benchmark_type();
         // `prepare` adds the cell's pins; the policy only carries the cap here.
-        let artifacts = ws.artifacts(http);
-        let (payload, extras) = run_cell(&spec, benchmark, &artifacts, ws)?;
-        report_lines(&run_summary_lines(
-            &payload.benchmark_id,
-            payload.result.benchmark_type(),
-            &payload.result,
-        ));
+        let artifacts = ws.artifacts(http, programs);
+        let (payload, extras, eval_checkpoint) = run_cell(
+            &spec,
+            benchmark,
+            &artifacts,
+            ws,
+            &ws.device().get()?,
+            client_config,
+            held_touch,
+            &pipette_wait::never_cancelled,
+            programs,
+        )?;
+        write_lines(
+            console.out(),
+            &run_summary_lines(&payload.benchmark_id, benchmark_type, &payload.result),
+        )?;
         let done = record_and_maybe_submit_run(
             &ws.results(),
-            &ws.identity(),
+            &ws.registration(),
             &payload,
             &extras,
             location,
             sync,
             http,
         )?;
-        print_record_done(ws, &done);
-        Ok(())
+        // Saved on disk, so the checkpoint has done its job.
+        finalize_eval_checkpoint(ws, eval_checkpoint.as_ref());
+        write_record_done(console, ws, &done)
     }
 
-    /// Parse the runtime/model refs (canonical JSON `Runtime`/`Model`, or the
-    /// compact URI), gate on `is_compatible`, resolve the benchmark ref once, and
-    /// validate the run knobs into plan-form flag enums. Both refs are
-    /// self-describing (the model tag names its format).
-    ///
-    /// Returns the resolved body alongside the spec, so the run path takes it
-    /// rather than resolving the same id a second time.
+    /// Resolve the refs and the benchmark, validate the run knobs into
+    /// plan-form flags, and refuse a cell this host cannot run. Returns the
+    /// resolved body so the run does not resolve the same id a second time.
     fn into_client_run_spec(
         self,
         ws: &PipetteWorkspace,
     ) -> anyhow::Result<(ClientRunSpec, BenchmarkDefinition)> {
         let runtime = resolve_runtime_arg(ws, &self.runtime)?;
+        refuse_foreign_os(&runtime, std::env::consts::OS)?;
         let mut model = resolve_model_arg(ws, &self.model)?;
         inject_env_hf_token(&mut model)?;
-        if !is_compatible(&model, &runtime) {
-            anyhow::bail!(
-                "model `{}` is not compatible with runtime `{}`",
-                self.model,
-                self.runtime
-            );
-        }
-        // Resolve the ref to its definition once. Its `.benchmark_type()` is the
-        // authoritative type (not a naming-convention guess from the id string),
-        // and the body is handed to the run so nothing resolves it twice.
-        let run_ref = &self.benchmark_ref;
-        let benchmark = ws
-            .benchmarks()
-            .get(run_ref)?
-            .ok_or_else(|| anyhow::anyhow!("unknown benchmark reference `{run_ref}`"))?;
-        // `--runtime-flags` carries the knobs; the cell they apply to is the one just
-        // resolved from `--benchmark`, `--runtime` and `--model`, so it is derived here
-        // rather than restated in the JSON. Parsed after the benchmark for that reason —
-        // its `.benchmark_type()` is the authoritative axis. An entry that *does* name its
-        // cell is checked against this one. The `raw` escape hatch rides inside the entry;
-        // the owning runtime renders it at execution time.
+        // Its `.benchmark_type()` is the authoritative type, not a guess from
+        // the id string.
+        let benchmark = resolve_benchmark(ws, &self.benchmark_ref)?;
+        // `--runtime-flags` carries knobs only: the cell is the one just resolved
+        // from `--benchmark`, `--runtime` and `--model`, so axis keys are refused
+        // rather than restated. `raw` rides inside the entry, and the owning
+        // runtime renders it at execution time.
         let runtime_flags = match self.runtime_flags.as_deref() {
             Some(json) => RuntimeFlags::from_cell_json(
                 json,
@@ -457,15 +833,15 @@ impl BenchmarkRunArgs {
             }
             (Some(json), None) => {
                 let flags = parse_model_flags_json(json).context("parsing --model-flags JSON")?;
-                if let Some(ref f) = flags {
-                    if !f.matches(benchmark.benchmark_type(), &model) {
-                        anyhow::bail!(
-                            "--model-flags entry does not match this cell \
+                if let Some(ref f) = flags
+                    && !f.matches(benchmark.benchmark_type(), &model)
+                {
+                    anyhow::bail!(
+                        "--model-flags entry does not match this cell \
                              (benchmark={:?}, model={})",
-                            benchmark.benchmark_type(),
-                            model
-                        );
-                    }
+                        benchmark.benchmark_type(),
+                        model
+                    );
                 }
                 flags
             }
@@ -474,6 +850,7 @@ impl BenchmarkRunArgs {
                     model_type: ModelType::of(&model),
                     benchmark_type: benchmark.benchmark_type(),
                     enable_thinking: Some(enable_thinking),
+                    reasoning_effort: None,
                 })
                 .with_context(|| {
                     format!(
@@ -484,15 +861,25 @@ impl BenchmarkRunArgs {
             ),
             (None, None) => None,
         };
-        let benchmark_flags = build_benchmark_flags(
-            benchmark.benchmark_type(),
-            &runtime,
-            &model,
-            self.http_timeout_seconds,
-            self.doomloop.into_overrides(),
-            self.readiness_max_wait_secs,
-            self.readiness_skip_thermal,
-        )?;
+        let benchmark_flags = match self.benchmark_flags.as_deref() {
+            Some(json) => {
+                parse_benchmark_flags_json(json, benchmark.benchmark_type(), &runtime, &model)
+                    .context("parsing --benchmark-flags JSON")?
+            }
+            None => build_benchmark_flags(
+                benchmark.benchmark_type(),
+                &runtime,
+                &model,
+                CellKnobs {
+                    http_timeout_seconds: self.http_timeout_seconds,
+                    bench_timeout_seconds: self.bench_timeout_seconds,
+                    readiness_max_wait_secs: self.readiness_max_wait_secs,
+                    readiness_skip_thermal: self.readiness_skip_thermal,
+                    readiness_skin_below_c: self.readiness_skin_below_c,
+                },
+            )?,
+        };
+        crate::run::ensure_skin_on_android(benchmark_flags.as_ref())?;
         let spec = ClientRunSpec {
             benchmark: BenchmarkId::try_new(benchmark.benchmark_id().to_string())
                 .context("benchmark id")?,
@@ -502,6 +889,7 @@ impl BenchmarkRunArgs {
             model_flags,
             benchmark_flags,
         };
+        spec.validate()?;
         Ok((spec, benchmark))
     }
 }
@@ -523,71 +911,150 @@ fn parse_model_flags_json(json: &str) -> anyhow::Result<Option<ModelFlags>> {
     ))
 }
 
-/// Build the eval-run `BenchmarkFlags` for a cell from its resolved benchmark
-/// TYPE (authoritative) + model + the raw eval knobs. `None` when no knob is set.
+/// Parse `--benchmark-flags` against the cell it resolved, as
+/// [`RuntimeFlags::from_cell_json`] parses `--runtime-flags`: one JSON object of
+/// knobs, the axes derived from the cell rather than restated, `{}` meaning none.
+fn parse_benchmark_flags_json(
+    json: &str,
+    benchmark_type: BenchmarkType,
+    runtime: &Runtime,
+    model: &Model,
+) -> anyhow::Result<Option<BenchmarkFlags>> {
+    let serde_json::Value::Object(mut fields) = serde_json::from_str(json)? else {
+        anyhow::bail!(r#"expected a JSON object of knobs, e.g. {{"http_timeout_seconds":600}}"#);
+    };
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    [
+        (
+            "runtime_type",
+            serde_json::to_value(RuntimeType::of(runtime))?,
+        ),
+        ("model_type", serde_json::to_value(ModelType::of(model))?),
+        ("benchmark_type", serde_json::to_value(benchmark_type)?),
+    ]
+    .into_iter()
+    .try_for_each(|(key, derived)| {
+        anyhow::ensure!(
+            !fields.contains_key(key),
+            "must not carry `{key}`: the cell comes from --benchmark, --runtime and --model"
+        );
+        fields.insert(key.to_owned(), derived);
+        Ok(())
+    })?;
+    let reference: BenchmarkFlagRef = serde_json::from_value(serde_json::Value::Object(fields))?;
+    // The shorthand's `range(1..)`, so the two forms accept the same waits.
+    anyhow::ensure!(
+        reference.readiness.as_ref().and_then(|r| r.max_wait_secs) != Some(0),
+        "readiness.max_wait_secs must be at least 1, as --readiness-max-wait-secs requires"
+    );
+    let flags = BenchmarkFlags::try_from(reference)
+        .with_context(|| format!("not valid for this benchmark ({benchmark_type:?})"))?;
+    Ok(Some(flags))
+}
+
+/// The run-driving knobs as the command line carried them, before the cell's
+/// [`BenchmarkFlags`] variant decides which of them it accepts.
+#[derive(Debug, Default)]
+struct CellKnobs {
+    http_timeout_seconds: Option<u64>,
+    bench_timeout_seconds: Option<u64>,
+    readiness_max_wait_secs: Option<u64>,
+    readiness_skip_thermal: bool,
+    readiness_skin_below_c: Option<u32>,
+}
+
+/// The run's `BenchmarkFlags` for a cell, or `None` when no knob is set.
 fn build_benchmark_flags(
     benchmark_type: BenchmarkType,
     runtime: &Runtime,
     model: &Model,
-    http_timeout_seconds: Option<u64>,
-    doomloop: pipette_doomloop::plan::DoomloopOverrides,
-    readiness_max_wait_secs: Option<u64>,
-    readiness_skip_thermal: bool,
+    knobs: CellKnobs,
 ) -> anyhow::Result<Option<BenchmarkFlags>> {
-    let readiness = (readiness_max_wait_secs.is_some() || readiness_skip_thermal).then(|| {
+    let CellKnobs {
+        http_timeout_seconds,
+        bench_timeout_seconds,
+        readiness_max_wait_secs,
+        readiness_skip_thermal,
+        readiness_skin_below_c,
+    } = knobs;
+    let readiness_skin_below_c = readiness_skin_below_c
+        .map(SkinCelsius::try_new)
+        .transpose()?;
+    let readiness = (readiness_max_wait_secs.is_some()
+        || readiness_skip_thermal
+        || readiness_skin_below_c.is_some())
+    .then(|| {
         ReadinessOverrides {
             max_wait_secs: readiness_max_wait_secs,
             // `None` rather than `Some(false)` when unset, so an untouched knob
             // stays absent from the serialized plan.
             skip_thermal: readiness_skip_thermal.then_some(true),
+            skin_below_c: readiness_skin_below_c,
         }
     });
-    let has_knob = http_timeout_seconds.is_some()
-        || doomloop != pipette_doomloop::plan::DoomloopOverrides::default()
-        || readiness.is_some();
+    let has_knob =
+        http_timeout_seconds.is_some() || bench_timeout_seconds.is_some() || readiness.is_some();
     if !has_knob {
         return Ok(None);
     }
     Ok(Some(
         // `TryFrom` routes the (benchmark, runtime, model) triple to its variant
-        // and rejects any knob that cell doesn't carry — so a readiness override
-        // is accepted only on a readiness-carrying (timing/vl) cell, and errors
-        // on eval/max-memory.
+        // and rejects any knob that cell doesn't carry: readiness only on a
+        // cell that gates, the bench deadline only on the two peak-memory cells.
         BenchmarkFlags::try_from(BenchmarkFlagRef {
             runtime_type: RuntimeType::of(runtime),
             model_type: ModelType::of(model),
             benchmark_type,
-            http_timeout_seconds,
-            doomloop,
+            http_timeout_seconds: http_timeout_seconds
+                .map(PositiveSeconds::try_new)
+                .transpose()?,
+            bench_timeout_seconds: bench_timeout_seconds
+                .map(PositiveSeconds::try_new)
+                .transpose()?,
+            _doomloop_obsolete: None,
             readiness,
         })
         .with_context(|| {
             format!(
-                "--http-timeout-seconds / --doomloop-* / --readiness-max-wait-secs \
-                 are not valid for this benchmark ({benchmark_type:?})"
+                "--http-timeout-seconds / --bench-timeout-seconds / \
+                 --readiness-max-wait-secs / --readiness-skin-below-c are not valid for this \
+                 benchmark ({benchmark_type:?})"
             )
         })?,
     ))
 }
 
-fn report_lines(lines: &[String]) {
-    lines.iter().for_each(|line| println!("{line}"));
+fn write_lines(out: &mut dyn Write, lines: &[String]) -> anyhow::Result<()> {
+    lines.iter().try_for_each(|line| writeln!(out, "{line}"))?;
+    Ok(())
 }
 
-fn print_record_done(ws: &PipetteWorkspace, done: &RecordSubmitOutcome) {
-    println!(
+fn write_record_done(
+    console: &mut dyn Console,
+    ws: &PipetteWorkspace,
+    done: &RecordSubmitOutcome,
+) -> anyhow::Result<()> {
+    writeln!(
+        console.out(),
         "payload: {}",
         ws.results()
             .payload_path(done.location, &done.result_id)
             .display()
-    );
-    println!("recorded {} ({})", done.result_id, done.location.label());
+    )?;
+    writeln!(
+        console.out(),
+        "recorded {} ({})",
+        done.result_id,
+        done.location.label()
+    )?;
     if let Some(job_id) = &done.job_id {
-        println!("submitted as job {job_id}");
+        writeln!(console.out(), "submitted as job {job_id}")?;
     }
+    Ok(())
 }
 
-/// Human-readable run summary lines (benchmark id/type + headline metrics).
 fn run_summary_lines(
     benchmark_id: &str,
     benchmark_type: BenchmarkType,
@@ -643,12 +1110,18 @@ fn run_summary_lines(
         }
         BenchmarkResultData::VlThroughput {
             prompt_tokens,
+            image_tokens,
             prompt_ms,
             prompt_ms_stddev,
             predicted_ms,
             predicted_ms_stddev,
+            total_time_ms,
+            total_time_ms_stddev,
         } => {
             lines.push(format!("prompt_tokens: {prompt_tokens}"));
+            if let Some(image_tokens) = image_tokens {
+                lines.push(format!("image_tokens: {image_tokens}"));
+            }
             lines.push(format!("prompt_ms: {prompt_ms:.3}"));
             if let Some(stddev) = prompt_ms_stddev {
                 lines.push(format!("prompt_ms_stddev: {stddev:.3}"));
@@ -657,23 +1130,149 @@ fn run_summary_lines(
             if let Some(stddev) = predicted_ms_stddev {
                 lines.push(format!("predicted_ms_stddev: {stddev:.3}"));
             }
+            if let Some(total_time_ms) = total_time_ms {
+                lines.push(format!("total_time_ms: {total_time_ms:.3}"));
+            }
+            if let Some(stddev) = total_time_ms_stddev {
+                lines.push(format!("total_time_ms_stddev: {stddev:.3}"));
+            }
+        }
+        BenchmarkResultData::AsrThroughput {
+            asr_prompt_tokens,
+            asr_audio_tokens,
+            asr_prompt_ms,
+            asr_prompt_ms_stddev,
+            asr_predicted_ms,
+            asr_predicted_ms_stddev,
+            total_time_ms,
+            total_time_ms_stddev,
+        } => {
+            lines.push(format!("asr_prompt_tokens: {asr_prompt_tokens}"));
+            lines.push(format!("asr_audio_tokens: {asr_audio_tokens}"));
+            lines.push(format!("asr_prompt_ms: {asr_prompt_ms:.3}"));
+            if let Some(stddev) = asr_prompt_ms_stddev {
+                lines.push(format!("asr_prompt_ms_stddev: {stddev:.3}"));
+            }
+            lines.push(format!("asr_predicted_ms: {asr_predicted_ms:.3}"));
+            if let Some(stddev) = asr_predicted_ms_stddev {
+                lines.push(format!("asr_predicted_ms_stddev: {stddev:.3}"));
+            }
+            if let Some(total_time_ms) = total_time_ms {
+                lines.push(format!("total_time_ms: {total_time_ms:.3}"));
+            }
+            if let Some(stddev) = total_time_ms_stddev {
+                lines.push(format!("total_time_ms_stddev: {stddev:.3}"));
+            }
+        }
+        // Derived for the terminal only; the server derives the row's metrics
+        // from the counters. A zero denominator omits the line. No speedup and
+        // no identity rate: those need the other run's row, and this client
+        // never has it.
+        BenchmarkResultData::VlSpecDecode {
+            vl_spec_decode_turns,
+            vl_spec_decode_predicted_ms,
+            vl_spec_decode_generated_tokens,
+            vl_spec_decode_drafted_tokens,
+            vl_spec_decode_accepted_tokens,
+            vl_spec_decode_turn_accept_length_sum,
+            vl_spec_decode_prompt_ms,
+            vl_spec_decode_ttft_ms,
+            vl_spec_decode_e2e_ms,
+            ..
+        } => {
+            lines.push(format!("turns: {vl_spec_decode_turns}"));
+            lines.push(format!(
+                "generated_tokens: {vl_spec_decode_generated_tokens}"
+            ));
+            // The drafter's lines exist only on a row with speculation on.
+            // Target forwards are `generated - accepted`: every verification
+            // step commits one token that is not an accepted draft. Saturating
+            // and omitted at zero, so a contradictory row prints no accept
+            // length rather than a flattering one.
+            if let (Some(drafted), Some(accepted)) = (
+                vl_spec_decode_drafted_tokens,
+                vl_spec_decode_accepted_tokens,
+            ) {
+                push_ratio(
+                    &mut lines,
+                    "accept_length",
+                    ratio(
+                        *vl_spec_decode_generated_tokens as f64,
+                        vl_spec_decode_generated_tokens.saturating_sub(*accepted) as f64,
+                    ),
+                );
+                push_ratio(
+                    &mut lines,
+                    "draft_acceptance_rate",
+                    ratio(*accepted as f64, *drafted as f64),
+                );
+            }
+            if let Some(sum) = vl_spec_decode_turn_accept_length_sum {
+                push_ratio(
+                    &mut lines,
+                    "accept_length_per_request",
+                    ratio(*sum, f64::from(*vl_spec_decode_turns)),
+                );
+            }
+            push_ratio(
+                &mut lines,
+                "decode_tok_per_s",
+                ratio(
+                    *vl_spec_decode_generated_tokens as f64 * 1000.0,
+                    *vl_spec_decode_predicted_ms,
+                ),
+            );
+            push_ratio(
+                &mut lines,
+                "prompt_ms_per_turn",
+                ratio(*vl_spec_decode_prompt_ms, f64::from(*vl_spec_decode_turns)),
+            );
+            push_ratio(
+                &mut lines,
+                "ttft_ms_per_turn",
+                ratio(*vl_spec_decode_ttft_ms, f64::from(*vl_spec_decode_turns)),
+            );
+            push_ratio(
+                &mut lines,
+                "e2e_ms_per_turn",
+                ratio(*vl_spec_decode_e2e_ms, f64::from(*vl_spec_decode_turns)),
+            );
         }
     }
     lines
 }
 
+fn ratio(numerator: f64, denominator: f64) -> Option<f64> {
+    (denominator > 0.0).then(|| numerator / denominator)
+}
+
+/// One derived ratio, or nothing when its denominator was zero — a missing
+/// line reads as "not computable" where `0.000` would read as a measurement.
+fn push_ratio(lines: &mut Vec<String>, name: &str, value: Option<f64>) {
+    if let Some(value) = value {
+        lines.push(format!("{name}: {value:.3}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
-    use rstest::rstest;
+    use rstest::{fixture, rstest};
 
     use pipette_artifacts::ArtifactsContext;
-    use pipette_plan_types::result::BenchmarkResultData;
+    use pipette_plan_types::{BenchmarkResultData, RunSpecError};
+    use pipette_programs::ExternalPrograms;
 
     use super::*;
+    use crate::identity::DeviceLabels;
     use crate::model_uri::parse_model_arg;
     use crate::runtime_uri::parse_runtime_arg;
-    use crate::workspace::test_support::TempWorkspace;
+    use crate::test_support::CapturedConsole;
+    use crate::test_support::corpus_wire;
+    use crate::test_support::{
+        IMG80, TempWorkspace, cache_remote, expect_gate_on_this_host, img80_wire,
+        write_public_2026_08_1_img80_cache,
+    };
 
     #[derive(Parser, Debug)]
     struct TestCli {
@@ -690,36 +1289,21 @@ mod tests {
         Ok(cli.run)
     }
 
-    /// Artifacts context whose `docker` / `uv` paths do not exist, so an install
-    /// fails on spawn.
-    ///
-    /// Ensuring a real ref pair pulls a multi-gigabyte image or builds a venv. A
-    /// dispatch test only needs to reach that arm — the real thing is covered by
-    /// the `#[ignore]` install smokes under `crates/*/tests/`.
-    ///
-    /// Stubbing the two tools is enough only because `prepare` ensures the
-    /// runtime before the model and both install arms resolve their tool before
-    /// doing any work. Reorder either and the model fetch runs for real.
-    fn stubbed_artifacts(tw: &TempWorkspace) -> anyhow::Result<ArtifactsContext> {
-        let ctx = ArtifactsContext::new(test_http()?);
-        let absent = tw.ws.root().join("no-such-tool");
-        // A silently-ignored `set` would hand the test a real docker/uv path.
-        // `set` returns the *rejected* value on failure, so report the occupant.
-        ctx.docker_executable.set(absent.clone()).map_err(|_| {
-            anyhow::anyhow!(
-                "docker_executable pre-seeded to {:?}",
-                ctx.docker_executable.get()
-            )
-        })?;
-        ctx.uv_executable.set(absent).map_err(|_| {
-            anyhow::anyhow!("uv_executable pre-seeded to {:?}", ctx.uv_executable.get())
-        })?;
-        Ok(ctx)
+    /// Artifacts context whose `docker` and `uv` paths do not exist, so an
+    /// install fails on spawn instead of pulling an image or building a venv
+    /// (the `#[ignore]` install smokes under `crates/*/tests/` cover that).
+    /// Enough only because `prepare` ensures the runtime before the model and
+    /// both install arms take their program's path before doing any work.
+    /// Reorder either and the model fetch runs for real.
+    fn stubbed_artifacts(_tw: &TempWorkspace) -> anyhow::Result<ArtifactsContext> {
+        Ok(
+            ArtifactsContext::new(test_http()?, ExternalPrograms::at_missing_paths())
+                .with_download_retry(pipette_http::retry::RetryPolicy::IMMEDIATE),
+        )
     }
 
-    /// The spec names the body, so a caller handing over a different one is
-    /// refused: the payload's id and the eval digest come from the body, so the
-    /// run would otherwise record a cell it never executed.
+    /// The payload's id and the eval digest come from the body, so a body the
+    /// spec does not name would record a cell that never ran.
     #[test]
     fn run_rejects_a_body_the_spec_does_not_name() -> anyhow::Result<()> {
         let tw = seeded_workspace("bench-body-mismatch")?;
@@ -738,9 +1322,19 @@ mod tests {
             .benchmarks()
             .get(&"local/prefill_throughput_smoke".parse::<SourcedBenchmarkId>()?)?
             .ok_or_else(|| anyhow::anyhow!("a second benchmark should be seeded"))?;
-        let err = run_cell(&spec, other, &stubbed_artifacts(&tw)?, &tw.ws)
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("a mismatched body should be refused"))?;
+        let err = run_cell(
+            &spec,
+            other,
+            &stubbed_artifacts(&tw)?,
+            &tw.ws,
+            &DeviceLabels::default(),
+            &ClientConfiguration::default(),
+            None,
+            &pipette_wait::never_cancelled,
+            &ExternalPrograms::at_missing_paths(),
+        )
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("a mismatched body should be refused"))?;
 
         let msg = format!("{err:#}");
         assert!(
@@ -750,16 +1344,68 @@ mod tests {
         Ok(())
     }
 
+    /// A bounded eval on a cell that leaves its context unpinned is refused
+    /// before the install: it would run unbounded and record the bound.
+    #[test]
+    fn run_refuses_a_context_bound_the_cell_does_not_pin() -> anyhow::Result<()> {
+        let tw = seeded_workspace("bench-context-unpinned")?;
+        let args = parse(&[
+            "--benchmark",
+            "local/eval_smoke",
+            "--model",
+            "gguf-text://repo=o/r&path=m-Q4_0.gguf",
+            "--runtime",
+            "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
+        ])?;
+        let (spec, benchmark) = args.into_client_run_spec(&tw.ws)?;
+        let BenchmarkDefinition::Eval(eval) = benchmark else {
+            anyhow::bail!("eval_smoke should be an eval");
+        };
+        let bounded = BenchmarkDefinition::Eval(EvalBenchmark {
+            parameter_max_context: Some(eval.parameter_max_tokens),
+            ..eval
+        });
+        let err = run_cell(
+            &spec,
+            bounded,
+            &stubbed_artifacts(&tw)?,
+            &tw.ws,
+            &DeviceLabels::default(),
+            &ClientConfiguration::default(),
+            None,
+            &pipette_wait::never_cancelled,
+            &ExternalPrograms::at_missing_paths(),
+        )
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("an unpinned bound should be refused"))?;
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("parameter_max_context") && !msg.contains("ensuring runtime"),
+            "expected the context refusal ahead of the install; got: {msg}"
+        );
+        Ok(())
+    }
+
     /// Drive a ref pair to the point where its runtime install would run, and
-    /// assert it got there — i.e. it cleared the on-device bail in `prepare`
-    /// rather than reaching an engine.
+    /// assert it got there, past the on-device bail in `prepare`.
     fn assert_reaches_runtime_install(label: &str, argv: &[&str]) -> anyhow::Result<()> {
         let tw = seeded_workspace(label)?;
         let args = parse(argv)?;
         let (spec, benchmark) = args.into_client_run_spec(&tw.ws)?;
-        let err = run_cell(&spec, benchmark, &stubbed_artifacts(&tw)?, &tw.ws)
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("{label}: run should fail installing the runtime"))?;
+        let err = run_cell(
+            &spec,
+            benchmark,
+            &stubbed_artifacts(&tw)?,
+            &tw.ws,
+            &DeviceLabels::default(),
+            &ClientConfiguration::default(),
+            None,
+            &pipette_wait::never_cancelled,
+            &ExternalPrograms::at_missing_paths(),
+        )
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("{label}: run should fail installing the runtime"))?;
         let msg = format!("{err:#}");
         anyhow::ensure!(
             msg.contains("ensuring runtime"),
@@ -768,15 +1414,12 @@ mod tests {
         Ok(())
     }
 
-    /// A fresh workspace seeded with the full standard local benchmark catalog.
     fn seeded_workspace(label: &str) -> anyhow::Result<TempWorkspace> {
         let tw = TempWorkspace::new(&format!("bench-{label}"))?;
         seed_standard_local(&tw.ws.benchmarks(), BenchmarkType::ALL)?;
         Ok(tw)
     }
 
-    /// The summary leads with identity, then the type's headline metric — and
-    /// an optional stddev only when present.
     #[test]
     fn run_summary_leads_with_identity_then_headline_metric() {
         let lines = run_summary_lines(
@@ -790,12 +1433,13 @@ mod tests {
         assert_eq!(lines[0], "benchmark: prefill_smoke");
         assert_eq!(lines[1], "type: prefill_throughput");
         assert!(lines.iter().any(|l| l == "prefill_time_ms: 12.500000"));
-        assert!(lines
-            .iter()
-            .any(|l| l == "prefill_time_ms_stddev: 0.250000"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "prefill_time_ms_stddev: 0.250000")
+        );
     }
 
-    /// A missing optional stddev is omitted, not printed as `None`/`0`.
     #[test]
     fn run_summary_omits_absent_stddev() {
         let lines = run_summary_lines(
@@ -810,7 +1454,78 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains("stddev")));
     }
 
-    /// Eval reports a completion count rather than a timing metric.
+    /// Each optional figure prints only when the engine measured it.
+    #[rstest::rstest]
+    #[case::decode(
+        BenchmarkType::DecodeThroughput,
+        BenchmarkResultData::DecodeThroughput { decode_time_ms: 3.0, decode_time_ms_stddev: Some(0.5) },
+        &["decode_time_ms: 3.000000", "decode_time_ms_stddev: 0.500000"]
+    )]
+    #[case::end_to_end(
+        BenchmarkType::EndToEndLatency,
+        BenchmarkResultData::EndToEndLatency { total_time_ms: 940.0, total_time_ms_stddev: Some(11.0) },
+        &["total_time_ms: 940.000000", "total_time_ms_stddev: 11.000000"]
+    )]
+    #[case::end_to_end_no_stddev(
+        BenchmarkType::EndToEndLatency,
+        BenchmarkResultData::EndToEndLatency { total_time_ms: 940.0, total_time_ms_stddev: None },
+        &["total_time_ms: 940.000000"]
+    )]
+    #[case::max_memory_host_only(
+        BenchmarkType::MaxMemoryUsage,
+        BenchmarkResultData::MaxMemoryUsage { max_host_bytes: 8, max_gpu_bytes: None, max_npu_bytes: None },
+        &["max_host_bytes: 8"]
+    )]
+    #[case::max_memory_all(
+        BenchmarkType::MaxMemoryUsage,
+        BenchmarkResultData::MaxMemoryUsage { max_host_bytes: 8, max_gpu_bytes: Some(4), max_npu_bytes: Some(2) },
+        &["max_host_bytes: 8", "max_gpu_bytes: 4", "max_npu_bytes: 2"]
+    )]
+    #[case::vl_minimal(
+        BenchmarkType::VlThroughput,
+        BenchmarkResultData::VlThroughput {
+            prompt_tokens: 75, image_tokens: None, prompt_ms: 352.3, prompt_ms_stddev: None,
+            predicted_ms: 32.7, predicted_ms_stddev: None, total_time_ms: None,
+            total_time_ms_stddev: None,
+        },
+        &["prompt_tokens: 75", "prompt_ms: 352.300", "predicted_ms: 32.700"]
+    )]
+    #[case::asr(
+        BenchmarkType::AsrThroughput,
+        BenchmarkResultData::AsrThroughput {
+            asr_prompt_tokens: 137, asr_audio_tokens: 118, asr_prompt_ms: 83.3,
+            asr_prompt_ms_stddev: Some(0.9), asr_predicted_ms: 129.4, asr_predicted_ms_stddev: None,
+            total_time_ms: Some(230.0), total_time_ms_stddev: Some(2.0),
+        },
+        &[
+            "asr_prompt_tokens: 137", "asr_audio_tokens: 118", "asr_prompt_ms: 83.300",
+            "asr_prompt_ms_stddev: 0.900", "asr_predicted_ms: 129.400",
+            "total_time_ms: 230.000", "total_time_ms_stddev: 2.000",
+        ]
+    )]
+    #[case::vl_full(
+        BenchmarkType::VlThroughput,
+        BenchmarkResultData::VlThroughput {
+            prompt_tokens: 75, image_tokens: Some(64), prompt_ms: 352.3, prompt_ms_stddev: Some(3.8),
+            predicted_ms: 32.7, predicted_ms_stddev: Some(1.2), total_time_ms: Some(390.1),
+            total_time_ms_stddev: Some(4.2),
+        },
+        &[
+            "prompt_tokens: 75", "image_tokens: 64", "prompt_ms: 352.300",
+            "prompt_ms_stddev: 3.800", "predicted_ms: 32.700", "predicted_ms_stddev: 1.200",
+            "total_time_ms: 390.100", "total_time_ms_stddev: 4.200",
+        ]
+    )]
+    fn run_summary_prints_what_the_engine_measured(
+        #[case] benchmark_type: BenchmarkType,
+        #[case] data: BenchmarkResultData,
+        #[case] metrics: &[&str],
+    ) {
+        let lines = run_summary_lines("b", benchmark_type, &data);
+        let expected: Vec<String> = metrics.iter().map(|m| (*m).to_owned()).collect();
+        assert_eq!(lines.get(2..), Some(expected.as_slice()));
+    }
+
     #[test]
     fn run_summary_reports_eval_completion_count() {
         let lines = run_summary_lines(
@@ -823,7 +1538,117 @@ mod tests {
         assert!(lines.iter().any(|l| l == "completions: 0"));
     }
 
-    /// `list` surfaces the seeded catalog as `local/<id>` rows.
+    /// `vl_max_memory` reuses the `MaxMemoryUsage` result shape, so a label
+    /// derived from the data would mislabel it.
+    #[test]
+    fn run_summary_labels_vl_max_memory_by_definition_type() {
+        let lines = run_summary_lines(
+            "vl_mem_smoke",
+            BenchmarkType::VlMaxMemory,
+            &BenchmarkResultData::MaxMemoryUsage {
+                max_host_bytes: 1024,
+                max_gpu_bytes: None,
+                max_npu_bytes: None,
+            },
+        );
+        assert_eq!(lines[1], "type: vl_max_memory");
+        assert!(lines.iter().any(|l| l == "max_host_bytes: 1024"));
+    }
+
+    /// `asr_max_memory` reuses the `MaxMemoryUsage` result shape too.
+    #[test]
+    fn run_summary_labels_asr_max_memory_by_definition_type() {
+        let lines = run_summary_lines(
+            "asr_mem_smoke",
+            BenchmarkType::AsrMaxMemory,
+            &BenchmarkResultData::MaxMemoryUsage {
+                max_host_bytes: 2048,
+                max_gpu_bytes: None,
+                max_npu_bytes: None,
+            },
+        );
+        assert_eq!(lines[1], "type: asr_max_memory");
+        assert!(lines.iter().any(|l| l == "max_host_bytes: 2048"));
+    }
+
+    /// One corpus row as the wire carries it. The clocks nobody asserts on are
+    /// fixed per turn (prefill 9 ms, TTFT 11 ms); what a case varies is the
+    /// drafter's counters and the two sums the derived lines divide.
+    fn corpus_row(
+        turns: u32,
+        predicted_ms: f64,
+        e2e_ms: f64,
+        generated: u64,
+        drafted: Option<u64>,
+        accepted: Option<u64>,
+        turn_accept_length_sum: Option<f64>,
+    ) -> BenchmarkResultData {
+        BenchmarkResultData::VlSpecDecode {
+            vl_spec_decode_turns: turns,
+            vl_spec_decode_prompt_ms: 9.0 * f64::from(turns),
+            vl_spec_decode_predicted_ms: predicted_ms,
+            vl_spec_decode_ttft_ms: 11.0 * f64::from(turns),
+            vl_spec_decode_decode_ms: predicted_ms * 1.05,
+            vl_spec_decode_e2e_ms: e2e_ms,
+            vl_spec_decode_generated_tokens: generated,
+            vl_spec_decode_drafted_tokens: drafted,
+            vl_spec_decode_accepted_tokens: accepted,
+            vl_spec_decode_turn_accept_length_sum: turn_accept_length_sum,
+        }
+    }
+
+    /// No speedup: the other cell's row is a different job. A row with
+    /// speculation off shows nothing about a drafter, and a zero denominator
+    /// prints nothing rather than a `0.000` that would read as measured.
+    #[rstest]
+    #[case::speculation_on(
+        corpus_row(100, 10_000.0, 12_000.0, 1_400, Some(2_800), Some(1_050), Some(420.0)),
+        &[
+            "turns: 100",
+            "accept_length: 4.000",
+            "draft_acceptance_rate: 0.375",
+            "accept_length_per_request: 4.200",
+            "prompt_ms_per_turn: 9.000",
+            "decode_tok_per_s: 140.000",
+            "e2e_ms_per_turn: 120.000",
+        ],
+        &["speedup"]
+    )]
+    #[case::speculation_off(
+        corpus_row(100, 20_000.0, 24_000.0, 1_400, None, None, None),
+        &["decode_tok_per_s: 70.000", "prompt_ms_per_turn: 9.000"],
+        &["accept_length", "draft_acceptance_rate", "speedup"]
+    )]
+    #[case::nothing_drafted(
+        corpus_row(1, 1.0, 1.0, 1, Some(0), Some(0), Some(1.0)),
+        &["accept_length: 1.000", "accept_length_per_request: 1.000"],
+        &["draft_acceptance_rate"]
+    )]
+    fn run_summary_derives_a_corpus_rows_sanity_numbers(
+        #[case] data: BenchmarkResultData,
+        #[case] present: &[&str],
+        #[case] absent: &[&str],
+    ) {
+        let lines = run_summary_lines(
+            "vl_spec_decode_mmspec_test_gqa_k8",
+            BenchmarkType::VlSpecDecode,
+            &data,
+        );
+        assert_eq!(lines[1], "type: vl_spec_decode");
+        present.iter().for_each(|want| {
+            assert!(
+                lines.iter().any(|l| l.as_str() == *want),
+                "missing {want}: {lines:?}"
+            );
+        });
+        absent.iter().for_each(|fragment| {
+            assert!(
+                !lines.iter().any(|l| l.contains(fragment)),
+                "unexpected {fragment}: {lines:?}"
+            );
+        });
+    }
+
     #[test]
     fn list_surfaces_seeded_local_catalog() -> anyhow::Result<()> {
         let tw = seeded_workspace("all")?;
@@ -836,7 +1661,6 @@ mod tests {
         Ok(())
     }
 
-    /// `--benchmark-type` narrows the listing to a single kind.
     #[test]
     fn list_filters_by_benchmark_type() -> anyhow::Result<()> {
         let tw = seeded_workspace("filter")?;
@@ -846,6 +1670,469 @@ mod tests {
         .rows(&tw.ws)?;
         assert!(!rows.is_empty(), "catalog has decode_throughput cells");
         assert!(rows.iter().all(|r| r.benchmark_type == "decode_throughput"));
+        Ok(())
+    }
+
+    /// What `show` writes for one definition.
+    fn shown(
+        def: &BenchmarkDefinition,
+        source: pipette_plan_types::BenchmarkSource,
+    ) -> anyhow::Result<String> {
+        let mut captured = CapturedConsole::default();
+        write_benchmark(captured.out(), def, source)?;
+        Ok(captured.out_text())
+    }
+
+    /// An asr_eval prints its dataset and profile, then its beams or its
+    /// temperature (the two decodings never share an entry), then a catalog
+    /// entry's corpus and recipe.
+    #[rstest::rstest]
+    #[case::greedy(
+        serde_json::json!({}),
+        &["task:", "dataset:", "count:", "profile:", "max_tok:", "temp:"],
+        "temp:    0 (greedy)"
+    )]
+    // A seed prints with its rule, the repeat offset named when the entry
+    // names none.
+    #[case::seeded(
+        serde_json::json!({"parameter_temperature": 1.0, "parameter_seed": 0}),
+        &["task:", "dataset:", "count:", "profile:", "max_tok:", "temp:", "seed:"],
+        "seed:    0 (seed_rule=repeat_offset)"
+    )]
+    #[case::seeded_per_sample(
+        serde_json::json!({
+            "parameter_temperature": 1.0,
+            "parameter_seed": 0,
+            "parameter_seed_rule": "per_sample_sha256"
+        }),
+        &["task:", "dataset:", "count:", "profile:", "max_tok:", "temp:", "seed:"],
+        "seed:    0 (seed_rule=per_sample_sha256)"
+    )]
+    #[case::beams(
+        serde_json::json!({
+            "parameter_num_beams": 3,
+            "parameter_beam_repetition_penalty": 1.2,
+            "parameter_beam_length_penalty": 1.0
+        }),
+        &["task:", "dataset:", "count:", "profile:", "max_tok:", "beams:"],
+        "beams:   3 (repetition penalty 1.2, length penalty 1)"
+    )]
+    // Unpinned penalties print as the run uses them: the card's.
+    #[case::beams_at_the_cards_penalties(
+        serde_json::json!({"parameter_num_beams": 3}),
+        &["task:", "dataset:", "count:", "profile:", "max_tok:", "beams:"],
+        "beams:   3 (repetition penalty 1.2, length penalty 1)"
+    )]
+    #[case::catalog_entry(
+        serde_json::json!({
+            "dataset": {
+                "format": "asr-eval-corpus/1", "adapter": "evals-server@1",
+                "digest": "1".repeat(64), "bytes": 2048,
+                "upstream": {"source": "evals_server", "eval_id": "asr_esb_librispeech_test_clean",
+                             "dataset_version": "2026.10.1", "prompt_profile": "minicpm_o",
+                             "identity": "2".repeat(64)},
+            },
+            "recipe": {
+                "family": "MiniCPM-o 4.5",
+                "models": [{"repo": "openbmb/MiniCPM-o-4_5-gguf",
+                            "mmproj": "audio/MiniCPM-o-4_5-audio-F16.gguf"}],
+                "enable_thinking": false,
+                "sources": ["https://huggingface.co/openbmb/MiniCPM-o-4_5"],
+            },
+        }),
+        &[
+            "task:", "dataset:", "count:", "profile:", "max_tok:", "temp:", "corpus:", "recipe:",
+            "model:", "source:",
+        ],
+        "model:   openbmb/MiniCPM-o-4_5-gguf with audio/MiniCPM-o-4_5-audio-F16.gguf"
+    )]
+    fn asr_eval_is_shown_with_its_profile(
+        #[case] decoding: serde_json::Value,
+        #[case] keys: &[&str],
+        #[case] line: &str,
+    ) -> anyhow::Result<()> {
+        let mut wire = serde_json::json!({
+            "benchmark_id": "asr_eval_esb_librispeech_test_clean_minicpm_o",
+            "benchmark_type": "asr_eval",
+            "parameter_asr_task": "asr_esb_librispeech_test_clean",
+            "parameter_dataset_version": "2026.10.1",
+            "parameter_sample_count": 2620,
+            "parameter_prompt_profile": "minicpm_o",
+            "parameter_max_tokens": 128
+        });
+        if let (Some(wire), Some(decoding)) = (wire.as_object_mut(), decoding.as_object()) {
+            wire.extend(decoding.clone());
+        }
+        let def: BenchmarkDefinition = serde_json::from_value(wire)?;
+        let written = shown(&def, pipette_plan_types::BenchmarkSource::Remote)?;
+        let got: Vec<&str> = written
+            .lines()
+            .skip(3)
+            .map(|line| line.split_whitespace().next().unwrap_or_default())
+            .collect();
+        assert_eq!(got, keys, "{written}");
+        assert!(written.contains("profile: minicpm_o"), "{written}");
+        assert!(written.contains(line), "{written}");
+        Ok(())
+    }
+
+    #[test]
+    fn show_renders_every_seeded_definition_with_its_parameters() -> anyhow::Result<()> {
+        use pipette_plan_types::BenchmarkSource;
+
+        let tw = seeded_workspace("show")?;
+        let seen: std::collections::BTreeSet<String> = tw
+            .ws
+            .benchmarks()
+            .list(BenchmarkSource::Local)?
+            .into_iter()
+            .map(|(id, def)| -> anyhow::Result<String> {
+                let written = shown(&def, BenchmarkSource::Local)?;
+                let lines: Vec<&str> = written.lines().collect();
+                assert_eq!(lines[0], format!("id:      {id}"));
+                assert_eq!(lines[1], format!("type:    {}", def.benchmark_type()));
+                assert_eq!(lines[2], "source:  local");
+                let expected: &[&str] = match def.benchmark_type() {
+                    BenchmarkType::PrefillThroughput => &["prefill:", "batch:"],
+                    BenchmarkType::DecodeThroughput | BenchmarkType::EndToEndLatency => {
+                        &["prefill:", "decode:", "batch:"]
+                    }
+                    BenchmarkType::MaxMemoryUsage => &["prefill:"],
+                    BenchmarkType::Eval => &["eval:", "dataset:", "max_tok:", "temp:", "samples:"],
+                    BenchmarkType::VlmEval => &[
+                        "task:", "dataset:", "count:", "max_tok:", "decode:", "samples:",
+                    ],
+                    BenchmarkType::VlThroughput => &["image:", "text:", "decode:", "images:"],
+                    BenchmarkType::VlMaxMemory => &["image:", "text:", "images:"],
+                    BenchmarkType::VlSpecDecode => &["draft_k:", "corpus:"],
+                    // Not seeded locally; `asr_eval_is_shown_with_its_profile` covers it.
+                    BenchmarkType::AsrEval => &[],
+                    BenchmarkType::AsrThroughput => &["audio:", "text:", "decode:"],
+                    BenchmarkType::AsrMaxMemory => &["audio:", "text:", "decode:"],
+                };
+                let keys: Vec<&str> = lines[3..]
+                    .iter()
+                    .map(|line| line.split_whitespace().next().unwrap_or_default())
+                    .collect();
+                assert_eq!(keys, expected, "{id}: {written}");
+                Ok(def.benchmark_type().to_string())
+            })
+            .collect::<anyhow::Result<_>>()?;
+        assert!(
+            seen.len() >= 6,
+            "the seed covers the timing, memory, eval and VL kinds: {seen:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn show_renders_a_vlm_evals_decode_and_recipe() -> anyhow::Result<()> {
+        let sampled: BenchmarkDefinition = serde_json::from_value(serde_json::json!({
+            "benchmark_type": "vlm_eval", "benchmark_id": "vlm_eval_mmstar_qwen3_5",
+            "parameter_lmms_task": "mmstar", "parameter_dataset_version": "2026.10.1",
+            "parameter_sample_count": 1500, "parameter_max_tokens": 32768,
+            "parameter_temperature": 0.6, "parameter_top_p": 0.95, "parameter_top_k": 20,
+            "parameter_presence_penalty": 1.5, "parameter_seed": 0,
+            "parameter_prompt_profile": "qwen3_5",
+            "recipe": {
+                "family": "Qwen3.5",
+                "models": [{"repo": "unsloth/Qwen3.5-0.8B-GGUF"}, {"repo": "unsloth/Qwen3.5-2B-GGUF"}],
+                "enable_thinking": true,
+                "sources": ["https://huggingface.co/Qwen/Qwen3.5-2B"],
+            },
+        }))?;
+        let written = shown(&sampled, pipette_plan_types::BenchmarkSource::Remote)?;
+        let lines: Vec<&str> = written.lines().collect();
+        for expected in [
+            "decode:  temperature=0.6 top_p=0.95 top_k=20 presence_penalty=1.5 seed=0 \
+             seed_rule=repeat_offset",
+            "profile: qwen3_5",
+            "recipe:  Qwen3.5 (enable_thinking = true)",
+            "model:   unsloth/Qwen3.5-0.8B-GGUF",
+            "model:   unsloth/Qwen3.5-2B-GGUF",
+            "source:  https://huggingface.co/Qwen/Qwen3.5-2B",
+        ] {
+            assert!(lines.contains(&expected), "{expected:?} in {written}");
+        }
+        let greedy: BenchmarkDefinition = serde_json::from_value(serde_json::json!({
+            "benchmark_type": "vlm_eval", "benchmark_id": "vlm_eval_mmstar_minicpm_v_4_7",
+            "parameter_lmms_task": "mmstar", "parameter_dataset_version": "2026.10.1",
+            "parameter_sample_count": 1500, "parameter_max_tokens": 8192,
+            "parameter_repeat_penalty": 1.03, "parameter_top_k": 1, "parameter_seed": 7,
+            "recipe": {
+                "family": "MiniCPM-V 4.7",
+                "models": [{"repo": "openbmb/MiniCPM-V-4.7-1B-gguf", "mmproj": "mmproj-model-f16.gguf"}],
+                "sources": ["https://huggingface.co/openbmb/MiniCPM-V-4.7-1B"],
+            },
+        }))?;
+        let written = shown(&greedy, pipette_plan_types::BenchmarkSource::Remote)?;
+        let lines: Vec<&str> = written.lines().collect();
+        for expected in [
+            // Greedy, and still every knob the entry sets.
+            "decode:  greedy top_k=1 repeat_penalty=1.03 seed=7 seed_rule=repeat_offset",
+            "recipe:  MiniCPM-V 4.7 (enable_thinking = unset)",
+            "model:   openbmb/MiniCPM-V-4.7-1B-gguf with mmproj-model-f16.gguf",
+        ] {
+            assert!(lines.contains(&expected), "{expected:?} in {written}");
+        }
+        // An entry on the per-sample rule says so: `seed=0` alone would read
+        // the same as the repeat offset's.
+        let mut wire = serde_json::to_value(&sampled)?;
+        wire["parameter_seed_rule"] = serde_json::json!("per_sample_sha256");
+        let per_sample: BenchmarkDefinition = serde_json::from_value(wire)?;
+        let written = shown(&per_sample, pipette_plan_types::BenchmarkSource::Remote)?;
+        let expected = "decode:  temperature=0.6 top_p=0.95 top_k=20 presence_penalty=1.5 seed=0 \
+             seed_rule=per_sample_sha256";
+        assert!(
+            written.lines().any(|line| line == expected),
+            "{expected:?} in {written}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn show_renders_a_vl_memory_cells_output_length() -> anyhow::Result<()> {
+        let def = BenchmarkDefinition::VlMaxMemory(pipette_plan_types::VlMaxMemoryBenchmark {
+            benchmark_id: BenchmarkId::try_new("vl_max_memory_224x224_text0_img1_decode256")?,
+            parameter_image_width: PositiveCount::try_new(224)?,
+            parameter_image_height: PositiveCount::try_new(224)?,
+            parameter_text_tokens: NonNegativeCount::try_new(0)?,
+            parameter_decode_tokens: Some(PositiveCount::try_new(256)?),
+            parameter_num_images: NonNegativeCount::try_new(1)?,
+        });
+        let written = shown(&def, pipette_plan_types::BenchmarkSource::Remote)?;
+        assert!(
+            written.lines().any(|l| l == "decode:  256 tokens"),
+            "{written}"
+        );
+        Ok(())
+    }
+
+    /// The corpus benchmark is not seeded locally, so its rendering is pinned
+    /// from the wire document the server serves.
+    #[test]
+    fn show_renders_a_corpus_benchmarks_pin() -> anyhow::Result<()> {
+        use pipette_plan_types::BenchmarkSource;
+
+        let def: BenchmarkDefinition =
+            serde_json::from_value(corpus_wire("vl_spec_decode_mmspec_test_gqa_k8_bs8"))?;
+        let written = shown(&def, BenchmarkSource::Remote)?;
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines[2], "source:  remote");
+        assert!(lines.contains(&"draft_k: 8 tokens per step (with speculation on)"));
+        assert!(lines.contains(&"batch:   8 sample(s) in flight"));
+        assert!(lines.contains(&"temp:    0 (greedy)"));
+        assert!(lines.contains(&"corpus:  vl-spec-decode-corpus/1 (mmspec@1)"));
+        assert!(lines.contains(&"subset:  GQA"));
+        assert!(lines.contains(&"license: Apache-2.0"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("upstream:github.com/killthefullmoon/MMSpec@")),
+            "{written}"
+        );
+        Ok(())
+    }
+
+    /// Where the temperature came from is the whole difference between two
+    /// ids a reader is comparing, so the rendering has to say.
+    #[test]
+    fn show_names_the_sampling_an_eval_pins() -> anyhow::Result<()> {
+        use pipette_plan_types::BenchmarkSource;
+
+        let pinned: BenchmarkDefinition = serde_json::from_value(serde_json::json!({
+            "benchmark_id": "eval_math_500_2026.06.1_t1",
+            "benchmark_type": "eval",
+            "parameter_eval_id": "math_500",
+            "parameter_dataset_name": "2026.06.1",
+            "parameter_max_tokens": 8192,
+            "parameter_temperature": 1.0,
+            "parameter_top_p": 0.95,
+            "parameter_top_k": 64,
+            "parameter_min_p": 0.05,
+            "parameter_seed": 7,
+        }))?;
+        let lines = shown(&pinned, BenchmarkSource::Remote)?;
+        let lines: Vec<&str> = lines.lines().collect();
+        assert!(lines.contains(&"temp:    1 (pinned)"), "{lines:?}");
+        let greedy_pin: BenchmarkDefinition = serde_json::from_value(serde_json::json!({
+            "benchmark_id": "eval_math_500_2026.06.1_t0",
+            "benchmark_type": "eval",
+            "parameter_eval_id": "math_500",
+            "parameter_dataset_name": "2026.06.1",
+            "parameter_max_tokens": 8192,
+            "parameter_temperature": 0.0,
+        }))?;
+        assert!(
+            shown(&greedy_pin, BenchmarkSource::Remote)?.contains("temp:    0 (pinned, greedy)"),
+            "a pinned greedy eval must say both"
+        );
+        assert!(lines.contains(&"top_p:   0.95"), "{lines:?}");
+        assert!(lines.contains(&"top_k:   64"), "{lines:?}");
+        assert!(lines.contains(&"min_p:   0.05"), "{lines:?}");
+        assert!(
+            lines.contains(&"seed:    7 (offset by the #k repeat index)"),
+            "{lines:?}"
+        );
+
+        // Nothing pinned claims no cut, because none is sent.
+        let unpinned: BenchmarkDefinition = serde_json::from_value(serde_json::json!({
+            "benchmark_id": "eval_math_500_2026.06.1",
+            "benchmark_type": "eval",
+            "parameter_eval_id": "math_500",
+            "parameter_dataset_name": "2026.06.1",
+            "parameter_max_tokens": 8192,
+        }))?;
+        let written = shown(&unpinned, BenchmarkSource::Remote)?;
+        assert!(
+            written.contains("temp:    0.6 (eval-id policy)"),
+            "{written}"
+        );
+        ["top_p:", "top_k:", "min_p:", "seed:"]
+            .iter()
+            .for_each(|key| assert!(!written.contains(key), "{key} must not print: {written}"));
+        Ok(())
+    }
+
+    #[test]
+    fn show_names_mcq_choices_and_an_unsubset_corpus() -> anyhow::Result<()> {
+        use pipette_plan_types::BenchmarkSource;
+
+        let eval: BenchmarkDefinition = serde_json::from_value(serde_json::json!({
+            "benchmark_id": "eval_mcq",
+            "benchmark_type": "eval",
+            "parameter_eval_id": "mmlu",
+            "parameter_dataset_name": "mmlu",
+            "parameter_max_tokens": 8,
+            "parameter_mcq_choices": ["A", "B", "C"],
+        }))?;
+        let written = shown(&eval, BenchmarkSource::Local)?;
+        assert!(written.contains("\nmcq:     A, B, C\n"), "{written}");
+        assert!(!written.contains("\nsamples:"), "{written}");
+
+        let mut wire = corpus_wire("vl_spec_decode_all");
+        let strip = |value: &mut serde_json::Value, key: &str| -> anyhow::Result<()> {
+            value
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("`{key}` sits under a non-object"))?
+                .remove(key);
+            Ok(())
+        };
+        strip(&mut wire["dataset"], "subset")?;
+        strip(&mut wire["dataset"]["upstream"], "license")?;
+        strip(&mut wire, "parameter_batch_size")?;
+        let corpus: BenchmarkDefinition = serde_json::from_value(wire)?;
+        let written = shown(&corpus, BenchmarkSource::Local)?;
+        assert!(written.contains("\nsubset:  (all)\n"), "{written}");
+        assert!(written.contains("\nbatch:   1 sample(s) in flight\n"));
+        assert!(!written.contains("\nlicense:"), "{written}");
+        Ok(())
+    }
+
+    #[test]
+    fn init_local_seeds_the_catalog_and_show_refuses_an_unknown_ref() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("bench-dispatch")?;
+        let http = HttpClient::new("pipette-test")?;
+        let config = ClientConfiguration::default();
+        let programs = ExternalPrograms::at_missing_paths();
+        let run = |command: BenchmarkCommand| {
+            BenchmarkArgs { command }.execute(
+                &tw.ws,
+                &http,
+                &config,
+                &programs,
+                &mut CapturedConsole::default(),
+            )
+        };
+        let mut seeded = CapturedConsole::default();
+        BenchmarkArgs {
+            command: BenchmarkCommand::InitLocal,
+        }
+        .execute(&tw.ws, &http, &config, &programs, &mut seeded)?;
+        assert!(
+            seeded
+                .out_text()
+                .starts_with("Wrote standard local benchmarks: "),
+            "got {}",
+            seeded.out_text()
+        );
+        assert!(
+            !tw.ws
+                .benchmarks()
+                .list(pipette_plan_types::BenchmarkSource::Local)?
+                .is_empty(),
+            "init-local seeded nothing"
+        );
+        let err = run(BenchmarkCommand::Show(BenchmarkShowArgs {
+            benchmark_ref: "local/prefill_throughput_nowhere".parse()?,
+        }))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("an unknown reference should be refused"))?;
+        assert!(
+            format!("{err:#}").contains("local/prefill_throughput_nowhere"),
+            "got {err:#}"
+        );
+        Ok(())
+    }
+
+    fn write_2026_08_1_img80(tw: &TempWorkspace) -> anyhow::Result<()> {
+        write_public_2026_08_1_img80_cache(&tw.ws.root().join("benchmarks"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_and_show_read_a_synced_remote_detail() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("bench-remote-detail")?;
+        let mut sent = img80_wire();
+        sent["org_id"] = serde_json::json!("org_test");
+        cache_remote(&tw.ws.benchmarks(), sent)?;
+
+        let rows = BenchmarkListArgs {
+            benchmark_type: None,
+        }
+        .rows(&tw.ws)?;
+        let refs: Vec<&str> = rows.iter().map(|r| r.benchmark_ref.as_str()).collect();
+        assert_eq!(refs, [format!("remote/{IMG80}")]);
+
+        let mut console = CapturedConsole::default();
+        BenchmarkShowArgs {
+            benchmark_ref: format!("remote/{IMG80}").parse()?,
+        }
+        .execute(&tw.ws, &mut console)?;
+        let written = console.out_text();
+        assert!(written.contains("\nsource:  remote\n"), "{written}");
+        assert!(written.contains("\nimages:  80\n"), "{written}");
+        Ok(())
+    }
+
+    /// An older build's file may have lost a parameter, so it is never read.
+    #[test]
+    fn show_and_run_do_not_read_a_legacy_remote_file() -> anyhow::Result<()> {
+        let tw = TempWorkspace::new("bench-legacy")?;
+        write_2026_08_1_img80(&tw)?;
+        let reference = format!("remote/{IMG80}");
+        let unknown = format!("unknown benchmark reference `{reference}`");
+
+        let shown = BenchmarkShowArgs {
+            benchmark_ref: reference.parse()?,
+        }
+        .execute(&tw.ws, &mut CapturedConsole::default())
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("show read an older build's file"))?;
+        assert_eq!(format!("{shown:#}"), unknown);
+
+        let run = parse(&[
+            "--benchmark",
+            &reference,
+            "--model",
+            "gguf-text://repo=o/r&path=m-Q4_0.gguf",
+            "--runtime",
+            "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
+        ])?
+        .into_client_run_spec(&tw.ws)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("run read an older build's file"))?;
+        assert_eq!(format!("{run:#}"), unknown);
         Ok(())
     }
 
@@ -862,8 +2149,6 @@ mod tests {
             r#"[{"benchmark_type":"eval","runtime_type":"llamacpp_cli_stock_tools","model_type":"gguf_text","ctx_size":8192}]"#,
             "--http-timeout-seconds",
             "600",
-            "--doomloop-exact-repeat-required",
-            "3",
             "--model-flags",
             r#"[{"benchmark_type":"eval","model_type":"gguf_text","enable_thinking":true}]"#,
             "--sync",
@@ -881,10 +2166,8 @@ mod tests {
         Ok(())
     }
 
-    /// A well-formed `(model, runtime)` pair parses and validates to a request —
-    /// in both accepted ref forms. The URI case exercises the `scheme://` grammar;
-    /// the JSON case exercises the `{`-routes-to-serde path, with the JSON produced
-    /// by serializing the URI-parsed value so it can't drift from the serde shape.
+    /// The JSON case is produced by serializing the URI-parsed value, so it
+    /// can't drift from the serde shape.
     #[rstest::rstest]
     #[case::uri(false)]
     #[case::json(true)]
@@ -924,58 +2207,99 @@ mod tests {
         Ok(())
     }
 
-    /// The gating helper reconstructs the eval knobs into a typed
-    /// `BenchmarkFlags` from the cell's authoritative benchmark TYPE.
+    /// The llama.cpp CLI + GGUF-text cell the `build_benchmark_flags` tests
+    /// below route through.
+    fn gguf_text_cell() -> anyhow::Result<(Runtime, Model)> {
+        Ok((
+            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?,
+            parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?,
+        ))
+    }
+
+    /// The same runtime with a vision model, for the cells keyed on
+    /// `gguf_vision`.
+    fn gguf_vision_cell() -> anyhow::Result<(Runtime, Model)> {
+        Ok((
+            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?,
+            parse_model_arg(
+                "gguf-vision://repo=unsloth/gemma-4-E2B-it-GGUF&model=g.gguf&mmproj=mm.gguf",
+            )?,
+        ))
+    }
+
+    /// The OpenVINO cell, for the readiness cases.
+    fn openvino_cell() -> anyhow::Result<(Runtime, Model)> {
+        Ok((
+            parse_runtime_arg("uv-openvino://version=2026.4.1")?,
+            parse_model_arg("openvino://repo=LiquidAI/LFM2.5-350M-ov&prefix=int4-sym-cw")?,
+        ))
+    }
+
     #[test]
     fn eval_run_reconstructs_benchmark_flags() -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
-        let doomloop = pipette_doomloop::plan::DoomloopOverrides {
-            exact_repeat: Some(pipette_doomloop::plan::ExactRepeatOverrides {
-                required: Some(3),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let (runtime, model) = gguf_text_cell()?;
         let bf = build_benchmark_flags(
             BenchmarkType::Eval,
             &runtime,
             &model,
-            Some(600),
-            doomloop,
-            None,
-            false,
+            CellKnobs {
+                http_timeout_seconds: Some(600),
+                ..Default::default()
+            },
         )?
         .ok_or_else(|| anyhow::anyhow!("benchmark_flags present for an eval run"))?;
-        assert_eq!(bf.http_timeout(), Some(600));
-        assert!(bf.doomloop().is_some(), "eval carries a doom-loop");
+        assert_eq!(bf.http_timeout().map(u64::from), Some(600));
         assert_eq!(bf.axes().0, BenchmarkType::Eval);
         Ok(())
     }
 
-    // `--http-timeout-seconds` needs a server-driven benchmark (eval/vl), so a
-    // non-server type (prefill/decode) is rejected, never silently dropped.
+    fn http(secs: u64) -> CellKnobs {
+        CellKnobs {
+            http_timeout_seconds: Some(secs),
+            ..Default::default()
+        }
+    }
+
+    fn bench(secs: u64) -> CellKnobs {
+        CellKnobs {
+            bench_timeout_seconds: Some(secs),
+            ..Default::default()
+        }
+    }
+
+    fn readiness_wait(secs: u64) -> CellKnobs {
+        CellKnobs {
+            readiness_max_wait_secs: Some(secs),
+            ..Default::default()
+        }
+    }
+
+    fn skip_thermal() -> CellKnobs {
+        CellKnobs {
+            readiness_skip_thermal: true,
+            ..Default::default()
+        }
+    }
+
+    /// One table rather than a test per knob: they all fail through the same
+    /// `TryFrom` path. The two timeouts read as interchangeable and are not, so
+    /// each gets a case on the other's cell.
     #[rstest::rstest]
-    #[case(BenchmarkType::PrefillThroughput)]
-    #[case(BenchmarkType::DecodeThroughput)]
-    fn timeout_off_a_server_benchmark_is_rejected(
+    #[case::http_on_prefill(BenchmarkType::PrefillThroughput, http(600))]
+    #[case::http_on_decode(BenchmarkType::DecodeThroughput, http(600))]
+    #[case::http_on_max_memory(BenchmarkType::MaxMemoryUsage, http(600))]
+    #[case::bench_on_eval(BenchmarkType::Eval, bench(2400))]
+    #[case::bench_on_prefill(BenchmarkType::PrefillThroughput, bench(2400))]
+    #[case::readiness_on_eval(BenchmarkType::Eval, readiness_wait(1800))]
+    #[case::thermal_on_eval(BenchmarkType::Eval, skip_thermal())]
+    fn a_knob_the_cell_does_not_carry_is_rejected(
         #[case] benchmark_type: BenchmarkType,
+        #[case] knobs: CellKnobs,
     ) -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
-        let err = build_benchmark_flags(
-            benchmark_type,
-            &runtime,
-            &model,
-            Some(600),
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            None,
-            false,
-        )
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("expected an error"))?;
+        let (runtime, model) = gguf_text_cell()?;
+        let err = build_benchmark_flags(benchmark_type, &runtime, &model, knobs)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected an error"))?;
         assert!(
             format!("{err:#}").contains("not valid for this benchmark"),
             "unexpected error: {err:#}"
@@ -983,27 +2307,212 @@ mod tests {
         Ok(())
     }
 
-    /// No eval knob set carries `None` regardless of benchmark type.
     #[test]
     fn no_knob_carries_no_benchmark_flags() -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
+        let (runtime, model) = gguf_text_cell()?;
         let bf = build_benchmark_flags(
             BenchmarkType::PrefillThroughput,
             &runtime,
             &model,
-            None,
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            None,
-            false,
+            CellKnobs::default(),
         )?;
         assert!(bf.is_none());
         Ok(())
     }
 
-    /// `--http-timeout-seconds` is valid on vl-throughput (it drives
-    /// `llama-server`), producing flags with a timeout and no doom-loop.
+    #[rstest::rstest]
+    #[case::readiness(
+        BenchmarkType::PrefillThroughput,
+        r#"{"readiness":{"max_wait_secs":1800,"skip_thermal":true}}"#,
+        CellKnobs { readiness_max_wait_secs: Some(1800), readiness_skip_thermal: true, ..Default::default() },
+    )]
+    #[case::skin(
+        BenchmarkType::PrefillThroughput,
+        r#"{"readiness":{"skin_below_c":34}}"#,
+        CellKnobs { readiness_skin_below_c: Some(34), ..Default::default() },
+    )]
+    #[case::http(BenchmarkType::Eval, r#"{"http_timeout_seconds":600}"#, http(600))]
+    #[case::bench(
+        BenchmarkType::MaxMemoryUsage,
+        r#"{"bench_timeout_seconds":2400}"#,
+        bench(2400)
+    )]
+    #[case::empty(BenchmarkType::PrefillThroughput, "{}", CellKnobs::default())]
+    fn benchmark_flags_json_matches_its_shorthand(
+        #[case] benchmark_type: BenchmarkType,
+        #[case] json: &str,
+        #[case] knobs: CellKnobs,
+    ) -> anyhow::Result<()> {
+        let (runtime, model) = gguf_text_cell()?;
+        assert_eq!(
+            parse_benchmark_flags_json(json, benchmark_type, &runtime, &model)?,
+            build_benchmark_flags(benchmark_type, &runtime, &model, knobs)?,
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::array(
+        BenchmarkType::Eval,
+        r#"[{"http_timeout_seconds":600}]"#,
+        "JSON object"
+    )]
+    #[case::axis(
+        BenchmarkType::Eval,
+        r#"{"benchmark_type":"eval","http_timeout_seconds":600}"#,
+        "must not carry `benchmark_type`"
+    )]
+    #[case::unknown_knob(BenchmarkType::Eval, r#"{"cooldown":30}"#, "unknown field `cooldown`")]
+    #[case::knob_not_on_cell(
+        BenchmarkType::Eval,
+        r#"{"readiness":{"max_wait_secs":1800}}"#,
+        "not valid for this benchmark"
+    )]
+    #[case::scalar(BenchmarkType::Eval, r#""http_timeout_seconds=600""#, "JSON object")]
+    #[case::malformed(
+        BenchmarkType::Eval,
+        r#"{"http_timeout_seconds":"#,
+        "EOF while parsing"
+    )]
+    #[case::zero_wait(
+        BenchmarkType::PrefillThroughput,
+        r#"{"readiness":{"max_wait_secs":0}}"#,
+        "at least 1"
+    )]
+    #[case::skin_out_of_range(
+        BenchmarkType::PrefillThroughput,
+        r#"{"readiness":{"skin_below_c":111}}"#,
+        "SkinCelsius"
+    )]
+    fn benchmark_flags_json_is_refused(
+        #[case] benchmark_type: BenchmarkType,
+        #[case] json: &str,
+        #[case] needle: &str,
+    ) -> anyhow::Result<()> {
+        let (runtime, model) = gguf_text_cell()?;
+        let err = parse_benchmark_flags_json(json, benchmark_type, &runtime, &model)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected an error"))?;
+        assert!(
+            format!("{err:#}").contains(needle),
+            "unexpected error: {err:#}"
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::http(&["--http-timeout-seconds", "600"])]
+    #[case::bench(&["--bench-timeout-seconds", "600"])]
+    #[case::readiness_wait(&["--readiness-max-wait-secs", "600"])]
+    #[case::skip_thermal(&["--readiness-skip-thermal"])]
+    #[case::skin(&["--readiness-skin-below-c", "34"])]
+    fn benchmark_flags_json_excludes_its_shorthand(
+        #[case] shorthand: &[&str],
+    ) -> anyhow::Result<()> {
+        let mut argv = vec![
+            "--benchmark",
+            "remote/eval_smoke",
+            "--model",
+            "gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf",
+            "--runtime",
+            "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
+            "--benchmark-flags",
+            r#"{"http_timeout_seconds":600}"#,
+        ];
+        let args = parse(&argv)?;
+        assert!(args.benchmark_flags.is_some());
+        argv.extend_from_slice(shorthand);
+        assert!(parse(&argv).is_err(), "{shorthand:?} was accepted");
+        Ok(())
+    }
+
+    #[fixture]
+    fn benchmark_argv() -> Vec<&'static str> {
+        vec![
+            "--benchmark",
+            "local/prefill_throughput_smoke",
+            "--model",
+            "gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf",
+            "--runtime",
+            "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
+        ]
+    }
+
+    #[rstest]
+    #[case::zero("0", false)]
+    #[case::minimum("1", true)]
+    #[case::maximum("110", true)]
+    #[case::too_high("111", false)]
+    #[case::fraction("34.5", false)]
+    fn skin_cli_flag_accepts_only_whole_degrees_in_range(
+        benchmark_argv: Vec<&str>,
+        #[case] value: &str,
+        #[case] accepted: bool,
+    ) {
+        let mut argv = benchmark_argv;
+        argv.extend(["--readiness-skin-below-c", value]);
+        let parsed = parse(&argv);
+        assert_eq!(parsed.is_ok(), accepted);
+    }
+
+    #[rstest]
+    #[case::wait("wait", Some(pipette_readiness::HeldTouch::Wait))]
+    #[case::fail("fail", Some(pipette_readiness::HeldTouch::Fail))]
+    #[case::off("off", Some(pipette_readiness::HeldTouch::Off))]
+    #[case::unknown("skip", None)]
+    fn held_touch_cli_flag_accepts_modes(
+        benchmark_argv: Vec<&str>,
+        #[case] value: &str,
+        #[case] want: Option<pipette_readiness::HeldTouch>,
+    ) {
+        let mut argv = benchmark_argv;
+        argv.extend(["--readiness-held-touch", value]);
+        let parsed = parse(&argv);
+        assert_eq!(parsed.ok().and_then(|args| args.readiness_held_touch), want);
+    }
+
+    #[rstest]
+    fn held_touch_flag_does_not_conflict_with_benchmark_flags_json(
+        benchmark_argv: Vec<&str>,
+    ) -> anyhow::Result<()> {
+        let mut argv = benchmark_argv;
+        argv.extend([
+            "--benchmark-flags",
+            r#"{"readiness":{"max_wait_secs":900}}"#,
+            "--readiness-held-touch",
+            "fail",
+        ]);
+        let parsed = parse(&argv)?;
+        assert_eq!(
+            parsed.readiness_held_touch,
+            Some(pipette_readiness::HeldTouch::Fail)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn benchmark_flags_json_reaches_the_spec() -> anyhow::Result<()> {
+        let tw = seeded_workspace("flags-json")?;
+        let (spec, _) = parse(&[
+            "--benchmark",
+            "local/prefill_throughput_smoke",
+            "--model",
+            "gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf",
+            "--runtime",
+            "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
+            "--benchmark-flags",
+            r#"{"readiness":{"max_wait_secs":900}}"#,
+        ])?
+        .into_client_run_spec(&tw.ws)?;
+        let readiness = spec
+            .benchmark_flags
+            .as_ref()
+            .and_then(BenchmarkFlags::readiness);
+        assert_eq!(readiness.and_then(|r| r.max_wait_secs), Some(900));
+        Ok(())
+    }
+
+    /// vl-throughput drives `llama-server`, so it takes an HTTP timeout.
     #[test]
     fn timeout_on_vl_throughput_is_accepted() -> anyhow::Result<()> {
         let runtime =
@@ -1015,80 +2524,105 @@ mod tests {
             BenchmarkType::VlThroughput,
             &runtime,
             &model,
-            Some(600),
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            None,
-            false,
+            CellKnobs {
+                http_timeout_seconds: Some(600),
+                ..Default::default()
+            },
         )?
         .ok_or_else(|| anyhow::anyhow!("vl-throughput accepts an http timeout"))?;
-        assert_eq!(bf.http_timeout(), Some(600));
-        assert!(bf.doomloop().is_none(), "vl runs no doom-loop");
+        assert_eq!(bf.http_timeout().map(u64::from), Some(600));
         assert_eq!(bf.axes().0, BenchmarkType::VlThroughput);
         Ok(())
     }
 
-    /// `--readiness-max-wait-secs` is honored on a timing cell — it crosses a
-    /// readiness-carrying `(benchmark, runtime, model)` variant.
+    /// `--bench-timeout-seconds` is the peak-memory knob: both cells run their
+    /// whole measured workload under a wall-clock watchdog, so the deadline is a
+    /// decision a plan can make on either.
+    #[rstest::rstest]
+    #[case::text(BenchmarkType::MaxMemoryUsage, gguf_text_cell())]
+    #[case::vl(BenchmarkType::VlMaxMemory, gguf_vision_cell())]
+    #[case::asr(BenchmarkType::AsrMaxMemory, gguf_vision_cell())]
+    fn bench_timeout_on_a_peak_memory_cell_is_accepted(
+        #[case] benchmark_type: BenchmarkType,
+        #[case] cell: anyhow::Result<(Runtime, Model)>,
+    ) -> anyhow::Result<()> {
+        let (runtime, model) = cell?;
+        let bf = build_benchmark_flags(
+            benchmark_type,
+            &runtime,
+            &model,
+            CellKnobs {
+                bench_timeout_seconds: Some(2400),
+                ..Default::default()
+            },
+        )?
+        .ok_or_else(|| anyhow::anyhow!("a peak-memory cell accepts a bench deadline"))?;
+        assert_eq!(bf.bench_timeout().map(u64::from), Some(2400));
+        assert!(bf.readiness().is_none(), "peak memory does not gate");
+        assert_eq!(bf.axes().0, benchmark_type);
+        Ok(())
+    }
+
     #[test]
     fn readiness_on_timing_cell_is_accepted() -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
+        let (runtime, model) = gguf_text_cell()?;
         let bf = build_benchmark_flags(
             BenchmarkType::PrefillThroughput,
             &runtime,
             &model,
-            None,
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            Some(1800),
-            false,
+            CellKnobs {
+                readiness_max_wait_secs: Some(1800),
+                ..Default::default()
+            },
         )?
         .ok_or_else(|| anyhow::anyhow!("prefill accepts a readiness override"))?;
         assert_eq!(bf.readiness().and_then(|r| r.max_wait_secs), Some(1800));
         Ok(())
     }
 
-    /// `--readiness-max-wait-secs` on eval is rejected — the conjunction doesn't
-    /// cross a readiness-carrying cell (eval gates on server, not device).
-    #[test]
-    fn readiness_off_a_timing_benchmark_is_rejected() -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
-        let err = build_benchmark_flags(
-            BenchmarkType::Eval,
+    /// OpenVINO's timing cells gate on the same criteria as llama.cpp's, so an
+    /// override accepted elsewhere must be accepted here too.
+    #[rstest::rstest]
+    #[case::prefill(BenchmarkType::PrefillThroughput)]
+    #[case::decode(BenchmarkType::DecodeThroughput)]
+    #[case::end_to_end(BenchmarkType::EndToEndLatency)]
+    fn readiness_on_an_openvino_timing_cell_is_accepted(
+        #[case] benchmark_type: BenchmarkType,
+    ) -> anyhow::Result<()> {
+        let (runtime, model) = openvino_cell()?;
+        let bf = build_benchmark_flags(
+            benchmark_type,
             &runtime,
             &model,
-            None,
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            Some(1800),
-            false,
-        )
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("expected an error"))?;
-        assert!(
-            format!("{err:#}").contains("not valid for this benchmark"),
-            "unexpected error: {err:#}"
-        );
+            CellKnobs {
+                readiness_max_wait_secs: Some(1800),
+                readiness_skip_thermal: true,
+                ..Default::default()
+            },
+        )?
+        .ok_or_else(|| anyhow::anyhow!("an OpenVINO timing cell accepts a readiness override"))?;
+        let readiness = bf
+            .readiness()
+            .ok_or_else(|| anyhow::anyhow!("expected a readiness override"))?;
+        assert_eq!(readiness.max_wait_secs, Some(1800));
+        assert_eq!(readiness.skip_thermal, Some(true));
+        assert_eq!(bf.axes().0, benchmark_type);
         Ok(())
     }
 
-    /// `--readiness-skip-thermal` on its own is enough to build a readiness
-    /// override — it must not need `--readiness-max-wait-secs` alongside it,
-    /// and it must not invent a deadline it wasn't given.
+    /// It must not need `--readiness-max-wait-secs` alongside it, and it must
+    /// not invent a deadline it wasn't given.
     #[test]
     fn readiness_skip_thermal_alone_is_accepted_on_a_timing_cell() -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
+        let (runtime, model) = gguf_text_cell()?;
         let bf = build_benchmark_flags(
             BenchmarkType::PrefillThroughput,
             &runtime,
             &model,
-            None,
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            None,
-            true,
+            CellKnobs {
+                readiness_skip_thermal: true,
+                ..Default::default()
+            },
         )?
         .ok_or_else(|| anyhow::anyhow!("prefill accepts a thermal waiver on its own"))?;
         let readiness = bf
@@ -1102,22 +2636,16 @@ mod tests {
         Ok(())
     }
 
-    /// `false` is not an override. Passing it must leave the cell with no
-    /// readiness knob at all, so an unused flag can't make a default-gated run
-    /// look like one that opted into something.
+    /// `false` is not an override: an unused flag must not make a default-gated
+    /// run look like one that opted into something.
     #[test]
     fn readiness_skip_thermal_false_records_no_override() -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
+        let (runtime, model) = gguf_text_cell()?;
         let flags = build_benchmark_flags(
             BenchmarkType::PrefillThroughput,
             &runtime,
             &model,
-            None,
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            None,
-            false,
+            CellKnobs::default(),
         )?;
         assert!(
             flags.is_none_or(|bf| bf.readiness().is_none()),
@@ -1126,36 +2654,10 @@ mod tests {
         Ok(())
     }
 
-    /// The waiver is rejected on the same benchmarks the deadline is: eval gates
-    /// on the server, not the device, so there is no thermal criterion to waive.
+    /// Plan `ModelFlags` exist only on eval and vlm_eval cells, so this is
+    /// rejected at the CLI boundary.
     #[test]
-    fn readiness_skip_thermal_off_a_timing_benchmark_is_rejected() -> anyhow::Result<()> {
-        let runtime =
-            parse_runtime_arg("llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64")?;
-        let model = parse_model_arg("gguf-text://repo=unsloth/gemma-4-E2B-it-GGUF&path=g.gguf")?;
-        let err = build_benchmark_flags(
-            BenchmarkType::Eval,
-            &runtime,
-            &model,
-            None,
-            pipette_doomloop::plan::DoomloopOverrides::default(),
-            None,
-            true,
-        )
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("expected an error"))?;
-        assert!(
-            format!("{err:#}").contains("not valid for this benchmark"),
-            "unexpected error: {err:#}"
-        );
-        Ok(())
-    }
-
-    /// Plan `ModelFlags` only exist on eval cells — non-eval +
-    /// `--model-enable-thinking` is rejected at the CLI boundary (not stored
-    /// then stripped on submit as the old flat ops flags did).
-    #[test]
-    fn model_enable_thinking_on_non_eval_is_rejected() -> anyhow::Result<()> {
+    fn model_enable_thinking_on_a_timing_benchmark_is_rejected() -> anyhow::Result<()> {
         let tw = seeded_workspace("enable-thinking-non-eval")?;
         let args = parse(&[
             "--benchmark",
@@ -1178,11 +2680,58 @@ mod tests {
         Ok(())
     }
 
-    /// `--runtime-flags` is a JSON object of knobs, and nothing else.
-    ///
-    /// The cell comes from `--benchmark`, `--runtime` and `--model`. Frozen alongside the
-    /// refusals below so the single-format rule cannot erode back into "accepts whatever
-    /// happens to parse".
+    #[rstest]
+    #[case::flat(&["--model-enable-thinking", "true"], None)]
+    #[case::json(
+        &["--model-flags", r#"{"benchmark_type":"vlm_eval","model_type":"gguf_vision","enable_thinking":true}"#],
+        None
+    )]
+    #[case::entry_for_a_text_eval(
+        &["--model-flags", r#"{"benchmark_type":"eval","model_type":"gguf_text","enable_thinking":true}"#],
+        Some("does not match this cell")
+    )]
+    fn a_vlm_eval_takes_enable_thinking_as_a_model_flag(
+        #[case] extra: &[&str],
+        #[case] refusal: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let tw = seeded_workspace("vlm-eval-thinking")?;
+        let mut argv = vec![
+            "--benchmark",
+            "local/vlm_eval_smoke",
+            "--model",
+            "gguf-vision://repo=unsloth/gemma-4-E2B-it-GGUF&model=g.gguf&mmproj=mm.gguf",
+            "--runtime",
+            "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
+        ];
+        argv.extend_from_slice(extra);
+        let result = parse(&argv)?.into_client_run_spec(&tw.ws);
+
+        match (result, refusal) {
+            (Ok((spec, _)), None) => {
+                let flags = spec
+                    .model_flags
+                    .ok_or_else(|| anyhow::anyhow!("expected model flags"))?;
+                assert_eq!(
+                    flags.axes(),
+                    (BenchmarkType::VlmEval, ModelType::GgufVision)
+                );
+                assert_eq!(flags.enable_thinking(), Some(true));
+            }
+            (Err(err), Some(expected)) => {
+                let chain = format!("{err:#}");
+                assert!(
+                    chain.contains(expected),
+                    "expected {expected:?}, got: {chain}"
+                );
+            }
+            (Ok(_), Some(_)) => anyhow::bail!("{extra:?} should have been refused"),
+            (Err(err), None) => return Err(err),
+        }
+        Ok(())
+    }
+
+    /// The cell comes from `--benchmark`, `--runtime` and `--model`; the JSON
+    /// carries only knobs.
     #[test]
     fn runtime_flags_is_an_object_of_knobs() -> anyhow::Result<()> {
         let tw = seeded_workspace("rt-flags-ok")?;
@@ -1199,8 +2748,7 @@ mod tests {
         Ok(())
     }
 
-    /// An empty object is "no flags", not an error — the runner emits nothing at all in
-    /// that case, but a hand-written `{}` should mean the same thing.
+    /// A hand-written `{}` means the same as no flag at all.
     #[test]
     fn an_empty_runtime_flags_object_is_no_flags() -> anyhow::Result<()> {
         let tw = seeded_workspace("rt-flags-empty")?;
@@ -1210,9 +2758,8 @@ mod tests {
         Ok(())
     }
 
-    /// What `--runtime-flags` refuses, and that the refusal names the offence. Each of
-    /// these used to be expressible: an entry for another cell would have been applied to
-    /// this one, and a knob the cell does not carry would have been dropped.
+    /// An entry for another cell must not be applied to this one, and a knob
+    /// the cell does not carry must not be dropped.
     #[rstest]
     #[case::any_array(r#"[{"threads":4}]"#, "object of knobs")]
     #[case::multiple_entries(r#"[{"threads":1},{"threads":2}]"#, "object of knobs")]
@@ -1246,13 +2793,9 @@ mod tests {
         Ok(())
     }
 
-    /// The plan and the CLI agree on what a cell is.
-    ///
-    /// A plan authors `runtime_flags` keyed by `(benchmark, runtime, model)`; the runner
-    /// resolves one entry for the cell and ships its knobs; the client re-derives the axes
-    /// from the same three arguments. This walks that whole path — author, resolve, emit,
-    /// parse — and asserts the client ends up holding exactly what the plan authored. It
-    /// is the test that would fail if either side changed the wire alone.
+    /// Walks author, resolve, emit and parse, and asserts the client ends up
+    /// holding exactly what the plan authored: the test that fails if either
+    /// side changes the wire alone.
     #[test]
     fn a_plans_cell_definition_survives_the_trip_to_the_client() -> anyhow::Result<()> {
         use pipette_plan_types::Plan;
@@ -1272,7 +2815,7 @@ shell = "posix"
 [[variants]]
 clients  = ["t1"]
 models   = [{ type = "gguf_text", source = "huggingface", org = "unsloth", repo_name = "gemma-4-E2B-it-GGUF", path = "g.gguf" }]
-runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", version = "b9050", flavor = "macos-arm64" }]
+runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", version = "b9050", flavor = "macos-arm64" }]
 runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_text", threads = 4 }]
 "#,
         )?;
@@ -1292,8 +2835,8 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         Ok(())
     }
 
-    /// A `prefill_throughput` run over the gguf-text × llama.cpp cell, varying only the
-    /// flags — the pairing every `--runtime-flags` case above is resolved against.
+    /// A `prefill_throughput` run over the gguf-text x llama.cpp cell, varying
+    /// only the flags.
     fn prefill_args(runtime_flags: &str) -> anyhow::Result<BenchmarkRunArgs> {
         parse(&[
             "--benchmark",
@@ -1321,15 +2864,14 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
             r#"{"ctx_size":8192,"raw":["--foo","bar"]}"#,
         ])?;
         let (spec, _) = args.into_client_run_spec(&tw.ws)?;
-        // The `raw` escape hatch rides inside the one RuntimeFlags entry — there
-        // is no separate raw channel.
+        // `raw` rides inside the one RuntimeFlags entry; there is no separate
+        // raw channel.
         assert!(spec.runtime_flags.is_some());
         Ok(())
     }
 
-    /// `--model-flags` accepts the plan's one-element array and the bare object a claim
-    /// carries — the same two-way tolerance `--runtime-flags` has. Frozen here so the
-    /// spellings a deployed client relies on cannot be dropped by accident.
+    /// The plan's one-element array and the bare object a claim carries: the
+    /// spellings a deployed client relies on.
     #[rstest]
     #[case::bare_object(
         r#"{"benchmark_type":"eval","model_type":"gguf_text","enable_thinking":true}"#
@@ -1382,8 +2924,8 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         Ok(())
     }
 
-    /// An eval run over the gguf-text × llama.cpp cell — the pairing the model-flags cases
-    /// above are resolved against, since only eval cells carry generation flags.
+    /// An eval run over the gguf-text x llama.cpp cell: only eval and vlm_eval
+    /// cells carry generation flags.
     fn eval_args(extra: &[&str]) -> anyhow::Result<BenchmarkRunArgs> {
         let mut argv = vec![
             "--benchmark",
@@ -1418,12 +2960,11 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         Ok(())
     }
 
+    /// An MLX model on a llama.cpp runtime is a well-formed ref pair that no
+    /// host loads.
     #[test]
     fn model_incompatible_with_the_runtime_is_rejected() -> anyhow::Result<()> {
-        // An MLX model on a llama.cpp runtime is a well-formed ref pair that fails
-        // the `is_compatible` gate — rejected before benchmark resolution or any
-        // download, so the workspace need not be seeded.
-        let tw = TempWorkspace::new("bench-model-wrong")?;
+        let tw = seeded_workspace("model-wrong")?;
         let args = parse(&[
             "--benchmark",
             "local/eval_smoke",
@@ -1432,16 +2973,87 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
             "--runtime",
             "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
         ])?;
-        assert!(args.into_client_run_spec(&tw.ws).is_err());
+        let err = args
+            .into_client_run_spec(&tw.ws)
+            .err()
+            .context("an incompatible pair must be refused")?;
+        assert!(
+            matches!(
+                err.downcast_ref::<RunSpecError>(),
+                Some(RunSpecError::Incompatible { .. })
+            ),
+            "{err:#}"
+        );
         Ok(())
     }
 
-    /// An on-device runtime can't run from the CLI: it clears `is_compatible`
-    /// and reaches dispatch, where its arm bails. Shown with JSON refs since
-    /// on-device runtimes have no URI scheme.
+    const OPENVINO_RUNTIME: &str = "uv-openvino://version=2026.4.1";
+    const OVMS_RUNTIME: &str = "ovms://version=v2026.4.1&flavor=windows-x64";
+
+    fn openvino_run_args(runtime: &str) -> anyhow::Result<BenchmarkRunArgs> {
+        parse(&[
+            "--benchmark",
+            "local/prefill_throughput_smoke",
+            "--model",
+            "openvino://repo=LiquidAI/LFM2.5-350M-ov&prefix=int4-sym-cw",
+            "--runtime",
+            runtime,
+        ])
+    }
+
+    /// OpenVINO and OVMS run on Linux and Windows only.
+    #[rstest]
+    #[case::openvino(OPENVINO_RUNTIME)]
+    #[case::ovms(OVMS_RUNTIME)]
+    fn openvino_and_ovms_follow_this_hosts_os(#[case] runtime: &str) -> anyhow::Result<()> {
+        let tw = seeded_workspace("host-os")?;
+        expect_gate_on_this_host(openvino_run_args(runtime)?.into_client_run_spec(&tw.ws))?;
+        Ok(())
+    }
+
+    /// On a host the gate refuses, the run fails before anything installs:
+    /// neither store is touched. Elsewhere the run would install for real.
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[rstest]
+    #[case::openvino(OPENVINO_RUNTIME)]
+    #[case::ovms(OVMS_RUNTIME)]
+    fn a_refused_run_installs_nothing(#[case] runtime: &str) -> anyhow::Result<()> {
+        let tw = seeded_workspace("host-os-run")?;
+        let err = openvino_run_args(runtime)?
+            .execute(
+                &tw.ws,
+                &test_http()?,
+                &ClientConfiguration::default(),
+                &ExternalPrograms::at_missing_paths(),
+                &mut CapturedConsole::default(),
+            )
+            .err()
+            .context("this host must be refused")?;
+        assert!(
+            err.downcast_ref::<crate::run::ForeignOsError>().is_some(),
+            "{err:#}"
+        );
+        [
+            tw.ws.runtimes().runtimes_dir().to_path_buf(),
+            tw.ws.models().models_dir().to_path_buf(),
+        ]
+        .iter()
+        .try_for_each(|dir| -> anyhow::Result<()> {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries.count(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(e) => return Err(e.into()),
+            };
+            assert_eq!(entries, 0, "{} was touched", dir.display());
+            Ok(())
+        })
+    }
+
+    /// An on-device runtime can't run from the CLI: `prepare` refuses it before
+    /// anything installs. Shown with JSON refs since on-device runtimes have no
+    /// URI scheme.
     #[test]
     fn run_rejects_on_device_runtime() -> anyhow::Result<()> {
-        // Seed the catalog so the benchmark resolves and the run reaches dispatch.
         let tw = seeded_workspace("run-dispatch")?;
         let err = parse(&[
             "--benchmark",
@@ -1451,7 +3063,13 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
             "--runtime",
             r#"{"type":"apple_foundation"}"#,
         ])?
-        .execute(&tw.ws, &test_http()?)
+        .execute(
+            &tw.ws,
+            &test_http()?,
+            &ClientConfiguration::default(),
+            &ExternalPrograms::at_missing_paths(),
+            &mut CapturedConsole::default(),
+        )
         .err()
         .ok_or_else(|| anyhow::anyhow!("run should error for an on-device runtime"))?;
         assert!(
@@ -1461,12 +3079,9 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         Ok(())
     }
 
-    /// A vLLM/SGLang ref pair clears the on-device bail and reaches artifact
-    /// ensure, where the torch-oai install arm lives. It stops there — `prepare`
-    /// fails before any engine runs.
-    ///
-    /// Runs against [`stubbed_artifacts`]: the docker arm of that ensure is
-    /// `docker pull vllm/vllm-openai:v0.21.0`, a real registry pull.
+    /// A vLLM ref pair clears the on-device bail and reaches artifact ensure,
+    /// where it stops. [`stubbed_artifacts`] keeps it from a real
+    /// `docker pull vllm/vllm-openai:v0.21.0`.
     #[test]
     fn torch_oai_reaches_runtime_install() -> anyhow::Result<()> {
         let model = Model::Torch(pipette_plan_types::Torch {
@@ -1494,9 +3109,8 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         )
     }
 
-    /// Benchmark resolution now happens in `into_client_run_spec`, before dispatch:
-    /// on a fresh (unseeded) workspace an absent benchmark fails there with
-    /// "unknown benchmark reference", without any download or run.
+    /// An absent benchmark fails in `into_client_run_spec`, before any download
+    /// or run.
     #[test]
     fn llama_arm_dispatches_into_run() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("bench-run-llama")?;
@@ -1508,7 +3122,13 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
             "--runtime",
             "llamacpp-cli-stock-tools://version=b9050&flavor=macos-arm64",
         ])?
-        .execute(&tw.ws, &test_http()?)
+        .execute(
+            &tw.ws,
+            &test_http()?,
+            &ClientConfiguration::default(),
+            &ExternalPrograms::at_missing_paths(),
+            &mut CapturedConsole::default(),
+        )
         .err()
         .ok_or_else(|| anyhow::anyhow!("run should fail resolving an absent benchmark"))?;
         assert!(
@@ -1518,12 +3138,8 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         Ok(())
     }
 
-    /// An MLX ref pair resolves its catalog URI and reaches artifact ensure,
-    /// where the MLX install arm lives. macOS-only — the MLX crate compiles away
-    /// on other hosts.
-    ///
-    /// Runs against [`stubbed_artifacts`]: ensuring an MLX runtime builds a uv
-    /// venv, which a unit test has no business doing.
+    /// An MLX ref pair resolves its catalog URI and reaches artifact ensure.
+    /// [`stubbed_artifacts`] keeps it from building a uv venv.
     #[cfg(target_os = "macos")]
     #[test]
     fn mlx_reaches_runtime_install() -> anyhow::Result<()> {
@@ -1541,8 +3157,7 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         )
     }
 
-    /// Regression for PIP-409: the plan runner's `build_argv` must emit a
-    /// `--model` the client can parse. It ships the model as JSON (projector
+    /// Regression for PIP-409: `build_argv` ships the model as JSON (projector
     /// inline for VL, no `--mmproj`); a flat `o/r:a.gguf` would be rejected by
     /// `parse_model_arg`.
     #[test]
@@ -1561,7 +3176,7 @@ shell = "posix"
 [[variants]]
 clients  = ["t1"]
 models   = [{ type = "gguf_vision", source = "huggingface", org = "o", repo_name = "r", model = "a.gguf", mmproj = "m.gguf" }]
-runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", version = "b9050", flavor = "macos-arm64" }]
+runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", repository_url = "github.com/ggml-org/llama.cpp", version = "b9050", flavor = "macos-arm64" }]
 "#;
         let plan = pipette_plan_types::Plan::parse(toml_str)?;
         let transport = plan
@@ -1579,8 +3194,6 @@ runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", vers
             .iter()
             .position(|a| a == "--model")
             .ok_or_else(|| anyhow::anyhow!("--model present"))?;
-        // The core PIP-409 assertion: this parses (a flat ref would `Err`), and
-        // the projector rode inside the model ref — no `--mmproj`.
         let model = parse_model_arg(&argv[model_idx + 1])?;
         assert!(matches!(model, Model::GgufVision(_)));
         assert!(!argv.iter().any(|a| a == "--mmproj"));
@@ -1588,11 +3201,9 @@ runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", vers
     }
 
     /// Every value the help block passes to `--<flag>`, quoted (`--model 'x'`)
-    /// or bare (`--benchmark x`).
-    ///
-    /// Comment lines are skipped: the prose there names flags too, and a
-    /// mention is not an example. The count is checked against the command
-    /// lines so a reflowed example cannot silently stop being verified.
+    /// or bare (`--benchmark x`). Comment lines are skipped: a mention is not
+    /// an example. The count is checked so a reflowed example cannot silently
+    /// stop being verified.
     fn help_values<'a>(help: &'a str, flag: &str) -> Vec<&'a str> {
         let needle = format!("--{flag} ");
         let commands = || {
@@ -1616,8 +3227,6 @@ runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", vers
         values
     }
 
-    /// Every ref quoted in `benchmarks run --help` must parse, so the examples
-    /// cannot drift from the grammar.
     #[test]
     fn after_help_refs_parse() -> anyhow::Result<()> {
         let models = help_values(RUN_AFTER_HELP, "model");
@@ -1712,8 +3321,14 @@ runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", vers
         ("threads", "4"),
         ("number_gpu_layers", "99"),
         ("mmap", "true"),
+        ("load_mode", "\"none\""),
         ("flash_attention", "\"on\""),
         ("ctx_size", "4096"),
+        ("parallel", "8"),
+        (
+            "repetition_detection",
+            "{\"min_pattern_size\": 2, \"max_pattern_size\": 128, \"min_count\": 10}",
+        ),
         ("n_ubatch", "512"),
         ("swa_full", "true"),
         ("no_cache", "true"),
@@ -1728,8 +3343,12 @@ runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", vers
         ("gpus", "\"all\""),
         ("shm_size", "\"16g\""),
         ("ipc", "\"host\""),
+        ("precision", "\"fp16\""),
         ("envs", "[\"NCCL_DEBUG\"]"),
-        ("raw", "[\"--some-passthrough\"]"),
+        // A value, not a flag: every cell takes it, the vLLM vlm_eval cell's
+        // allowlist included.
+        ("raw", "[\"some-passthrough\"]"),
+        ("speculative_enabled", "false"),
     ];
 
     /// The settings the real parser accepts for one cell.
@@ -1788,44 +3407,78 @@ runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", vers
         Ok(())
     }
 
-    /// The CELL SETTINGS block in `--help` must match what the parser accepts.
-    ///
-    /// The `documented` list is the load-bearing check: it is compared against
-    /// the real parser, so a wrong row fails. The block is then searched for
-    /// each name, which only catches a setting missing from the help *entirely*
-    /// (a name dropped from one row still appears in another). Row-level
-    /// precision would mean parsing the layout, which breaks on any reflow.
+    /// The `documented` list is the load-bearing check, against the real
+    /// parser. The block is then searched for each name, which only catches a
+    /// setting missing from the help entirely; row-level precision would mean
+    /// parsing the layout, which breaks on any reflow.
     #[rstest]
     #[case::llama_bench(
         RuntimeType::LlamacppCliStockTools, ModelType::GgufText, BenchmarkType::PrefillThroughput,
-        &["threads", "number_gpu_layers", "mmap", "flash_attention", "raw"]
+        &["threads", "number_gpu_layers", "mmap", "load_mode", "flash_attention", "envs", "raw"]
     )]
     #[case::llama_server(
         RuntimeType::LlamacppCliStockTools, ModelType::GgufText, BenchmarkType::Eval,
-        &["threads", "number_gpu_layers", "mmap", "flash_attention", "ctx_size", "no_cache", "raw"]
+        &["threads", "number_gpu_layers", "mmap", "load_mode", "flash_attention", "ctx_size",
+          "no_cache", "parallel", "envs", "raw"]
     )]
     #[case::llama_vl(
         RuntimeType::LlamacppCliStockTools, ModelType::GgufVision, BenchmarkType::VlThroughput,
-        &["threads", "number_gpu_layers", "mmap", "flash_attention", "ctx_size", "no_cache", "raw"]
+        &["threads", "number_gpu_layers", "mmap", "load_mode", "flash_attention", "ctx_size",
+          "no_cache", "envs", "raw"]
+    )]
+    #[case::llama_vlm_eval(
+        RuntimeType::LlamacppCliStockTools, ModelType::GgufVision, BenchmarkType::VlmEval,
+        &["threads", "number_gpu_layers", "mmap", "load_mode", "flash_attention", "ctx_size",
+          "no_cache", "parallel", "envs", "raw"]
     )]
     #[case::docker_vllm(
         RuntimeType::DockerVllm, ModelType::Torch, BenchmarkType::Eval,
         &["tensor_parallel_size", "dtype", "max_model_len", "prefix_caching", "gpus", "shm_size",
+          "ipc", "parallel", "repetition_detection", "envs", "raw"]
+    )]
+    #[case::docker_vllm_prefill(
+        RuntimeType::DockerVllm, ModelType::Torch, BenchmarkType::PrefillThroughput,
+        &["tensor_parallel_size", "dtype", "max_model_len", "prefix_caching", "gpus", "shm_size",
           "ipc", "envs", "raw"]
+    )]
+    #[case::uv_sglang_decode(
+        RuntimeType::UvSglang, ModelType::Torch, BenchmarkType::DecodeThroughput,
+        &["tensor_parallel_size", "prefix_caching", "envs", "raw"]
     )]
     #[case::uv_vllm(
         RuntimeType::UvVllm, ModelType::Torch, BenchmarkType::Eval,
-        &["tensor_parallel_size", "dtype", "max_model_len", "prefix_caching", "envs", "raw"]
+        &["tensor_parallel_size", "dtype", "max_model_len", "prefix_caching", "parallel",
+          "repetition_detection", "envs", "raw"]
+    )]
+    #[case::uv_vllm_vlm_eval(
+        RuntimeType::UvVllm, ModelType::Torch, BenchmarkType::VlmEval,
+        &["tensor_parallel_size", "dtype", "max_model_len", "prefix_caching", "parallel", "envs",
+          "raw"]
     )]
     #[case::uv_sglang(
         RuntimeType::UvSglang, ModelType::Torch, BenchmarkType::Eval,
-        &["tensor_parallel_size", "prefix_caching", "envs", "raw"]
+        &["tensor_parallel_size", "prefix_caching", "parallel", "envs", "raw"]
     )]
     #[case::openvino(
         RuntimeType::UvOpenvino, ModelType::Openvino, BenchmarkType::PrefillThroughput,
         &["device", "max_prompt_len", "min_response_len", "generate_hint"]
     )]
+    #[case::ovms(
+        RuntimeType::Ovms, ModelType::Openvino, BenchmarkType::DecodeThroughput,
+        &["device", "max_prompt_len", "min_response_len", "generate_hint", "prefix_caching"]
+    )]
+    #[case::trt_edgellm(
+        RuntimeType::TrtEdgellm, ModelType::GgufVision, BenchmarkType::VlThroughput,
+        &["precision", "envs", "raw"]
+    )]
+    #[case::onnx_genai(
+        RuntimeType::UvOnnxGenai, ModelType::OnnxGenai, BenchmarkType::PrefillThroughput, &[]
+    )]
     #[case::mlx(RuntimeType::MlxMacosPipette, ModelType::Mlx, BenchmarkType::Eval, &[])]
+    #[case::core_ai(
+        RuntimeType::AppleCoreAiMacosPipette, ModelType::AppleCoreAi,
+        BenchmarkType::PrefillThroughput, &[]
+    )]
     fn help_cell_settings_match_the_parser(
         #[case] runtime: RuntimeType,
         #[case] model: ModelType,
@@ -1865,8 +3518,6 @@ runtimes = [{ type = "llamacpp_cli_stock_tools", source = "github_release", vers
         Required,
     }
 
-    /// The flag JSON in the help must be well-formed and carry exactly the axis
-    /// keys its flag accepts.
     #[rstest]
     #[case::runtime_flags(
         "runtime-flags",

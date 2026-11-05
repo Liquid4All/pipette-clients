@@ -1,0 +1,78 @@
+# Example plan: TensorRT Edge-LLM on a Jetson AGX Orin, vision-language cells.
+# See docs/pipette-cli/trt-edgellm.md in the pipette clients repo.
+#
+# The `trt_edgellm` runtime is a server archive built for one SoC and CUDA
+# major (flavor `jetson-orin-cuda-13`: a Jetson Orin on CUDA 13, as JetPack 7.2
+# ships it). It reads the same GGUF vision pair llama.cpp does and builds its
+# TensorRT engines from it on the device, into the client's compile cache and
+# before the measured windows, so the first cell of a (model, precision) takes
+# the build and the rest reuse it.
+#
+# Only `vl_throughput` and `vl_max_memory` run on it. A cell's runtime flags
+# take the language model's engine `precision` (fp16, bf16 or w8a16; the
+# vision encoder builds at FP16), env forwards, and `raw` for the server's own
+# flags. `--model`, `-m`, `--mmproj`, `--host`, `--port`, `--cache-dir` and
+# `--build-only` are the harness's, and `--precision` is the typed knob's, so
+# `raw` refuses them all.
+#
+# The server converts unquantized GGUFs of the LFM3-VL layout only, and refuses
+# a Q8_0 one: TensorRT's INT8 is per channel, so the Q8_0 counterpart is the
+# BF16 GGUF built at `w8a16`. Both variants below therefore name the BF16 pair.
+# Replace the vault ids with the pair's upload; a VLA projector (one carrying
+# the `robo.*` head) runs in VLA mode under the `--robo-*` raw flags.
+#
+# Upload the archive with pipette-ctl as a vault runtime of type
+# `trt_edgellm`, then replace the placeholder `vault_remote_archive` entries
+# below with the one the upload answers with.
+#
+# State written to
+# .pipette-ctl/plans/trt-edgellm-orin-vl/state.jsonl.
+
+plan_id = "trt-edgellm-orin-vl"
+benchmarks = [
+  "vl_throughput_512x512_text0_decode64_img1",
+  "vl_max_memory_512x512_text0_img1",
+]
+
+[[transports]]
+client_id   = "orin-a"
+type        = "ssh"
+host        = "orin-a"
+user        = "pipette"
+binary_path = "/opt/pipette/pipette"
+work_dir    = "/opt/pipette"
+shell       = "posix"
+
+[retry]
+max_consecutive_failures = 3
+
+# One engine build per (model, precision): the language model at FP16, and at
+# INT8 weights per output channel with FP16 activations.
+[[variants]]
+clients = ["orin-a"]
+models = [
+  { type = "gguf_vision", source = "vault_url", model = "/vault/resources/vault_00000000-0000-0000-0000-000000000001/content", mmproj = "/vault/resources/vault_00000000-0000-0000-0000-000000000002/content", principal_id = "org_01936d", custom_label = "LFM3-VL-1.9B BF16" },
+]
+runtimes = [
+  { type = "trt_edgellm", source = "vault_remote_archive", url = "/vault/resources/vault_00000000-0000-0000-0000-000000000003/content", principal_id = "org_01936d", custom_label = "TensorRT Edge-LLM server 0.11.0", flavor = "jetson-orin-cuda-13" },
+]
+runtime_flags = [
+  { benchmark_type = "vl_throughput", runtime_type = "trt_edgellm", model_type = "gguf_vision", precision = "fp16" },
+  { benchmark_type = "vl_max_memory", runtime_type = "trt_edgellm", model_type = "gguf_vision", precision = "fp16" },
+]
+benchmark_flags = [
+  { benchmark_type = "vl_throughput", runtime_type = "trt_edgellm", model_type = "gguf_vision", http_timeout_seconds = 300 },
+]
+
+[[variants]]
+clients = ["orin-a"]
+models = [
+  { type = "gguf_vision", source = "vault_url", model = "/vault/resources/vault_00000000-0000-0000-0000-000000000001/content", mmproj = "/vault/resources/vault_00000000-0000-0000-0000-000000000002/content", principal_id = "org_01936d", custom_label = "LFM3-VL-1.9B BF16" },
+]
+runtimes = [
+  { type = "trt_edgellm", source = "vault_remote_archive", url = "/vault/resources/vault_00000000-0000-0000-0000-000000000003/content", principal_id = "org_01936d", custom_label = "TensorRT Edge-LLM server 0.11.0", flavor = "jetson-orin-cuda-13" },
+]
+runtime_flags = [
+  { benchmark_type = "vl_throughput", runtime_type = "trt_edgellm", model_type = "gguf_vision", precision = "w8a16" },
+  { benchmark_type = "vl_max_memory", runtime_type = "trt_edgellm", model_type = "gguf_vision", precision = "w8a16" },
+]

@@ -97,7 +97,7 @@ cd "$REPO_ROOT"
 
 # 1. Configure (ANDROID_PLATFORM + GGML_CPU_KLEIDIAI + jniLibs dest override the
 #    preset defaults).
-cmake --preset android-arm64-v8a \
+cmake --preset android-arm64-v8a-rust \
   -DANDROID_PLATFORM="android-$API_LEVEL" \
   -DGGML_CPU_KLEIDIAI="$KLEIDIAI" \
   -DPIPETTE_ENABLE_CRASH_REPORTING="$CRASH_REPORTING" \
@@ -106,9 +106,9 @@ cmake --preset android-arm64-v8a \
 
 # 2. Build + stage in one invocation. The stage target depends on the cdylib,
 #    which pulls the bridge -> llama/mtmd/ggml/ggml-base and (via ggml's
-#    add_dependencies) the runtime-loaded CPU variants — so everything needed is
+#    add_dependencies) the runtime-loaded CPU variants: so everything needed is
 #    built, and cargo runs exactly once.
-cmake --build --preset android-arm64-v8a --target pipette_android_stage
+cmake --build --preset android-arm64-v8a-rust --target pipette_android_stage
 
 echo "Staged native libs in $ABI_DIR:"
 ls -1 "$ABI_DIR"

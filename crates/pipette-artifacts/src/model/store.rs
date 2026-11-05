@@ -1,80 +1,76 @@
-//! [`ModelArtifactStore`] — resolve a declared model to its stored on-disk form.
-//!
-//! The store owns *where* a model's bytes live (the workspace `models/` tree);
-//! a fetch callback owns *how* they arrive. [`ModelArtifactStore::find`] is the
-//! read path (is it stored?); [`ModelArtifactStore::ensure`] is find-or-fetch:
-//! it fetches once into a staging dir, records a [`ModelManifest`], and swaps the
-//! entry into place with a rename (replacing any stale copy first) — so a partial
-//! or failed fetch never leaves a half-written entry, and a re-run resolves the
-//! already-pulled artifact.
-//!
-//! Both return the [`ModelManifest`]: `.declared` is the reporting identity,
-//! `.bind_under(models_dir)` binds `stored` paths under the models dir.
+//! [`ModelArtifactStore`]: resolve a declared model to its entry under the
+//! workspace `models/` tree. The store owns where the bytes live; a fetch
+//! callback owns how they arrive.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 
-use pipette_plan_types::Model;
+use pipette_plan_types::{Model, ModelType};
 
 use super::key::{ModelStorageKey, ModelStorageKeyError};
-use super::manifest::{ModelManifest, MANIFEST_VERSION};
-use super::stored::{to_stored, ModelStoredError};
+use super::manifest::{MANIFEST_VERSION, ModelManifest};
+use super::stored::{ModelStoredError, to_stored};
 use crate::entry::{
-    entry_size_bytes, install_dir_computing_manifest, BLOBS_DIR_NAME, MANIFEST_NAME,
-    STAGING_DIR_NAME,
+    BLOBS_DIR_NAME, MANIFEST_NAME, STAGING_DIR_NAME, entry_size_bytes, hold_entry,
+    install_dir_computing_manifest, lock_entry,
 };
 use crate::quota::QuotaError;
 
 /// A model-store failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelStoreError {
-    /// The model has no storage key (OS-bundled Apple Foundation — not stored).
+    /// The model has no storage key: Apple Foundation or a store-relative source.
     #[error(transparent)]
     NotStorable(#[from] ModelStorageKeyError),
-    /// The declared source doesn't resolve to a usable on-disk path.
     #[error(transparent)]
     UnresolvedPath(#[from] ModelStoredError),
-    /// A stored manifest is unusable — bad version, drift, or timestamp.
+    /// A manifest that decodes but has an unsupported version or a `stored`
+    /// that drifted from `declared`.
     #[error("stored model is corrupt: {0}")]
     Corrupt(String),
-    /// The model cannot fit under the configured storage quota.
     #[error(transparent)]
     Quota(#[from] QuotaError),
-    /// The fetcher failed to pull the model's bytes.
     #[error("fetching model `{model}` failed")]
     Fetch {
         model: String,
         #[source]
         source: anyhow::Error,
     },
-    /// A filesystem operation failed; `doing` names it.
     #[error("{doing}")]
     Io {
         doing: String,
         #[source]
         source: std::io::Error,
     },
-    /// A manifest on disk didn't parse as TOML, or a typed field failed
-    /// deserialization (e.g. non-RFC 3339 `fetched_at`).
+    /// Not TOML, or a typed field failed to deserialize (e.g. a non-RFC 3339
+    /// `fetched_at`). `ensure` treats this as a torn write and refetches.
     #[error("parsing the manifest at {path} failed")]
     Parse {
         path: PathBuf,
         #[source]
         source: toml::de::Error,
     },
+    /// Two models of different types share one storage key (see
+    /// [`ModelStorageKey`]).
+    #[error(
+        "the store entry `{key}` holds a {stored} model, but this cell names a {requested} \
+         model; give each of the two a `prefix` so they address separate entries, or run \
+         `models remove` to free this one"
+    )]
+    TypeCollision {
+        key: String,
+        stored: ModelType,
+        requested: ModelType,
+    },
 }
 
 /// Filesystem model store rooted at a workspace `models/` directory.
 ///
-/// Assumes a single writer: [`Self::ensure`] stages a fetch, then swaps it into
-/// place with a rename (replacing any stale copy first), so a reader never sees a
-/// half-written entry. Two concurrent `ensure` calls for the same model may both
-/// fetch — the loser's entry is replaced, not corrupted.
-///
-/// A crash mid-fetch can orphan a `.staging/<uuid>` dir under `models/`; those are
-/// safe to delete and are the operator's to garbage-collect.
+/// [`Self::ensure`] stages a fetch and renames it into place, so a reader never
+/// sees a half-written entry. A crash mid-fetch leaves a staged dir under
+/// `.staging`, which [`crate::quota`] reclaims as garbage.
 pub struct ModelArtifactStore {
     models_dir: PathBuf,
 }
@@ -84,40 +80,66 @@ impl ModelArtifactStore {
         Self { models_dir }
     }
 
-    /// Root directory this store manages (`…/models`).
     pub fn models_dir(&self) -> &Path {
         &self.models_dir
     }
 
-    /// The on-disk entry directory for a stored model: `models_dir/<key>`.
     fn entry_dir(&self, key: &ModelStorageKey) -> PathBuf {
         self.models_dir.join(key.relative_dir())
     }
 
-    /// The stored manifest for `declared`, or `None` if it isn't stored. Pure
-    /// read — no fetch, no mutation. `Err(Parse)` if the manifest bytes don't
-    /// parse as TOML or a field fails type deserialization (including a
-    /// non–RFC 3339 `fetched_at`); `Err(Corrupt)` if they parse but fail
-    /// validation (version, `stored`/`declared` drift).
+    /// The stored manifest for `declared`, or `None` if it isn't stored. Reads
+    /// only: no fetch, no `last_used_at` touch.
     ///
-    /// Only `manifest.toml` is checked — the blob files it points at are not, so
-    /// an out-of-band blob deletion isn't caught here (nor by [`Self::ensure`]);
-    /// a loader surfaces it at load time.
+    /// Checks `manifest.toml`, not the blobs it points at, so an out-of-band blob
+    /// deletion surfaces when the model loads.
+    ///
+    /// `Err(TypeCollision)` if the entry holds another type: returning that
+    /// manifest would bind a model the caller never asked for.
     pub fn find(&self, declared: &Model) -> Result<Option<ModelManifest>, ModelStoreError> {
         let key = ModelStorageKey::of(declared)?;
         let manifest_path = self.entry_dir(&key).join(MANIFEST_NAME);
         if !manifest_path.exists() {
             return Ok(None);
         }
-        Ok(Some(read_manifest(manifest_path)?))
+        let manifest = read_manifest(manifest_path)?;
+        let stored = ModelType::of(&manifest.declared);
+        let requested = ModelType::of(declared);
+        if stored != requested {
+            return Err(ModelStoreError::TypeCollision {
+                key: key.as_str().to_owned(),
+                stored,
+                requested,
+            });
+        }
+        Ok(Some(manifest))
     }
 
-    /// Every stored model, read from each `models_dir/<key>/manifest.toml` and
-    /// sorted by declared identity. The `.staging` scratch dir and any child
-    /// without a manifest are skipped; a missing `models_dir` (fresh workspace) is
-    /// an empty list. A corrupt or unparseable manifest surfaces as `Err`, the
-    /// same strictness as [`Self::find`] — one bad entry fails the listing rather
-    /// than being silently dropped.
+    /// Like [`Self::find`], but `None` when the manifest does not parse: a
+    /// publish replaces such an entry. [`Self::ensure`] repairs it under its
+    /// lock.
+    pub(crate) fn find_intact(
+        &self,
+        declared: &Model,
+    ) -> Result<Option<ModelManifest>, ModelStoreError> {
+        match self.find(declared) {
+            Err(ModelStoreError::Parse { .. }) => Ok(None),
+            found => found,
+        }
+    }
+
+    /// The in-use lock on `declared`'s entry (see [`hold_entry`]), or `None` when
+    /// a sweep removed the entry before the lock was taken. The inner `None` is a
+    /// store that cannot be locked.
+    pub(crate) fn hold(&self, declared: &Model) -> Result<Option<Option<File>>, ModelStoreError> {
+        let key = ModelStorageKey::of(declared)?;
+        let lock = hold_entry(&self.models_dir, key.as_str());
+        Ok(self.find_intact(declared)?.map(|_| lock))
+    }
+
+    /// Every stored model, sorted by declared identity. Hidden dirs and children
+    /// without a manifest are skipped. A bad manifest fails the listing, as in
+    /// [`Self::find`], rather than being silently dropped.
     pub fn list(&self) -> Result<Vec<ModelManifest>, ModelStoreError> {
         let dir = match fs::read_dir(&self.models_dir) {
             Ok(dir) => dir,
@@ -126,7 +148,7 @@ impl ModelArtifactStore {
                 return Err(ModelStoreError::Io {
                     doing: format!("reading {}", self.models_dir.display()),
                     source,
-                })
+                });
             }
         };
         let mut manifests = dir
@@ -135,7 +157,6 @@ impl ModelArtifactStore {
                     Ok(entry) => entry,
                     Err(err) => return Some(Err(err)),
                 };
-                // Skip reserved / hidden dirs (`.staging`, etc.).
                 if entry
                     .file_name()
                     .to_str()
@@ -151,8 +172,7 @@ impl ModelArtifactStore {
         Ok(manifests)
     }
 
-    /// Delete `declared`'s stored entry (`models/<key>/`), returning whether it
-    /// was present. Removes the whole entry dir — manifest and blobs together.
+    /// Delete `declared`'s whole entry dir, returning whether it was present.
     pub fn remove(&self, declared: &Model) -> Result<bool, ModelStoreError> {
         let entry = self.entry_dir(&ModelStorageKey::of(declared)?);
         if !entry.exists() {
@@ -165,29 +185,57 @@ impl ModelArtifactStore {
         Ok(true)
     }
 
-    /// The manifest for `declared`, fetching + recording it first if it isn't
-    /// already stored. Call `.bind_under(models_dir)` on the result for loader paths.
+    /// The manifest for `declared`, fetching it first if it isn't stored.
     ///
-    /// `fetch` puts `declared`'s files at the absolute Local paths in `into`
-    /// (the store entry's `blobs/`): remote → download, local → copy. It verifies
-    /// `sha256` when present — the store does not re-hash.
+    /// `fetch(declared, into)` puts the files at `into`'s paths, under the
+    /// staged `blobs/`, and verifies `sha256` itself: the store does not re-hash.
     ///
-    /// A stored-but-corrupt entry (bad version, drift, tamper) surfaces as `Err`,
-    /// not a re-fetch — surfacing the corruption over silently overwriting it.
+    /// A manifest that decodes but fails a check is `Err`, so the store reports
+    /// the corruption rather than overwriting it. One that does not decode (a
+    /// crash mid-write, or a v1 manifest) is removed and fetched again.
     pub fn ensure<F>(&self, declared: &Model, fetch: F) -> Result<ModelManifest, ModelStoreError>
     where
         F: FnMut(&Model, &Model) -> anyhow::Result<()>,
     {
-        match self.find(declared)? {
-            Some(mut manifest) => {
-                self.touch(&mut manifest);
-                Ok(manifest)
+        if let Some(manifest) = self.touched(self.find_intact(declared)?) {
+            return Ok(manifest);
+        }
+        // Another process sharing the store may be fetching it: wait for it,
+        // then look again.
+        let key = ModelStorageKey::of(declared)?;
+        let _fetching = lock_entry(&self.models_dir, key.as_str()).map_err(|source| {
+            ModelStoreError::Fetch {
+                model: declared.without_auth_token().to_string(),
+                source,
             }
+        })?;
+        let found = match self.find(declared) {
+            Err(ModelStoreError::Parse { path, source }) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %source,
+                    "model manifest does not parse; removing the entry to refetch it"
+                );
+                // Before the fetch, so that the disk does not hold two payloads.
+                self.remove(declared)?;
+                None
+            }
+            found => found?,
+        };
+        match self.touched(found) {
+            Some(manifest) => Ok(manifest),
             None => self.fetch_and_publish(declared, fetch),
         }
     }
 
-    /// Stamp `last_used_at = now` on a resolved entry — the eviction order.
+    fn touched(&self, found: Option<ModelManifest>) -> Option<ModelManifest> {
+        found.map(|mut manifest| {
+            self.touch(&mut manifest);
+            manifest
+        })
+    }
+
+    /// Stamp `last_used_at`, the sweep's eviction order.
     /// Best-effort: a read-only store must still resolve models, so a failed
     /// write is logged and the in-memory value advances regardless.
     fn touch(&self, manifest: &mut ModelManifest) {
@@ -197,20 +245,14 @@ impl ModelArtifactStore {
         };
         let entry = self.entry_dir(&key);
         if let Err(err) = crate::entry::rewrite_manifest(&entry, MANIFEST_NAME, manifest) {
-            log::debug!(
-                "could not record last_used_at for {}: {err:#}",
-                entry.display()
+            tracing::debug!(
+                path = %entry.display(),
+                error = %format_args!("{err:#}"),
+                "could not record last_used_at"
             );
         }
     }
 
-    /// Fetch into a staging dir, then swap it into place — delegating staging,
-    /// the reserved-name guard, atomic publish, and cleanup-on-failure to the
-    /// shared [`crate::entry`] engine.
-    ///
-    /// The manifest is computed rather than passed in, because `blobs_bytes` is
-    /// only knowable once the fetch has landed. Measuring the staged payload
-    /// here is what lets [`crate::quota`] total a store from manifests alone.
     fn fetch_and_publish<F>(
         &self,
         declared: &Model,
@@ -219,10 +261,8 @@ impl ModelArtifactStore {
     where
         F: FnMut(&Model, &Model) -> anyhow::Result<()>,
     {
-        // Store owns storable-key policy, auth strip, version stamp, and the
-        // relative `stored` form. The strip covers only what the store keeps:
-        // `fetch` gets the caller's `declared` so a gated download can still
-        // authenticate.
+        // The auth strip covers only what the store keeps: `fetch` gets the
+        // caller's `declared` so a gated download can still authenticate.
         let storable = declared.without_auth_token();
         let key = ModelStorageKey::of(&storable)?;
         let entry = self.entry_dir(&key);
@@ -255,21 +295,20 @@ impl ModelArtifactStore {
     }
 }
 
-/// Deserialize + enforce store policy for the manifest at `manifest_path`
-/// (assumed to exist).
-///
-/// - TOML / field types → [`ModelStoreError::Parse`]
-/// - version, `stored` drift → [`ModelStoreError::Corrupt`]
-/// - non-storable `declared` → [`ModelStoreError::NotStorable`]
+/// Decode the manifest at `manifest_path` and enforce store policy on it.
 pub(crate) fn read_manifest(manifest_path: PathBuf) -> Result<ModelManifest, ModelStoreError> {
     let raw = io(
         format!("reading {}", manifest_path.display()),
-        fs::read_to_string(&manifest_path),
+        fs::read(&manifest_path),
     )?;
-    let mut m: ModelManifest = toml::from_str(&raw).map_err(|source| ModelStoreError::Parse {
-        path: manifest_path,
-        source,
-    })?;
+    // Bytes that are not UTF-8 fail the TOML parse as `Parse`, not as `Io`.
+    let mut m: ModelManifest =
+        toml::from_str(&String::from_utf8_lossy(&raw)).map_err(|source| {
+            ModelStoreError::Parse {
+                path: manifest_path,
+                source,
+            }
+        })?;
 
     // Drop any token so in-memory `declared` never carries secrets.
     m.declared = m.declared.without_auth_token();
@@ -290,7 +329,6 @@ pub(crate) fn read_manifest(manifest_path: PathBuf) -> Result<ModelManifest, Mod
     Ok(m)
 }
 
-/// Tag an [`std::io::Result`] with what filesystem operation produced it.
 fn io<T>(doing: impl Into<String>, result: std::io::Result<T>) -> Result<T, ModelStoreError> {
     result.map_err(|source| ModelStoreError::Io {
         doing: doing.into(),
@@ -306,7 +344,8 @@ mod tests {
     use rstest::rstest;
 
     use pipette_plan_types::{
-        AbsolutePath, AuthToken, GgufText, GgufTextSource, HfOrg, HfRepo, HfRepoName, RepoSubpath,
+        AbsolutePath, AuthToken, GgufText, GgufTextSource, HfOrg, HfRepo, HfRepoName, ModelSource,
+        OnnxGenai, Openvino, RepoSubpath,
     };
 
     use super::*;
@@ -316,7 +355,6 @@ mod tests {
         declared_named("llama")
     }
 
-    /// A gguf-text model whose repo name varies so it lands in its own entry.
     fn declared_named(repo_name: &str) -> anyhow::Result<Model> {
         declared_named_with_auth(repo_name, None)
     }
@@ -341,8 +379,6 @@ mod tests {
         Ok(tmp.join(key.relative_dir()).join(MANIFEST_NAME))
     }
 
-    /// Writes empty files at the `Local` paths in `into`, counting calls so a
-    /// test can prove the second `ensure` resolves without re-fetching.
     #[derive(Default)]
     struct CallCounter {
         calls: Cell<usize>,
@@ -396,10 +432,132 @@ mod tests {
             to_stored(&model, &entry.join(BLOBS_DIR_NAME))?
         );
 
-        // `find` now resolves it, and a second `ensure` doesn't re-fetch.
         assert!(store.find(&model)?.is_some());
         store.ensure(&model, counting_fetch(&counter))?;
         assert_eq!(counter.calls.get(), 1);
+        Ok(())
+    }
+
+    /// A crash mid-write can leave zero bytes or non-UTF-8 bytes; that must not
+    /// fail every job that names the model.
+    #[rstest::rstest]
+    #[case::zero_bytes(&[0u8; 444])]
+    #[case::not_utf8(&[0xFFu8; 444])]
+    #[case::not_toml(b"not = [a manifest")]
+    fn ensure_refetches_an_entry_whose_manifest_does_not_parse(
+        #[case] manifest: &[u8],
+    ) -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = ModelArtifactStore::new(tmp.path().to_path_buf());
+        let counter = CallCounter::default();
+        let model = declared()?;
+        store.ensure(&model, counting_fetch(&counter))?;
+        let manifest_path = stored_manifest_path(tmp.path(), &model)?;
+        fs::write(&manifest_path, manifest)?;
+
+        let mut fetch = counting_fetch(&counter);
+        let (refetched, logged) = crate::test_support::logged_text(|| {
+            store.ensure(&model, |d: &Model, into: &Model| {
+                anyhow::ensure!(
+                    !manifest_path.exists(),
+                    "the old entry is gone before the fetch"
+                );
+                fetch(d, into)
+            })
+        })?;
+        let refetched = refetched?;
+
+        assert!(
+            logged.contains("WARN") && logged.contains(&manifest_path.display().to_string()),
+            "the damaged entry is logged with its path: {logged}"
+        );
+        assert_eq!(counter.calls.get(), 2, "the damaged entry is fetched again");
+        assert_eq!(refetched.declared, model);
+        assert_eq!(
+            store.find(&model)?.map(|m| m.declared),
+            Some(model),
+            "the replaced manifest reads back"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_waits_for_a_fetch_in_flight_and_reuses_it() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = ModelArtifactStore::new(tmp.path().to_path_buf());
+        let model = declared()?;
+        let held = lock_entry(tmp.path(), ModelStorageKey::of(&model)?.as_str())?;
+        let waiter_fetches = std::sync::atomic::AtomicUsize::new(0);
+
+        let resolved = std::thread::scope(|s| -> anyhow::Result<ModelManifest> {
+            let waiter = s.spawn(|| {
+                store.ensure(&model, |_, into| {
+                    waiter_fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    write_empty_gguf_text(into)
+                })
+            });
+            // Time for the waiter to miss and block on the lock. A slower one
+            // finds the entry published below on its first look, so it never
+            // fetches either way.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            store.fetch_and_publish(&model, |_, into| write_empty_gguf_text(into))?;
+            drop(held);
+            Ok(waiter
+                .join()
+                .map_err(|_| anyhow::anyhow!("the waiter panicked"))??)
+        })?;
+
+        assert_eq!(waiter_fetches.into_inner(), 0);
+        assert_eq!(resolved.declared, model);
+        Ok(())
+    }
+
+    #[test]
+    fn a_second_model_type_on_one_repo_is_refused_by_name() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = ModelArtifactStore::new(tmp.path().to_path_buf());
+        let repo = ModelSource::HuggingFace {
+            repo: HfRepo {
+                org: HfOrg::try_new("acme".to_owned())?,
+                repo_name: HfRepoName::try_new("both-formats".to_owned())?,
+                revision: None,
+                auth_token: None,
+            },
+            prefix: None,
+        };
+        let openvino = Model::Openvino(Openvino {
+            source: repo.clone(),
+        });
+        let onnx = Model::OnnxGenai(OnnxGenai { source: repo });
+        assert_eq!(
+            ModelStorageKey::of(&openvino)?.as_str(),
+            ModelStorageKey::of(&onnx)?.as_str(),
+            "the two types share one key, which is what makes the guard load-bearing"
+        );
+
+        store.ensure(&openvino, |_d, into| {
+            let Model::Openvino(Openvino {
+                source: ModelSource::AbsoluteDir { dir },
+            }) = into
+            else {
+                anyhow::bail!("fake fetch only handles a bound openvino dir");
+            };
+            let dir = Path::new(dir.as_ref());
+            fs::create_dir_all(dir)?;
+            fs::write(dir.join("openvino_model.xml"), b"")?;
+            Ok(())
+        })?;
+
+        let Err(ModelStoreError::TypeCollision {
+            stored, requested, ..
+        }) = store.find(&onnx)
+        else {
+            anyhow::bail!("the onnx model should be refused, not served the openvino entry");
+        };
+        assert_eq!(stored, ModelType::Openvino);
+        assert_eq!(requested, ModelType::OnnxGenai);
+        // The first type still resolves: the entry is its own.
+        assert!(store.find(&openvino)?.is_some());
         Ok(())
     }
 
@@ -408,14 +566,15 @@ mod tests {
         let tmp = tempfile::tempdir()?;
         let store = ModelArtifactStore::new(tmp.path().to_path_buf());
 
-        assert!(store
-            .ensure(&declared()?, |_d, _i| anyhow::bail!("network down"))
-            .is_err());
+        assert!(
+            store
+                .ensure(&declared()?, |_d, _i| anyhow::bail!("network down"))
+                .is_err()
+        );
         assert!(
             !tmp.path().join("meta__llama__Q4.gguf").exists(),
             "no entry published on failure"
         );
-        // And the staging dir is cleaned up, not orphaned.
         let staging = tmp.path().join(STAGING_DIR_NAME);
         assert!(
             !staging.exists() || fs::read_dir(&staging)?.next().is_none(),
@@ -430,20 +589,17 @@ mod tests {
         let store = ModelArtifactStore::new(tmp.path().to_path_buf());
         let model = declared()?;
 
-        // Nothing stored yet: `remove` reports it wasn't there.
         assert!(!store.remove(&model)?, "nothing to remove yet");
 
         store.ensure(&model, counting_fetch(&CallCounter::default()))?;
         assert!(store.find(&model)?.is_some(), "stored after ensure");
 
-        // `remove` deletes the entry, reports it was there, and a repeat is false.
         assert!(store.remove(&model)?, "stored entry removed");
         assert!(store.find(&model)?.is_none(), "entry gone after remove");
         assert!(!store.remove(&model)?, "already gone");
         Ok(())
     }
 
-    /// Store one model, then overwrite its manifest with unparseable bytes.
     fn store_with_broken_manifest(tmp: &Path) -> anyhow::Result<(ModelArtifactStore, Model)> {
         let store = ModelArtifactStore::new(tmp.to_path_buf());
         let model = declared()?;
@@ -453,8 +609,6 @@ mod tests {
         Ok((store, model))
     }
 
-    /// Both read paths — the single-model `find` and the whole-store `list` —
-    /// surface an unparseable manifest as `Parse` rather than skipping it.
     #[rstest]
     #[case::find(|store: &ModelArtifactStore, model: &Model| store.find(model).map(|_| ()))]
     #[case::list(|store: &ModelArtifactStore, _model: &Model| store.list().map(|_| ()))]
@@ -477,8 +631,6 @@ mod tests {
         let model = declared()?;
         store.ensure(&model, counting_fetch(&CallCounter::default()))?;
 
-        // Tamper with the stored blob path so it no longer matches `declared` —
-        // valid TOML, but the drift check must reject it as `Corrupt`.
         let manifest_path = stored_manifest_path(tmp.path(), &model)?;
         let good = fs::read_to_string(&manifest_path)?;
         let drifted = good.replace("blobs/Q4.gguf", "blobs/TAMPERED.gguf");
@@ -525,7 +677,6 @@ mod tests {
             "token must not be serialized to disk"
         );
 
-        // Hand-edit a token into the flattened `declared` table; load strips it.
         let mut table: toml::Table = toml::from_str(&on_disk)?;
         let declared = table
             .get_mut("declared")
@@ -544,9 +695,8 @@ mod tests {
         Ok(())
     }
 
-    /// The strip covers what the store persists, not what it fetches with — a
-    /// strip that also reached `fetch` sent gated downloads out unauthenticated
-    /// and every private repo answered 401.
+    /// The strip covers what the store persists, not what it fetches with:
+    /// otherwise every private repo answers 401.
     #[test]
     fn ensure_hands_the_auth_token_to_the_fetch() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -662,15 +812,58 @@ mod tests {
         Ok(())
     }
 
-    /// No migration: the version bump strands v1 stores on purpose, and the
-    /// missing field means they fail at deserialization rather than the version
-    /// check. `pipette storage gc` is the recovery, not a compat shim.
     #[test]
-    fn a_v1_manifest_is_unreadable() -> anyhow::Result<()> {
+    fn hold_finds_an_entry_removed_before_the_lock() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
         let store = ModelArtifactStore::new(tmp.path().to_path_buf());
         let model = declared()?;
         store.ensure(&model, counting_fetch(&CallCounter::default()))?;
+
+        store.remove(&model)?;
+        assert!(store.hold(&model)?.is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_store_holds_a_hit() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let store = ModelArtifactStore::new(tmp.path().to_path_buf());
+        let model = declared()?;
+        store.ensure(&model, counting_fetch(&CallCounter::default()))?;
+        // The first hold, on a writable store, creates the lock file.
+        drop(store.hold(&model)?);
+        let locks = tmp.path().join(crate::entry::LOCKS_DIR_NAME);
+        let lock = locks.join(format!(
+            "{}{}",
+            ModelStorageKey::of(&model)?.as_str(),
+            crate::entry::USE_SUFFIX
+        ));
+
+        let set = |mode| {
+            [lock.as_path(), locks.as_path(), tmp.path()]
+                .iter()
+                .try_for_each(|path| fs::set_permissions(path, fs::Permissions::from_mode(mode)))
+        };
+        set(0o500)?;
+        let held = store.hold(&model);
+        set(0o700)?;
+
+        assert!(matches!(held?, Some(Some(_))));
+        Ok(())
+    }
+
+    /// No migration: a v1 manifest is missing a field, so it fails to decode
+    /// before the version check, and `ensure` refetches it.
+    #[test]
+    fn a_v1_manifest_is_unreadable() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = ModelArtifactStore::new(tmp.path().to_path_buf());
+        let counter = CallCounter::default();
+        let model = declared()?;
+        store.ensure(&model, counting_fetch(&counter))?;
 
         let manifest_path = stored_manifest_path(tmp.path(), &model)?;
         let mut table: toml::Table = toml::from_str(&fs::read_to_string(&manifest_path)?)?;
@@ -682,20 +875,24 @@ mod tests {
             store.find(&model),
             Err(ModelStoreError::Parse { .. })
         ));
+        store.ensure(&model, counting_fetch(&counter))?;
+        assert_eq!(counter.calls.get(), 2, "the v1 entry is fetched again");
+        assert!(
+            store.find(&model)?.is_some(),
+            "the replaced manifest reads back"
+        );
         Ok(())
     }
 
     #[test]
     fn list_is_empty_for_a_fresh_store() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
-        // `models_dir` doesn't exist yet — a fresh workspace lists nothing.
         let store = ModelArtifactStore::new(tmp.path().join("models"));
         assert!(store.list()?.is_empty());
         Ok(())
     }
 
-    /// Local-authored models are storable: identity stays the authoring path,
-    /// `stored` re-homes under `<key>/blobs/`, and the fetcher imports the file.
+    /// Identity stays the authoring path; `stored` re-homes under `<key>/blobs/`.
     #[test]
     fn ensure_imports_a_local_gguf_into_the_store() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -711,7 +908,6 @@ mod tests {
                 path: AbsolutePath::try_new(src.to_string_lossy().into_owned())?,
             },
         });
-        // Copy local plan path into store blobs (mirrors fetch_model local path).
         let copy_local = |declared: &Model, into: &Model| -> anyhow::Result<()> {
             let Model::GgufText(GgufText {
                 source: GgufTextSource::AbsoluteFile { path: src },
@@ -744,7 +940,6 @@ mod tests {
         else {
             anyhow::bail!("expected relative stored");
         };
-        // Manifest `stored` is models-root-relative, never absolute.
         assert!(
             !stored.as_ref().starts_with('/'),
             "stored must be relative to model storage root: {stored}"
@@ -758,7 +953,17 @@ mod tests {
             Model::GgufText(GgufText {
                 source: GgufTextSource::AbsoluteFile { path },
             }) => PathBuf::from(path.as_ref()),
-            other => anyhow::bail!("unexpected bind_under: {other:?}"),
+            other @ (Model::GgufText(_)
+            | Model::GgufVision(_)
+            | Model::GgufVisionSpeculative(_)
+            | Model::Mlx(_)
+            | Model::MlxSpeculative(_)
+            | Model::TorchSpeculative(_)
+            | Model::Torch(_)
+            | Model::Openvino(_)
+            | Model::OnnxGenai(_)
+            | Model::AppleFoundationText
+            | Model::AppleCoreAi(_)) => anyhow::bail!("unexpected bind_under: {other:?}"),
         };
         assert_eq!(fs::read(&abs)?, b"local-gguf");
         assert_eq!(fs::read(&src)?, b"local-gguf");
@@ -770,7 +975,6 @@ mod tests {
         let tmp = tempfile::tempdir()?;
         let store = ModelArtifactStore::new(tmp.path().to_path_buf());
         let counter = CallCounter::default();
-        // Ensure out of sorted order; a crash-orphaned staging dir must not appear.
         store.ensure(&declared_named("zephyr")?, counting_fetch(&counter))?;
         store.ensure(&declared_named("llama")?, counting_fetch(&counter))?;
         fs::create_dir_all(

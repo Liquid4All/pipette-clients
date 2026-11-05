@@ -1,0 +1,30 @@
+[package]
+name = "pipette-completions"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "The text-completion endpoint (`/v1/completions`, OVMS's `/v3/completions`) that vLLM, SGLang, mlx_lm.server, OVMS and pipette's own Python servers answer, read into a pipette_ops generation, streamed or whole, and the greedy request body timing cells send; and llama-server's timed chat dialect (`llama_server`), which pipette-llamacpp and pipette-trt-edgellm share."
+
+[lints]
+workspace = true
+
+[features]
+# Helpers only a test wants; the engine crates ask for it from their
+# `[dev-dependencies]`.
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+pipette-http.workspace = true
+pipette-ops.workspace = true
+pipette-plan-types.workspace = true
+pipette-subprocess.workspace = true
+
+[dev-dependencies]
+httpmock.workspace = true
+rstest.workspace = true

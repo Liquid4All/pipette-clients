@@ -1,0 +1,17 @@
+[package]
+name = "pipette-wait"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "The caller's side of a blocking wait: how it is narrated, when it gives up, and how it sleeps."
+
+[lints]
+workspace = true
+
+# No dependencies, deliberately: a shared vocabulary that dragged in a logging
+# facade would impose it on every caller, the plan runner's `eprintln!` included.
+# That is what `WaitStatus` is for.
+[dependencies]
+
+[dev-dependencies]
+rstest.workspace = true

@@ -1,22 +1,42 @@
 //! The bound-model projection every directory-shaped backend shares.
 //!
-//! Install is `pipette_artifacts::ensure_model`; this is the other end — what
-//! the run path checks before handing a path to an engine: the model is the
-//! kind this engine runs, it was bound to a host directory, and that directory
-//! holds what the loader needs.
+//! What the run path checks before handing a path to an engine (install is
+//! `pipette_artifacts::ensure_model`): the model is the kind this engine runs,
+//! it was bound to a host directory, and that directory holds what the loader
+//! needs.
 
 use std::path::PathBuf;
 
 use pipette_plan_types::{Model, ModelSource, ModelType};
+
+/// What a bound directory is being checked *as*, so a refusal names which half
+/// of a speculative pair is missing rather than just the model type.
+#[derive(Debug, Clone, Copy)]
+enum Role {
+    /// The model itself, for a type that is one directory.
+    Whole,
+    Target,
+    Draft,
+}
+
+impl Role {
+    /// Appended after the model type in a refusal, leading space included.
+    fn suffix(self) -> &'static str {
+        match self {
+            Role::Whole => "",
+            Role::Target => " target",
+            Role::Draft => " drafter",
+        }
+    }
+}
 
 /// Bound model directory for a model of kind `expected`, verified to exist and
 /// to contain every one of `required_files`.
 ///
 /// `required_files` is the loader's manifest, so it belongs to the caller: a
 /// GenAI pipeline needs its compiled tokenizer pair, while `mlx_lm` accepts
-/// several tokenizer layouts. Name only files the loader always needs — the
-/// point is to catch a truncated snapshot before the engine does, not to
-/// second-guess it.
+/// several tokenizer layouts. Name only files the loader always needs: the
+/// point is to catch a truncated snapshot, not to second-guess the loader.
 pub fn require_bound_model_dir(
     bound: &Model,
     expected: ModelType,
@@ -31,28 +51,74 @@ pub fn require_bound_model_dir(
     // than falling into the not-a-directory arm.
     let source = match bound {
         Model::Mlx(m) => &m.source,
+        Model::AppleCoreAi(m) => &m.source,
         Model::Torch(m) => &m.source,
         Model::Openvino(m) => &m.source,
-        Model::AppleCoreAi(m) => &m.source,
-        Model::GgufText(_) | Model::GgufVision(_) | Model::AppleFoundationText => {
+        Model::OnnxGenai(m) => &m.source,
+        // Two directories, so it has no single answer to give here.
+        Model::MlxSpeculative(_) | Model::TorchSpeculative(_) => {
+            anyhow::bail!("{expected} is a directory pair; use require_bound_model_dir_pair")
+        }
+        Model::GgufText(_)
+        | Model::GgufVision(_)
+        | Model::GgufVisionSpeculative(_)
+        | Model::AppleFoundationText => {
             anyhow::bail!("{expected} is not a directory-shaped model")
         }
     };
+    bound_dir(source, expected, Role::Whole, required_files, bound)
+}
+
+/// [`require_bound_model_dir`] for a model that is **two** bound directories:
+/// the target and the drafter it is measured against, in that order.
+///
+/// A tuple rather than a `Vec`: an engine that mixed the two up would report
+/// the drafter's numbers as the target's.
+pub fn require_bound_model_dir_pair(
+    bound: &Model,
+    expected: ModelType,
+    required_files: &[&str],
+) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let actual = ModelType::of(bound);
+    anyhow::ensure!(
+        actual == expected,
+        "expected a bound {expected} model, got {actual}"
+    );
+    let (Model::MlxSpeculative(m) | Model::TorchSpeculative(m)) = bound else {
+        anyhow::bail!("{expected} is not a directory-pair model");
+    };
+    Ok((
+        bound_dir(&m.target, expected, Role::Target, required_files, bound)?,
+        bound_dir(&m.draft, expected, Role::Draft, required_files, bound)?,
+    ))
+}
+
+fn bound_dir(
+    source: &ModelSource,
+    expected: ModelType,
+    role: Role,
+    required_files: &[&str],
+    bound: &Model,
+) -> anyhow::Result<PathBuf> {
+    let suffix = role.suffix();
     let ModelSource::AbsoluteDir { dir } = source else {
         anyhow::bail!(
-            "expected bound {expected} AbsoluteDir (after ensure_model/bind_under), got {bound}"
+            "expected bound {expected}{suffix} AbsoluteDir (after ensure_model/bind_under), got {bound}"
         );
     };
 
     let dir = PathBuf::from(dir.as_ref());
     if !dir.is_dir() {
         anyhow::bail!(
-            "bound {expected} model is not a directory: {} (ensure/bind may be incomplete)",
+            "bound {expected}{suffix} model is not a directory: {} (ensure/bind may be incomplete)",
             dir.display()
         );
     }
     if let Some(missing) = required_files.iter().find(|f| !dir.join(f).is_file()) {
-        anyhow::bail!("{expected} model at {} is missing {missing}", dir.display());
+        anyhow::bail!(
+            "{expected}{suffix} model at {} is missing {missing}",
+            dir.display()
+        );
     }
     Ok(dir)
 }
@@ -72,10 +138,31 @@ mod tests {
         };
         match kind {
             ModelType::Mlx => Ok(Model::Mlx(Mlx { source })),
+            ModelType::AppleCoreAi => Ok(Model::AppleCoreAi(pipette_plan_types::AppleCoreAi {
+                source,
+            })),
             ModelType::Torch => Ok(Model::Torch(Torch { source })),
             ModelType::Openvino => Ok(Model::Openvino(Openvino { source })),
-            other => anyhow::bail!("{other} has no directory form"),
+            other @ (ModelType::GgufText
+            | ModelType::GgufVision
+            | ModelType::GgufVisionSpeculative
+            | ModelType::MlxSpeculative
+            | ModelType::TorchSpeculative
+            | ModelType::OnnxGenai
+            | ModelType::AppleFoundationText) => anyhow::bail!("{other} has no directory form"),
         }
+    }
+
+    fn mlx_pair(target: &std::path::Path, draft: &std::path::Path) -> anyhow::Result<Model> {
+        let dir = |p: &std::path::Path| -> anyhow::Result<ModelSource> {
+            Ok(ModelSource::AbsoluteDir {
+                dir: AbsolutePath::try_new(p.to_string_lossy().into_owned())?,
+            })
+        };
+        Ok(Model::MlxSpeculative(pipette_plan_types::MlxSpeculative {
+            target: dir(target)?,
+            draft: dir(draft)?,
+        }))
     }
 
     #[test]
@@ -89,8 +176,7 @@ mod tests {
         Ok(())
     }
 
-    /// Another engine's model reaching this one is a dispatch bug; the error
-    /// has to name both kinds or it reads as a missing file.
+    /// Naming both kinds keeps a dispatch bug from reading as a missing file.
     #[test]
     fn another_kind_is_refused_by_name() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -103,8 +189,6 @@ mod tests {
         Ok(())
     }
 
-    /// The omission people actually hit is a partial snapshot, so the error
-    /// names the file rather than calling the directory incomplete.
     #[test]
     fn a_missing_required_file_is_named() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
@@ -124,8 +208,74 @@ mod tests {
         Ok(())
     }
 
-    /// An unbound model means ensure/bind never ran, which must not look like
-    /// an empty directory.
+    #[test]
+    fn a_bound_pair_is_returned_target_first() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (target, draft) = (tmp.path().join("target"), tmp.path().join("draft"));
+        [&target, &draft].iter().try_for_each(|dir| {
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(dir.join("config.json"), b"{}")
+        })?;
+
+        let got = require_bound_model_dir_pair(
+            &mlx_pair(&target, &draft)?,
+            ModelType::MlxSpeculative,
+            &["config.json"],
+        )?;
+        assert_eq!(got, (target, draft));
+        Ok(())
+    }
+
+    /// "mlx_speculative model is missing config.json" alone would send the
+    /// reader to the target when the drafter is the half that is missing.
+    #[rstest::rstest]
+    #[case::target_incomplete(false, true, "target")]
+    #[case::draft_incomplete(true, false, "drafter")]
+    fn an_incomplete_half_of_a_pair_is_named(
+        #[case] target_ok: bool,
+        #[case] draft_ok: bool,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (target, draft) = (tmp.path().join("target"), tmp.path().join("draft"));
+        [(&target, target_ok), (&draft, draft_ok)]
+            .iter()
+            .try_for_each(|(dir, ok)| {
+                std::fs::create_dir_all(dir)?;
+                if *ok {
+                    std::fs::write(dir.join("config.json"), b"{}")?;
+                }
+                Ok::<_, std::io::Error>(())
+            })?;
+
+        let Err(err) = require_bound_model_dir_pair(
+            &mlx_pair(&target, &draft)?,
+            ModelType::MlxSpeculative,
+            &["config.json"],
+        ) else {
+            anyhow::bail!("expected an incomplete-half rejection");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(expected), "got {msg}");
+        assert!(msg.contains("config.json"), "got {msg}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_pair_is_refused_by_the_single_directory_entry_point() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let model = mlx_pair(&tmp.path().join("target"), &tmp.path().join("draft"))?;
+        let Err(err) = require_bound_model_dir(&model, ModelType::MlxSpeculative, &[]) else {
+            anyhow::bail!("expected a directory-pair rejection");
+        };
+        assert!(
+            err.to_string().contains("require_bound_model_dir_pair"),
+            "got {err}"
+        );
+        Ok(())
+    }
+
+    /// An unbound model must not look like an empty directory.
     #[test]
     fn an_unbound_model_is_refused() -> anyhow::Result<()> {
         let model = Model::Mlx(Mlx {

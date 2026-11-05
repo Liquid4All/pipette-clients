@@ -19,6 +19,7 @@
 		FAB000022FB0000000000002 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = FAB000012FB0000000000001 /* Sentry */; };
 		FAC000022FC0000000000002 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = FAC000012FC0000000000001 /* PostHog */; };
 		FAD000022FD0000000000002 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = FAD000012FD0000000000001 /* ArgumentParser */; };
+		FAE200022FE0000000000002 /* HuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = FAE200012FE0000000000001 /* HuggingFace */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -45,6 +46,8 @@
 		FAD9540D2F7C78D40039144D /* Exceptions for "Pipette" folder in "Pipette" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Generated/MLX/MLXBuildInfo.json,
+				Generated/OnnxGenai/OnnxGenaiBuildInfo.json,
 				Info.plist,
 			);
 			target = FA37E19F2F7C7592007A9639 /* Pipette */;
@@ -82,6 +85,7 @@
 				FA9000252F91000000000025 /* MLXHuggingFace in Frameworks */,
 				FA9000262F91000000000026 /* Tokenizers in Frameworks */,
 				FA9000272F91000000000027 /* Hub in Frameworks */,
+				FAE200022FE0000000000002 /* HuggingFace in Frameworks */,
 				FAA000022FA0000000000002 /* LicenseList in Frameworks */,
 				FAD000022FD0000000000002 /* ArgumentParser in Frameworks */,
 			);
@@ -136,10 +140,12 @@
 			buildConfigurationList = FA37E1AB2F7C7593007A9639 /* Build configuration list for PBXNativeTarget "Pipette" */;
 			buildPhases = (
 				FA37E1AF2F7C7593007A9640 /* Build llama.cpp */,
+				FA9000402F91000000000040 /* Build ONNX Runtime GenAI */,
 				FA9000202F91000000000020 /* Generate MLX build info */,
 				FA37E19C2F7C7592007A9639 /* Sources */,
 				FA37E19D2F7C7592007A9639 /* Frameworks */,
 				FA37E19E2F7C7592007A9639 /* Resources */,
+				FAD000052FD0000000000005 /* Embed llama.cpp */,
 				FAB000032FB0000000000003 /* Upload Sentry dSYMs */,
 				FAC000042FC0000000000004 /* Stamp git commit */,
 			);
@@ -162,6 +168,7 @@
 				FA9000152F91000000000015 /* MLXHuggingFace */,
 				FA9000162F91000000000016 /* Tokenizers */,
 				FA9000172F91000000000017 /* Hub */,
+				FAE200012FE0000000000001 /* HuggingFace */,
 				FAA000012FA0000000000001 /* LicenseList */,
 				FAD000012FD0000000000001 /* ArgumentParser */,
 			);
@@ -173,9 +180,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = FAE100092F8A000000000009 /* Build configuration list for PBXNativeTarget "PipetteTests" */;
 			buildPhases = (
+				FAF100012FF1000000000001 /* Check contract variants */,
 				FAE100032F8A000000000003 /* Sources */,
 				FAE100042F8A000000000004 /* Frameworks */,
 				FAE100052F8A000000000005 /* Resources */,
+				FA9000502F91000000000050 /* Copy the ONNX GenAI test fixture */,
 			);
 			buildRules = (
 			);
@@ -228,6 +237,7 @@
 				FA9000012F91000000000001 /* XCRemoteSwiftPackageReference "mlx-swift" */,
 				FA9000022F91000000000002 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 				FA9000032F91000000000003 /* XCRemoteSwiftPackageReference "swift-transformers" */,
+				FAE200002FE0000000000000 /* XCRemoteSwiftPackageReference "swift-huggingface" */,
 				FAA000002FA0000000000000 /* XCRemoteSwiftPackageReference "LicenseList" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -274,13 +284,96 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(SRCROOT)/Pipette/Generated/Llama/libllama.a",
 				"$(SRCROOT)/Pipette/Generated/Llama/module.modulemap",
-				"$(SRCROOT)/Pipette/Generated/Llama/LlamaCppBuildInfo.swift",
+				"$(SRCROOT)/../.build-llama/frameworks/$(PLATFORM_NAME)/llamacpp.framework/llamacpp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "\"${SRCROOT}/../build-llama.sh\"\n";
+		};
+		FAD000052FD0000000000005 /* Embed llama.cpp */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../embed-llama.sh",
+			);
+			name = "Embed llama.cpp";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/../embed-llama.sh\"\n";
+		};
+		FA9000402F91000000000040 /* Build ONNX Runtime GenAI */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../build-onnx-genai.sh",
+			);
+			name = "Build ONNX Runtime GenAI";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Pipette/Generated/OnnxGenai/libonnxruntime-genai.a",
+				"$(SRCROOT)/Pipette/Generated/OnnxGenai/libonnxruntime.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/../build-onnx-genai.sh\"\n";
+		};
+		FAF100012FF1000000000001 /* Check contract variants */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../gen-contract-variants.py",
+				"$(SRCROOT)/../contract-refusals.json",
+				"$(SRCROOT)/../../crates/pipette-contract/fixtures/variants.json",
+			);
+			name = "Check contract variants";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/PipetteTests/Generated/ContractVariants.swift",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/../gen-contract-variants.py\" \"${SRCROOT}/../../crates/pipette-contract/fixtures\" \"${SRCROOT}/../contract-refusals.json\" \"${SRCROOT}/PipetteTests/Generated/ContractVariants.swift\"\n";
+		};
+		FA9000502F91000000000050 /* Copy the ONNX GenAI test fixture */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Copy the ONNX GenAI test fixture";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/../copy-onnx-test-fixture.sh\"\n";
 		};
 		FA9000202F91000000000020 /* Generate MLX build info */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -299,6 +392,7 @@
 			);
 			outputPaths = (
 				"$(SRCROOT)/Pipette/Generated/MLX/MLXBuildInfo.swift",
+				"$(SRCROOT)/Pipette/Generated/MLX/MLXBuildInfo.json",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -424,13 +518,19 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Pipette/Generated/Llama";
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/Pipette/Generated/Llama",
+					"$(SRCROOT)/Pipette/Generated/OnnxGenai",
+				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Pipette/Generated/Llama";
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Pipette/Generated/Llama",
+					"$(SRCROOT)/Pipette/Generated/OnnxGenai",
+				);
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
 			name = Debug;
@@ -481,12 +581,18 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Pipette/Generated/Llama";
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/Pipette/Generated/Llama",
+					"$(SRCROOT)/Pipette/Generated/OnnxGenai",
+				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Pipette/Generated/Llama";
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Pipette/Generated/Llama",
+					"$(SRCROOT)/Pipette/Generated/OnnxGenai",
+				);
 			};
 			name = Release;
 		};
@@ -512,16 +618,24 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/Pipette/Generated/Llama",
+					"$(PROJECT_DIR)/Pipette/Generated/OnnxGenai",
 					"$(PROJECT_DIR)/Pipette/Generated",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-lllama",
+					"-lonnxruntime-genai",
+					"-lonnxruntime",
+					"-lsqlite3",
 					"-lc++",
 					"-framework",
 					Accelerate,
+					"-framework",
+					CoreML,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					ImageIO,
 					"-framework",
 					Foundation,
 					"-framework",
@@ -573,16 +687,24 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/Pipette/Generated/Llama",
+					"$(PROJECT_DIR)/Pipette/Generated/OnnxGenai",
 					"$(PROJECT_DIR)/Pipette/Generated",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-lllama",
+					"-lonnxruntime-genai",
+					"-lonnxruntime",
+					"-lsqlite3",
 					"-lc++",
 					"-framework",
 					Accelerate,
+					"-framework",
+					CoreML,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					ImageIO,
 					"-framework",
 					Foundation,
 					"-framework",
@@ -619,6 +741,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 353N5JSDGZ;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -647,6 +770,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 353N5JSDGZ;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -714,15 +838,15 @@
 			repositoryURL = "https://github.com/ml-explore/mlx-swift";
 			requirement = {
 				kind = upToNextMinorVersion;
-				minimumVersion = 0.31.6;
+				minimumVersion = 0.32.3;
 			};
 		};
 		FA9000022F91000000000002 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
 			requirement = {
-				kind = revision;
-				revision = f5f18ed9d3373b21874bd43da34922377c6da0fb;
+				kind = upToNextMinorVersion;
+				minimumVersion = 3.32.3;
 			};
 		};
 		FA9000032F91000000000003 /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
@@ -763,6 +887,14 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 1.8.2;
+			};
+		};
+		FAE200002FE0000000000000 /* XCRemoteSwiftPackageReference "swift-huggingface" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-huggingface.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.11.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -827,6 +959,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = FAD000002FD0000000000000 /* XCRemoteSwiftPackageReference "swift-argument-parser" */;
 			productName = ArgumentParser;
+		};
+		FAE200012FE0000000000001 /* HuggingFace */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FAE200002FE0000000000000 /* XCRemoteSwiftPackageReference "swift-huggingface" */;
+			productName = HuggingFace;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

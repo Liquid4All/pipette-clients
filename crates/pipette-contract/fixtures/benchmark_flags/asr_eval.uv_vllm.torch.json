@@ -1,0 +1,6 @@
+{
+  "benchmark_type": "asr_eval",
+  "http_timeout_seconds": 1800,
+  "model_type": "torch",
+  "runtime_type": "uv_vllm"
+}

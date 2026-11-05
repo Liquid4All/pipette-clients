@@ -1,50 +1,12 @@
 //! The compact `--runtime` URI: [`parse_runtime_uri`] and its inverse
-//! [`runtime_to_uri`], over a shared key vocabulary. The two agree on the
-//! runtime a URI names, not on its spelling — the renderer writes keys the
-//! catalog leaves defaulted, so a rendered URI may be longer than the one that
-//! produced it. `runtimes list --format uri` covers the round trip. The
-//! runtime-side counterpart to [`crate::model_uri`]: `runtimes pull` takes one
-//! self-contained argument — a JSON `Runtime` object or the URI below.
+//! [`runtime_to_uri`], over shared key constants. The grammar and keys are in
+//! `docs/pipette-cli/models-and-runtimes.md`.
 //!
-//! # Grammar
-//!
-//! ```text
-//! uri    ::= scheme "://" body            ; split on the FIRST "://"
-//! scheme ::= "llamacpp-cli-stock-tools" | "mlx-macos-pipette"
-//!          | "core-ai-macos-pipette"
-//!          | "docker-vllm" | "docker-sglang"
-//!          | "uv-vllm" | "uv-sglang" | "uv-openvino"
-//! body   ::= "" | pair ("&" pair)*        ; keys unordered, each at most once
-//! pair   ::= key "=" value                ; first "=" splits; value may contain "="
-//! ```
-//! `&` separates pairs, so no value may contain `&`; a URL value additionally may
-//! not contain `?` (a query string can't survive the split — use the JSON form).
-//!
-//! # Keys → variant (parsing is deterministic on key *presence*, not order)
-//!
-//! | scheme                        | keys (required; *optional*)                                |
-//! |-------------------------------|------------------------------------------------------------|
-//! | `llamacpp-cli-stock-tools`    | `version`(+*`repo`*) **xor** `url`; `flavor`               |
-//! | `mlx-macos-pipette`           | `version`; *`flavor`* (default `macos-arm64`)               |
-//! | `core-ai-macos-pipette`       | *`version`* (default: bundled `coreai-models` pin)          |
-//! | `docker-vllm` / `docker-sglang` | `image`, `tag`; *`flavor`* (default `nvidia_gpu`)        |
-//! | `uv-vllm` / `uv-sglang`       | `server`, `build`, `python`                                |
-//! | `uv-openvino`                 | `version` (the device is a per-cell runtime flag)          |
-//!
-//! # Not representable (both directions error)
-//!
-//! - `apple-foundation` and the on-device app runtimes (`llamacpp-apk-pipette`,
-//!   `llamacpp-ios-pipette`, `mlx-ios-pipette`) →
-//!   [`RuntimeUriError::NotRepresentable`]; address them via a JSON `--runtime`
-//!   object instead.
-//! - a URL carrying a query string → [`RuntimeUriError::QueryUrl`].
-//! - `runtime://sha256=<hex>`, which *refers to* a descriptor rather than
-//!   describing one and so needs the local store to resolve; it is handled a
-//!   layer up, in [`crate::artifact_ref`].
-//! - a uv/MLX runtime whose `requirements_text` is not the bundled catalog's for
-//!   its scheme keys, and `RelativePreinstalled` →
-//!   [`RuntimeUriError::NotRepresentable`]; pass a JSON `--runtime` object. The
-//!   uv source contributes no keys of its own, so a URI can only name a preset.
+//! The two directions agree on the runtime a URI names, not on its spelling:
+//! the renderer writes keys the catalog leaves defaulted. A uv or MLX source
+//! contributes no keys of its own, so a URI can only name a bundled catalog
+//! preset; anything else travels as JSON. `runtime://sha256=` is resolved a
+//! layer up, in [`crate::artifact_ref`].
 
 use std::fmt;
 use std::str::FromStr;
@@ -52,38 +14,37 @@ use std::str::FromStr;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use pipette_artifacts_catalog::runtime::llamacpp::upstream_repository_url as llamacpp_upstream;
+use pipette_artifacts_catalog::runtime::ovms::upstream_repository_url as ovms_upstream;
+use pipette_artifacts_catalog::runtime::{mlx, onnx_genai, openvino, torch_oai};
 use pipette_plan_types::{
-    default_repository_url, AppleCoreAiMacosPipette, DockerSglang, DockerVllm, LlamaCppFlavor,
-    LlamacppCliStockTools, LlamacppCliStockToolsSource, MlxMacosPipette, MlxMacosPipetteFlavor,
-    NonEmptyString, RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, SourceRepository,
-    UvBuild, UvPythonVersion, UvRuntimeSource, UvServerVersion, UvSglang, UvVllm, VllmFlavor,
+    AppleCoreAiMacosPipette, DockerSglang, DockerVllm, FileName, LlamaCppFlavor,
+    LlamacppCliStockTools, LlamacppCliStockToolsRelease, LlamacppCliStockToolsSource,
+    MlxMacosPipette, MlxMacosPipetteFlavor, NonEmptyString, Ovms, OvmsFlavor, OvmsSource,
+    OvmsSourceRepository, RemoteArchiveUrl, RepositoryUrl, Runtime, SglangFlavor, TrtEdgellm,
+    TrtEdgellmFlavor, TrtEdgellmSource, UvBuild, UvPythonVersion, UvRuntimeSource, UvServerVersion,
+    UvSglang, UvVllm, VllmFlavor,
 };
 
-// Key names, shared by the parser and [`runtime_to_uri`] so the two directions
-// reference one spelling each. Schemes get the same guarantee, plus
-// exhaustiveness, from the [`Scheme`] enum below.
+// Shared by the parser and [`runtime_to_uri`], so a rename cannot desync them.
 const KEY_REPO: &str = "repo";
 const KEY_VERSION: &str = "version";
 const KEY_URL: &str = "url";
 const KEY_FLAVOR: &str = "flavor";
+const KEY_ASSET: &str = "asset";
 const KEY_IMAGE: &str = "image";
 const KEY_TAG: &str = "tag";
 const KEY_SERVER: &str = "server";
 const KEY_BUILD: &str = "build";
 const KEY_PYTHON: &str = "python";
+const KEY_EP: &str = "ep";
 
-/// The importable runtime kinds, one per URI scheme. Both parsing and
-/// [`runtime_to_uri`] route through this; the exhaustive match means neither
-/// direction can silently drop a kind.
+/// The importable runtime kinds, one per URI scheme. Both directions match on
+/// it exhaustively, so neither can drop a kind.
 ///
-/// Variants are named for the plan [`Runtime`] kinds they select, so the
-/// kebab-case strum spelling *is* the runtime's type word with `-` for `_`
-/// (`UvOpenvino` → `uv-openvino`, matching `uv_openvino`). That is the whole
-/// naming rule, and `a_schemes_prefix_is_its_runtime_type` enforces it — a
-/// shorthand here would be a second name for a type that already has one.
-///
-/// Iterable so `runtimes pull --help` can be held to documenting every scheme:
-/// a kind added here and left out of the help is a kind nobody can discover.
+/// A scheme is the runtime's type word with `-` for `_`, never a shorthand
+/// (`a_schemes_prefix_is_its_runtime_type` enforces it). Iterable so a test can
+/// hold `runtimes pull --help` to documenting every scheme.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter, strum::EnumString, strum::IntoStaticStr,
 )]
@@ -91,8 +52,8 @@ const KEY_PYTHON: &str = "python";
 pub(crate) enum Scheme {
     LlamacppCliStockTools,
     MlxMacosPipette,
-    /// Wire scheme stays `core-ai-macos-pipette` — the authored URI shape is
-    /// public API; only the Rust variant name tracks the plan type.
+    /// The wire scheme is `core-ai-macos-pipette`. The authored URI shape is
+    /// public API, and the variant name follows the plan type.
     #[strum(serialize = "core-ai-macos-pipette")]
     AppleCoreAiMacosPipette,
     DockerVllm,
@@ -100,6 +61,9 @@ pub(crate) enum Scheme {
     UvVllm,
     UvSglang,
     UvOpenvino,
+    UvOnnxGenai,
+    Ovms,
+    TrtEdgellm,
 }
 
 impl Scheme {
@@ -107,21 +71,17 @@ impl Scheme {
         self.into()
     }
 
-    /// The scheme for `s`. `apple-foundation` and the on-device app runtimes name
-    /// real but non-importable runtimes (OS-bundled or addressed via their app
-    /// transports), so they get a distinct [`RuntimeUriError::NotRepresentable`]
-    /// rather than "unknown".
+    /// `apple-foundation` and the on-device app runtimes are real but not
+    /// importable, so they get [`RuntimeUriError::NotRepresentable`] rather than
+    /// "unknown".
     fn parse(s: &str) -> Result<Self, RuntimeUriError> {
         Scheme::from_str(s).map_err(|_| match s {
-            // Same naming rule as the importable schemes, so a plan author who
-            // knows the runtime type gets told it is not addressable here
-            // rather than that the word is unknown.
             "apple-foundation"
             | "llamacpp-apk-pipette"
             | "llamacpp-ios-pipette"
-            | "mlx-ios-pipette" => RuntimeUriError::NotRepresentable(s.to_owned()),
-            // Resolved against the local store by `crate::artifact_ref`, which
-            // intercepts it before this parser ever sees it.
+            | "mlx-ios-pipette"
+            | "onnx-genai-ios-pipette" => RuntimeUriError::NotRepresentable(s.to_owned()),
+            // `crate::artifact_ref` intercepts it before this parser.
             "runtime" => RuntimeUriError::NotRepresentable(
                 "a `runtime://sha256=` digest here; it resolves against the local store".to_owned(),
             ),
@@ -130,8 +90,6 @@ impl Scheme {
     }
 }
 
-/// Everything that can go wrong turning a compact runtime URI into a typed
-/// [`Runtime`]. Converts into `anyhow` at the CLI boundary via `?`.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeUriError {
     #[error("runtime URI must be `<scheme>://<key>=<value>[&<key>=<value>...]`")]
@@ -139,8 +97,9 @@ pub enum RuntimeUriError {
 
     #[error(
         "unknown runtime URI scheme `{0}` (expected `llamacpp-cli-stock-tools`, \
-         `mlx-macos-pipette`, `core-ai-macos-pipette`, `docker-vllm`, `docker-sglang`, \
-         `uv-vllm`, `uv-sglang`, or `uv-openvino`; a scheme is the runtime type with `-` for `_`)"
+         `mlx-macos-pipette`, `core-ai-macos-pipette`, `docker-vllm`, `docker-sglang`, `uv-vllm`, `uv-sglang`, \
+         `uv-openvino`, `uv-onnx-genai`, `ovms`, or `trt-edgellm`; a scheme is the runtime \
+         type with `-` for `_`)"
     )]
     UnknownScheme(String),
 
@@ -187,10 +146,7 @@ pub enum RuntimeUriError {
     UnrepresentableValue { key: &'static str, value: String },
 }
 
-/// The parsed `key=value` pairs of a URI body. Identical tokenizer to
-/// [`crate::model_uri`]: `&` is the pair separator; the first `=` splits key
-/// from value, so a value keeps any later `=`. URL values are barred from
-/// carrying a query string, so a raw `&` can never be part of a value.
+/// The `key=value` pairs of a URI body, tokenized as in [`crate::model_uri`].
 struct Pairs<'a> {
     scheme: Scheme,
     items: Vec<(&'a str, &'a str)>,
@@ -233,7 +189,7 @@ impl<'a> Pairs<'a> {
         })
     }
 
-    /// Consume the tokenizer, rejecting any key the scheme didn't claim.
+    /// Reject any key the scheme didn't claim.
     fn finish(self) -> Result<(), RuntimeUriError> {
         match self.items.first() {
             None => Ok(()),
@@ -245,10 +201,6 @@ impl<'a> Pairs<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Leaf-value constructors (newtype validation → InvalidValue)
-// ---------------------------------------------------------------------------
-
 fn non_empty(key: &'static str, v: &str) -> Result<NonEmptyString, RuntimeUriError> {
     NonEmptyString::try_new(v).map_err(|e| RuntimeUriError::InvalidValue {
         key,
@@ -256,11 +208,15 @@ fn non_empty(key: &'static str, v: &str) -> Result<NonEmptyString, RuntimeUriErr
     })
 }
 
-/// Remote archive coordinate: scheme-less host/path (or `http(s)://` paste,
-/// stripped). `file://` and other schemes are rejected.
+fn release_asset_name(v: &str) -> Result<FileName, RuntimeUriError> {
+    FileName::try_new(v.to_owned()).map_err(|e| RuntimeUriError::InvalidValue {
+        key: KEY_ASSET,
+        message: e.to_string(),
+    })
+}
+
 fn remote_archive_url(key: &'static str, v: &str) -> Result<RemoteArchiveUrl, RuntimeUriError> {
-    // A query string can't survive the `&` split — signed / query URLs go
-    // through the JSON `--runtime` form.
+    // A query string can't survive the `&` split; signed URLs go through JSON.
     if v.contains('?') {
         return Err(RuntimeUriError::QueryUrl { key });
     }
@@ -270,20 +226,16 @@ fn remote_archive_url(key: &'static str, v: &str) -> Result<RemoteArchiveUrl, Ru
     })
 }
 
-/// Resolve the `server`/`build`/`python` triple against the bundled torch-oai
-/// catalog into a plain [`UvRuntimeSource::PipRequirementsText`].
-///
-/// The slug is composed from the URI's own keys rather than accepted as one, so
-/// a URI cannot name a row whose body it then misreports: the three keys that
-/// select the row are the same three the rendered runtime carries.
+/// Resolve a torch-oai catalog slug into its requirements. The slug is composed
+/// from the URI's own keys rather than accepted as one, so a URI cannot name a
+/// row whose body it then misreports.
 fn uv_catalog_source_from_uri(slug: &str) -> Result<UvRuntimeSource, RuntimeUriError> {
-    let uv_slug = pipette_torch_oai::slug::UvSlug::try_new(slug).map_err(|e| {
-        RuntimeUriError::InvalidValue {
+    let uv_slug =
+        torch_oai::slug::UvSlug::try_new(slug).map_err(|e| RuntimeUriError::InvalidValue {
             key: KEY_SERVER,
             message: e.to_string(),
-        }
-    })?;
-    let entry = pipette_torch_oai::catalog::lookup(&uv_slug)
+        })?;
+    let entry = torch_oai::lookup(&uv_slug)
         .map_err(|e| RuntimeUriError::InvalidValue {
             key: KEY_SERVER,
             message: e.to_string(),
@@ -303,65 +255,40 @@ fn uv_catalog_source_from_uri(slug: &str) -> Result<UvRuntimeSource, RuntimeUriE
     match runtime {
         Runtime::UvVllm(rt) => Ok(rt.source),
         Runtime::UvSglang(rt) => Ok(rt.source),
-        other => Err(RuntimeUriError::InvalidValue {
+        other @ (Runtime::LlamacppCliStockTools(_)
+        | Runtime::LlamacppApkPipette(_)
+        | Runtime::LlamacppIosPipette(_)
+        | Runtime::MlxMacosPipette(_)
+        | Runtime::MlxIosPipette(_)
+        | Runtime::OnnxGenaiIosPipette(_)
+        | Runtime::DockerVllm(_)
+        | Runtime::DockerSglang(_)
+        | Runtime::UvOpenvino(_)
+        | Runtime::UvOnnxGenai(_)
+        | Runtime::Ovms(_)
+        | Runtime::TrtEdgellm(_)
+        | Runtime::AppleFoundation(_)
+        | Runtime::AppleCoreAiMacosPipette(_)) => Err(RuntimeUriError::InvalidValue {
             key: KEY_SERVER,
             message: format!("catalog row produced unexpected runtime {other}"),
         }),
     }
 }
 
-/// MLX bundled catalog (compile-time). Parsed only to fill
-/// `PipRequirementsText.requirements_text` for URIs so the declared form is
-/// self-contained for the shared store fetcher.
-const MLX_CATALOG_TOML: &str = include_str!("../../pipette-mlx/bundled-catalog/catalog.toml");
-
-#[derive(serde::Deserialize)]
-struct MlxCatalogFile {
-    mlx: Vec<MlxCatalogRow>,
-}
-
-#[derive(serde::Deserialize)]
-struct MlxCatalogRow {
-    version: String,
-    requirements: String,
-}
-
-/// Resolve `version` against the bundled MLX catalog into a plain
-/// [`UvRuntimeSource::PipRequirementsText`].
-///
-/// The version is the whole selector: a URI names a preset, and what comes back
-/// is an ordinary uv-defined runtime carrying that preset's body. There is no
-/// way to spell a name that disagrees with the body it resolved to.
+/// Resolve `version` against the bundled MLX catalog into its requirements.
 fn mlx_catalog_source_from_uri(version: &str) -> Result<UvRuntimeSource, RuntimeUriError> {
-    let file: MlxCatalogFile =
-        toml::from_str(MLX_CATALOG_TOML).map_err(|e| RuntimeUriError::InvalidValue {
-            key: KEY_VERSION,
-            message: format!("bundled mlx catalog is unreadable: {e}"),
-        })?;
-    let row = file
-        .mlx
-        .into_iter()
-        .find(|row| row.version == version)
-        .ok_or_else(|| {
+    mlx::declared_from_catalog(version)
+        .map(|rt| rt.source)
+        .map_err(|e| {
             RuntimeUriError::NotRepresentable(format!(
-                "mlx version `{version}` is not in the bundled catalog; pass a JSON \
+                "mlx version `{version}` is not in the bundled catalog ({e}); pass a JSON \
                  `--runtime` with a full pip_requirements_text source"
             ))
-        })?;
-    let requirements_text =
-        NonEmptyString::try_new(row.requirements).map_err(|e| RuntimeUriError::InvalidValue {
-            key: KEY_VERSION,
-            message: e.to_string(),
-        })?;
-    Ok(UvRuntimeSource::PipRequirementsText {
-        contents: requirements_text,
-        install_flags: None,
-    })
+        })
 }
 
-// The closed flavor enums have serde renames but no `Display`, so render/parse
-// go through explicit maps here — this keeps a wrong flavor a precise
-// `InvalidValue` and the rendered spelling pinned.
+// The closed flavor enums have serde renames but no `Display`, so explicit maps
+// keep a wrong flavor a precise `InvalidValue` and the spelling pinned.
 
 fn vllm_flavor_str(flavor: &VllmFlavor) -> &'static str {
     match flavor {
@@ -413,45 +340,100 @@ fn parse_mlx_flavor(v: &str) -> Result<MlxMacosPipetteFlavor, RuntimeUriError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parse: URI → Runtime
-// ---------------------------------------------------------------------------
-
 fn parse_llama_cpp(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     let repo = p.take(KEY_REPO);
     let version = p.take(KEY_VERSION);
+    let asset = p.take(KEY_ASSET);
     let url = p.take(KEY_URL);
     let flavor = LlamaCppFlavor::parse(p.require(KEY_FLAVOR)?);
+    let exclusive = || RuntimeUriError::MutuallyExclusive {
+        scheme: p.scheme.as_str(),
+        expected: "`version` (optionally with `repo` and `asset`) or `url`",
+    };
     let source = match (version, url) {
-        // Git build: `version` (+ optional `repo`, default upstream).
-        (Some(version), None) => LlamacppCliStockToolsSource::GithubRelease(SourceRepository {
-            repository_url: repo.map_or_else(default_repository_url, RepositoryUrl::new),
-            repository_version: non_empty(KEY_VERSION, version)?,
-        }),
-        // Prebuilt archive: a single URL. `repo` has no meaning here.
+        (Some(version), None) => {
+            LlamacppCliStockToolsSource::GithubRelease(LlamacppCliStockToolsRelease {
+                repository_url: repo.map_or_else(llamacpp_upstream, RepositoryUrl::new),
+                repository_version: non_empty(KEY_VERSION, version)?,
+                asset: asset.map(release_asset_name).transpose()?,
+            })
+        }
+        // The URL is the file, so `repo` and `asset` don't apply.
         (None, Some(url)) => {
-            if repo.is_some() {
-                return Err(RuntimeUriError::MutuallyExclusive {
-                    scheme: p.scheme.as_str(),
-                    expected: "`version` (optionally with `repo`) or `url`",
-                });
+            if repo.is_some() || asset.is_some() {
+                return Err(exclusive());
             }
             LlamacppCliStockToolsSource::RemoteArchive {
                 url: remote_archive_url(KEY_URL, url)?,
             }
         }
-        _ => {
-            return Err(RuntimeUriError::MutuallyExclusive {
-                scheme: p.scheme.as_str(),
-                expected: "`version` (optionally with `repo`) or `url`",
-            })
-        }
+        _ => return Err(exclusive()),
     };
     p.finish()?;
     Ok(Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
         source,
         flavor,
     }))
+}
+
+/// `ovms://`: llama.cpp's keys, with OVMS's upstream as the default `repo`.
+/// `version` is the release tag verbatim (`v2026.4.1`).
+fn parse_ovms(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
+    let repo = p.take(KEY_REPO);
+    let version = p.take(KEY_VERSION);
+    let url = p.take(KEY_URL);
+    let flavor = parse_ovms_flavor(p.require(KEY_FLAVOR)?)?;
+    let source = match (version, url) {
+        (Some(version), None) => OvmsSource::GithubRelease(OvmsSourceRepository {
+            repository_url: repo.map_or_else(ovms_upstream, RepositoryUrl::new),
+            repository_version: non_empty(KEY_VERSION, version)?,
+        }),
+        (None, Some(url)) if repo.is_none() => OvmsSource::RemoteArchive {
+            url: remote_archive_url(KEY_URL, url)?,
+        },
+        _ => {
+            return Err(RuntimeUriError::MutuallyExclusive {
+                scheme: p.scheme.as_str(),
+                expected: "`version` (optionally with `repo`) or `url`",
+            });
+        }
+    };
+    p.finish()?;
+    Ok(Runtime::Ovms(Ovms { source, flavor }))
+}
+
+/// Through the flavor's own deserializer, so a URI is held to the JSON slug rule.
+fn parse_ovms_flavor(v: &str) -> Result<OvmsFlavor, RuntimeUriError> {
+    use serde::de::IntoDeserializer as _;
+    OvmsFlavor::deserialize(v.into_deserializer()).map_err(|e: de::value::Error| {
+        RuntimeUriError::InvalidValue {
+            key: KEY_FLAVOR,
+            message: e.to_string(),
+        }
+    })
+}
+
+/// `trt-edgellm://url=<archive>&flavor=<f>`: upstream publishes no server
+/// archive, so a URI names one by URL; a vault archive travels as JSON.
+fn parse_trt_edgellm(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
+    let url = remote_archive_url(KEY_URL, p.require(KEY_URL)?)?;
+    let flavor = parse_trt_edgellm_flavor(p.require(KEY_FLAVOR)?)?;
+    p.finish()?;
+    Ok(Runtime::TrtEdgellm(TrtEdgellm {
+        source: TrtEdgellmSource::RemoteArchive { url },
+        flavor,
+    }))
+}
+
+/// As [`parse_ovms_flavor`].
+fn parse_trt_edgellm_flavor(v: &str) -> Result<TrtEdgellmFlavor, RuntimeUriError> {
+    use serde::de::IntoDeserializer as _;
+    TrtEdgellmFlavor::deserialize(v.into_deserializer()).map_err(|e: de::value::Error| {
+        RuntimeUriError::InvalidValue {
+            key: KEY_FLAVOR,
+            message: e.to_string(),
+        }
+    })
 }
 
 fn parse_mlx(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
@@ -475,10 +457,13 @@ fn parse_coreai(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
         let version = non_empty(KEY_VERSION, version)?;
         let bundled = rt.packages.coreai_models.repository_version.as_ref();
         if version.as_ref() != bundled {
-            return Err(RuntimeUriError::NotRepresentable(format!(
-                "core-ai-macos-pipette version `{version}` is not the bundled pin `{bundled}`; \
-                 the sidecar is compiled against that pin only"
-            )));
+            return Err(RuntimeUriError::InvalidValue {
+                key: KEY_VERSION,
+                message: format!(
+                    "`{version}` is not the bundled pin `{bundled}`. \
+                     The sidecar uses the bundled pin only."
+                ),
+            });
         }
     }
     p.finish()?;
@@ -515,7 +500,6 @@ fn parse_docker_sglang(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     }))
 }
 
-/// The three uv fields shared by vllm and sglang, plus a catalog source.
 fn parse_uv_fields(
     p: &mut Pairs,
     server_label: &str,
@@ -569,9 +553,6 @@ fn parse_uv_sglang(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     }))
 }
 
-/// Parse a compact runtime URI into a typed [`Runtime`]. Only importable desktop
-/// runtimes have a scheme; on-device and Apple-Foundation runtimes are rejected
-/// (see [`Scheme::parse`]).
 pub fn parse_runtime_uri(input: &str) -> Result<Runtime, RuntimeUriError> {
     let (scheme, body) = input
         .split_once("://")
@@ -587,19 +568,18 @@ pub fn parse_runtime_uri(input: &str) -> Result<Runtime, RuntimeUriError> {
         Scheme::UvVllm => parse_uv_vllm(pairs),
         Scheme::UvSglang => parse_uv_sglang(pairs),
         Scheme::UvOpenvino => parse_openvino(pairs),
+        Scheme::UvOnnxGenai => parse_onnx_genai(pairs),
+        Scheme::Ovms => parse_ovms(pairs),
+        Scheme::TrtEdgellm => parse_trt_edgellm(pairs),
     }
 }
 
-/// `uv-openvino://version=<v>&device=<cpu|gpu|npu>`.
-///
-/// No `device` key: one wheel serves CPU, GPU and NPU, so a runtime ref names
-/// an installable artifact and the device is a flag on the cell that uses it.
-/// The version resolves against the bundled catalog, which owns the pinned
-/// requirements — same contract as `mlx-macos-pipette://`.
+/// `uv-openvino://version=<v>`. No `device` key: one wheel serves CPU, GPU and
+/// NPU, so the device is a flag on the cell.
 fn parse_openvino(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     let version = non_empty(KEY_VERSION, p.require(KEY_VERSION)?)?;
     p.finish()?;
-    pipette_openvino::catalog::declared_from_catalog(version.as_ref()).map_err(|e| {
+    openvino::declared_from_catalog(version.as_ref()).map_err(|e| {
         RuntimeUriError::NotRepresentable(format!(
             "openvino version `{version}` is not in the bundled catalog ({e}); pass a \
              JSON `--runtime` with a full pip_requirements_text source"
@@ -607,11 +587,20 @@ fn parse_openvino(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Render: Runtime → URI (inverse of the parse, arm-for-arm)
-// ---------------------------------------------------------------------------
+/// `uv-onnx-genai://version=<v>&ep=<provider>`. Each execution provider is a
+/// separate wheel, so it is part of the install, not a flag on the cell.
+fn parse_onnx_genai(mut p: Pairs) -> Result<Runtime, RuntimeUriError> {
+    let version = non_empty(KEY_VERSION, p.require(KEY_VERSION)?)?;
+    let ep = non_empty(KEY_EP, p.require(KEY_EP)?)?;
+    p.finish()?;
+    onnx_genai::declared_from_catalog(version.as_ref(), ep.as_ref()).map_err(|e| {
+        RuntimeUriError::NotRepresentable(format!(
+            "onnx-genai version `{version}` on `{ep}` is not in the bundled catalog ({e}); \
+             pass a JSON `--runtime` with a full pip_requirements_text source"
+        ))
+    })
+}
 
-/// Accumulates a rendered URI's `key=value` pairs in push order, then joins them.
 struct Body {
     scheme: Scheme,
     pairs: Vec<String>,
@@ -625,11 +614,8 @@ impl Body {
         }
     }
 
-    /// Push a `key=value` pair, rejecting a value that contains the `&` pair
-    /// separator — it would fracture the URI on re-parse. (`=` is fine: the
-    /// parser splits on the first `=` only; `?` matters only for URL values,
-    /// guarded in [`Body::url`].) This keeps render → parse a total round-trip
-    /// even for free-form values like a `Custom` flavor or a `req-path`.
+    /// Rejects a value containing `&`, which would fracture on re-parse, so
+    /// render then parse stays total even for a free-form `Custom` flavor.
     fn push(&mut self, key: &'static str, value: &str) -> Result<(), RuntimeUriError> {
         if value.contains('&') {
             return Err(RuntimeUriError::UnrepresentableValue {
@@ -641,9 +627,7 @@ impl Body {
         Ok(())
     }
 
-    /// A URL value that would fracture on re-parse — `&` (the separator) or `?`
-    /// (a query string) — can't be represented; reject it symmetrically with
-    /// the parser's URL checks.
+    /// A URL with a query string has no URI form, as on the parse side.
     fn url(&mut self, key: &'static str, url: impl AsRef<str>) -> Result<(), RuntimeUriError> {
         let value = url.as_ref();
         if value.contains('?') {
@@ -657,13 +641,8 @@ impl Body {
     }
 }
 
-/// Check that `source` is exactly what this scheme's keys resolve to.
-///
-/// A uv source contributes no URI keys of its own — the scheme's keys pick a
-/// catalog preset and the preset supplies the body. So a runtime is
-/// representable only when its body *is* that preset's. Rendering one that
-/// differs would produce a URI that looks right and re-parses into a different
-/// environment; such a runtime has to travel as JSON instead.
+/// Check that `source` is exactly what this scheme's keys resolve to: any other
+/// body would render a URI that re-parses into a different environment.
 fn ensure_catalog_backed(
     source: &UvRuntimeSource,
     resolve: impl FnOnce() -> Result<UvRuntimeSource, RuntimeUriError>,
@@ -677,6 +656,13 @@ fn ensure_catalog_backed(
              (pass it as a JSON `--runtime` object)"
                 .to_owned(),
         )),
+        // No key carries the principal, and a URI that dropped it would name
+        // a public install of a private wheelhouse.
+        UvRuntimeSource::VaultWheelhouse { .. } => Err(RuntimeUriError::NotRepresentable(
+            "a uv runtime installed from a vault wheelhouse (pass it as a JSON `--runtime` \
+             object)"
+                .to_owned(),
+        )),
         UvRuntimeSource::RelativePreinstalled { .. }
         | UvRuntimeSource::AbsolutePreinstalled { .. } => Err(RuntimeUriError::NotRepresentable(
             "a preinstalled (local) uv/MLX runtime".to_owned(),
@@ -684,26 +670,32 @@ fn ensure_catalog_backed(
     }
 }
 
-/// Render a [`Runtime`] as its compact URI — the inverse of [`parse_runtime_uri`],
-/// mirroring it arm-for-arm with a fixed key order for stable output.
-/// Non-representable runtimes error: on-device / Apple-Foundation →
-/// [`RuntimeUriError::NotRepresentable`]; a URL a query string or `&` would
-/// fracture → [`RuntimeUriError::QueryUrl`].
+/// The inverse of [`parse_runtime_uri`], with a fixed key order for stable
+/// output.
 pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
     match runtime {
         Runtime::LlamacppCliStockTools(rt) => {
             let mut body = Body::new(Scheme::LlamacppCliStockTools);
             match &rt.source {
                 LlamacppCliStockToolsSource::GithubRelease(repo) => {
-                    // `repo` is emitted only when it differs from the upstream
-                    // default, which the parser fills in when absent.
-                    if repo.repository_url != default_repository_url() {
+                    // The parser fills in the upstream default.
+                    if repo.repository_url != llamacpp_upstream() {
                         body.push(KEY_REPO, repo.repository_url.as_ref())?;
                     }
                     body.push(KEY_VERSION, repo.repository_version.as_ref())?;
+                    if let Some(asset) = &repo.asset {
+                        body.push(KEY_ASSET, asset.as_ref())?;
+                    }
                 }
                 LlamacppCliStockToolsSource::RemoteArchive { url } => body.url(KEY_URL, url)?,
-                // Effective (installed) form only — not a fetch coordinate.
+                LlamacppCliStockToolsSource::VaultRemoteArchive { .. } => {
+                    return Err(RuntimeUriError::NotRepresentable(
+                        "a llama.cpp runtime from a vault archive (pass it as a JSON \
+                         `--runtime` object)"
+                            .to_owned(),
+                    ));
+                }
+                // The installed form, not a fetch coordinate.
                 LlamacppCliStockToolsSource::RelativeDir { .. }
                 | LlamacppCliStockToolsSource::AbsoluteDir { .. } => {
                     return Err(RuntimeUriError::NotRepresentable(
@@ -711,7 +703,53 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
                     ));
                 }
             }
-            body.push(KEY_FLAVOR, &rt.flavor.to_string())?;
+            body.push(KEY_FLAVOR, rt.flavor.as_ref())?;
+            Ok(body.finish())
+        }
+        Runtime::Ovms(rt) => {
+            let mut body = Body::new(Scheme::Ovms);
+            match &rt.source {
+                OvmsSource::GithubRelease(repo) => {
+                    if repo.repository_url != ovms_upstream() {
+                        body.push(KEY_REPO, repo.repository_url.as_ref())?;
+                    }
+                    body.push(KEY_VERSION, repo.repository_version.as_ref())?;
+                }
+                OvmsSource::RemoteArchive { url } => body.url(KEY_URL, url)?,
+                OvmsSource::VaultRemoteArchive { .. } => {
+                    return Err(RuntimeUriError::NotRepresentable(
+                        "an ovms runtime from a vault archive (pass it as a JSON `--runtime` \
+                         object)"
+                            .to_owned(),
+                    ));
+                }
+                OvmsSource::RelativeDir { .. } | OvmsSource::AbsoluteDir { .. } => {
+                    return Err(RuntimeUriError::NotRepresentable(
+                        "a local (installed) ovms runtime".to_owned(),
+                    ));
+                }
+            }
+            body.push(KEY_FLAVOR, rt.flavor.as_str())?;
+            Ok(body.finish())
+        }
+        Runtime::TrtEdgellm(rt) => {
+            let mut body = Body::new(Scheme::TrtEdgellm);
+            match &rt.source {
+                TrtEdgellmSource::RemoteArchive { url } => body.url(KEY_URL, url)?,
+                TrtEdgellmSource::VaultRemoteArchive { .. } => {
+                    return Err(RuntimeUriError::NotRepresentable(
+                        "a trt_edgellm runtime from a vault archive (pass it as a JSON \
+                         `--runtime` object)"
+                            .to_owned(),
+                    ));
+                }
+                TrtEdgellmSource::RelativeDir { .. } | TrtEdgellmSource::AbsoluteDir { .. } => {
+                    return Err(RuntimeUriError::NotRepresentable(
+                        "a local (installed) trt_edgellm runtime".to_owned(),
+                    ));
+                }
+            }
+            body.push(KEY_FLAVOR, rt.flavor.as_str())?;
             Ok(body.finish())
         }
         Runtime::MlxMacosPipette(rt) => {
@@ -727,10 +765,27 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
             let mut body = Body::new(Scheme::UvOpenvino);
             body.push(KEY_VERSION, rt.server_version.as_ref())?;
             ensure_catalog_backed(&rt.source, || {
-                match pipette_openvino::catalog::declared_from_catalog(rt.server_version.as_ref()) {
+                match openvino::declared_from_catalog(rt.server_version.as_ref()) {
                     Ok(Runtime::UvOpenvino(catalog_rt)) => Ok(catalog_rt.source),
                     _ => Err(RuntimeUriError::NotRepresentable(
                         "an openvino runtime outside the bundled catalog".to_owned(),
+                    )),
+                }
+            })?;
+            Ok(body.finish())
+        }
+        Runtime::UvOnnxGenai(rt) => {
+            let mut body = Body::new(Scheme::UvOnnxGenai);
+            body.push(KEY_VERSION, rt.server_version.as_ref())?;
+            body.push(KEY_EP, rt.execution_provider.as_str())?;
+            ensure_catalog_backed(&rt.source, || {
+                match onnx_genai::declared_from_catalog(
+                    rt.server_version.as_ref(),
+                    rt.execution_provider.as_str(),
+                ) {
+                    Ok(Runtime::UvOnnxGenai(catalog_rt)) => Ok(catalog_rt.source),
+                    _ => Err(RuntimeUriError::NotRepresentable(
+                        "an onnx-genai runtime outside the bundled catalog".to_owned(),
                     )),
                 }
             })?;
@@ -778,14 +833,10 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
             ensure_catalog_backed(&rt.source, || uv_catalog_source_from_uri(&slug))?;
             Ok(body.finish())
         }
-        // Core AI is a desktop runtime (macOS 27+): the engine ships with the OS,
-        // the URI carries the bundled `coreai-models` pin as `version`.
         Runtime::AppleCoreAiMacosPipette(rt) => {
             if !rt.is_bundled() {
                 return Err(RuntimeUriError::NotRepresentable(
-                    "a core-ai-macos-pipette runtime whose Swift stack is not the bundled pin \
-                     (pass it as a JSON `--runtime` object)"
-                        .to_owned(),
+                    "non-bundled Core AI Swift stack".to_owned(),
                 ));
             }
             let mut body = Body::new(Scheme::AppleCoreAiMacosPipette);
@@ -795,11 +846,10 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
             )?;
             Ok(body.finish())
         }
-        // On-device app runtimes + Apple Foundation aren't addressable via the
-        // desktop CLI — the same reject-list `refs.rs` enforces.
         Runtime::LlamacppApkPipette(_)
         | Runtime::LlamacppIosPipette(_)
         | Runtime::MlxIosPipette(_)
+        | Runtime::OnnxGenaiIosPipette(_)
         | Runtime::AppleFoundation(_) => Err(RuntimeUriError::NotRepresentable(
             runtime.headless_token().to_owned(),
         )),
@@ -824,21 +874,19 @@ pub fn parse_runtime_arg(arg: &str) -> anyhow::Result<Runtime> {
     // A JSON/TOML `Runtime` object bypasses the URI grammar, so re-check the
     // Core AI pin here: the sidecar is compiled against the bundled stack only,
     // and a non-bundled `packages` would record a pin the binary does not have.
-    if let Runtime::AppleCoreAiMacosPipette(rt) = &runtime {
-        if !rt.is_bundled() {
-            anyhow::bail!(
-                "core-ai-macos-pipette runtime pins a Swift stack this client was \
-                 not built against; only the bundled pin is runnable"
-            );
-        }
+    if let Runtime::AppleCoreAiMacosPipette(rt) = &runtime
+        && !rt.is_bundled()
+    {
+        anyhow::bail!(
+            "the core-ai-macos-pipette runtime pins a Swift stack that this client \
+             does not contain. Use the bundled pin."
+        );
     }
     Ok(runtime)
 }
 
-/// A [`Runtime`] wrapper that serde-round-trips through the compact URI. It reads
-/// the URI string *or* the structured object, and writes the URI when the runtime
-/// is representable (else the structured form) — so a serde field (config/plan
-/// JSON or TOML) can use either.
+/// A [`Runtime`] that reads a URI string or the structured object, and writes
+/// the URI when the runtime has one, else the structured form.
 #[derive(Debug, Clone)]
 pub struct RuntimeUri(pub Runtime);
 
@@ -863,7 +911,6 @@ impl<'de> Deserialize<'de> for RuntimeUri {
                 parse_runtime_uri(uri).map_err(de::Error::custom)
             }
 
-            // A map is the structured `Runtime` — defer to its derived Deserialize.
             fn visit_map<A>(self, map: A) -> Result<Runtime, A::Error>
             where
                 A: MapAccess<'de>,
@@ -883,8 +930,6 @@ impl Serialize for RuntimeUri {
     where
         S: Serializer,
     {
-        // Emit the compact URI when the runtime is representable, else the
-        // structured form — the mirror of the URI-or-struct Deserialize.
         match runtime_to_uri(&self.0) {
             Ok(uri) => serializer.serialize_str(&uri),
             Err(_) => self.0.serialize(serializer),
@@ -909,7 +954,7 @@ mod tests {
         let LlamacppCliStockToolsSource::GithubRelease(repo) = source else {
             anyhow::bail!("expected a GitHubRelease source");
         };
-        assert_eq!(repo.repository_url, default_repository_url());
+        assert_eq!(repo.repository_url, llamacpp_upstream());
         assert_eq!(repo.repository_version.as_ref(), "b9305");
         assert_eq!(flavor.to_string(), "macos-arm64");
         Ok(())
@@ -928,7 +973,6 @@ mod tests {
             anyhow::bail!("expected Repository");
         };
         assert_eq!(repo.repository_url.as_ref(), "github.com/acme/llama.cpp");
-        // An unknown flavor round-trips through `Custom`.
         assert_eq!(flavor.to_string(), "my-fork");
         Ok(())
     }
@@ -948,22 +992,50 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[case::version(
+        "llamacpp-cli-stock-tools://version=b1&url=https://x/a.tar.gz&flavor=macos-arm64"
+    )]
+    #[case::repo(
+        "llamacpp-cli-stock-tools://repo=github.com/a/b&url=https://x/a.tgz&flavor=macos-arm64"
+    )]
+    #[case::asset("llamacpp-cli-stock-tools://url=https://x/a.tgz&asset=a.tgz&flavor=macos-arm64")]
+    fn llama_cpp_release_keys_and_url_are_exclusive(#[case] uri: &str) {
+        assert!(matches!(
+            parse_runtime_uri(uri),
+            Err(RuntimeUriError::MutuallyExclusive { .. })
+        ));
+    }
+
+    /// OVMS's upstream, not llama.cpp's.
     #[test]
-    fn llama_cpp_version_and_url_are_exclusive() -> anyhow::Result<()> {
-        assert!(matches!(
-            parse_runtime_uri(
-                "llamacpp-cli-stock-tools://version=b1&url=https://x/a.tar.gz&flavor=macos-arm64"
-            ),
-            Err(RuntimeUriError::MutuallyExclusive { .. })
-        ));
-        // `repo` alongside `url` is also rejected.
-        assert!(matches!(
-            parse_runtime_uri(
-                "llamacpp-cli-stock-tools://repo=github.com/a/b&url=https://x/a.tgz&flavor=macos-arm64"
-            ),
-            Err(RuntimeUriError::MutuallyExclusive { .. })
-        ));
+    fn an_ovms_release_defaults_to_the_upstream_repo() -> anyhow::Result<()> {
+        let runtime = parse_runtime_uri("ovms://version=v2026.4.1&flavor=windows-x64")?;
+        let Runtime::Ovms(Ovms {
+            source: OvmsSource::GithubRelease(repo),
+            flavor,
+        }) = &runtime
+        else {
+            anyhow::bail!("expected an ovms release, got {runtime:?}");
+        };
+        assert_eq!(repo.repository_url, ovms_upstream());
+        assert_eq!(repo.repository_version.as_ref(), "v2026.4.1");
+        assert_eq!(*flavor, OvmsFlavor::WindowsX64);
         Ok(())
+    }
+
+    #[rstest]
+    #[case::both("ovms://version=v2026.4.1&url=https://x/a.zip&flavor=windows-x64")]
+    #[case::repo_with_url("ovms://repo=github.com/a/b&url=https://x/a.zip&flavor=windows-x64")]
+    #[case::neither("ovms://flavor=windows-x64")]
+    fn an_ovms_ref_names_a_release_or_an_archive(#[case] uri: &str) {
+        assert!(
+            matches!(
+                parse_runtime_uri(uri),
+                Err(RuntimeUriError::MutuallyExclusive { .. })
+            ),
+            "{uri}"
+        );
     }
 
     #[test]
@@ -977,7 +1049,6 @@ mod tests {
         let UvRuntimeSource::PipRequirementsText { contents, .. } = &rt.source else {
             anyhow::bail!("expected PipRequirementsText, got {:?}", rt.source);
         };
-        // Real frozen catalog body — not a URI stub.
         assert!(
             contents.as_ref().contains("mlx-lm==0.31.3"),
             "expected catalog requirements, got {contents}"
@@ -985,90 +1056,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn mlx_unknown_version_is_not_representable() -> anyhow::Result<()> {
-        assert!(matches!(
-            parse_runtime_uri("mlx-macos-pipette://version=0.0.0-not-in-catalog"),
-            Err(RuntimeUriError::NotRepresentable(_))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn coreai_unknown_version_is_not_representable() -> anyhow::Result<()> {
-        assert!(matches!(
-            parse_runtime_uri("core-ai-macos-pipette://version=9.9.9"),
-            Err(RuntimeUriError::NotRepresentable(_))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn coreai_json_with_nonbundled_pin_is_rejected() -> anyhow::Result<()> {
-        // A JSON `--runtime` object bypasses the URI grammar. parse_runtime_arg
-        // must still reject a Swift stack this client was not built against, or
-        // the recorded pin would lie about what binary ran.
-        let json = r#"{"type":"core_ai_macos_pipette","packages":{
-            "coreai_models":{"repository_url":"github.com/apple/coreai-models","repository_version":"9.9.9"},
-            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.2.0"},
-            "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
-            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.3.2"}}}"#;
-        assert!(
-            parse_runtime_arg(json).is_err(),
-            "non-bundled JSON pin must be rejected"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn coreai_json_with_bundled_pin_is_accepted() -> anyhow::Result<()> {
-        let json = r#"{"type":"core_ai_macos_pipette","packages":{
-            "coreai_models":{"repository_url":"github.com/apple/coreai-models","repository_version":"27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"},
-            "swift_transformers":{"repository_url":"github.com/huggingface/swift-transformers","repository_version":"1.2.0"},
-            "xgrammar":{"repository_url":"github.com/mlc-ai/xgrammar","repository_version":"0.2.2"},
-            "swift_jinja":{"repository_url":"github.com/huggingface/swift-jinja","repository_version":"2.3.2"}}}"#;
-        let runtime = parse_runtime_arg(json)?;
-        assert!(matches!(runtime, Runtime::AppleCoreAiMacosPipette(_)));
-        Ok(())
-    }
-
-    #[test]
-    fn coreai_bundled_version_round_trips() -> anyhow::Result<()> {
-        let runtime = parse_runtime_uri(
-            "core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60",
-        )?;
-        let Runtime::AppleCoreAiMacosPipette(rt) = runtime else {
-            anyhow::bail!("expected AppleCoreAiMacosPipette");
-        };
-        assert_eq!(
-            rt.packages.coreai_models.repository_version.as_ref(),
-            "27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
-        );
-        assert_eq!(
-            runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt))?,
-            "core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn coreai_nonbundled_stack_has_no_uri_form() -> anyhow::Result<()> {
-        let mut rt = AppleCoreAiMacosPipette::bundled();
-        rt.packages.coreai_models.repository_version = NonEmptyString::try_new("9.9.9".to_owned())?;
-        assert!(
-            matches!(
-                runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(rt)),
-                Err(RuntimeUriError::NotRepresentable(_))
-            ),
-            "a non-bundled stack must not render as the bundled URI"
-        );
-        Ok(())
-    }
-
-    /// A URI names a preset and nothing else, so a runtime whose requirements
-    /// are not that preset's has no URI form. Rendering one anyway would emit
-    /// `mlx-macos-pipette://version=0.31.3`, which re-parses into the catalog's environment —
-    /// a different runtime wearing the same spelling.
+    /// Rendering it would emit `mlx-macos-pipette://version=0.31.3`, which
+    /// re-parses into the catalog's environment.
     #[test]
     fn a_uv_runtime_off_the_catalog_has_no_uri_form() -> anyhow::Result<()> {
         let runtime = Runtime::MlxMacosPipette(MlxMacosPipette {
@@ -1111,7 +1100,22 @@ mod tests {
         let source = match &runtime {
             Runtime::UvVllm(rt) => &rt.source,
             Runtime::UvSglang(rt) => &rt.source,
-            other => anyhow::bail!("expected uv runtime, got {other:?}"),
+            other @ (Runtime::LlamacppCliStockTools(_)
+            | Runtime::LlamacppApkPipette(_)
+            | Runtime::LlamacppIosPipette(_)
+            | Runtime::MlxMacosPipette(_)
+            | Runtime::MlxIosPipette(_)
+            | Runtime::OnnxGenaiIosPipette(_)
+            | Runtime::DockerVllm(_)
+            | Runtime::DockerSglang(_)
+            | Runtime::UvOpenvino(_)
+            | Runtime::UvOnnxGenai(_)
+            | Runtime::Ovms(_)
+            | Runtime::TrtEdgellm(_)
+            | Runtime::AppleFoundation(_)
+            | Runtime::AppleCoreAiMacosPipette(_)) => {
+                anyhow::bail!("expected uv runtime, got {other:?}")
+            }
         };
         let UvRuntimeSource::PipRequirementsText { contents, .. } = source else {
             anyhow::bail!("expected PipRequirementsText, got {source:?}");
@@ -1176,11 +1180,14 @@ mod tests {
         Ok(())
     }
 
-    // `llama-cpp` with neither version nor url is a MutuallyExclusive (covered
-    // above), so this table only covers keys required unconditionally.
+    // Keys required unconditionally; llama.cpp's version/url is MutuallyExclusive.
     #[rstest]
     #[case("docker-vllm://image=vllm", "tag")]
     #[case("uv-vllm://server=0.21.0&build=cu121", "python")]
+    // `ep` selects half the catalog key, so a ref without it names no row.
+    #[case("uv-onnx-genai://version=0.16.0", "ep")]
+    #[case("uv-onnx-genai://ep=cpu", "version")]
+    #[case("ovms://version=v2026.4.1", "flavor")]
     fn missing_required_key(#[case] uri: &str, #[case] key: &str) -> anyhow::Result<()> {
         assert!(matches!(
             parse_runtime_uri(uri),
@@ -1238,7 +1245,19 @@ mod tests {
 
     #[rstest]
     #[case("llamacpp-cli-stock-tools://url=not-a-url&flavor=macos-arm64", "url")]
+    #[case(
+        "llamacpp-cli-stock-tools://url=file:///tmp/llama-b1.tar.gz&flavor=macos-arm64",
+        "url"
+    )]
+    #[case(
+        "llamacpp-cli-stock-tools://version=b1&asset=bin/a.tgz&flavor=macos-arm64",
+        "asset"
+    )]
     #[case("uv-vllm://server=0.21.0&build=notabuild&python=3.12", "build")]
+    // The ovms flavor is held to the wire's slug rule: it lands in the storage key.
+    #[case("ovms://version=v2026.4.1&flavor=acme/arm64", "flavor")]
+    #[case("ovms://version=v2026.4.1&flavor=", "flavor")]
+    #[case("trt-edgellm://url=https://ex.com/t.tar.gz&flavor=jetpack/7", "flavor")]
     fn invalid_value(#[case] uri: &str, #[case] key: &str) -> anyhow::Result<()> {
         let err = parse_runtime_uri(uri)
             .err()
@@ -1247,6 +1266,19 @@ mod tests {
             anyhow::bail!("expected InvalidValue, got {err:?}");
         };
         assert_eq!(got, key);
+        Ok(())
+    }
+
+    /// The message points at the JSON form.
+    #[rstest]
+    #[case::off_catalog_version("uv-onnx-genai://version=0.0.0&ep=cpu")]
+    #[case::off_catalog_provider("uv-onnx-genai://version=0.16.0&ep=directml")]
+    fn an_unlisted_onnx_genai_pair_is_not_representable(#[case] uri: &str) -> anyhow::Result<()> {
+        let Err(RuntimeUriError::NotRepresentable(msg)) = parse_runtime_uri(uri) else {
+            anyhow::bail!("expected `{uri}` to be refused as unlisted");
+        };
+        assert!(msg.contains("not in the bundled catalog"), "got {msg}");
+        assert!(msg.contains("pip_requirements_text"), "got {msg}");
         Ok(())
     }
 
@@ -1261,12 +1293,11 @@ mod tests {
 
     #[test]
     fn render_rejects_value_containing_the_pair_separator() -> anyhow::Result<()> {
-        // A free-form `Custom` flavor with `&` would fracture the URI on
-        // re-parse, so render refuses it rather than emit an unparseable string.
         let runtime = Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
-            source: LlamacppCliStockToolsSource::GithubRelease(SourceRepository {
-                repository_url: default_repository_url(),
+            source: LlamacppCliStockToolsSource::GithubRelease(LlamacppCliStockToolsRelease {
+                repository_url: llamacpp_upstream(),
                 repository_version: NonEmptyString::try_new("b1")?,
+                asset: None,
             }),
             flavor: LlamaCppFlavor::parse("weird&flavor"),
         });
@@ -1277,19 +1308,32 @@ mod tests {
         Ok(())
     }
 
-    // Canonical URIs (keys already in render order) — parse → render → parse is
-    // an identity, and the rendered string equals the input.
+    // Canonical URIs (keys in render order), so the render equals the input.
     #[rstest]
     #[case("llamacpp-cli-stock-tools://version=b9305&flavor=macos-arm64")]
     #[case("llamacpp-cli-stock-tools://repo=github.com/acme/llama.cpp&version=b1&flavor=macos-x64")]
-    #[case("llamacpp-cli-stock-tools://url=ex.com/llama-b1.tar.gz&flavor=macos-arm64")]
+    #[case(
+        "llamacpp-cli-stock-tools://version=b11399&asset=llama-b11399-bin-win-cuda-13.4-x64.zip\
+         &flavor=windows-x64-cuda-13-1"
+    )]
+    #[case("llamacpp-cli-stock-tools://url=https://ex.com/llama-b1.tar.gz&flavor=macos-arm64")]
     #[case("mlx-macos-pipette://version=0.31.3&flavor=macos-arm64")]
-    #[case("core-ai-macos-pipette://version=27a66f90e7f3fd9b83a6acb7bcb0a4a5ff71fd60")]
+    #[case("mlx-macos-pipette://version=0.32.2&flavor=macos-arm64")]
+    #[case("mlx-macos-pipette://version=0.32.0&flavor=macos-arm64")]
+    #[case("mlx-macos-pipette://version=0.7.4&flavor=macos-arm64")]
     #[case("docker-vllm://image=vllm/vllm-openai&tag=v0.10.0&flavor=nvidia_gpu")]
     #[case("docker-sglang://image=lmsysorg/sglang&tag=v0.4.0&flavor=amd_gpu")]
     #[case("uv-vllm://server=0.21.0&build=cu121&python=3.12")]
     #[case("uv-sglang://server=0.5.12.post1&build=cu121&python=3.12")]
-    #[case("uv-openvino://version=2026.2.1")]
+    #[case("uv-openvino://version=2026.4.1")]
+    #[case("uv-onnx-genai://version=0.16.0&ep=cpu")]
+    #[case("uv-onnx-genai://version=0.16.0&ep=cuda")]
+    #[case("ovms://version=v2026.4.1&flavor=windows-x64")]
+    #[case("ovms://repo=github.com/acme/model_server&version=v2026.4.1&flavor=ubuntu24-x64")]
+    #[case("ovms://url=https://ex.com/ovms.zip&flavor=acme-x64")]
+    #[case(
+        "trt-edgellm://url=https://ex.com/trt-edgellm-server-4e3f9d23f052.tar.gz&flavor=jetson-orin-cuda-13"
+    )]
     fn round_trips(#[case] uri: &str) -> anyhow::Result<()> {
         let runtime = parse_runtime_uri(uri)?;
         let rendered = runtime_to_uri(&runtime)?;
@@ -1298,6 +1342,26 @@ mod tests {
             parse_runtime_uri(&rendered)?,
             runtime,
             "re-parse recovers the runtime"
+        );
+        Ok(())
+    }
+
+    /// ONNX Runtime's own API spells providers in capitals, and a JSON
+    /// `--runtime` accepts them too.
+    #[rstest]
+    #[case::upper("uv-onnx-genai://version=0.16.0&ep=CUDA")]
+    #[case::mixed("uv-onnx-genai://version=0.16.0&ep=Cuda")]
+    fn a_provider_parses_in_any_case_and_renders_canonically(
+        #[case] uri: &str,
+    ) -> anyhow::Result<()> {
+        let runtime = parse_runtime_uri(uri)?;
+        assert_eq!(
+            runtime,
+            parse_runtime_uri("uv-onnx-genai://version=0.16.0&ep=cuda")?
+        );
+        assert_eq!(
+            runtime_to_uri(&runtime)?,
+            "uv-onnx-genai://version=0.16.0&ep=cuda"
         );
         Ok(())
     }
@@ -1317,12 +1381,267 @@ mod tests {
 
     #[test]
     fn runtime_uri_serializes_non_representable_structurally() -> anyhow::Result<()> {
-        // Apple Foundation has no URI form, so serde falls back to the object.
         let json =
             serde_json::to_string(&RuntimeUri(Runtime::AppleFoundation(Default::default())))?;
         assert!(json.starts_with('{'));
         let RuntimeUri(back) = serde_json::from_str(&json)?;
         assert_eq!(back, Runtime::AppleFoundation(Default::default()));
+        Ok(())
+    }
+
+    /// Reaching this parser means the caller skipped `artifact_ref`.
+    #[test]
+    fn a_digest_ref_names_where_it_resolves() -> anyhow::Result<()> {
+        let Err(RuntimeUriError::NotRepresentable(msg)) =
+            parse_runtime_uri("runtime://sha256=abcdef")
+        else {
+            anyhow::bail!("expected the digest scheme to be refused");
+        };
+        assert!(msg.contains("local store"), "got {msg}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_runtime_uri_rejects_a_non_string_non_object() -> anyhow::Result<()> {
+        let err = serde_json::from_str::<RuntimeUri>("42")
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected a number to be refused"))?;
+        assert!(
+            err.to_string()
+                .contains("a runtime URI string or a Runtime object"),
+            "got {err}"
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::vllm_amd("docker-vllm://image=i&tag=t&flavor=amd_gpu", "amd_gpu")]
+    #[case::vllm_cpu("docker-vllm://image=i&tag=t&flavor=cpu", "cpu")]
+    #[case::vllm_default("docker-vllm://image=i&tag=t", "nvidia_gpu")]
+    #[case::sglang_nvidia("docker-sglang://image=i&tag=t&flavor=nvidia_gpu", "nvidia_gpu")]
+    #[case::sglang_cpu("docker-sglang://image=i&tag=t&flavor=cpu", "cpu")]
+    #[case::sglang_default("docker-sglang://image=i&tag=t", "nvidia_gpu")]
+    fn docker_flavors_parse_and_render(
+        #[case] uri: &str,
+        #[case] flavor: &str,
+    ) -> anyhow::Result<()> {
+        let runtime = parse_runtime_uri(uri)?;
+        let rendered = if let Runtime::DockerVllm(rt) = &runtime {
+            vllm_flavor_str(&rt.flavor)
+        } else if let Runtime::DockerSglang(rt) = &runtime {
+            sglang_flavor_str(&rt.flavor)
+        } else {
+            anyhow::bail!("expected a docker runtime, got {runtime:?}");
+        };
+        assert_eq!(rendered, flavor);
+        assert!(runtime_to_uri(&runtime)?.ends_with(&format!("&flavor={flavor}")));
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::vllm("docker-vllm://image=i&tag=t&flavor=tpu")]
+    #[case::sglang("docker-sglang://image=i&tag=t&flavor=tpu")]
+    #[case::mlx("mlx-macos-pipette://version=0.31.3&flavor=macos-x64")]
+    #[case::empty_image("docker-vllm://image=&tag=t")]
+    fn an_unknown_flavor_or_empty_value_is_an_invalid_value(
+        #[case] uri: &str,
+    ) -> anyhow::Result<()> {
+        let err = parse_runtime_uri(uri)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected `{uri}` to be rejected"))?;
+        assert!(
+            matches!(err, RuntimeUriError::InvalidValue { .. }),
+            "got {err:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::server("uv-vllm://server=not a version&build=cu121&python=3.12", "server")]
+    #[case::python("uv-vllm://server=0.21.0&build=cu121&python=three", "python")]
+    fn a_malformed_uv_field_names_its_key(
+        #[case] uri: &str,
+        #[case] key: &str,
+    ) -> anyhow::Result<()> {
+        let err = parse_runtime_uri(uri)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected `{uri}` to be rejected"))?;
+        let RuntimeUriError::InvalidValue { key: got, .. } = err else {
+            anyhow::bail!("expected InvalidValue, got {err:?}");
+        };
+        assert_eq!(got, key);
+        Ok(())
+    }
+
+    /// A version-keyed miss lists what is bundled.
+    #[rstest]
+    #[case::vllm("uv-vllm://server=0.0.1&build=cu121&python=3.12", None)]
+    #[case::sglang("uv-sglang://server=0.0.1&build=cu121&python=3.12", None)]
+    #[case::openvino("uv-openvino://version=0.0.0", Some("2026.4.0"))]
+    #[case::mlx("mlx-macos-pipette://version=0.0.0", Some("0.31.3"))]
+    fn an_unlisted_uv_row_is_not_representable(
+        #[case] uri: &str,
+        #[case] bundled: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Err(RuntimeUriError::NotRepresentable(msg)) = parse_runtime_uri(uri) else {
+            anyhow::bail!("expected `{uri}` to be refused as unlisted");
+        };
+        assert!(msg.contains("pip_requirements_text"), "got {msg}");
+        assert!(
+            bundled.is_none_or(|version| msg.contains(version)),
+            "should list the bundled versions: {msg}"
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::llama_cpp(
+        r#"{"type":"llamacpp_cli_stock_tools","source":"relative_dir","dir":"blobs","flavor":"macos-arm64"}"#
+    )]
+    #[case::ovms(r#"{"type":"ovms","source":"relative_dir","dir":"blobs","flavor":"windows-x64"}"#)]
+    fn render_rejects_an_installed_layout(#[case] json: &str) -> anyhow::Result<()> {
+        let runtime: Runtime = serde_json::from_str(json)?;
+        let Err(RuntimeUriError::NotRepresentable(msg)) = runtime_to_uri(&runtime) else {
+            anyhow::bail!("expected the installed layout to be refused: {json}");
+        };
+        assert!(msg.contains("installed"), "got {msg}");
+        Ok(())
+    }
+
+    #[test]
+    fn render_rejects_a_query_string_archive_url() -> anyhow::Result<()> {
+        let runtime = Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
+            source: LlamacppCliStockToolsSource::RemoteArchive {
+                url: RemoteArchiveUrl::try_new("https://ex.com/a.tgz?sig=1".to_owned())?,
+            },
+            flavor: LlamaCppFlavor::parse("macos-arm64"),
+        });
+        assert!(matches!(
+            runtime_to_uri(&runtime),
+            Err(RuntimeUriError::QueryUrl { key: "url" })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn render_rejects_a_preinstalled_uv_source() -> anyhow::Result<()> {
+        let runtime = Runtime::MlxMacosPipette(MlxMacosPipette {
+            version: NonEmptyString::try_new("0.31.3".to_owned())?,
+            flavor: MlxMacosPipetteFlavor::MacosArm64,
+            source: UvRuntimeSource::RelativePreinstalled {
+                dir: pipette_plan_types::RelativePath::try_new("venv")?,
+            },
+        });
+        let Err(RuntimeUriError::NotRepresentable(msg)) = runtime_to_uri(&runtime) else {
+            anyhow::bail!("expected the preinstalled venv to be refused");
+        };
+        assert!(msg.contains("preinstalled"), "got {msg}");
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::llamacpp(
+        r#"{"type":"llamacpp_cli_stock_tools","source":"vault_remote_archive","url":"/vault/resources/vault_1/content","principal_id":"org_1","flavor":"macos-arm64"}"#
+    )]
+    #[case::uv_vllm(
+        r#"{"type":"uv_vllm","server_version":"0.10.0","build":"cu121","python_version":"3.12","source":{"type":"vault_wheelhouse","contents":"vllm==0.10.0\n","url":"/vault/resources/vault_1/content","principal_id":"org_1"}}"#
+    )]
+    #[case::ovms(
+        r#"{"type":"ovms","source":"vault_remote_archive","url":"/vault/resources/vault_1/content","principal_id":"org_1","flavor":"windows-x64"}"#
+    )]
+    fn render_rejects_a_vault_runtime(#[case] json: &str) -> anyhow::Result<()> {
+        let runtime: Runtime = serde_json::from_str(json)?;
+        let Err(RuntimeUriError::NotRepresentable(msg)) = runtime_to_uri(&runtime) else {
+            anyhow::bail!("expected the vault runtime to be refused");
+        };
+        assert!(msg.contains("vault"), "got {msg}");
+        assert!(msg.contains("JSON"), "got {msg}");
+        Ok(())
+    }
+
+    /// The resolver has no body to compare against, so there is no URI form.
+    #[rstest]
+    #[case::openvino("uv-openvino://version=2026.4.1")]
+    #[case::onnx_genai("uv-onnx-genai://version=0.16.0&ep=cpu")]
+    fn render_rejects_a_catalog_runtime_off_its_catalog(#[case] uri: &str) -> anyhow::Result<()> {
+        let off_catalog = UvServerVersion::try_new("0.0.1")?;
+        let runtime = match parse_runtime_uri(uri)? {
+            Runtime::UvOpenvino(mut rt) => {
+                rt.server_version = off_catalog;
+                Runtime::UvOpenvino(rt)
+            }
+            Runtime::UvOnnxGenai(mut rt) => {
+                rt.server_version = off_catalog;
+                Runtime::UvOnnxGenai(rt)
+            }
+            other @ (Runtime::LlamacppCliStockTools(_)
+            | Runtime::LlamacppApkPipette(_)
+            | Runtime::LlamacppIosPipette(_)
+            | Runtime::MlxMacosPipette(_)
+            | Runtime::MlxIosPipette(_)
+            | Runtime::OnnxGenaiIosPipette(_)
+            | Runtime::DockerVllm(_)
+            | Runtime::DockerSglang(_)
+            | Runtime::UvVllm(_)
+            | Runtime::UvSglang(_)
+            | Runtime::Ovms(_)
+            | Runtime::TrtEdgellm(_)
+            | Runtime::AppleFoundation(_)
+            | Runtime::AppleCoreAiMacosPipette(_)) => {
+                anyhow::bail!("expected a catalog runtime, got {other:?}")
+            }
+        };
+        assert!(
+            matches!(
+                runtime_to_uri(&runtime),
+                Err(RuntimeUriError::NotRepresentable(_))
+            ),
+            "the body is the catalog's for a version the catalog lacks"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod core_ai_port_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_core_ai_uri_round_trips_and_rejects_false_pins() -> anyhow::Result<()> {
+        let bundled = Runtime::AppleCoreAiMacosPipette(AppleCoreAiMacosPipette::bundled());
+        let uri = runtime_to_uri(&bundled)?;
+        assert!(uri.starts_with("core-ai-macos-pipette://version="));
+        assert_eq!(parse_runtime_uri(&uri)?, bundled);
+        assert!(matches!(
+            parse_runtime_uri("core-ai-macos-pipette://version=9.9.9"),
+            Err(RuntimeUriError::InvalidValue {
+                key: KEY_VERSION,
+                ..
+            })
+        ));
+        let mut wrong = AppleCoreAiMacosPipette::bundled();
+        wrong.packages.coreai_models.repository_version = NonEmptyString::try_new("9.9.9")?;
+        assert!(runtime_to_uri(&Runtime::AppleCoreAiMacosPipette(wrong)).is_err());
+        Ok(())
+    }
+
+    /// The JSON form skips the URI grammar, so `parse_runtime_arg` checks the
+    /// whole Swift stack itself.
+    #[test]
+    fn a_json_core_ai_runtime_with_a_foreign_stack_is_refused() -> anyhow::Result<()> {
+        let bundled = Runtime::AppleCoreAiMacosPipette(AppleCoreAiMacosPipette::bundled());
+        assert_eq!(
+            parse_runtime_arg(&serde_json::to_string(&bundled)?)?,
+            bundled
+        );
+
+        let mut foreign = AppleCoreAiMacosPipette::bundled();
+        foreign.packages.swift_transformers.repository_version = NonEmptyString::try_new("9.9.9")?;
+        let json = serde_json::to_string(&Runtime::AppleCoreAiMacosPipette(foreign))?;
+        let Err(err) = parse_runtime_arg(&json) else {
+            anyhow::bail!("a foreign Swift stack was accepted");
+        };
+        anyhow::ensure!(format!("{err:#}").contains("bundled pin"), "{err:#}");
         Ok(())
     }
 }

@@ -1,50 +1,27 @@
-# Stage the Android native libs into jniLibs/<abi>/ with a fail-closed CPU-variant
-# policy. Run as `cmake -P` from a post-build custom command. Ported verbatim in
-# spirit from android/Pipette/build-rust-android.sh's stage step — the policy and
-# guards are load-bearing, so keep them strict.
+# Stage the Android native libs into jniLibs/<abi>/, fail-closed. Run as
+# `cmake -P` by the root CMakeLists' pipette_android_stage target.
 #
-# Required -D args:
-#   ENGINE_SO    : path to the built libpipette_android.so (cargo output)
-#   LIBCXX_SO    : path to the NDK libc++_shared.so
-#   GGML_BIN_DIR : dir holding libggml{,-base}.so libllama.so libmtmd.so + the
-#                  per-variant libggml-cpu-android_*.so
-#   DEST_DIR     : jniLibs/<abi> destination
-#   SENTRY_SO    : path to libpipette_sentry.so. Set iff the engine was built with
-#                  native crash capture (PIPETTE_ENABLE_CRASH_REPORTING=ON), in
-#                  which case staging it is MANDATORY: the engine hard-links it
-#                  (DT_NEEDED), so staging without it would ship an unloadable APK.
-#                  Empty/unset means crash reporting was compiled out, so the lib
-#                  does not exist and the engine carries no reference to it. The
-#                  caller (root CMakeLists) owns that decision; this script only
-#                  honours it, and stays fail-closed for the enabled case.
-#   STRIP        : llvm-strip executable (optional; skipped if missing)
-#   READELF      : llvm-readelf executable (optional; the sentry SONAME guard
-#                  below is skipped if missing)
-#   SYMBOLS_DIR  : dir to receive the UNSTRIPPED copies for Sentry symbol upload
-#                  (optional; skipped if unset). The APK ships the stripped libs
-#                  from DEST_DIR; Sentry matches these unstripped ones by build-id
-#                  so `:benchmark` native crash backtraces symbolicate.
+# -D args:
+#   ENGINE_SO, LIBCXX_SO : libpipette_android.so and the NDK libc++_shared.so
+#   GGML_BIN_DIR : llama.cpp libs plus the per-variant libggml-cpu-android_*.so
+#   DEST_DIR     : jniLibs/<abi>
+#   SENTRY_SO    : libpipette_sentry.so; set iff PIPETTE_ENABLE_CRASH_REPORTING=ON.
+#                  Then it is mandatory: the engine has it as DT_NEEDED.
+#   STRIP        : llvm-strip (optional)
+#   READELF      : llvm-readelf (optional; without it the SONAME guard is skipped)
+#   SYMBOLS_DIR  : receives unstripped copies for Sentry symbol upload (optional)
 #
-# Every ggml-cpu variant is classified against an explicit ship allowlist rather
-# than staged-then-filtered, so the build FAILS rather than silently shipping or
-# dropping anything if upstream ever renames or adds a variant.
-#   SHIP_VARIANTS : the armv8.x and armv9.x backends we ship.
-#   anything else : unknown -> hard error (confirm it loads, then add it).
-#
-# We ship the armv9 backends even though they produce incorrect LFM2A
-# audio-encoder output on armv9 devices (Tensor G5 / Pixel 10): Pipette is a
-# benchmark harness and measures every backend a device exposes. See
-# docs/pipette-android/implementation.md for the upstream bug and full rationale.
+# ggml-cpu variants are checked against the SHIP_VARIANTS allowlist so an
+# upstream rename or new variant fails the build instead of shipping or dropping
+# silently. The armv9 variants ship despite bad LFM2A audio-encoder output on
+# some armv9 devices; see docs/pipette-android/build.md.
 
-# This runs via `cmake -P` (its own cmake process, no enclosing project), so it
-# must set its own policy floor — without this, CMP0057 defaults to OLD and the
-# `if(... IN_LIST ...)` below errors (seen on CI's cmake; local default masked it).
+# `cmake -P` has no project, so without this CMP0057 is OLD and IN_LIST errors.
 cmake_minimum_required(VERSION 3.25)
 
 set(SHIP_VARIANTS "armv8.0_1;armv8.2_1;armv8.2_2;armv8.6_1;armv9.0_1;armv9.2_1;armv9.2_2")
 
-# SENTRY_SO is deliberately NOT in this list: it is set only when the engine was built
-# with native crash capture. See its entry in the header comment.
+# SENTRY_SO is optional; see the header.
 foreach(_required ENGINE_SO LIBCXX_SO GGML_BIN_DIR DEST_DIR)
   if(NOT DEFINED ${_required})
     message(FATAL_ERROR "stage_android_jnilibs: -D${_required} is required")
@@ -54,17 +31,13 @@ endforeach()
 file(REMOVE_RECURSE "${DEST_DIR}")
 file(MAKE_DIRECTORY "${DEST_DIR}")
 
-# Unstripped-symbol output for Sentry upload (M5). Cleaned + recreated so a
-# rebuild never uploads a stale symbol file for a lib that no longer ships.
+# Recreated so a rebuild never uploads symbols for a lib that no longer ships.
 if(DEFINED SYMBOLS_DIR AND SYMBOLS_DIR)
   file(REMOVE_RECURSE "${SYMBOLS_DIR}")
   file(MAKE_DIRECTORY "${SYMBOLS_DIR}")
 endif()
 
-# stage(src): copy into DEST_DIR (+ the UNSTRIPPED copy into SYMBOLS_DIR) then
-# strip --strip-unneeded the DEST copy (if STRIP given). The SYMBOLS_DIR copy is
-# taken from the original `src`, which strip never touches, so it keeps its
-# symbol table regardless of strip order.
+# Only the DEST_DIR copy is stripped; SYMBOLS_DIR gets the untouched `src`.
 function(stage src)
   if(NOT EXISTS "${src}")
     message(FATAL_ERROR "stage_android_jnilibs: expected lib missing: ${src}")
@@ -85,15 +58,10 @@ function(stage src)
   endif()
 endfunction()
 
-# assert_soname(src expected): fail the build unless `src`'s DT_SONAME equals
-# `expected`. Guards the sentry-native rename (root CMakeLists sets OUTPUT_NAME
-# pipette_sentry): the collision-avoidance only holds if the DT_SONAME the linker
-# embeds — and hence the engine's DT_NEEDED — is libpipette_sentry.so, NOT
-# libsentry.so. CMake derives the SONAME from OUTPUT_NAME today, so this passes;
-# if a future sentry-native submodule bump sets its own explicit SONAME the file
-# would still be libpipette_sentry.so while its SONAME reverted to libsentry.so,
-# silently reintroducing the collision with the Sentry Android SDK's libsentry.so.
-# This catches that at build time instead of as an on-device Sentry NDK break.
+# Guards the sentry-native OUTPUT_NAME rename in the root CMakeLists: if a
+# submodule bump sets an explicit SONAME, the file keeps its new name but the
+# engine's DT_NEEDED reverts to libsentry.so and collides with the Sentry
+# Android SDK's lib. Catch that here rather than on device.
 function(assert_soname src expected)
   if(NOT (READELF AND EXISTS "${READELF}"))
     message(STATUS "stage_android_jnilibs: READELF unavailable — skipping "
@@ -124,27 +92,14 @@ function(assert_soname src expected)
   endif()
 endfunction()
 
-# Core libs.
 stage("${ENGINE_SO}")
 stage("${LIBCXX_SO}")
 foreach(_lib libggml-base.so libggml.so libllama.so libmtmd.so)
   stage("${GGML_BIN_DIR}/${_lib}")
 endforeach()
 
-# sentry-native (libpipette_sentry.so) — native crash capture for :benchmark.
-#
-# Staged iff the caller passed SENTRY_SO, which it does iff the engine was built with
-# PIPETTE_ENABLE_CRASH_REPORTING=ON. In that case staging is MANDATORY, not
-# best-effort: libpipette_android.so hard-links the lib (DT_NEEDED), so staging the
-# engine without it would ship an APK that fails to load in BOTH processes. `stage()`
-# therefore still hard-errors on a missing file, keeping that path fail-closed.
-#
-# When crash reporting was compiled out the lib does not exist and the engine carries
-# no reference to it, so there is nothing to stage and nothing to guard.
 if(DEFINED SENTRY_SO AND SENTRY_SO)
   stage("${SENTRY_SO}")
-  # Guard the rename: its DT_SONAME must stay libpipette_sentry.so, else the
-  # libsentry.so collision with the Sentry Android SDK silently returns.
   assert_soname("${SENTRY_SO}" "libpipette_sentry.so")
 else()
   message(STATUS "stage_android_jnilibs: no SENTRY_SO, staging without native "
@@ -152,7 +107,6 @@ else()
                  "PIPETTE_ENABLE_CRASH_REPORTING=OFF).")
 endif()
 
-# CPU-variant backends.
 file(GLOB _variants "${GGML_BIN_DIR}/libggml-cpu-android_*.so")
 set(_staged_variants 0)
 foreach(_variant ${_variants})
@@ -169,7 +123,6 @@ foreach(_variant ${_variants})
   endif()
 endforeach()
 
-# Guard: at least one CPU variant must ship, or every on-device model load fails.
 if(_staged_variants EQUAL 0)
   message(FATAL_ERROR
     "no CPU backend variant was staged — the APK would have no usable CPU "
