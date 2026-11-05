@@ -15,9 +15,7 @@ No client reads power or energy from any of these sources. The clients record:
   before each repetition (§4)
 - on the Android CLI, the readiness gate's optional skin-temperature reading
 
-The farm reads the GMKtec power limits. The lab's power service, powerd, reads
-the smart plug and the inline USB-C meter (§8). No client records watts or
-joules.
+The farm reads the GMKtec power limits. No client records watts or joules.
 
 Terms used below:
 
@@ -104,8 +102,7 @@ Three findings that shape the method:
    state of charge must be recorded before and after.
 3. **`PSTR` is a polled reading, not a counter,** so it needs ≥1 Hz sampling
    through the window. It is undocumented; a one-off comparison against a
-   metering plug per model ([03-proposal.md](03-proposal.md) §6, Phase 0)
-   gives its error band.
+   metering plug per model gives its error band.
 
 `PHPC` also answers on the Mac Studio and MBP (37 W and 105–136 W under load)
 but its meaning is unverified; it is not used.
@@ -217,17 +214,14 @@ Consequences:
   charger's contribution, but an inline USB-C meter between the charger port and
   the handset reads it directly. With both halves measured, system energy is the
   meter's energy less the net energy into the battery, and the controller's
-  split cancels. The proposal takes this route; see
-  [03-proposal.md](03-proposal.md) §4.
+  split cancels.
 - The rack decides which route is cheap. The handsets share Anker Prime 250W
   stations, four USB-C and two USB-A ports each. A cooler pad uses a port of its
   own, so a station serves fewer phones than it has ports: in October 2026, each
   Galaxy S26 Ultra used three ports, one for the phone and one for each pad. A
   smart plug on the wall side therefore cuts a group, not one phone, and takes
   the group's other handsets off charge during a run. The stations switch ports
-  individually over Bluetooth. powerd's Anker adapter reads and switches each
-  port. The powerd build on the Linux host on 2026-11-04 does not include it
-  ([03-proposal.md](03-proposal.md) §4).
+  individually over Bluetooth.
 - ODPM-style per-rail energy is unavailable on every phone in the farm. The
   Pixel 4 XL predates it and nothing else exposes it to the shell or to an app.
 
@@ -273,8 +267,7 @@ This unit negotiated 5 V at 5 A from the official 27 W supply, whose PDOs are
 5 V/5 A, 9 V/3 A, 12 V/2.25 A and 15 V/1.8 A. The 5 A entry is outside the
 standard PD table; with a supply that offers 3 A the firmware caps USB
 current at 600 mA and flags under-voltage under load. The contract belongs on
-every row, and it is the reason the proposal's attribution rule places the Pi
-with the phones: the board ships without a supply.
+every row, because the board ships without a supply.
 
 **`vcgencmd get_throttled`.** A bitfield: under-voltage (bit 0), ARM frequency
 capped (1), currently throttled (2), soft temperature limit (3), each with a
@@ -543,8 +536,7 @@ polled at 4 Hz):
   this load only. The ramp in §6 shows the relation between the two sources is
   a floor of about 8 W plus a slope, so the ratio grows as power falls and is
   20× at idle. Carry the offset and the slope from the ramp if a conversion is
-  ever needed; since both scopes are submitted as rows of their own, nothing
-  in the proposal needs the factor.
+  ever needed.
 
 **GMKtec EVO-X2** (`ryzenadj --info` `PPT VALUE FAST` integrated over each
 run; benchmark worker stopped):
@@ -645,12 +637,9 @@ sources, poll gently, and define decode energy at a fixed depth and length.
 
 ## 8. What the probes did not cover
 
-- The client-side hook (per-rep observer) and the choice of sampling window
-  are in the proposal; no client code reads a power source.
+- No client code reads a power source.
 - No metering plug was available, so `PSTR` and `ryzenadj` have no wall
-  bracket yet. That is the first item of Phase 0 in the proposal. A Shelly Plug
-  US Gen4 and a KM003C are on the Linux host under `powerd`, the lab's power service,
-  so the brackets wait on scheduling, not on purchase. A plug
+  bracket yet. A plug
   bounds a DC-side source from above; it does not calibrate it, because the
   PSU's loss sits between the two. On a laptop the plug also misses the
   battery's contribution under load: it reads the adapter's ~125 W while the
@@ -668,9 +657,7 @@ sources, poll gently, and define decode energy at a fixed depth and length.
   M5 Max at full charge and again near 25 %, compare tok/s and mJ/token, and
   watch `PPBR`.
 - No inline USB-C meter was available, so the metered route in §3 is reasoned
-  from the battery-side data rather than demonstrated. The KM003C's live
-  stream has no energy counter; powerd integrates its 50 samples a second,
-  and their sequence numbers show no loss at that rate.
+  from the battery-side data rather than demonstrated.
 - No token sweep was run on the iPhone; §6 has one end-to-end shape. The 20 s
   publish cadence means the §7 pair on an iPhone needs windows that are whole
   multiples of 20 s, or a repetition count that makes the edge blocks small.
@@ -678,8 +665,6 @@ sources, poll gently, and define decode energy at a fixed depth and length.
   `SystemPowerIn` at the connector.
 - No inline meter was on Pi 1, so its rail sum has no connector
   bracket yet, and whether the meter passes the 5 V 5 A contract through is
-  untested. The KM003C on the Linux host monitored Pi 9 under powerd until
-  2026-10-27, when a powerd experiment moved it to a phone. With the meter back
-  on a Pi, a sweep on that Pi gives the bracket.
+  untested. A sweep on a Pi with an inline meter gives the bracket.
 - Mac Studio 1 was used for the M3 Ultra; `sudo -n
   powermetrics` was not exercised there.

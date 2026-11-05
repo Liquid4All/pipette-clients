@@ -10,9 +10,7 @@ The main finding: **no public benchmark measures LLM energy on phones, Macs
 or mini-PCs to a standard.** Datacenter energy is well covered (MLPerf Power,
 ML.ENERGY, AI Energy Score). On-device coverage is vendor percentage claims and
 one-off academic studies. Pipette can publish what is missing. No ready-made set
-of rules exists to adopt; the rules in
-[03-proposal.md](03-proposal.md) are assembled from the datacenter methods and
-the phone studies.
+of rules exists to adopt.
 
 ## 1. Benchmark bodies and leaderboards
 
@@ -258,8 +256,7 @@ measurement boundary.
    MELTing Point's VBUS switch and the DVFS study are the two phone-specific
    rules that no datacenter method covers. Every phone study cuts the charger
    because it measures only the battery side; metering the charger side instead
-   satisfies the same rule, and [03-proposal.md](03-proposal.md) takes that
-   route.
+   satisfies the same rule.
 6. **No other benchmark covers this.** MLPerf does not do
    phones, MLPerf Client's power is experimental and PC-only, the app
    benchmarks have nothing. Whatever pipette publishes will be the first

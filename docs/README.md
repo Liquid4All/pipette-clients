@@ -60,7 +60,7 @@ as needed; other files keep descriptive names.
 - [ASR evals](methodology/asr-eval.md): word error rate on audio clips from the entry's pinned corpus, on llama.cpp or vLLM, scored outside the client like text evals
 - [Selection policies](methodology/selection-policies.md): which models, weights and runtime builds are benchmarked
 - [Core AI specialization cache](methodology/coreai-specialization.md): how Core AI caches and reuses specialized model artifacts on the device
-- Energy: [landscape](methodology/energy/01-landscape.md) · [device capabilities](methodology/energy/02-device-capabilities.md) · [proposal](methodology/energy/03-proposal.md)
+- Energy: [landscape](methodology/energy/01-landscape.md) · [device capabilities](methodology/energy/02-device-capabilities.md)
 
 ### Host-native CLIs
 
