@@ -28,6 +28,9 @@ Before a timed measurement starts, a device is expected to be:
   *Fast charging* below), and the energy probes saw both the S26 Ultra and the
   iPhone draw from the pack during a rep
   ([Energy: device capabilities](energy/02-device-capabilities.md) §3 and §6).
+  Laptops run on the adapter they ship with, and that adapter can supply less
+  than the laptop draws. The MacBook Neo ships with a 20 W adapter and can draw
+  up to 33 W, so under load it can also draw from its battery.
   Each result records the power state it ran under
   ([Recorded run environment](#recorded-run-environment)).
 - **Actively cooled.** Phones run clamped between powered coolers. The fanless
