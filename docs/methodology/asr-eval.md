@@ -66,10 +66,12 @@ under `media/<sha256>.wav`), and the run downloads it from `GET /datasets/{id}`.
 A device that runs `asr_eval` needs `perform_work`, as a dataset is served only
 to a working client (`pipette-mgmt clients permission add <client>
 perform_work`). The entries are private to an organization, which puts them
-into its own catalog: pipette uses the datasets only for internal,
-non-commercial benchmarking of its models, with no redistribution.
-SPGISpeech and URGENT 2024 are licensed for non-commercial use only, and
-GigaSpeech is gated.
+into its own catalog: pipette uses the datasets only for internal
+benchmarking of its models, with no redistribution. SPGISpeech is under
+Kensho's Terms of Usage: academic research and internal use only, with no
+redistribution without Kensho's written consent. URGENT 2024 is under
+CC-BY-NC-SA-4.0. GigaSpeech is under Apache-2.0, behind a Hugging Face access
+gate.
 
 The corpus is checked before the first prompt, and any mismatch fails the run:
 answers to other clips would be graded against the wrong references.
