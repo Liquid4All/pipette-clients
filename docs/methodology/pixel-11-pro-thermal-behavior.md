@@ -75,14 +75,18 @@ wait. The three modes of one cooler gave the same rep time, and the strongest
 mode gave about 5 % more results per hour.
 
 **A cooler on the screen can cause phantom touches in two ways.** Water from
-condensation registers as a touch: the fleet's front cooler did this on 3 of 10
-handsets. A soft pad pressed on the glass also registers as a held touch,
+condensation registers as a touch: the fleet's front cooler of October 2026 did
+this on 3 of 10 handsets. A soft pad pressed on the glass also registers as a held touch,
 without any water. A held touch costs CPU time on every rep, and the gate's CPU
 criterion does not see that cost. Clients built on 2026-10-26 or later hold a
 rep in the Android CLI gate while it detects a held touch. The clients in these
 studies did not have that criterion. See [Phantom touches](#phantom-touches).
 
 ## Measurement rig
+
+The fleet's current cooling is one Black Shark Live Streaming Cooler on the
+back of each phone ([Active cooling](device-conditions.md#active-cooling)).
+This section lists the setups that this study measured.
 
 **First study (2026-10-19):**
 
@@ -376,7 +380,7 @@ water:
 
 | Front cooler | Touch events in 5 s | `TOUCH_MAJOR` | Probable cause |
 |---|---|---|---|
-| The fleet's front cooler, bare (phones 1, 8, 10) | 269–3,531 | near 12,000, changes quickly | condensation |
+| The fleet's October 2026 front cooler, bare (phones 1, 8, 10) | 269–3,531 | near 12,000, changes quickly | condensation |
 | 50 W cooler with a 0.5 mm Arctic TP-4 silicone pad | 90–146 (interrupt at about 240/s) | about 7,500, changes slowly | the pad and plate |
 | Black Shark (rubber pad) | 131–2,360 (interrupt at 241/s) | about 7,060, changes slowly | the pad |
 | The silicone pad alone, no plate | 0 | — | — |

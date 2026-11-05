@@ -33,7 +33,7 @@ Before a timed measurement starts, a device is expected to be:
   up to 33 W, so under load it can also draw from its battery.
   Each result records the power state it ran under
   ([Recorded run environment](#recorded-run-environment)).
-- **Actively cooled.** Phones run clamped between powered coolers. The fanless
+- **Actively cooled.** Each phone runs with one powered cooler on its back. The fanless
   MacBook Neo carries a passive pad inside the case and one active pad under it.
   See [Active cooling](#active-cooling) for what the coolers change and what
   they do not change. A modified device does not represent the product as sold.
@@ -63,8 +63,8 @@ These conditions are of two kinds, treated differently:
 
 ## Active cooling
 
-Phones are held between two powered coolers, one clamped to the screen side and
-one to the back. Both coolers draw from the rig's charger. The MacBook Neo has a
+Each phone has one Black Shark Live Streaming Cooler clamped to its back,
+powered from the rig's charger. No cooler touches the screen. The MacBook Neo has a
 different setup; see [Cooling on the MacBook Neo](#cooling-on-the-macbook-neo).
 
 The readiness gate controls only the temperature at which a repetition *starts*.
@@ -115,35 +115,34 @@ standard deviation under half a second. Even at its best, measured compute is
 under a tenth of the wall clock. The rest is the wait for the readiness band, so
 a shorter wait is what makes a run fast.
 
-We standardize on **two coolers, one per side**:
+The rig uses **one cooler per phone, on the back**:
 
-- The first cooler roughly halves the measured latency (34.7 s → 18.3 s).
-- The second cooler roughly halves the wall clock again (410 s → 220 s).
+- In the sweep, one cooler roughly halves the measured latency (34.7 s → 18.3 s).
+- A second cooler, on the screen side, roughly halves the wall clock again
+  (410 s → 220 s). A cooler on the screen can cause phantom touches (below), so
+  the rig does not use one.
 - A third cooler changes the wall clock by less than 6 % and does not improve
-  stability. It adds power draw and cabling, so we do not use it.
+  stability.
 
 Placement matters more than the fan count, because the two faces are the
 phone's main surfaces for heat loss. Two coolers on one side gave no useful
 gain.
 
-A **cooler** is one piezo-electric pad that clamps to the phone. A pad carries
-one or two **fans**, so the fan and cooler counts above differ. The sweep mixes
-the single-fan Black Shark FunCooler 5 NEO with the two-fan Neveika 001. We
-standardize on the two-fan **Neveika 001** (only one two-fan pad fits per
-side). Each pad has its own USB-C port on an Anker A2345 Prime 250 W charging
+A **cooler** is one pad that clamps to the phone. A pad carries one or two
+**fans**, so the fan and cooler counts above differ. The sweep mixes the
+single-fan Black Shark FunCooler 5 NEO with the two-fan Neveika 001; it has no
+row for the rig's Black Shark Live Streaming Cooler. Each pad has its own USB-C port on an Anker A2345 Prime 250 W charging
 station, and the phone has a port of its own. On 2026-10-15, some pads drew
 11–13 W, more than the station's USB-A ports supply, so the pads use the USB-C
-ports. The standard rig (two Neveika
-pads: two coolers, four fans) was not a row in the sweep. It sits between the
-two-cooler/three-fan and three-cooler/four-fan points, which both land at
-17–18 s with a standard deviation under 0.5 s.
+ports.
 
-A cooler on the screen side can also cause phantom touches, from condensation
-or from a soft pad pressed on the glass. The Android CLI gate holds a rep while
+A cooler on the screen side can cause phantom touches, from condensation or
+from a soft pad pressed on the glass. The Android CLI gate also holds a rep while
 it detects a held touch; see
 [Android](end-to-end-latency.md#android) in the readiness criteria.
 
-No cooler sweep exists for **iPhone**. In the iPhone 18 Pro study (2026-10-16
+No cooler sweep exists for **iPhone**. Each iPhone also has one Black Shark
+Live Streaming Cooler on its back. In the iPhone 18 Pro study (2026-10-16
 to 2026-10-19), each handset ran with one active cooler
 ([iPhone 18 Pro thermal behavior](iphone-18-pro-thermal-behavior.md)).
 
@@ -234,8 +233,8 @@ reports how much of the last window each handset spent awake.
 
 Two steps happen outside the Settings app:
 
-- **Delete every home-screen icon.** The screen-side cooler can raise
-  condensation on the panel, and a capacitive digitizer reads water as a touch.
+- **Delete every home-screen icon.** A cooler can raise condensation on the
+  phone, and a capacitive digitizer reads water on the panel as a touch.
   A stray touch on an empty home screen starts nothing. See the note on
   accidental touch protection below.
 - **Close every app.** Open the recents list with the left-hand button in the
@@ -289,8 +288,8 @@ a device from top to bottom:
   resolution cost GPU and display-pipeline work.
   - *Adaptive brightness*: **off** (`system.screen_brightness_mode` = 0). Then
     set the brightness slider at the top of Display to **minimum**
-    (`system.screen_brightness` = 0). The panel sits directly against the
-    screen-side cooler, and minimum brightness produces the least heat. With a
+    (`system.screen_brightness` = 0). Minimum brightness produces the least
+    heat. With a
     fixed level, the light sensor also has no effect on panel output. Order
     matters: while adaptive brightness is on, the level moves on its own and a
     written level does not hold.
@@ -385,7 +384,7 @@ a device from top to bottom:
   Wi-Fi and Bluetooth scans that a position fix drives. It also stops the
   location triggers that a mode or routine can carry.
 - **Advanced features → Side button.** Both actions launch a heavy app out of
-  the box, and the clips that hold the coolers press this button. An app that
+  the box, and the clip that holds the cooler can press this button. An app that
   starts behind the benchmark client holds memory, drives the memory compressor,
   and slows the measured runs.
   - *Double press*: **Nothing** (`global.function_key_config_doublepress` = 0).
@@ -488,10 +487,8 @@ a device from top to bottom:
     fleet. The AOSP default of 604800000 revokes an unused host key after seven
     days, which drops the phone out of the fleet.
 
-Two of these settings conflict. *Accidental touch protection* suppresses touch
-input when the light sensor reads dark, and a cooler pad over the panel produces
-exactly that condition. The feature would therefore also suppress a phantom
-touch from condensation. We turn it off, because the light sensor then has no
+*Accidental touch protection* suppresses touch input when the light sensor
+reads dark. We turn it off, so that the light sensor has no
 effect on device behavior, and an empty home screen handles the phantom touches
 instead. If a phone ever acts on a stray touch despite an empty home screen,
 turn the feature back on.
@@ -679,9 +676,8 @@ on the model at hand.
     moves the phone on the rig.
   - *Always On Display*: **off**. The panel otherwise refreshes about once a
     second while the phone idles. That draws power and warms the display.
-  - *Brightness*: **minimum**, on every phone in the fleet. The panel sits
-    directly against the screen-side cooler, and minimum brightness produces the
-    least heat. *Auto-Brightness* off stops the phone from changing the level,
+  - *Brightness*: **minimum**, on every phone in the fleet. Minimum brightness
+    produces the least heat. *Auto-Brightness* off stops the phone from changing the level,
     but it does not set the level. Two phones at different levels draw different
     display power and settle at different panel temperatures.
 - **Privacy & Security**
@@ -884,8 +880,8 @@ The macOS gate's behavior on these hosts is characterized in
 
 | Platform / board | Representative hardware | Power | Cooling |
 | --- | --- | --- | --- |
-| Android phone | Galaxy S26 Ultra ×10; Pixel 11 Pro ×10; Galaxy S25 Ultra (Snapdragon 8 Elite) | mains | two piezo coolers, one per side |
-| iPhone (iOS) | iPhone 17 Pro ×10; iPhone 18 Pro ×5; iPhone 16 Pro Max; the [private-API build](../pipette-ios/private-thermal-release-build.md) | mains | iPhone 18 Pro: one active cooler per handset (2026-10-16 to 2026-10-19 study) |
+| Android phone | Galaxy S26 Ultra ×10; Pixel 11 Pro ×10; Galaxy S25 Ultra (Snapdragon 8 Elite) | mains | one Black Shark Live Streaming Cooler, on the back |
+| iPhone (iOS) | iPhone 17 Pro ×10; iPhone 18 Pro ×5; iPhone 16 Pro Max; the [private-API build](../pipette-ios/private-thermal-release-build.md) | mains | one Black Shark Live Streaming Cooler, on the back |
 | macOS | Mac Studio (M3 Ultra) ×4; MacBook Pro (M5 Max) ×3; MacBook Neo (A18 Pro) | stock AC | Mac Studio and MacBook Pro stock; **Neo is thermally modified: passive pad inside the case plus one active cooling pad under it** |
 | Linux host (generic) | x86 / ARM benchmark host | stock AC | stock |
 | Raspberry Pi 5 (BCM2712) | Raspberry Pi 5 ×10 | sized PSU | stock |

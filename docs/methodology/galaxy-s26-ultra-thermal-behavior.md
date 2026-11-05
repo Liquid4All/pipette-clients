@@ -81,6 +81,10 @@ studies did not have that criterion.
 
 ## Measurement rig
 
+The fleet's current cooling is one Black Shark Live Streaming Cooler on the
+back of each phone ([Active cooling](device-conditions.md#active-cooling)).
+This section lists the setups that this study measured.
+
 - **Handsets:**
   - Phone 9 (SM-S948U1) of our fleet, on 2026-10-22, with its benchmark
     workers stopped and a Neveika rev2 cooler on each side.
@@ -90,9 +94,8 @@ studies did not have that criterion.
   (cpu6–7, 4.74 GHz). The cpufreq policies are `policy0` (cpu0–5) and `policy6`
   (cpu6–7).
 - **Coolers:**
-  - Neveika rev1: the 4 W Neveika 001 that
-    [Device conditions](device-conditions.md#active-cooling) names as the
-    standard.
+  - Neveika rev1: the 4 W Neveika 001, the fleet's front and back cooler in
+    October 2026.
   - Neveika rev2: a second revision of the Neveika pad. On 2026-10-14, the
     fleet phones carried two coolers each, one on each side: two rev1, two
     rev2, one of each, or a rev1 with a Black Shark. Phone 9 carried a rev2 on
@@ -299,7 +302,7 @@ of cpu6–7 during each rep, for rep 1 and rep 5.
 | 50 W cooler, back middle | 59.0 s | 2.67 % | 57.0 → 60.8 s | 55 s | ~114 s | 3.66 → 3.39 GHz |
 | 50 W cooler, back top, over the CPU (cold start) | 54.3 s | 1.59 % | 53.5 → 55.7 s | 25 s | ~80 s | 4.27 → 3.60 GHz |
 | 50 W cooler, back top, over the CPU (resting start) | 54.9 s | 2.46 % | 53.3 → 56.7 s | 25 s | ~80 s | 4.07 → 3.67 GHz |
-| Neveika rev1, back + front (the fleet setup) | 57.6 s | 3.92 % | 54.7 → 60.3 s | 34 s | ~92 s | 3.80 → 3.46 GHz |
+| Neveika rev1, back + front (the October 2026 fleet setup) | 57.6 s | 3.92 % | 54.7 → 60.3 s | 34 s | ~92 s | 3.80 → 3.46 GHz |
 | Black Shark, front | 58.6 s | 2.78 % | 56.8 → 60.1 s | 37 s | ~96 s | 3.57 → 3.32 GHz |
 
 - **All setups throttled from the first seconds of each rep.** The time under a
@@ -311,7 +314,7 @@ of cpu6–7 during each rep, for rep 1 and rep 5.
   a candidate for the fleet.
 - **The Black Shark on the front was 2.7 % faster than on the back** (t = −1.6,
   5 reps each). Its cap deepened less from rep to rep.
-- **The fleet setup was 4.6 % faster than one Neveika on the back** (t = −1.9),
+- **The October 2026 fleet setup was 4.6 % faster than one Neveika on the back** (t = −1.9),
   with the same drift (+10 %). The front Neveika registered as a touch during
   this run (see [Phantom touches](#phantom-touches)).
 - **Cooler power does not change the mean in the middle of the back.** The 4 W
@@ -498,7 +501,7 @@ memory throttling seen", not proof that there is none.
   touches from a screen-side cooler. On 2026-10-19, the nine fleet S26 Ultras
   that the check reached read 0 touch events. On 2026-10-21, phone 10 still
   showed touches. On 2026-10-22, phone 9 with a Neveika rev2 on each side read
-  0. The touches in the fleet setup row of [Coolers](#coolers) come from this
+  0. The touches in the October 2026 fleet setup row of [Coolers](#coolers) come from this
   handset's front Neveika rev1 and how it sat on the glass.
 - **The held-touch criterion.** In clients built on 2026-10-26 or later, the
   Android CLI gate holds a rep while it detects a held touch; the mechanism is in
@@ -545,7 +548,7 @@ memory throttling seen", not proof that there is none.
   skin-gated run by 40 % against one Neveika rev1. Measure one Black Shark on
   the back in quiet mode, on the same day, to find how much of that gain the
   front cooler gives. The front cooler gave touches in AI mode on a humid day.
-- **The fleet's front Neveika.** This handset's front Neveika rev1 registered as
-  a touch. On 2026-10-21, phones 1–9 of the fleet showed no touches, and phone
+- **The front Neveika.** This handset's front Neveika rev1 registered as
+  a touch. The fleet no longer uses a front cooler. On 2026-10-21, phones 1–9 of the fleet showed no touches, and phone
   10 did. Check the fleet handsets again before you compare fleet results with
   this note.

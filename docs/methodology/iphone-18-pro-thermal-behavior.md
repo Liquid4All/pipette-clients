@@ -32,6 +32,10 @@ about 6 s.
 
 ## Measurement rig
 
+The fleet's current cooling is one Black Shark Live Streaming Cooler on the
+back of each phone ([Active cooling](device-conditions.md#active-cooling)).
+This section lists the setups that this study measured.
+
 - **Handsets:** five iPhone 18 Pro (iPhone19,2), phone 1 to phone 5, paired to
   a Mac host. Jobs run through
   `pipette-ios-proxy`.
