@@ -435,7 +435,9 @@ issue is fixed.
 Staging is **fail-closed** for unknown variants:
 `cmake/stage_android_jnilibs.cmake` copies only the variants in the explicit
 `SHIP_VARIANTS` allowlist. The build *fails* if ggml builds a variant that is not
-in the allowlist, or if it stages no variant at all.
+in the allowlist, or if it stages no variant at all. An allowlisted variant
+that ggml does not build is left out without an error, as long as one variant
+stages.
 
 ### KleidiAI (opt-in)
 

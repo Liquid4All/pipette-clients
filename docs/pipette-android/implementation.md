@@ -403,6 +403,9 @@ a run (`ModelProvisioner`). The Compose UI has no field for a manual Hugging
 Face identifier or for the Hugging Face token. The token comes from an
 `auth-import` bundle (see
 [architecture.md](architecture.md#carrying-an-identity-to-another-device)).
+This is deliberate. Lab benchmarks run through the CLI, which takes a token for
+gated models. The app is for members of the public who run real-world tests and
+submit their numbers, and those tests need no token.
 
 ## Downloads (WorkManager)
 

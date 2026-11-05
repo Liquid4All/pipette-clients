@@ -283,3 +283,4 @@ decode (+5.06% against +/- 1.0%), memory (+0.58% against +/- 0.2%), and prefill
 criterion, and the gate did not use them. Under those thresholds, the Section 5
 protocol makes decode and prefill improvements (step 2: verify with an eval run)
 and memory a regression (step 3: profile, then a review with the product owner).
+`kotlinEngine` stays the default flavor by design.
