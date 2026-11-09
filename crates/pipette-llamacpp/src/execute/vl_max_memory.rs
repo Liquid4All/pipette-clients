@@ -11,7 +11,9 @@ use base64::Engine;
 
 use pipette_http::HttpClient;
 use pipette_memprobe::{Peak, Sampler, SupportedWatch};
-use pipette_ops::measurement::{self, MemoryMeasurementWarmup, VlMaxMemoryMeasurementReading};
+use pipette_ops::measurement::{
+    self, MeasurementObserver, MemoryMeasurementWarmup, VlMaxMemoryMeasurementReading,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     BenchmarkFlagRef, LlamaCppFlavor, LlamacppCliStockToolsExtraRuntimeConfiguration,
@@ -28,6 +30,10 @@ use crate::server::{self, LoggingMarker, ServerCommandBuilder};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::swap_aware;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub fn run(
     benchmark: &VlMaxMemoryBenchmark,
     runtime_flags: VlMaxMemoryLlamacppCliStockToolsGgufVision,
@@ -35,6 +41,7 @@ pub fn run(
     flavor: &LlamaCppFlavor,
     program: &ResolvedLlamaServer,
     model: &ResolvedGgufVisionModel,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     // Before the calibration, which loads the model: a flavor refused here
@@ -49,10 +56,12 @@ pub fn run(
     let ctx_pinned = runtime_flags.ctx_size.is_some();
     let calibrated_per_image = (!ctx_pinned)
         .then(|| {
-            mtmd::calibrate(
-                &inputs,
-                &calibration(&runtime_flags, program, model, client_config),
-            )
+            observer.outside(|| {
+                mtmd::calibrate(
+                    &inputs,
+                    &calibration(&runtime_flags, program, model, client_config),
+                )
+            })
         })
         .flatten();
     // No floor, unlike vl_throughput: the fallback already over-estimates, so
@@ -74,12 +83,13 @@ pub fn run(
     let timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
     // One budget per server from spawn through the workload: the model load,
     // then the vision encode and prefill.
-    let deadline = memory::bench_timeout(benchmark_flags.bench_timeout_seconds);
+    let deadline = memory::attempt_timeout(benchmark_flags.attempt_timeout_seconds);
     let mut served = None;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let mut extras = serde_json::Map::new();
     let result = measurement::vl_max_memory(
         benchmark,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {

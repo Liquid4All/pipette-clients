@@ -1,6 +1,8 @@
 use pipette_http::HttpClient;
 use pipette_memprobe::Watch;
-use pipette_ops::measurement::{self, MaxMemoryMeasurementReading, MemoryMeasurementWarmup};
+use pipette_ops::measurement::{
+    self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
+};
 use pipette_plan_types::{
     MaxMemoryUsageBenchmark, MlxMacosPipetteExtraRuntimeConfiguration, RunResponse,
 };
@@ -15,6 +17,7 @@ pub(super) fn run(
     benchmark: &MaxMemoryUsageBenchmark,
     venv_python: &ResolvedMlxPython,
     model_dir: &ResolvedMlxModel,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&MlxMacosPipetteExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     // Before the tokenizer, the first process this cell starts.
@@ -47,6 +50,7 @@ pub(super) fn run(
     let mut served = None;
     let result = measurement::max_memory(
         &benchmark.benchmark_id,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {

@@ -1,7 +1,7 @@
 //! The typed CLI verbs: `pipette-ctl <area> <verb>`, one per catalog row.
 //!
 //! Built with clap's builder API from [`ROUTES`] rather than derived, so a
-//! route's flags are its catalog fields and cannot drift from the MCP schema.
+//! route's flags are its catalog fields.
 
 use std::{
     collections::BTreeMap,
@@ -41,7 +41,7 @@ const WITHHELD: &str = "withheld";
 /// The CLI areas, in catalog order.
 fn areas() -> Vec<&'static str> {
     let mut areas: Vec<&'static str> = Vec::new();
-    for route in ROUTES.iter().filter(|route| route.has_verb()) {
+    for route in ROUTES {
         if !areas.contains(&route.area) {
             areas.push(route.area);
         }
@@ -77,7 +77,7 @@ impl FromArgMatches for RouteCommand {
         let (verb, matches) = matches.subcommand().ok_or_else(missing)?;
         let route = ROUTES
             .iter()
-            .find(|route| route.has_verb() && route.area == area && route.verb == verb)
+            .find(|route| route.area == area && route.verb == verb)
             .ok_or_else(|| clap::Error::new(clap::error::ErrorKind::InvalidSubcommand))?;
         let args = collect(route, matches).map_err(|error| {
             clap::Error::raw(
@@ -107,7 +107,7 @@ impl Subcommand for RouteCommand {
         areas().into_iter().fold(cmd, |cmd, area| {
             let verbs = ROUTES
                 .iter()
-                .filter(|route| route.has_verb() && route.area == area)
+                .filter(|route| route.area == area)
                 .map(route_command);
             cmd.subcommand(
                 clap::Command::new(area)
@@ -124,18 +124,15 @@ impl Subcommand for RouteCommand {
     }
 
     fn has_subcommand(name: &str) -> bool {
-        ROUTES
-            .iter()
-            .any(|route| route.has_verb() && route.area == name)
+        ROUTES.iter().any(|route| route.area == name)
     }
 }
 
 fn route_command(route: &'static Route) -> clap::Command {
     let mut cmd = clap::Command::new(route.verb).after_help(format!(
-        "{} {}  (MCP tool `{}`)",
+        "{} {}",
         route.method.as_str(),
-        route.path,
-        route.tool()
+        route.path
     ));
     for name in route.path_params() {
         cmd = cmd.arg(
@@ -275,8 +272,7 @@ fn field_arg(field: &Field) -> Arg {
     }
 }
 
-/// The catalog arguments clap parsed, typed as the MCP front end would send
-/// them.
+/// The catalog arguments clap parsed, as typed JSON values.
 fn collect(route: &Route, matches: &ArgMatches) -> anyhow::Result<Args> {
     let mut args = Map::new();
     for name in route.path_params() {
@@ -948,65 +944,6 @@ fn scalar(value: &Value) -> String {
     }
 }
 
-/// `pipette-ctl mcp`: the same routes, as MCP tools.
-#[derive(clap::Args, Debug)]
-pub struct McpArgs {
-    #[command(subcommand)]
-    pub command: McpCommand,
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub enum McpCommand {
-    /// Serve the management routes as MCP tools on stdio.
-    ///
-    /// Signs as the account in this working directory, so register the server
-    /// with it named, e.g.
-    /// `claude mcp add pipette -- pipette-ctl --work-dir ~/pipette mcp serve`,
-    /// or through `PIPETTE_WORK_DIR` and `PIPETTE_MGMT_SERVER` for a client
-    /// that drops or takes over the flags.
-    Serve {
-        /// Management server URL (default: the one this working directory is
-        /// registered against).
-        #[arg(long, env = "PIPETTE_MGMT_SERVER")]
-        server: Option<ServerUrl>,
-    },
-    /// List the tools `serve` offers.
-    Tools {
-        /// Print the full MCP tool definitions, input schemas included.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-impl McpArgs {
-    pub fn execute(self, work_dir: Option<&Path>) -> anyhow::Result<()> {
-        match self.command {
-            McpCommand::Serve { server } => {
-                let session = Session::open(&resolve_work_dir(work_dir)?, server)?;
-                super::mcp::serve(&session, std::io::stdin().lock(), std::io::stdout())
-            }
-            McpCommand::Tools { json: true } => {
-                let tools = ROUTES.iter().map(super::mcp::tool).collect::<Vec<_>>();
-                println!("{}", serde_json::to_string_pretty(&tools)?);
-                Ok(())
-            }
-            McpCommand::Tools { json: false } => {
-                let mut table = Builder::default();
-                table.push_record(["TOOL", "ROUTE", "SUMMARY"]);
-                for route in ROUTES {
-                    table.push_record([
-                        route.tool(),
-                        format!("{} {}", route.method.as_str(), route.path),
-                        route.summary().to_string(),
-                    ]);
-                }
-                println!("{}", table.build().with(Style::psql()));
-                Ok(())
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -1131,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_become_the_arguments_mcp_would_send() -> anyhow::Result<()> {
+    fn flags_become_catalog_arguments() -> anyhow::Result<()> {
         let command = parse(&[
             "clients", "list", "--tag", "lab", "--tag", "rack-2", "--limit", "5", "--all",
         ])?;
@@ -1598,8 +1535,8 @@ mod tests {
         );
         let spellings = spellings(&route_command(route("vault_download")?));
         assert_eq!(
-            respell(&spellings, "`resource_id`, `overwrite`, `users_me`"),
-            "`RESOURCE_ID`, `--overwrite`, `auth me`"
+            respell(&spellings, "`resource_id`, `overwrite`, `users_keys`"),
+            "`RESOURCE_ID`, `--overwrite`, `users keys`"
         );
         Ok(())
     }

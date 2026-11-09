@@ -681,6 +681,8 @@ nonisolated struct FailureSubmission: Encodable, Sendable, Equatable {
     let benchmarkId: String
     let failureReason: String
     let retriable: Bool
+    /// Left out when `nil`: mgmt refuses a `null`.
+    var failureCode: FailureCode?
     let clientVersion: String
     /// Milliseconds from the claim to the failure being ready to submit, on a monotonic
     /// clock, excluding the submit and its retries. `nil` unless a caller timed the job.
@@ -692,6 +694,7 @@ nonisolated struct FailureSubmission: Encodable, Sendable, Equatable {
         case benchmarkId = "benchmark_id"
         case failureReason = "failure_reason"
         case retriable
+        case failureCode = "failure_code"
         case clientVersion = "client_version"
         case deviceTimeMs = "device_time_ms"
     }
@@ -721,6 +724,17 @@ nonisolated struct FailureSubmission: Encodable, Sendable, Equatable {
             clientVersion: clientVersion
         )
     }
+}
+
+/// mgmt's grouping of a failure (the mgmt repo's `docs/httpapi.md`, `failure_code`): the
+/// crate's `pipette_plan_types::FailureCode` less `unspecified`, which a body says by
+/// leaving the key out.
+nonisolated enum FailureCode: String, Codable, Sendable, Equatable {
+    case outOfMemory = "out_of_memory"
+    case attemptTimeout = "attempt_timeout"
+    case runtimeError = "runtime_error"
+    case deviceError = "device_error"
+    case harnessError = "harness_error"
 }
 
 // MARK: - Benchmarks

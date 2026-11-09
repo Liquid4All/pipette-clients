@@ -197,9 +197,11 @@ On every flavor the runner first starts a `llama-server` on the same command,
 sends it the cell's request, checks its reading and drops it, and stops it, then
 starts the measured server; why is in
 [peak memory: compile caches](peak-memory-usage.md#compile-caches). If that first
-server fails to start or to answer, the cell fails. Each server gets the cell's
-`bench_timeout_seconds` for itself. The response and the peak are the measured
-server's; the observation covers both servers.
+server fails to start or to answer, the cell fails. Each server is an attempt
+of its own under the cell's `attempt_timeout_seconds`, 300 s by default
+([the attempt limit](../pipette-cli/usage.md#5c-the-attempt-limit)). The
+response and the peak are the measured server's; the observation covers both
+servers.
 
 `vl_max_memory_smoke` on `LiquidAI/LFM2.5-VL-450M-GGUF` (Q4_0, F16 mmproj),
 llama.cpp b11109, all layers offloaded, before the warm-up server, on an empty
@@ -346,8 +348,9 @@ It differs from the `llama-server` runner in two ways:
 
 - **No context to size.** `mlx_vlm`'s KV cache grows with the prompt in
   256-token steps, so nothing is reserved ahead of the request.
-- **No plan flags.** Like the MLX text memory cell, it carries no
-  `http_timeout_seconds` or `bench_timeout_seconds`. The request waits up to
+- **No HTTP timeout.** Like the MLX text memory cell, it carries
+  `attempt_timeout_seconds` alone, no `http_timeout_seconds`. Each server is
+  one attempt from its launch (300 s by default), and its request waits up to
   3600 s.
 
 The figure is the whole Python server: the interpreter, the processor, the

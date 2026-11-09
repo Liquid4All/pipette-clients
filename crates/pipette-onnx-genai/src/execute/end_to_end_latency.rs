@@ -127,10 +127,7 @@ mod tests {
             parameter_decode_tokens: PositiveCount::try_new(16)?,
             parameter_batch_size: BatchSize::one(),
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let result = measure(
             &benchmark,
             &server.base_url(),

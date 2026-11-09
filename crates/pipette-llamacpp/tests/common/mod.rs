@@ -353,10 +353,7 @@ pub fn no_readiness_gate() -> anyhow::Result<()> {
 /// A [`MeasurementObserver`] that records nothing: a test must not probe host
 /// sensors.
 pub fn ignore_reps() -> MeasurementObserver<'static> {
-    MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    }
+    MeasurementObserver::QUIET
 }
 
 /// A [`RunContext`] that checkpoints evals under `root` and serves no corpus,

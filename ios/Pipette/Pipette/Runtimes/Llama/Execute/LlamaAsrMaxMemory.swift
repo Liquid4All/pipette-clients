@@ -9,16 +9,18 @@ nonisolated extension LlamaExecute {
     /// The context is sized inside the bracket.
     static func asrMaxMemory(
         _ benchmark: AsrMaxMemoryBenchmark, _ request: RunRequest, cell: AsrCell,
-        model: ResolvedGgufVisionModel, flags: RuntimeFlags
+        model: ResolvedGgufVisionModel, flags: RuntimeFlags, observer: MeasurementObserver
     ) async throws -> (BenchmarkResultData, RuntimeFlags, AsrClientExtras) {
         // Behind a pinned context the count would size nothing, as the CLI skips its helper.
         let pinned = request.runtimeFlags?.ctxSize != nil
         var ran = flags
         let resultData = try await withAsrClip(cell) { clip in
-            try await BenchmarkMeasurement.asrMaxMemory(benchmark, warmup: .cold, ctx: ()) { _ in
+            try await BenchmarkMeasurement.asrMaxMemory(benchmark, observer: observer,
+                                                        warmup: .cold, ctx: ()) { _ in
                 let peak = try await ProcessMemory.maxMemoryBracket(label: "llama asr") {
                     (_, ran) = try await withCalibratedAudio(
-                        request, model, cell, flags: flags, clipPath: clip, calibrate: !pinned
+                        request, model, cell, flags: flags, clipPath: clip, calibrate: !pinned,
+                        observer: observer
                     ) { try await asrMaxMemory(cell, $0, clipPath: clip, calibrated: $1) }
                 }
                 return VlMaxMemoryMeasurementReading(maxHostBytes: peak.maxHostBytes,

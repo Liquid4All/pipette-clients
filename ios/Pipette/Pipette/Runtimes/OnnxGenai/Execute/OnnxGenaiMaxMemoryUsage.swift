@@ -8,9 +8,11 @@ import Foundation
 nonisolated extension OnnxGenaiExecute {
     static func maxMemoryUsage(
         _ benchmark: MaxMemoryUsageBenchmark,
-        model: ResolvedOnnxGenaiModel
+        model: ResolvedOnnxGenaiModel,
+        observer: MeasurementObserver
     ) async throws -> BenchmarkResultData {
-        try await BenchmarkMeasurement.maxMemory(benchmark, warmup: .cold, ctx: ()) { _ in
+        try await BenchmarkMeasurement.maxMemory(benchmark, observer: observer, warmup: .cold,
+                                                 ctx: ()) { _ in
             try await ProcessMemory.maxMemoryBracket(
                 label: "onnx", counter: OnnxGenaiRuntime.footprintWithMappedWeights
             ) {

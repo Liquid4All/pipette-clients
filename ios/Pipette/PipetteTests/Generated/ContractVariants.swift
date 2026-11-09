@@ -65,16 +65,23 @@ private func contractBenchmarkEvalCompletionStopReason(_ value: BenchmarkEvalCom
 
 private func contractBenchmarkFlags(_ value: BenchmarkFlags) {
     switch value {
+    case .asrMaxMemoryLlamacppIosPipetteGgufVision: break
     case .asrThroughputLlamacppIosPipetteGgufVision: break
+    case .decodeThroughputAppleFoundationAppleFoundationText: break
     case .decodeThroughputLlamacppIosPipetteGgufText: break
     case .decodeThroughputMlxIosPipetteMlx: break
     case .decodeThroughputOnnxGenaiIosPipetteOnnxGenai: break
+    case .endToEndLatencyAppleFoundationAppleFoundationText: break
     case .endToEndLatencyLlamacppIosPipetteGgufText: break
     case .endToEndLatencyMlxIosPipetteMlx: break
     case .endToEndLatencyOnnxGenaiIosPipetteOnnxGenai: break
+    case .maxMemoryUsageLlamacppIosPipetteGgufText: break
+    case .maxMemoryUsageMlxIosPipetteMlx: break
+    case .maxMemoryUsageOnnxGenaiIosPipetteOnnxGenai: break
     case .prefillThroughputLlamacppIosPipetteGgufText: break
     case .prefillThroughputMlxIosPipetteMlx: break
     case .prefillThroughputOnnxGenaiIosPipetteOnnxGenai: break
+    case .vlMaxMemoryLlamacppIosPipetteGgufVision: break
     case .vlSpecDecodeLlamacppIosPipetteGgufVision: break
     case .vlSpecDecodeLlamacppIosPipetteGgufVisionSpeculative: break
     case .vlThroughputLlamacppIosPipetteGgufVision: break
@@ -122,6 +129,16 @@ private func contractDeviceFormFactor(_ value: DeviceFormFactor) {
     case .phone: break
     case .server: break
     case .tablet: break
+    }
+}
+
+private func contractFailureCode(_ value: FailureCode) {
+    switch value {
+    case .attemptTimeout: break
+    case .deviceError: break
+    case .harnessError: break
+    case .outOfMemory: break
+    case .runtimeError: break
     }
 }
 

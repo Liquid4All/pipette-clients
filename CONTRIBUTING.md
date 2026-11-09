@@ -26,10 +26,11 @@ All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md
 
 ## Getting started
 
-Clone with submodules. There are seven, all under `vendor/` and listed in
+Clone with submodules. There are eight, all under `vendor/` and listed in
 `.gitmodules`: `llama.cpp` (shared by the iOS and Android builds), `kleidiai`,
-`sentry-native`, `onnxruntime`, `onnxruntime-genai`, `llamacpp-prismml` and
-`llamacpp-lfm3` (upstream llama.cpp at a later commit). The last two are iOS
+`sentry-native`, `onnxruntime`, `onnxruntime-genai`, `llamacpp-prismml`,
+`llamacpp-prismml-b10828` and `llamacpp-lfm3` (upstream llama.cpp at a later
+commit). The last three are iOS
 [llama.cpp variants](docs/pipette-ios/build.md#llamacpp-variants).
 
 ```bash

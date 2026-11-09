@@ -13,8 +13,16 @@ nonisolated enum HeadlessExit {
         exit(code)
     }
 
+    /// Ends the process at once from any thread, with no exit handlers or C++ static
+    /// destructors to race the threads still running: for an engine call that cannot be
+    /// stopped and may hold the main actor `terminate` waits on.
+    static func abandon(_ code: Int32) -> Never {
+        fflush(stdout)
+        _exit(code)
+    }
+
     /// `terminate` once in-flight downloads have saved their partials for the next launch.
-    /// Every exit after work starts goes through here.
+    /// Every exit after work starts goes through here, except `abandon`.
     @MainActor static func finish(_ code: Int32) async -> Never {
         finishing = true
         await DownloadCoordinator.shared.keepPartialsForNextLaunch()
@@ -367,7 +375,7 @@ enum HeadlessRunner {
                 await HeadlessExit.finish(ok ? HeadlessExit.ok : HeadlessExit.failure)
             }
 
-        case let .afm(metrics, benchmarks, offsets, submit, claim):
+        case let .afm(metrics, benchmarks, offsets, submit, claim, benchmarkFlags):
             // A probe token in `metrics` runs a diagnostic that records nothing and exits 0;
             // otherwise the benchmarks run through the normal job path.
             let benchmarkIds = BenchmarksCommands.resolveBenchmarkIds(metrics: metrics, offsets: offsets,
@@ -387,6 +395,7 @@ enum HeadlessRunner {
                     ok = await BenchmarksCommands.runAFM(benchmarkIds: benchmarkIds, submit: submit,
                                                          claim: claim,
                                                          claimedAt: claim.map { _ in launchedAt },
+                                                         benchmarkFlags: benchmarkFlags,
                                                          ws: ws, http: .shared)
                 }
                 await HeadlessExit.finish(ok ? HeadlessExit.ok : HeadlessExit.failure)

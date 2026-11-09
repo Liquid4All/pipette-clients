@@ -75,12 +75,14 @@ pub fn run(
     .check_thinking_controls()?;
     // Calibrated once, before the server starts: a second model load beside a
     // resident server is an OOM risk.
-    let calibrated = asr::calibrate(
-        &recipe,
-        duration,
-        format,
-        &calibration(&runtime_flags, program, model, client_config),
-    );
+    let calibrated = observer.outside(|| {
+        asr::calibrate(
+            &recipe,
+            duration,
+            format,
+            &calibration(&runtime_flags, program, model, client_config),
+        )
+    });
     let ctx_size = CtxInputs {
         audio_bound: asr::fallback_audio_tokens(duration.as_u32()),
         text_tokens,

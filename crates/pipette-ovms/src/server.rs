@@ -7,6 +7,7 @@ use anyhow::Context;
 
 use pipette_artifacts_catalog::runtime::ovms::layout::OvmsInstall;
 use pipette_http::HttpClient;
+use pipette_ops::measurement::MeasurementObserver;
 use pipette_plan_types::{BatchSize, OvmsExtraRuntimeConfiguration, RuntimeFlags, RuntimeOutput};
 use pipette_subprocess::{NotReadyError, start_process};
 
@@ -109,9 +110,13 @@ pub(crate) fn size_prompt(
     url: &str,
     http: &HttpClient,
     tokens: u32,
+    observer: MeasurementObserver<'_>,
 ) -> anyhow::Result<String> {
     let mut ovms = start_process(PROGRAM, command, STOP_GRACE)?;
-    ovms.wait_ready(READY_TIMEOUT, ready(url)?)?;
+    let ready = ready(url)?;
+    // Off the clock: the cell's first server compiles a cold cache, which the
+    // servers after it load.
+    observer.outside(|| ovms.wait_ready(READY_TIMEOUT, ready))?;
     completions::prompt_text(http, url, tokens).map_err(|err| err.context(ovms.stop_with_tail()))
 }
 

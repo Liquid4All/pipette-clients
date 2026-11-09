@@ -11,7 +11,7 @@ use pipette_workspace::{InitResult, resolve_work_dir};
 
 use crate::{
     auth::AuthArgs,
-    mgmt::cli::{McpArgs, RouteCommand},
+    mgmt::cli::RouteCommand,
     runner::{self, CellFilter, RejoinPolicy, RunOptions, Shard},
     state,
     workspace::PipetteCtlWorkspace,
@@ -145,7 +145,6 @@ impl Cli {
                 )
             }
             Command::Reset(args) => args.execute(&open_ws(work_dir.as_deref())?),
-            Command::Mcp(args) => args.execute(work_dir.as_deref()),
             Command::Mgmt(command) => command.execute(work_dir.as_deref()),
         }
     }
@@ -180,11 +179,6 @@ pub enum Command {
     /// Targets the binary at `transports[*].binary_path` by basename via
     /// `taskkill` (powershell) or `pkill` (posix).
     Kill(KillArgs),
-    /// Serve the management server's account routes as MCP tools on stdio,
-    /// or list them. The same routes are the `clients`, `users`, `orgs`,
-    /// `audit`, `campaigns`, `vault`, `plans`, `model-params` and `benchmarks`
-    /// verbs.
-    Mcp(McpArgs),
     #[command(flatten)]
     Mgmt(RouteCommand),
 }

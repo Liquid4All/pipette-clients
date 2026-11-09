@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "end_to_end_latency",
+  "model_type": "apple_foundation_text",
+  "runtime_type": "apple_foundation"
+}

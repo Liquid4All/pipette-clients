@@ -102,6 +102,7 @@ pub fn run(
             benchmark,
             &venv_python?,
             &ResolvedMlxModel::try_from(&model.bound)?,
+            observer,
             client_config,
         ),
         BenchmarkDefinition::Eval(benchmark) => {
@@ -123,11 +124,13 @@ pub fn run(
             )
         }
         BenchmarkDefinition::VlSpecDecode(benchmark) => {
-            let lease = pipette_vl_spec_decode_corpus::download(
-                run_context,
-                &benchmark.benchmark_id,
-                &benchmark.dataset,
-            )?;
+            let lease = observer.outside(|| {
+                pipette_vl_spec_decode_corpus::download(
+                    run_context,
+                    &benchmark.benchmark_id,
+                    &benchmark.dataset,
+                )
+            })?;
             // Resolved against the model and written back, so the row records
             // the condition it was measured under rather than what the cell
             // left unset.
@@ -161,6 +164,7 @@ pub fn run(
             benchmark,
             &venv_python?,
             &ResolvedMlxModel::try_from(&model.bound)?,
+            observer,
             client_config,
         ),
         BenchmarkDefinition::AsrThroughput(_) | BenchmarkDefinition::AsrMaxMemory(_) => {

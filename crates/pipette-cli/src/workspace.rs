@@ -22,8 +22,8 @@ use pipette_artifacts::quota::StoragePolicy;
 use pipette_artifacts::{ArtifactsContext, VaultAccess};
 use pipette_http::HttpClient;
 use pipette_mgmt_client::client_api;
-use pipette_ops::EvalCompletionsStore;
 use pipette_ops::run_context::RunContext;
+use pipette_ops::{EvalCompletionsStore, EvalShard};
 use pipette_plan_types::Dataset;
 use pipette_programs::ExternalPrograms;
 use pipette_workspace::{InitResult, Workspace};
@@ -39,6 +39,7 @@ const MARKER_NAME: &str = "pipette";
 pub struct PipetteWorkspace {
     root: PathBuf,
     storage_quota: StorageQuota,
+    eval_shard: Option<EvalShard>,
 }
 
 impl PipetteWorkspace {
@@ -163,7 +164,19 @@ impl PipetteWorkspace {
         Ok(Self {
             root,
             storage_quota,
+            eval_shard: None,
         })
+    }
+
+    /// The group `--eval-shard` names, which every eval store this workspace
+    /// mints writes.
+    #[must_use]
+    pub fn with_eval_shard(self, eval_shard: Option<EvalShard>) -> Self {
+        Self { eval_shard, ..self }
+    }
+
+    pub fn eval_shard(&self) -> Option<EvalShard> {
+        self.eval_shard
     }
 
     /// Absolute path to `.pipette/`.
@@ -276,7 +289,7 @@ impl RunContext for PipetteWorkspace {
     }
 
     fn eval_completions(&self) -> EvalCompletionsStore {
-        EvalCompletionsStore::new(self.root().join("state/evals"))
+        EvalCompletionsStore::new(self.root().join("state/evals")).with_shard(self.eval_shard)
     }
 }
 

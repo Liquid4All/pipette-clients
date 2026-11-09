@@ -38,17 +38,19 @@ nonisolated extension BenchmarkMeasurement {
     /// `ctx` is lent to the attempt, for what the engine records while it runs.
     static func vlMaxMemory<C>(
         _ benchmark: VlMaxMemoryBenchmark,
+        observer: MeasurementObserver,
         warmup: MemoryMeasurementWarmup,
         ctx: C,
         attempt: (inout C) async throws -> VlMaxMemoryMeasurementReading
     ) async throws -> BenchmarkResultData {
-        try await mediaMaxMemory(marker: benchmark.benchmarkId.value, warmup: warmup, ctx: ctx,
-                                 attempt: attempt)
+        try await mediaMaxMemory(marker: benchmark.benchmarkId.value, observer: observer,
+                                 warmup: warmup, ctx: ctx, attempt: attempt)
     }
 
     /// The attempts both media cells run, the cell named by `marker`.
     static func mediaMaxMemory<C>(
         marker: String,
+        observer: MeasurementObserver,
         warmup: MemoryMeasurementWarmup,
         ctx: C,
         attempt: (inout C) async throws -> VlMaxMemoryMeasurementReading
@@ -56,8 +58,10 @@ nonisolated extension BenchmarkMeasurement {
         var ctx = ctx
 
         if warmup == .once {
+            try observer.onAttemptStart(peakMemoryWarmUp)
             _ = try await measure("\(marker) warm-up", &ctx, attempt)
         }
+        try observer.onAttemptStart(peakMemoryMeasured)
         return try await measure(marker, &ctx, attempt)
     }
 }

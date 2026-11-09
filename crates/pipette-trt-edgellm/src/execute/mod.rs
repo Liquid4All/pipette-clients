@@ -48,7 +48,7 @@ pub fn run(
             observer,
         ),
         BenchmarkDefinition::VlMaxMemory(benchmark) => {
-            vl_max_memory::run(benchmark, &req.benchmark_flags_ref()?, &launch()?)
+            vl_max_memory::run(benchmark, &req.benchmark_flags_ref()?, &launch()?, observer)
         }
         other @ (BenchmarkDefinition::PrefillThroughput(_)
         | BenchmarkDefinition::DecodeThroughput(_)
@@ -114,10 +114,7 @@ mod tests {
                 parameter_num_images: NonNegativeCount::try_new(2)?,
             }),
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let Err(err) = run(&req, &|| Ok(()), observer, &tmp.path().join("cache"), None) else {
             anyhow::bail!("a one-token decode cell was measured");
         };
@@ -148,10 +145,7 @@ mod tests {
                 parameter_prefill_tokens: NonNegativeCount::try_new(128)?,
             }),
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let Err(err) = run(&req, &|| Ok(()), observer, tmp.path(), None) else {
             anyhow::bail!("a text cell ran");
         };

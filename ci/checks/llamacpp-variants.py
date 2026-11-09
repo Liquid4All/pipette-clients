@@ -13,7 +13,8 @@ A variant is a `vendor/llamacpp-<v>` submodule (docs/pipette-ios/build.md,
 - its `vendor/llamacpp-<v>.tag`, as above;
 - its path in the checkout step's `submodule update`;
 - a build step whose env sets `PIPETTE_LLAMA_VARIANT: <v>`;
-- `llamacpp-<v>` in the archive's `PIPETTE_LLAMA_PINS`, beside main's `llamacpp`;
+- `llamacpp-<v>` in the archive step's `pins` array, beside main's `llamacpp`,
+  which that step passes to xcodebuild as `PIPETTE_LLAMA_PINS`;
 - when its .gitmodules entry says `update = none` (a private repository), its
   repository in the token step's `repositories`, which names no other, and an
   `insteadOf` in the checkout step that reads its
@@ -32,7 +33,8 @@ PREFIX = "vendor/llamacpp-"
 # Up to the next job's key.
 JOB = re.compile(r"^  ios-archive:\n(.*?)(?=^  \S|\Z)", re.M | re.S)
 STEP_VARIANT = re.compile(r'^ +PIPETTE_LLAMA_VARIANT: "?([^"\s]+)"?$', re.M)
-PINS = re.compile(r"PIPETTE_LLAMA_PINS=([^'\"\n]*)")
+PINS = re.compile(r"^ +pins=\(\n(.*?)^ +\)$", re.M | re.S)
+PINS_SETTING = '"PIPETTE_LLAMA_PINS=${pins[*]}"'
 REPOSITORIES = re.compile(r"^ +repositories: (.*)$", re.M)
 # Up to the next step.
 CHECKOUT = re.compile(
@@ -105,8 +107,11 @@ def main() -> int:
     pinned = set(pins.group(1).split()) if pins else set()
     if "llamacpp" not in pinned:
         errors.append(
-            f"{WORKFLOW}: ios-archive's PIPETTE_LLAMA_PINS has no llamacpp "
-            "(vendor/llama.cpp)"
+            f"{WORKFLOW}: ios-archive's pins array has no llamacpp (vendor/llama.cpp)"
+        )
+    if PINS_SETTING not in job:
+        errors.append(
+            f"{WORKFLOW}: ios-archive does not pass {PINS_SETTING} to xcodebuild"
         )
 
     lists = {
@@ -117,7 +122,7 @@ def main() -> int:
         "ios-archive build step (PIPETTE_LLAMA_VARIANT: <v>)": set(
             STEP_VARIANT.findall(job)
         ),
-        "entry in ios-archive's PIPETTE_LLAMA_PINS (llamacpp-<v>)": {
+        "entry in ios-archive's pins array (llamacpp-<v>)": {
             pin.removeprefix("llamacpp-") for pin in pinned - {"llamacpp"}
         },
     }

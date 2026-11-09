@@ -27,8 +27,8 @@ use pipette_ops::measurement::{
 use pipette_ops::readiness::ReadinessGate;
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_ops::vl_spec_decode::{
-    Deadline, Progress, Speculation, StreamedTurn, TimingsSource, TurnFailure, TurnRecord,
-    counters, log_progress, output_digest, read_chat_stream, text_sha256, with_retries,
+    Progress, Speculation, StreamedTurn, TimingsSource, TurnFailure, TurnRecord, counters,
+    log_progress, output_digest, read_chat_stream, text_sha256, with_retries,
 };
 use pipette_plan_types::{
     PositiveSeconds, SamplingTemperature, Sha256, TurnObservation, VlSpecDecodeBenchmark,
@@ -64,16 +64,13 @@ pub struct Params {
     pub temperature: SamplingTemperature,
     /// One turn's budget, see [`turn_timeout`].
     pub http_timeout: Duration,
-    pub deadline: Deadline,
 }
 
 impl Params {
-    /// Refuses parameters that cannot run. The deadline starts here, so build
-    /// this before the server.
+    /// Refuses parameters that cannot run.
     pub fn new(
         benchmark: &VlSpecDecodeBenchmark,
         http_timeout: Option<PositiveSeconds>,
-        bench_timeout: Option<PositiveSeconds>,
         speculation: Speculation,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -83,11 +80,13 @@ impl Params {
             draft_length: benchmark.parameter_draft_length.into_inner().unsigned_abs(),
             temperature: benchmark.parameter_temperature,
             http_timeout: turn_timeout(http_timeout, benchmark.parameter_batch_size.as_u32()),
-            deadline: Deadline::starting_now(
-                bench_timeout.map(|secs| Duration::from_secs(secs.into_inner())),
-            ),
         })
     }
+}
+
+/// Each sample is one attempt for `attempt_timeout_seconds`.
+fn begin_sample(on_attempt_start: &(dyn Fn(&str) + Sync), speculation: Speculation, number: usize) {
+    on_attempt_start(&format!("{}, sample {number}", speculation.label()));
 }
 
 /// The shared HTTP-timeout rule at [`DEFAULT_TURN_TIMEOUT_SECS`].
@@ -196,8 +195,8 @@ pub fn run(
 pub type Stream<'a> = &'a dyn Fn(Vec<Value>, u32) -> std::result::Result<StreamedTurn, TurnFailure>;
 
 /// [`run`] for a batch of one through the typed [`measurement::vl_spec_decode()`]
-/// entry, which checks and sums each turn. `bench_timeout_seconds` is checked in
-/// the gate, which the entry calls before each sample, as [`run`] does.
+/// entry, which checks and sums each turn. Each sample's attempt starts in the
+/// gate, which the entry calls before each sample, as [`run`] does.
 pub fn measure(
     benchmark: &VlSpecDecodeBenchmark,
     params: &Params,
@@ -242,12 +241,19 @@ fn measure_row(
     let gated = Cell::new(0);
     let gate = || {
         gated.set(gated.get() + 1);
-        params.deadline.check(&format!(
-            "{}, sample {}",
-            params.speculation.label(),
-            gated.get()
-        ))?;
-        readiness_gate()
+        readiness_gate()?;
+        begin_sample(observer.on_attempt_start, params.speculation, gated.get());
+        Ok(())
+    };
+    // The entry starts the rep after sample 1's gate, which would rename it.
+    let on_before_rep_start = || {
+        (observer.on_before_rep_start)()?;
+        begin_sample(observer.on_attempt_start, params.speculation, gated.get());
+        Ok(())
+    };
+    let observer = MeasurementObserver {
+        on_before_rep_start: &on_before_rep_start,
+        ..observer
     };
     let speculation = match params.speculation {
         Speculation::Off => VlSpecDecodeMeasurementSpeculation::Off,
@@ -401,7 +407,6 @@ pub(crate) fn traverse(
         speculation,
         max_tokens,
         batch_size,
-        deadline,
         ..
     } = *params;
     let first = corpus
@@ -428,12 +433,19 @@ pub(crate) fn traverse(
             speculation,
             corpus,
             max_tokens,
-            deadline,
             readiness_gate,
+            observer.on_attempt_start,
             send,
         )?
     } else {
-        batched(speculation, corpus, max_tokens, slots, deadline, send)?
+        batched(
+            speculation,
+            corpus,
+            max_tokens,
+            slots,
+            observer.on_attempt_start,
+            send,
+        )?
     };
     let wall = started.elapsed();
     (observer.on_after_rep_end)()?;
@@ -492,8 +504,8 @@ fn sequential(
     speculation: Speculation,
     corpus: &VlSpecDecodeCorpus,
     max_tokens: u32,
-    deadline: Deadline,
     readiness_gate: ReadinessGate,
+    on_attempt_start: &(dyn Fn(&str) + Sync),
     send: Send<'_>,
 ) -> anyhow::Result<Vec<Vec<TurnRecord>>> {
     let total = corpus.samples().len();
@@ -504,9 +516,9 @@ fn sequential(
         .enumerate()
         .map(|(index, sample)| {
             if index > 0 {
-                deadline.check(&format!("{}, sample {}", speculation.label(), index + 1))?;
                 readiness_gate()?;
             }
+            begin_sample(on_attempt_start, speculation, index + 1);
             let turns = one_sample(speculation, corpus, sample, index, max_tokens, send)?;
             progress.add_sample(&turns);
             log_progress(speculation, progress, total);
@@ -516,8 +528,7 @@ fn sequential(
 }
 
 /// `slots` samples in flight, each slot taking the next in file order. No
-/// gate between samples (see [`traverse`]), but the deadline is checked
-/// before each take.
+/// gate between samples (see [`traverse`]).
 ///
 /// A failed sample stops the traversal: the other slots finish the sample
 /// they hold and take no more. Results come back in file order.
@@ -526,7 +537,7 @@ fn batched(
     corpus: &VlSpecDecodeCorpus,
     max_tokens: u32,
     slots: usize,
-    deadline: Deadline,
+    on_attempt_start: &(dyn Fn(&str) + Sync),
     send: Send<'_>,
 ) -> anyhow::Result<Vec<Vec<TurnRecord>>> {
     let total = corpus.samples().len();
@@ -550,12 +561,11 @@ fn batched(
             let Some(sample) = corpus.samples().get(index) else {
                 return Ok(());
             };
-            let outcome = (|| {
-                if index > 0 {
-                    deadline.check(&format!("{}, sample {}", speculation.label(), index + 1))?;
-                }
-                one_sample(speculation, corpus, sample, index, max_tokens, send)
-            })();
+            // shortcut: the slots share one clock, so a stuck sample is caught
+            // only once the other slots stop starting samples; give each slot
+            // its own clock if batched traversals need an exact per-sample limit.
+            begin_sample(on_attempt_start, speculation, index + 1);
+            let outcome = one_sample(speculation, corpus, sample, index, max_tokens, send);
             let mut shared = lock();
             let turns = match outcome {
                 Ok(turns) => turns,
@@ -801,7 +811,7 @@ mod tests {
 
     use pipette_ops::measurement::MeasurementObserver;
     use pipette_ops::vl_spec_decode::{
-        ChatTimings, Deadline, Speculation, StreamedTurn, TimingsSource, TurnFailure, TurnRecord,
+        ChatTimings, Speculation, StreamedTurn, TimingsSource, TurnFailure, TurnRecord,
         output_digest,
     };
     use pipette_plan_types::{
@@ -1012,7 +1022,6 @@ mod tests {
             draft_length: 8,
             temperature: SamplingTemperature::greedy(),
             http_timeout: Duration::from_secs(1),
-            deadline: Deadline::starting_now(None),
         })
     }
 
@@ -1086,13 +1095,12 @@ mod tests {
     ) -> anyhow::Result<()> {
         let flags = BenchmarkFlags::VlSpecDecodeMlxMacosPipetteMlx {
             http_timeout_seconds: pinned.map(PositiveSeconds::try_new).transpose()?,
-            bench_timeout_seconds: None,
+            attempt_timeout_seconds: None,
             readiness: None,
         };
         let params = Params::new(
             &benchmark(2048, 8, batch_size)?,
             flags.http_timeout(),
-            flags.bench_timeout(),
             Speculation::On,
         )?;
         assert_eq!(params.http_timeout, Duration::from_secs(expected_secs));
@@ -1102,7 +1110,7 @@ mod tests {
 
     #[test]
     fn a_cell_without_benchmark_flags_gets_the_default_timeout() -> anyhow::Result<()> {
-        let params = Params::new(&benchmark(2048, 8, 2)?, None, None, Speculation::Off)?;
+        let params = Params::new(&benchmark(2048, 8, 2)?, None, Speculation::Off)?;
         assert_eq!(params.http_timeout, Duration::from_secs(1200));
         Ok(())
     }
@@ -1177,10 +1185,7 @@ mod tests {
     }
 
     fn no_observer() -> MeasurementObserver<'static> {
-        MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        }
+        MeasurementObserver::QUIET
     }
 
     /// Unretriable, so the test does not wait out retries.
@@ -1334,6 +1339,51 @@ mod tests {
             format!("{err:#}").contains("a batch of 2 runs through turn::run"),
             "{err:#}"
         );
+        Ok(())
+    }
+
+    /// Each sample sent is an attempt of its own, sample 1 included, though
+    /// the rep's start after its gate begins one too, as the CLI's does.
+    #[test]
+    fn each_measured_sample_is_its_own_attempt() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let corpus = corpus(&dir.path().join("c"))?;
+        let current = Mutex::new(String::new());
+        let begin = |what: &str| {
+            *current.lock().unwrap_or_else(PoisonError::into_inner) = what.to_owned();
+        };
+        let observer = MeasurementObserver {
+            on_before_rep_start: &|| {
+                begin("rep 1");
+                Ok(())
+            },
+            on_attempt_start: &begin,
+            ..MeasurementObserver::QUIET
+        };
+        let sent = Mutex::new(Vec::new());
+        let echo = echo(0, 0, 0);
+        let _ = measure(
+            &benchmark(64, 8, 1)?,
+            &params(Speculation::Off, 1)?,
+            &corpus,
+            &|| Ok(()),
+            observer,
+            &|messages, max_tokens| {
+                let attempt = current
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                sent.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(attempt);
+                echo(messages, max_tokens)
+            },
+        )?;
+        let sample = |n: usize| format!("vl_spec_decode (speculation off), sample {n}");
+        let sent = sent.into_inner().unwrap_or_else(PoisonError::into_inner);
+        // The warm-up's turn, then sample 1's, sample 2's two and sample 3's.
+        let expected = [String::new(), sample(1), sample(2), sample(2), sample(3)];
+        anyhow::ensure!(sent == expected, "{sent:?}");
         Ok(())
     }
 

@@ -147,8 +147,9 @@ struct PlannerWorkerTests {
         let job = try ClaimTests.claimedJob(spec: nil)
         var sleeps: [TimeInterval] = []
         let disposition = try await PlannerWorker.submitFailure(
-            job, reason: "[ts] oom", retriable: true, deviceTime: .seconds(3), server: server,
-            http: http, auth: try auth(), clientVersion: "9.9.9"
+            job, reason: "[ts] oom", retriable: true, failureCode: .outOfMemory,
+            deviceTime: .seconds(3), server: server, http: http, auth: try auth(),
+            clientVersion: "9.9.9"
         ) { sleeps.append($0) }
         guard case .accepted = disposition else {
             Issue.record("expected accepted")
@@ -591,6 +592,30 @@ struct PlannerWorkerTests {
         #expect(sent["device_time_ms"] as? Int == 3000)
         #expect(ws.results.location(of: run.cellId) != .remoteSynced,
                 "a failure filed a result as submitted")
+    }
+
+    /// A failed cell is coded by its error and reported in the words the cell recorded, the
+    /// out-of-memory hint's context size included.
+    @Test func aFailedCellIsReportedInItsOwnWords() async throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let (http, server, seen) = try RoutedURLProtocol.serve { _, _ in
+            .reply(202, #"{"job_id":"job-1"}"#)
+        }
+        let (job, _) = try completedRun(ws: ws)
+        let oom = ModelLoadFailure(cause: .outOfMemory("failed to allocate buffer"))
+        let failed = CellFailure(error: oom, message: formatJobError(oom, contextSize: 4096))
+
+        try await report(
+            job, runResult: .failure(failed), leaseLost: false, server: server, http: http,
+            ws: ws)
+
+        let body = try #require(seen.bodies.last)
+        let sent = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(sent["failure_code"] as? String == "out_of_memory")
+        #expect(sent["retriable"] as? Bool == true)
+        let reason = try #require(sent["failure_reason"] as? String)
+        #expect(reason.contains("Model + context size 4096 exceeded available device memory"))
     }
 
     /// The checkpoint is retired once the server holds the result, and only then. A refused

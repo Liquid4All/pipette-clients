@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "max_memory_usage",
+  "model_type": "mlx",
+  "runtime_type": "mlx_macos_pipette"
+}

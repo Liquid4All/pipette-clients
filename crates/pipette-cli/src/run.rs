@@ -25,6 +25,7 @@ use pipette_plan_types::{
 
 use pipette_programs::ExternalPrograms;
 
+use crate::attempt_watchdog::{self, Clock};
 use crate::client_configuration::ClientConfiguration;
 use crate::identity::DeviceLabels;
 use crate::preflight;
@@ -73,12 +74,25 @@ pub fn run_cell(
         client_config = client_config.to_string().as_str(),
         "run"
     );
+    // Any other cell would run whole under the flag, and its result be dropped.
+    anyhow::ensure!(
+        ws.eval_shard().is_none()
+            || matches!(
+                benchmark,
+                BenchmarkDefinition::Eval(_)
+                    | BenchmarkDefinition::VlmEval(_)
+                    | BenchmarkDefinition::AsrEval(_)
+            ),
+        "--eval-shard splits only an eval, vlm_eval or asr_eval cell, and `{}` keeps no \
+         checkpoint to split",
+        benchmark.benchmark_id()
+    );
     // Before the readiness gate, which would otherwise wait on what a killed
     // run left busy.
     pipette_subprocess::reap_orphans();
     client_config.runtimes.admit(spec)?;
     // Before prepare, so a battery refusal does not wait on minutes of weights.
-    refuse_on_battery(&benchmark)?;
+    refuse_on_battery(&benchmark).map_err(HostNotReadyError)?;
     // mgmt checks a claimed cell at ingestion; a local run arrives unchecked.
     if let BenchmarkDefinition::Eval(eval) = &benchmark {
         eval.check_cell_context(RuntimeType::of(&spec.runtime), spec.runtime_flags.as_ref())?;
@@ -210,6 +224,7 @@ fn prepare(
     // Ahead of ensure, so a broken driver fails before an image pull or a venv
     // build.
     preflight::assert_gpu_ready(&spec.runtime, programs)
+        .map_err(HostNotReadyError)
         .with_context(|| format!("GPU preflight for runtime `{}`", spec.runtime))?;
 
     // The in-flight plan's pin set: the runtime's ensure must not evict the
@@ -367,6 +382,12 @@ pub struct ForeignOsError {
     runs_on: &'static [&'static str],
     host_os: String,
 }
+
+/// The host cannot run the cell as it is: its GPU stack failed the preflight, or
+/// its power state can move under a `vl_spec_decode` cell. Reads as its cause.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct HostNotReadyError(pub(crate) anyhow::Error);
 
 /// The OSes `runtime` runs on, spelled as [`std::env::consts::OS`] spells
 /// them; `None` leaves the runtime to its own install or dispatch check.
@@ -576,9 +597,14 @@ fn dispatch_run(
         .with_status(&report)
         .with_poll(&polled)
         .with_cancel(cancelled);
+    let clock = Clock::new(pipette_ops::attempt::limit(req));
     let readiness_gate = || -> anyhow::Result<()> {
+        // A readiness wait is no part of an attempt; the gate has its own limit.
+        clock.hold();
         gate_wait_recorder.begin();
-        pipette_readiness::wait_until_ready_with(&readiness, &callbacks)?;
+        let waited = pipette_readiness::wait_until_ready_with(&readiness, &callbacks);
+        clock.resume();
+        waited?;
         gate_wait_recorder.pass();
         Ok(())
     };
@@ -590,6 +616,8 @@ fn dispatch_run(
     // run (a llama-bench rep's own load), the one before rep 1 the first gate
     // and the warm-up (a server's load).
     let memory = MemoryPressure::default();
+    // Each rep, and the work after it, is an attempt of its own.
+    let reps_started = std::cell::Cell::new(0_usize);
     let observer = MeasurementObserver {
         on_before_rep_start: &|| {
             let sample = RepSample {
@@ -599,9 +627,13 @@ fn dispatch_run(
             };
             // Last, as `after_rep` is first, so the rep's window leaves the probes out.
             memory.log("before_rep");
-            lock(&series)?.start(sample)
+            lock(&series)?.start(sample)?;
+            reps_started.set(reps_started.get() + 1);
+            clock.begin(&format!("rep {}", reps_started.get()));
+            Ok(())
         },
         on_after_rep_end: &|| {
+            clock.begin(&format!("the work after rep {}", reps_started.get()));
             // First, before the probes that shell out.
             memory.log("after_rep");
             let sample = RepSample {
@@ -611,6 +643,9 @@ fn dispatch_run(
             };
             lock(&series)?.finish(sample)
         },
+        on_attempt_start: &|what| clock.begin(what),
+        on_hold: &|| clock.hold(),
+        on_resume: &|| clock.resume(),
     };
     // After the model and runtime downloads, before the warm-up.
     #[cfg(target_os = "android")]
@@ -619,7 +654,9 @@ fn dispatch_run(
     // The whole object, so a new field is logged too; `AuthToken` redacts
     // itself. Debug level: an eval's request carries its whole dataset.
     tracing::debug!(request = ?req, "dispatch");
-    let mut response = match (&req.runtime.declared, &req.benchmark) {
+    // After the downloads, so the first attempt starts with the model on disk.
+    clock.begin(pipette_ops::attempt::LOAD_AND_WARM_UP);
+    let engine = || match (&req.runtime.declared, &req.benchmark) {
         (Runtime::LlamacppCliStockTools(_), _) => pipette_llamacpp::run(
             req,
             ws,
@@ -718,7 +755,8 @@ fn dispatch_run(
             "runtime `{}` is not a desktop CLI runtime",
             req.runtime.declared
         ),
-    }?;
+    };
+    let mut response = attempt_watchdog::watched(&clock, engine)?;
 
     // The engines mark the reps; the readings are this side's.
     let reps = lock(&series)?.take()?;
@@ -1070,6 +1108,7 @@ mod resolved_flags_tests {
     #[test]
     fn skin_flag_is_rejected_off_android() -> anyhow::Result<()> {
         let flags = BenchmarkFlags::PrefillThroughputLlamacppCliStockToolsGgufText {
+            attempt_timeout_seconds: None,
             readiness: Some(ReadinessOverrides {
                 max_wait_secs: None,
                 skip_thermal: None,
@@ -1224,14 +1263,14 @@ mod resolved_flags_tests {
         let mut req = max_memory_req()?;
         req.benchmark_flags = Some(
             BenchmarkFlags::MaxMemoryUsageLlamacppCliStockToolsGgufText {
-                bench_timeout_seconds: Some(PositiveSeconds::try_new(2400)?),
+                attempt_timeout_seconds: Some(PositiveSeconds::try_new(2400)?),
             },
         );
 
         let flags =
             resolved_flags(&req, gated())?.context("an authored deadline must reach the record")?;
 
-        assert_eq!(flags.bench_timeout().map(u64::from), Some(2400));
+        assert_eq!(flags.attempt_timeout().map(u64::from), Some(2400));
         assert_eq!(flags.submission_value().get("readiness"), None);
         Ok(())
     }
@@ -1282,6 +1321,7 @@ mod spec_policy_tests {
     fn readiness(max_wait_secs: Option<u64>, skip_thermal: Option<bool>) -> Option<BenchmarkFlags> {
         Some(
             BenchmarkFlags::PrefillThroughputLlamacppCliStockToolsGgufText {
+                attempt_timeout_seconds: None,
                 readiness: Some(ReadinessOverrides {
                     max_wait_secs,
                     skip_thermal,
@@ -1309,7 +1349,7 @@ mod spec_policy_tests {
         "runtime_flags"
     )]
     #[case::benchmark(
-        |s: &mut ClientRunSpec| s.benchmark_flags = Some(BenchmarkFlags::DecodeThroughputLlamacppCliStockToolsGgufText { readiness: None }),
+        |s: &mut ClientRunSpec| s.benchmark_flags = Some(BenchmarkFlags::DecodeThroughputLlamacppCliStockToolsGgufText { attempt_timeout_seconds: None, readiness: None }),
         "benchmark_flags"
     )]
     fn flags_for_another_cell_are_refused(

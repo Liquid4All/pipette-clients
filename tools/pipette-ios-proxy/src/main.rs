@@ -22,6 +22,13 @@
     )
 )]
 
+/// Wire prefix for runtime descriptor flags. `pipette_plan_types::runtime_build_flag`
+/// generates the flags. The proxy uses this prefix to count the flags against
+/// the flag budget. Management keeps its prefix private, so contract tests pin
+/// the wire format.
+#[cfg(target_os = "macos")]
+const RUNTIME_BUILD_FLAG_PREFIX: &str = "runtime:descriptor:";
+
 // Every module and dependency is macOS-scoped, so off-Mac the crate is this one
 // function and `cargo clippy --workspace` stays green on the other legs. A stub
 // rather than `compile_error!` for that reason; nothing ships this tool off macOS.

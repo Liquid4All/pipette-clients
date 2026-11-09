@@ -38,8 +38,8 @@ use serde_json::{Value, json};
 
 use pipette_plan_types::{
     BenchmarkDefinition, BenchmarkEvalCompletion, BenchmarkFlagRef, BenchmarkFlags,
-    BenchmarkParams, ClientRunSpec, DeviceInfo, Model, ModelFlagRef, ModelFlags, Runtime,
-    RuntimeFlagRef, RuntimeFlags, runtime_build_flag,
+    BenchmarkParams, ClientRunSpec, DeviceInfo, FailureCode, Model, ModelFlagRef, ModelFlags,
+    Runtime, RuntimeFlagRef, RuntimeFlags, runtime_build_flag,
 };
 
 use pipette_contract::{Bounds, Contract, Key, Name, ReencodeFn, ensure_current, reencode};
@@ -199,6 +199,7 @@ fn reencoder(section: &str) -> anyhow::Result<ReencodeFn> {
         "client_run_spec" => reencode::<ClientRunSpec>,
         "device" => reencode::<DeviceInfo>,
         "eval_completion" => reencode::<BenchmarkEvalCompletion>,
+        "failure_code" => reencode::<FailureCode>,
         other => anyhow::bail!("{other}/ is no section"),
     })
 }
@@ -216,6 +217,7 @@ fn check(contract: &mut Contract, path: &Path) -> anyhow::Result<()> {
         "client_run_spec" => contract.file(path, client_run_spec_name),
         "device" => contract.file(path, device_name),
         "eval_completion" => contract.file(path, eval_completion_name),
+        "failure_code" => contract.file(path, failure_code_name),
         other => anyhow::bail!("{other}/ is no section"),
     }
 }
@@ -406,4 +408,9 @@ fn eval_completion_name(
     name: &mut Name,
 ) -> anyhow::Result<()> {
     name.holds(&completion.stop_reason)
+}
+
+/// A failure body's `failure_code`, which each client sends in its own copy.
+fn failure_code_name(code: &FailureCode, name: &mut Name) -> anyhow::Result<()> {
+    name.holds(code)
 }

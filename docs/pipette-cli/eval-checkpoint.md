@@ -87,6 +87,7 @@ Target device (where the CLI actually runs the benchmark)
 <work-dir>/.pipette/
   state/evals/
     <digest16>.jsonl                    ← Layer 2: sample state
+    <digest16>.part-<i>-of-<N>-<pid>-<ns>.jsonl  ← one shard's rows (see Shards)
     <digest16>.jsonl.stale-<ts>         ← rotated sample state
 ```
 
@@ -303,3 +304,93 @@ device that first started it, since its checkpoint lives there
 Different cells of the same benchmark get different digests and
 therefore different files, so interrupting one cell does not touch
 another cell's partial work.
+
+## Shards
+
+The global flag `--eval-shard I/N` (`0 <= I < N`) runs only group I of
+an eval, vlm_eval or asr_eval cell's samples: sample id S is in group
+`u64::from_be_bytes(first 8 bytes of SHA-256(S)) mod N`. Such a run
+records, submits and finalizes nothing, and its result is not checked
+for completeness. A later run of the cell without the flag folds every
+group in, checks the whole cell and records it. `benchmarks run`
+refuses `--sync` with the flag, and both commands refuse a cell other
+than eval, vlm_eval or asr_eval before anything installs. `worker`
+takes the flag only behind the pool dispatcher, which holds the lease:
+it takes one claim, heartbeats, writes no in-flight marker, reports
+nothing, and exits 0 when its run succeeded and 1 otherwise.
+
+- **Part files.** A shard writes
+  `<digest16>.part-<I>-of-<N>-<pid>-<ns>.jsonl` beside the checkpoint,
+  in the checkpoint's format, its header written through a `.tmp`
+  sibling and a rename. The process id and the start time in
+  nanoseconds make the name its writer's alone, so every part has one
+  writer, and a rerun of a group writes a part of its own.
+- **Other files.** Every open reads the cell's other files; a shard
+  never creates the checkpoint. In such a file a torn last line is
+  skipped but stays on disk (its writer may still be writing it), a
+  header naming another digest skips the file, another HTTP timeout
+  brings only its successes, and a file gone since the listing is
+  absent. A file that cannot be read (an I/O error, a header
+  that does not parse) costs only its rows: a shard skips it with a
+  warning, so its samples run again, and the run without the flag
+  renames it to `<name>.stale-<ts>` with a warning and goes on.
+- **Fold.** The run's own file comes first, then the others in name
+  order, the checkpoint before its parts. Per id the first success
+  wins over every failure; with none, the last failed row stands.
+  Failed attempts add up over every file, so a sample's attempt budget
+  holds across shards.
+- **Finalize.** Only the run without the flag finalizes. It deletes
+  every part, then rewrites the checkpoint to its failed rows or
+  deletes it. The parts go first, so a crash in between loses only
+  attempt history. To start a cell over by hand, remove its parts with
+  its checkpoint.
+
+**By hand on SLURM.** This recipe has not been run end to end yet.
+
+1. Once, set up a workspace on the shared disk, registered and synced
+   as for any `benchmarks run` of a catalog cell, and pull the cell's
+   model and runtime into it, so the N jobs do not download into one
+   store at once:
+   ```
+   pipette --work-dir /shared/pw models pull --model '<model>'
+   pipette --work-dir /shared/pw runtimes pull --runtime '<runtime>'
+   ```
+2. Run N shard jobs, here 4. Each gets its own work dir on node-local
+   disk, so its `datasets/` and `cache/` are its own, with `identity`,
+   `benchmarks`, `models`, `runtimes` and `state/evals` linked to the
+   shared workspace's. `shard.sh`:
+   ```bash
+   #!/bin/bash
+   set -euo pipefail
+   T=/shared/pw
+   w=${TMPDIR:-/tmp}/pw-$SLURM_JOB_ID
+   pipette --work-dir "$w" init >/dev/null
+   for d in identity benchmarks models runtimes state/evals; do
+     rm -rf "$w/.pipette/$d"
+     ln -s "$T/.pipette/$d" "$w/.pipette/$d"
+   done
+   exec pipette --work-dir "$w" --eval-shard "$SLURM_ARRAY_TASK_ID/4" \
+     benchmarks run --benchmark <id> --model '<model>' \
+     --runtime '<runtime>' --runtime-flags '<flags>'
+   ```
+   ```
+   array=$(sbatch --parsable --array=0-3 --gpus-per-node=<gpus> shard.sh)
+   ```
+3. Once every task has ended, collect: this run folds the parts, runs
+   what no shard settled, saves the result, submits it with `--sync`,
+   and deletes the parts.
+   ```
+   sbatch --dependency=afterany:$array --gpus-per-node=<gpus> --wrap \
+     "pipette --work-dir /shared/pw benchmarks run --benchmark <id> \
+      --model '<model>' --runtime '<runtime>' --runtime-flags '<flags>' --sync"
+   ```
+
+All N+1 runs need identical arguments, the same release and the same
+`PIPETTE_HF_TOKEN`; otherwise the digest differs (a text eval's covers
+the HF token, a vlm_eval's the whole benchmark flags) and the parts are
+never folded. A part still being written when the collector finalizes
+loses its later rows, which run again next time. Running one group
+twice at once only repeats work. Nothing in the client checks that
+`state/evals` is shared; the links do that. Each job needs the
+environment a single `benchmarks run` of the cell needs on that
+cluster.

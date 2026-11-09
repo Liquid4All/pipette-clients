@@ -159,7 +159,7 @@ runtime, not linked or redistributed, so they are outside both gates: upstream
 (Apache-2.0), and in managed `uv` venvs `mlx-lm` (MIT), OpenVINO GenAI
 (Apache-2.0), ONNX Runtime GenAI (MIT) and vLLM/SGLang (Apache-2.0, also
 runnable as Docker images). The Core AI runtime is a Swift sidecar that
-`pipette-coreai` builds from its bundled Swift package on first use, on the
-host that runs it. Its SwiftPM graph
-(`crates/pipette-coreai/swift/Package.resolved`) includes `apple/coreai-models`
+`pipette-artifacts` builds from its bundled Swift package and installs in the
+runtime store on first use, on the host that runs it. Its SwiftPM graph
+(`crates/pipette-artifacts/swift/Package.resolved`) includes `apple/coreai-models`
 (BSD-3-Clause) and `mlc-ai/xgrammar` (Apache-2.0).

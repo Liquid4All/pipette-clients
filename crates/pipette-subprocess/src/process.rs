@@ -1,12 +1,14 @@
 //! A program run to its exit, or serving requests until it is stopped.
 
-use std::process::{Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
 use pipette_plan_types::RuntimeOutput;
 
+use crate::cleanup;
 use crate::error::{ExitError, NotReadyError, ReadyError, StartError, StatusError, Stopped};
+use crate::session::Session;
 use crate::spawned::{Spawned, Stop, Stream};
 
 /// A program started by [`start_process`]: one that runs to its exit, such as
@@ -17,8 +19,8 @@ pub struct Process {
 }
 
 /// Spawn `command` leading a session of its own, with an empty stdin and both
-/// output streams kept, so a program that talks over stdin and stdout needs a
-/// plain `Command` instead. Its environment is the command's:
+/// output streams kept, so a program that talks over stdin and stdout needs
+/// [`spawn_piped`] instead. Its environment is the command's:
 /// [`apply_client_config`](crate::apply_client_config), then
 /// [`apply_envs`](crate::apply_envs). Returns while it runs.
 ///
@@ -50,6 +52,35 @@ pub fn start_process(
     Ok(Process {
         spawned: Spawned::start(command, name.to_owned(), stop)?,
     })
+}
+
+/// Spawn `command` with every stream piped, for a helper the caller talks to.
+/// It leads a session of its own, which ^C and
+/// [`stop_children`](crate::stop_children) kill while the returned guard
+/// lives; the caller still kills and reaps the child.
+pub fn spawn_piped(mut command: Command) -> std::io::Result<(Child, ChildTeardown)> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    Session::lead(&mut command);
+    let starting = cleanup::hold_off_teardown();
+    let child = command.spawn()?;
+    #[cfg(windows)]
+    crate::job::assign(&child);
+    let session = Session::led_by(child.id());
+    let teardown = cleanup::Guard::child(move || {
+        session.kill();
+    });
+    drop(starting);
+    Ok((child, ChildTeardown { _guard: teardown }))
+}
+
+/// Keeps a [`spawn_piped`] child's teardown registered; dropping it only
+/// deregisters.
+pub struct ChildTeardown {
+    _guard: cleanup::Guard,
 }
 
 impl Process {

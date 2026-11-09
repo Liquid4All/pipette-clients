@@ -325,7 +325,8 @@ flowchart TD
   deadline outranks it, and a run whose console was lost prints no such line and
   stays retriable. The line does not say why iOS sent the signal, so a watchdog
   kill (a launch that hung) is filed the same way.
-- A cell the app's engine failed on is `engine_failed`, terminal. A current
+- A cell the app's engine failed on is `engine_failed`, terminal, or
+  `engine_out_of_memory` when the app's out-of-memory message says so. A current
   build ends that claimed run `BENCH_DONE 1 failed: <error>`; an older one,
   closing on the job's status, prints `BENCH_DONE 0 completed` and leaves no
   payload, so the check runs after either. The deadline, a kill by iOS and
@@ -346,6 +347,17 @@ flowchart TD
   arrives, and leaves out a `vl_spec_decode` corpus fetch (`fetching a corpus:`
   to `corpus for`) and each readiness wait (`→ waiting` to `→ proceeding` or
   `→ timed out`). Both reasons name the limit and the engine's time.
+- An attempt past the plan's `attempt_timeout_seconds` (300 s by default on the
+  timing, throughput and memory cells) is stopped by the app: it cannot abort the engine
+  mid-call, so it logs the failed cell, `[HEADLESS] error jobRun <benchmark> /
+  <model> failed: rep 2 ran 300.4s, past attempt_timeout_seconds (300s), and
+  was stopped`, prints `BENCH_DONE 1 failed: <the same error>` and exits. The
+  proxy reads it with the engine failures above (after the dispatch line) and
+  files it `attempt_timed_out`, terminal, not `engine_failed`: the cell ran out
+  of time in the engine and no engine operation failed.
+  Every client runs the cell under the same limit, so another phone or try
+  would stop it the same way. `run_timeout_secs` stays the outer bound over
+  the whole launch, every attempt and wait included.
 - On `results show`, the payload is the app's first document on stdout and the
   sentinel moves to stderr. `devicectl --console` prints its own lines ahead of
   the app's, so the payload starts at the first line that opens an object.
@@ -378,23 +390,29 @@ signal):
 - Failures are reported by the proxy only: the app uploads results, not
   failures.
 
-| failure | cause | retriable |
-|---|---|---|
-| phone absent or unreachable | `device_unreachable` | yes |
-| devicectl error or timeout | `devicectl_failure` | yes |
-| run failed (status other than 2) | `run_failed` | yes |
-| deadline with the engine under half the window | `run_timed_out` | yes |
-| deadline with the engine half the window or more | `engine_timed_out` | no |
-| no line from the app on the launch or its relaunch | `launch_silent` | yes |
-| the app's engine failed on the cell | `engine_failed` | no |
-| iOS killed the app (signal 9), most likely at its memory limit | `killed_by_ios` | no |
-| status 2: malformed arguments | `malformed_invocation` | no |
-| runtime mismatch with the installed build (status 2) | `malformed_invocation` | no |
-| no build provides the runtime | `install_failed` | no |
-| install failed | `install_failed` | no |
-| the app holds another client after the install; the phone stops | `install_failed` | no |
-| spec the proxy cannot interpret | `uninterpretable_spec` | no |
-| the server does not know the benchmark | `unknown_benchmark` | no |
+| failure | cause | retriable | `failure_code` |
+|---|---|---|---|
+| phone absent or unreachable | `device_unreachable` | yes | `device_error` |
+| devicectl error or timeout | `devicectl_failure` | yes | `device_error` |
+| run failed (status other than 2) | `run_failed` | yes | none |
+| deadline with the engine under half the window | `run_timed_out` | yes | `harness_error` |
+| deadline with the engine half the window or more | `engine_timed_out` | no | `runtime_error` |
+| the app stopped an attempt past `attempt_timeout_seconds` | `attempt_timed_out` | no | `attempt_timeout` |
+| no line from the app on the launch or its relaunch | `launch_silent` | yes | `device_error` |
+| the app's engine failed on the cell | `engine_failed` | no | `runtime_error` |
+| the app's engine failed on the cell, out of memory | `engine_out_of_memory` | no | `out_of_memory` |
+| iOS killed the app (signal 9), most likely at its memory limit | `killed_by_ios` | no | `out_of_memory` |
+| status 2: malformed arguments | `malformed_invocation` | no | `harness_error` |
+| runtime mismatch with the installed build (status 2) | `malformed_invocation` | no | `harness_error` |
+| no build provides the runtime | `install_failed` | no | `harness_error` |
+| install failed | `install_failed` | no | `harness_error` |
+| the app holds another client after the install; the phone stops | `install_failed` | no | `harness_error` |
+| spec the proxy cannot interpret | `uninterpretable_spec` | no | `harness_error` |
+| the server does not know the benchmark | `unknown_benchmark` | no | `harness_error` |
+
+`failure_code` is mgmt's grouping of the failure; "none" leaves the key out,
+which mgmt records as `unspecified`. The version-mode causes are all
+`harness_error`, except `identity_replaced`, which is `device_error`.
 
 ## 5. Wire protocol
 
@@ -956,9 +974,10 @@ flowchart TD
   replaced identity is retriable too: the job is fine, the phone is not. A kill
   by iOS (`killed_by_ios`, section 4) is terminal here too, though a build may
   cause it: a cell that a later build would fit needs
-  `pipette-ctl campaigns rerun`. So are an engine failure (`engine_failed`) and
-  a deadline in the engine (`engine_timed_out`): a build that fixes either
-  needs `pipette-ctl campaigns rerun`.
+  `pipette-ctl campaigns rerun`. So are an engine failure (`engine_failed`,
+  `engine_out_of_memory`), an attempt past its limit (`attempt_timed_out`) and
+  a deadline in the engine (`engine_timed_out`): a build that fixes one needs
+  `pipette-ctl campaigns rerun`.
 - **`client_version` on a failure** is `V` once the phone has reported running
   it, else this proxy's own; `failure_reason` names `V` for every failure after
   the choice.

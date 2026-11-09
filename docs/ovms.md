@@ -61,6 +61,10 @@ on the Arc GPU. The memory cell also starts a warm-up server between the two
   request is at most 3600 s for each request in flight. The bound applies to
   the wait for the headers, then to the wait for each chunk, and not to the
   whole exchange. The longest wait is the prefill before the first chunk.
+  `attempt_timeout_seconds` bounds each whole repetition, 300 s by default
+  ([the attempt limit](pipette-cli/usage.md#5c-the-attempt-limit)). The first
+  server's whole start, where a cold cache compiles the model, does not count
+  against it; the starts of the servers after it do.
 
 ## Batched entries
 

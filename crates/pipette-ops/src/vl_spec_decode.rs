@@ -52,48 +52,6 @@ impl Speculation {
     }
 }
 
-/// The whole run's wall clock, checked between samples.
-///
-/// `None` when the cell set no `bench_timeout_seconds`, with no built-in
-/// default: the traversal's length is the corpus's, so a guess would kill
-/// healthy long runs. Unset, the job's lease is the bound. Checked between
-/// samples because there is no child process to kill; a wedged request is
-/// bounded by `http_timeout_seconds`.
-#[derive(Debug, Clone, Copy)]
-pub struct Deadline {
-    started: Instant,
-    budget: Option<Duration>,
-}
-
-impl Deadline {
-    pub fn starting_now(budget: Option<Duration>) -> Self {
-        Self {
-            started: Instant::now(),
-            budget,
-        }
-    }
-
-    pub fn check(&self, what: &str) -> anyhow::Result<()> {
-        self.check_elapsed(self.started.elapsed(), what)
-    }
-
-    /// [`Self::check`] with the clock injected: a test cannot move `Instant` a
-    /// day back, which panics on a host booted more recently than that.
-    pub fn check_elapsed(&self, elapsed: Duration, what: &str) -> anyhow::Result<()> {
-        let Some(budget) = self.budget else {
-            return Ok(());
-        };
-        anyhow::ensure!(
-            elapsed < budget,
-            "the traversal passed its bench_timeout_seconds ({}s) after {}s, at {what}; \
-             the budget has to cover the whole corpus and a readiness gate per sample",
-            budget.as_secs(),
-            elapsed.as_secs()
-        );
-        Ok(())
-    }
-}
-
 /// What one turn produced, in the terms the wire counts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnRecord {
@@ -1622,21 +1580,5 @@ mod tests {
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(message.contains("not whole blocks of 10"), "{message}");
-    }
-
-    #[test]
-    fn an_unset_deadline_never_fires() -> anyhow::Result<()> {
-        Deadline::starting_now(None).check_elapsed(Duration::from_secs(86_400), "a day in")
-    }
-
-    #[test]
-    fn an_elapsed_deadline_names_where_it_stopped() {
-        let message = Deadline::starting_now(Some(Duration::from_secs(60)))
-            .check_elapsed(Duration::from_secs(600), "baseline arm, sample 412")
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default();
-        assert!(message.contains("baseline arm, sample 412"), "{message}");
-        assert!(message.contains("bench_timeout_seconds"), "{message}");
     }
 }

@@ -95,10 +95,7 @@ fn a_corpus_cell_asks_the_context_for_its_dataset_first() -> anyhow::Result<()> 
         &req,
         &context,
         &|| Ok(()),
-        MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        },
+        MeasurementObserver::QUIET,
         None,
         &ExternalPrograms::at_missing_paths(),
     ) else {

@@ -6,7 +6,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use pipette_memprobe::Sampler;
-use pipette_ops::measurement::{self, MaxMemoryMeasurementReading, MemoryMeasurementWarmup};
+use pipette_ops::measurement::{
+    self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     BenchmarkFlagRef, LlamaCppFlavor, LlamacppCliStockToolsExtraRuntimeConfiguration,
@@ -24,6 +26,10 @@ use crate::swap_aware;
 
 const DECODE_TOKENS: u32 = 1;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub fn run(
     benchmark: &MaxMemoryUsageBenchmark,
     runtime_flags: MaxMemoryUsageLlamacppCliStockToolsGgufText,
@@ -31,6 +37,7 @@ pub fn run(
     flavor: &LlamaCppFlavor,
     program: &ResolvedLlamaBench,
     model: &ResolvedGgufTextModel,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     let watch = memory::peak(flavor, |name| {
@@ -42,13 +49,14 @@ pub fn run(
     };
     let launch = bench_launch(benchmark, &runtime_flags, program, model, client_config);
     // Per run: a warm-up gets a deadline of its own.
-    let deadline = memory::bench_timeout(benchmark_flags.bench_timeout_seconds);
+    let deadline = memory::attempt_timeout(benchmark_flags.attempt_timeout_seconds);
     let mut ran: Option<(Process, MemoryObservation)> = None;
     // The `/proc` terms behind the swap-aware peak, for the row.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let mut extras = serde_json::Map::new();
     let result = measurement::max_memory(
         &benchmark.benchmark_id,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut ran,
         |ran| {

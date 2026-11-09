@@ -132,12 +132,7 @@ pub fn run(
         ..runtime_flags
     };
     let speculation = model.speculation();
-    let params = turn::Params::new(
-        benchmark,
-        benchmark_flags.http_timeout_seconds,
-        benchmark_flags.bench_timeout_seconds,
-        speculation,
-    )?;
+    let params = turn::Params::new(benchmark, benchmark_flags.http_timeout_seconds, speculation)?;
     let vision = model.vision();
     // On: the drafter's argv. Off: none; a merged drafter stays in the
     // backbone, resident and unused.
@@ -509,7 +504,6 @@ mod tests {
             draft_length: 8,
             temperature: SamplingTemperature::greedy(),
             http_timeout: std::time::Duration::from_secs(600),
-            deadline: pipette_ops::vl_spec_decode::Deadline::starting_now(None),
         })?;
         let messages = vec![json!({"role": "user", "content": "hi"})];
         assert_eq!(
@@ -539,7 +533,6 @@ mod tests {
             draft_length: 8,
             temperature: SamplingTemperature::try_new(0.8)?,
             http_timeout: std::time::Duration::from_secs(600),
-            deadline: pipette_ops::vl_spec_decode::Deadline::starting_now(None),
         })?;
         let messages = vec![json!({"role": "user", "content": "hi"})];
         assert_eq!(

@@ -105,27 +105,57 @@ private struct GateCase: Sendable, CustomTestStringConvertible {
         #expect(JobExecutor.liveCellLabel(c, params: ["parameter_decode_tokens": 100]) == "Decode Throughput · 100 tok · Foo")
     }
 
-    // MARK: - The kept fetch failure
+    // MARK: - The kept cell failure
 
-    /// The worker classifies the run's first vault failure by its type, so neither a
-    /// non-vault error nor a later vault failure may replace it.
-    @Test func keptFetchFailureHoldsTheFirstVaultFailure() {
-        let kept = KeptFetchFailure()
-        kept.keep(URLError(.timedOut))
-        #expect(kept.error == nil)
-
+    /// The worker reports the run's first failure, in its type and in the cell's words, so a
+    /// later failure may not replace it.
+    @Test func keptCellFailureHoldsTheFirstFailure() {
+        let kept = KeptCellFailure()
         kept.keep(VaultFetchError.refused(
-            resourceId: VaultResourceId(validated: "vault_1"), status: 403, detail: "refused"))
+            resourceId: VaultResourceId(validated: "vault_1"), status: 403, detail: "refused"),
+            message: "vault refused")
         kept.keep(VaultFetchError.mgmt(.httpStatus(
             method: "GET", url: "https://mgmt.test/vault/resources/vault_1/content",
-            status: 503, body: "")))
-        kept.keep(URLError(.timedOut))
+            status: 503, body: "")), message: "vault unavailable")
+        kept.keep(URLError(.timedOut), message: "timed out")
 
-        guard case .refused(_, 403, _) = kept.error else {
-            Issue.record("kept \(String(describing: kept.error)), not the first vault refusal")
+        guard case .refused(_, 403, _) = kept.failure?.error as? VaultFetchError else {
+            Issue.record("kept \(String(describing: kept.failure)), not the first failure")
             return
         }
-        #expect(kept.error?.isPermanent == true)
+        #expect((kept.failure?.error as? VaultFetchError)?.isPermanent == true)
+        #expect(kept.failure?.message == "vault refused")
+    }
+
+    /// An attempt past its limit is kept too, so the worker files it as final.
+    @Test func keptCellFailureHoldsAnOverrun() throws {
+        let kept = KeptCellFailure()
+        let overrun = AttemptTimeoutError(
+            overrun: Attempt.Overrun(what: "rep 2", limit: .seconds(300), elapsed: .seconds(301)),
+            engineError: nil)
+        kept.keep(overrun, message: overrun.localizedDescription)
+
+        #expect(try #require(kept.failure?.error as? AttemptTimeoutError) == overrun)
+        #expect(!classifyRunError(try #require(kept.failure?.error)))
+    }
+
+    /// A cell failure reaches the worker in its type, so its `failure_code` is named: held as
+    /// the cell's text only, it would go out with none.
+    @Test(arguments: [
+        (RuntimeError.outOfMemory("failed to allocate buffer") as any Error, FailureCode.outOfMemory),
+        (ModelLoadFailure(cause: .outOfMemory("mmap")), .outOfMemory),
+        (ModelLoadFailure(cause: .engine("unknown architecture")), .runtimeError),
+        (ModelLoadFailure(cause: .unreadableModel("failed to read magic")), .harnessError),
+        (RuntimeError.backend("decode rc=-3"), .runtimeError),
+        (RuntimeError.readiness("thermal serious"), .deviceError),
+        (ModelStoreError.fetch(model: "m", source: "offline"), .harnessError),
+    ])
+    func keptCellFailureCodesWhatFailed(error: any Error, code: FailureCode) throws {
+        let kept = KeptCellFailure()
+        kept.keep(error, message: "failed")
+
+        #expect(failureCode(try #require(kept.failure?.error)) == code)
+        #expect(classifyRunError(try #require(kept.failure?.error)), "still retriable")
     }
 
     // MARK: - The benchmark a cell runs

@@ -28,6 +28,12 @@ nonisolated func llamaLogIsOOM(_ msg: String) -> Bool {
         .contains { msg.contains($0) }
 }
 
+/// The crate's `LOAD_FAILED_ON_FILE`: llama.cpp's words for a model file it could not read.
+nonisolated func llamaLogIsUnreadableFile(_ msg: String) -> Bool {
+    ["failed to open", "failed to read magic", "corrupted or incomplete"]
+        .contains { msg.contains($0) }
+}
+
 // MARK: - Loaded model handle
 
 /// Freed explicitly with `free()` rather than left to ARC timing, since a cell reloads a
@@ -241,7 +247,10 @@ nonisolated enum LlamaCpp {
         llamaLogLock.lock(); let log = llamaLogBuffer; llamaLogLock.unlock()
         let tail = log.isEmpty ? "" : ": " + String(log.suffix(400)).trimmingCharacters(in: .whitespacesAndNewlines)
         let detail = what + tail
-        return ModelLoadFailure(cause: llamaLogIsOOM(log) ? .outOfMemory(detail) : .engine(detail))
+        // The file words count only in `detail`, the text pipette-ios-proxy reads them in.
+        let cause: RuntimeError = llamaLogIsOOM(log) ? .outOfMemory(detail)
+            : llamaLogIsUnreadableFile(detail) ? .unreadableModel(detail) : .engine(detail)
+        return ModelLoadFailure(cause: cause)
     }
 
     // MARK: Ops

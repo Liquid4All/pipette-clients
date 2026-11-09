@@ -187,6 +187,7 @@ pub fn run(
             runtimes::flavor(&req.runtime.bound)?,
             &ResolvedLlamaBench::try_from(&req.runtime.bound)?,
             &ResolvedGgufTextModel::try_from(&req.model.bound)?,
+            observer,
             client_config,
         ),
         BenchmarkDefinition::Eval(benchmark) => eval::run(
@@ -264,6 +265,7 @@ pub fn run(
             runtimes::flavor(&req.runtime.bound)?,
             &ResolvedLlamaServer::try_from(&req.runtime.bound)?,
             &ResolvedGgufVisionModel::try_from(&req.model.bound)?,
+            observer,
             client_config,
         ),
         BenchmarkDefinition::VlMaxMemory(benchmark) => vl_max_memory::run(
@@ -273,14 +275,17 @@ pub fn run(
             runtimes::flavor(&req.runtime.bound)?,
             &ResolvedLlamaServer::try_from(&req.runtime.bound)?,
             &ResolvedGgufVisionModel::try_from(&req.model.bound)?,
+            observer,
             client_config,
         ),
         BenchmarkDefinition::VlSpecDecode(benchmark) => {
-            let lease = pipette_vl_spec_decode_corpus::download(
-                run_context,
-                &benchmark.benchmark_id,
-                &benchmark.dataset,
-            )?;
+            let lease = observer.outside(|| {
+                pipette_vl_spec_decode_corpus::download(
+                    run_context,
+                    &benchmark.benchmark_id,
+                    &benchmark.dataset,
+                )
+            })?;
             // Resolved against the model, so the run loads the matching files and
             // the row records what ran rather than what the cell left unset.
             let runtime_flags: VlSpecDecodeLlamacppCliStockTools =
@@ -390,10 +395,7 @@ mod tests {
     }
 
     fn failure(req: &RunRequest) -> anyhow::Result<String> {
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let err = run(req, &NoCorpus, &|| Ok(()), observer, None)
             .err()
             .context("expected the cell to fail")?;

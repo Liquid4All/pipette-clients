@@ -10,7 +10,7 @@ files.
 | Component | Location | License | Notes |
 |---|---|---|---|
 | llama.cpp | `vendor/llama.cpp` | MIT | Built into the iOS and Android native clients. |
-| llama.cpp forks | `vendor/llamacpp-prismml`, `vendor/llamacpp-lfm3` | MIT | The [private-API build](docs/pipette-ios/private-thermal-release-build.md) of the iOS app carries each fork in its own framework, beside the framework for `vendor/llama.cpp`; see [docs/pipette-ios/build.md](docs/pipette-ios/build.md). |
+| llama.cpp forks | `vendor/llamacpp-prismml`, `vendor/llamacpp-prismml-b10828`, `vendor/llamacpp-lfm3` | MIT | The [private-API build](docs/pipette-ios/private-thermal-release-build.md) of the iOS app carries each fork in its own framework, beside the framework for `vendor/llama.cpp`; see [docs/pipette-ios/build.md](docs/pipette-ios/build.md). |
 | nlohmann/json | `vendor/llama.cpp/vendor/nlohmann` | MIT | Header-only, bundled by llama.cpp and compiled into the native bridge. |
 | stb_image | `vendor/llama.cpp/vendor/stb` | Public domain or MIT (licensee's choice) | Header-only, bundled by llama.cpp and compiled into its `mtmd` library, which the iOS and Android apps link. |
 | miniaudio | `vendor/llama.cpp/vendor/miniaudio` | Public domain or MIT-0 (licensee's choice) | Header-only, bundled by llama.cpp and compiled into its `mtmd` library, which the iOS and Android apps link. |

@@ -21,6 +21,7 @@ use tabled::{Tabled, settings::Style};
 use tracing::level_filters::LevelFilter;
 
 use pipette_http::HttpClient;
+use pipette_ops::EvalShard;
 use pipette_programs::{ExternalProgram, ExternalPrograms};
 use pipette_workspace::{InitResult, resolve_work_dir};
 
@@ -108,6 +109,14 @@ pub struct Cli {
     /// Artifact-store disk cap: bytes, or an IEC suffix (`200GiB`, `512MiB`)
     #[arg(long, global = true, env = "PIPETTE_STORAGE_QUOTA")]
     pub storage_quota: Option<String>,
+
+    /// Run only group I of N (0-based) of an eval, vlm_eval or asr_eval cell,
+    /// split by a hash of each sample id, into a part file beside its
+    /// checkpoint. Records and reports nothing: a later run without the flag
+    /// folds every group in and records the cell. `worker` takes it only
+    /// behind the pool dispatcher, which holds the lease.
+    #[arg(long, global = true, value_name = "I/N")]
+    pub eval_shard: Option<EvalShard>,
 
     /// How this client operates, as a TOML file: one `[[runtimes]]` entry per
     /// runtime type with the `envs` set on every process it spawns, and a
@@ -327,7 +336,8 @@ fn dispatch(cli: Cli, console: &mut dyn Console) -> anyhow::Result<()> {
             workspace::require_workspace(&work_dir, work_dir_arg.as_deref())?;
             // `open` resolves the quota override against
             // `identity/settings.json` and carries the result.
-            let ws = PipetteWorkspace::open(&work_dir, quota_override)?;
+            let ws =
+                PipetteWorkspace::open(&work_dir, quota_override)?.with_eval_shard(cli.eval_shard);
             match command {
                 RootCommand::Init => anyhow::bail!("init is handled before workspace open"),
                 RootCommand::Check(_) => {
@@ -732,6 +742,35 @@ mod tests {
             .err()
             .ok_or_else(|| anyhow::anyhow!("a malformed config should refuse"))?;
         assert!(format!("{err:#}").contains("client.toml"), "got {err:#}");
+        Ok(())
+    }
+
+    /// Parsed is not enough: every shard rule reads the flag off the workspace.
+    #[test]
+    fn an_eval_shard_after_the_subcommand_reaches_the_workspace() -> anyhow::Result<()> {
+        let dir = WorkDir::new("eval-shard")?;
+        dir.dispatch(&["init"])?;
+        // Unseeded, so a run the flag did not reach stops at resolving it.
+        let err = dir
+            .dispatch(&[
+                "benchmarks",
+                "run",
+                "--eval-shard",
+                "0/2",
+                "--benchmark",
+                "local/eval_smoke",
+                "--model",
+                r#"{"type":"apple_foundation_text"}"#,
+                "--runtime",
+                r#"{"type":"apple_foundation"}"#,
+                "--sync",
+            ])
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a shard's --sync should refuse"))?;
+        assert!(
+            format!("{err:#}").contains("--sync has nothing to send"),
+            "got {err:#}"
+        );
         Ok(())
     }
 }

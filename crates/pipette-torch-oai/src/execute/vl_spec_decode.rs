@@ -40,7 +40,6 @@ pub(super) fn run(
     let params = turn::Params::new(
         benchmark,
         benchmark_flags.and_then(BenchmarkFlags::http_timeout),
-        benchmark_flags.and_then(BenchmarkFlags::bench_timeout),
         speculation,
     )?;
 

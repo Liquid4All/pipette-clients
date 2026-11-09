@@ -444,7 +444,7 @@ final class SidecarServer: @unchecked Sendable {
                     return json(["error": "'decode_tokens' must be >= 2 (generation_tps is N-1 inter-token intervals)"], status: 400)
                 }
                 let r = try await engine.generate(prompt: engine.randomPrompt(count: p), maxTokens: d)
-                return json(["generation_tps": r.genTps, "decode_tokens": r.completionTokens])
+                return json(["generation_tps": r.genTps, "prompt_tokens": r.promptTokens, "decode_tokens": r.completionTokens])
             case "/max_memory_usage":
                 guard let p = obj["prompt_tokens"] as? Int, p > 0,
                       let d = obj["decode_tokens"] as? Int, d > 0 else {

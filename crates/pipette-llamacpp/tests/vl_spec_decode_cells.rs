@@ -141,6 +141,7 @@ fn a_corpus_cell_traverses_through_its_entry() -> anyhow::Result<()> {
             finished.set(finished.get() + 1);
             Ok(())
         },
+        ..MeasurementObserver::QUIET
     };
     let response = pipette_llamacpp::run(&req, &serving, &gate, observer, None)?;
 

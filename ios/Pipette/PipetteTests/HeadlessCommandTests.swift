@@ -645,7 +645,7 @@ struct HeadlessCommandTests {
     }
 
     /// Refused on Apple Foundation, as the crate refuses it: plan-types declares no AFM
-    /// variant, so the result could not record a waived thermal check.
+    /// prefill variant, so the result could not record a waived thermal check.
     @Test(arguments: [
         ["headlessrun", "runtime=afm", "benchmarks=prefill_throughput_256"],
         ["headlessrun", "bench", "runtime=afm", "benchmarks=prefill_throughput_256"],
@@ -696,6 +696,29 @@ struct HeadlessCommandTests {
             readiness: ReadinessOverrides(maxWaitSecs: 1800, skipThermal: true)))
     }
 
+    /// The attempt limit has no shorthand; `benchmark-flags=` carries it, on a memory cell too.
+    @Test func benchmarkFlagsCarryTheAttemptLimit() {
+        let parsed = parse("headlessrun", "benchmarks", "run", "benchmark=max_memory_usage_256",
+                           "model=\(Self.ggufModel)", "runtime=llama",
+                           #"benchmark-flags={"attempt_timeout_seconds":900}"#)
+        guard case let .benchmarksRun(_, _, _, _, _, _, flags, _)? = parsed else {
+            Issue.record("expected benchmarksRun, got \(String(describing: parsed))"); return
+        }
+        #expect(flags == .maxMemoryUsageLlamacppIosPipetteGgufText(attemptTimeoutSeconds: 900))
+    }
+
+    /// Apple Foundation's decode and end-to-end cells take benchmark flags, and the AFM
+    /// command carries them to its cells rather than dropping them.
+    @Test func appleFoundationCarriesItsBenchmarkFlags() {
+        let parsed = parse("headlessrun", "runtime=afm", "benchmarks=decode_throughput_256_100",
+                           #"benchmark-flags={"attempt_timeout_seconds":600,"readiness":{"max_wait_secs":900}}"#)
+        guard case let .afm(_, _, _, _, _, flags)? = parsed else {
+            Issue.record("expected afm, got \(String(describing: parsed))"); return
+        }
+        #expect(flags == .decodeThroughputAppleFoundationAppleFoundationText(
+            attemptTimeoutSeconds: 600, readiness: ReadinessOverrides(maxWaitSecs: 900)))
+    }
+
     /// As the CLI's `conflicts_with_all` refuses them.
     @Test(arguments: ["readiness-max-wait-secs=30", "readiness-skip-thermal=1"])
     func benchmarkFlagsAndItsShorthandAreRefusedTogether(shorthand: String) {
@@ -714,6 +737,8 @@ struct HeadlessCommandTests {
         (#"{"http_timeout_seconds":600}"#, "prefill_throughput_256",
          "no iOS variant declares `http_timeout_seconds`"),
         (#"{"readiness":{"max_wait_secs":30}}"#, "eval_smoke", "not valid for this benchmark"),
+        (#"{"readiness":{"max_wait_secs":30}}"#, "max_memory_usage_256",
+         "not valid for this benchmark: readiness is not a valid benchmark flag"),
         (#"{"readiness":{"max_wait_secs":0}}"#, "prefill_throughput_256",
          "`readiness.max_wait_secs` must be at least 1"),
     ])
@@ -801,6 +826,18 @@ struct HeadlessCommandTests {
         let pin = try HeadlessCommand.carriedLlamaPin(Runtime.carried(Self.asrPin),
                                                       carried: [Self.mainPin, Self.asrPin])
         #expect(pin == Self.asrPin)
+    }
+
+    /// Two builds of one repository: the version in the descriptor picks between them.
+    @Test func aRuntimePicksBetweenTwoBuildsOfOneRepository() throws {
+        let url = "github.com/PrismML-Eng/llama.cpp"
+        let older = LlamaPin(name: "llamacpp-prismml", repositoryUrl: url,
+                             build: .tagged(tag: "prism-b10777-e3de715", commit: "e3de71522"))
+        let newer = LlamaPin(name: "llamacpp-prismml-b10828", repositoryUrl: url,
+                             build: .tagged(tag: "prism-b10828-a153697", commit: "a15369706"))
+        let carried = [Self.mainPin, older, newer]
+        #expect(try HeadlessCommand.carriedLlamaPin(Runtime.carried(older), carried: carried) == older)
+        #expect(try HeadlessCommand.carriedLlamaPin(Runtime.carried(newer), carried: carried) == newer)
     }
 
     /// A descriptor no carried build matches is refused with every carried build named, and
@@ -1517,7 +1554,7 @@ struct HeadlessCommandTests {
         func claim(_ command: HeadlessCommand?) -> String? {
             switch command {
             case let .bench(_, _, _, _, _, _, _, _, _, _, _, claim, _)?: claim
-            case let .afm(_, _, _, _, claim)?: claim
+            case let .afm(_, _, _, _, claim, _)?: claim
             default: nil
             }
         }

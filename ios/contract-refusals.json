@@ -11,6 +11,7 @@
     "asr_eval_uv_vllm_torch": "desktop runtime",
     "asr_max_memory_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
     "asr_throughput_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
+    "decode_throughput_apple_core_ai_macos_pipette_apple_core_ai": "desktop runtime",
     "decode_throughput_docker_sglang_torch": "desktop runtime",
     "decode_throughput_docker_vllm_torch": "desktop runtime",
     "decode_throughput_llamacpp_apk_pipette_gguf_text": "Android runtime",
@@ -21,6 +22,7 @@
     "decode_throughput_uv_openvino_openvino": "desktop runtime",
     "decode_throughput_uv_sglang_torch": "desktop runtime",
     "decode_throughput_uv_vllm_torch": "desktop runtime",
+    "end_to_end_latency_apple_core_ai_macos_pipette_apple_core_ai": "desktop runtime",
     "end_to_end_latency_docker_sglang_torch": "desktop runtime",
     "end_to_end_latency_docker_vllm_torch": "desktop runtime",
     "end_to_end_latency_llamacpp_apk_pipette_gguf_text": "Android runtime",
@@ -37,7 +39,18 @@
     "eval_mlx_macos_pipette_mlx": "desktop runtime",
     "eval_uv_sglang_torch": "desktop runtime",
     "eval_uv_vllm_torch": "desktop runtime",
+    "max_memory_usage_apple_core_ai_macos_pipette_apple_core_ai": "desktop runtime",
+    "max_memory_usage_docker_sglang_torch": "desktop runtime",
+    "max_memory_usage_docker_vllm_torch": "desktop runtime",
+    "max_memory_usage_llamacpp_apk_pipette_gguf_text": "Android runtime",
     "max_memory_usage_llamacpp_cli_stock_tools_gguf_text": "desktop runtime",
+    "max_memory_usage_mlx_macos_pipette_mlx": "desktop runtime",
+    "max_memory_usage_ovms_openvino": "desktop runtime",
+    "max_memory_usage_uv_onnx_genai_onnx_genai": "desktop runtime",
+    "max_memory_usage_uv_openvino_openvino": "desktop runtime",
+    "max_memory_usage_uv_sglang_torch": "desktop runtime",
+    "max_memory_usage_uv_vllm_torch": "desktop runtime",
+    "prefill_throughput_apple_core_ai_macos_pipette_apple_core_ai": "desktop runtime",
     "prefill_throughput_docker_sglang_torch": "desktop runtime",
     "prefill_throughput_docker_vllm_torch": "desktop runtime",
     "prefill_throughput_llamacpp_apk_pipette_gguf_text": "Android runtime",
@@ -49,6 +62,7 @@
     "prefill_throughput_uv_sglang_torch": "desktop runtime",
     "prefill_throughput_uv_vllm_torch": "desktop runtime",
     "vl_max_memory_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
+    "vl_max_memory_mlx_macos_pipette_mlx": "desktop runtime",
     "vl_max_memory_trt_edgellm_gguf_vision": "desktop runtime",
     "vl_spec_decode_docker_sglang_torch": "desktop runtime",
     "vl_spec_decode_docker_sglang_torch_speculative": "desktop runtime",
@@ -78,6 +92,9 @@
   },
   "DatasetUpstream": {
     "evals_server": "no vlm_eval or asr_eval engine on iOS"
+  },
+  "FailureCode": {
+    "unspecified": "a failure body says it by leaving the key out"
   },
   "Model": {
     "core_ai": "no Core AI engine on iOS",

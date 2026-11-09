@@ -219,7 +219,8 @@ pub struct VlSpecDecodeMeasurementRow {
 /// records while they run: the server it sends to. Lend a reference to read it
 /// back afterwards, a failed run included.
 ///
-/// `bench_timeout_seconds` is the caller's to check in `readiness_gate`.
+/// `attempt_timeout_seconds` is the caller's: it begins each batch's attempt in
+/// `readiness_gate`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the seams every entry takes, plus the corpus and the retry sleep"
@@ -893,10 +894,7 @@ mod tests {
     }
 
     fn no_observer() -> MeasurementObserver<'static> {
-        MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        }
+        MeasurementObserver::QUIET
     }
 
     /// The entry behind an open gate, with no observer and no sleep.
@@ -1331,6 +1329,7 @@ mod tests {
         let observer = MeasurementObserver {
             on_before_rep_start: &|| step("start".to_owned()),
             on_after_rep_end: &|| step("end".to_owned()),
+            ..MeasurementObserver::QUIET
         };
         let got = vl_spec_decode(
             &body(1)?,
@@ -1402,6 +1401,7 @@ mod tests {
                 events.borrow_mut().push("end".to_owned());
                 Ok(())
             },
+            ..MeasurementObserver::QUIET
         };
         vl_spec_decode(
             &body(batch_size)?,

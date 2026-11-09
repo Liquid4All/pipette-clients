@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use pipette_mgmt_client::types::{ClaimedJob, FailureSubmission};
-use pipette_plan_types::RuntimeOutput;
+use pipette_plan_types::{FailureCode, RuntimeOutput};
 
 use crate::app::{self, ListedResult, ResultRef};
 use crate::device::DeviceControl;
@@ -26,8 +26,8 @@ pub(crate) fn client_version() -> String {
 /// Why a job failed, and with it whether the server should hand it to someone
 /// else. Terminal means the job can never run anywhere, or the cell met its end
 /// in the app's engine: iOS killed the app, the engine failed, or the engine
-/// ran past the deadline. The snake_case slug is what the log carries; the
-/// table test pins every one.
+/// ran past the deadline or an attempt's limit. The snake_case slug is what the
+/// log carries; the table test pins every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum FailureCause {
@@ -43,6 +43,9 @@ pub(crate) enum FailureCause {
     /// The deadline elapsed with the cell in the app's engine for half of it or
     /// more ([`crate::app::ConsoleRun::engine_time`]).
     EngineTimedOut,
+    /// The app stopped an attempt past the plan's `attempt_timeout_seconds`
+    /// ([`crate::app::attempt_timed_out`]).
+    AttemptTimedOut,
     /// See [`crate::app::KILLED_BY_IOS`].
     KilledByIos,
     /// The app printed nothing by the first-line deadline, on the launch and on
@@ -50,6 +53,8 @@ pub(crate) enum FailureCause {
     LaunchSilent,
     /// See [`crate::app::engine_failure`].
     EngineFailed,
+    /// The engine failure the app reported as out of memory.
+    EngineOutOfMemory,
     /// Exit 2 with no sentinel: malformed argv.
     MalformedInvocation,
     /// Pool mode: no build in the pool provides the job's runtime, or the one
@@ -98,7 +103,9 @@ impl FailureCause {
             | Self::IdentityReplaced => true,
             Self::KilledByIos
             | Self::EngineFailed
+            | Self::EngineOutOfMemory
             | Self::EngineTimedOut
+            | Self::AttemptTimedOut
             | Self::MalformedInvocation
             | Self::InstallFailed
             | Self::UninterpretableSpec
@@ -123,8 +130,10 @@ impl FailureCause {
             Self::RunFailed
             | Self::RunTimedOut
             | Self::EngineTimedOut
+            | Self::AttemptTimedOut
             | Self::KilledByIos
             | Self::EngineFailed
+            | Self::EngineOutOfMemory
             | Self::MalformedInvocation
             | Self::UninterpretableSpec
             | Self::UnknownBenchmark
@@ -132,6 +141,36 @@ impl FailureCause {
             | Self::RuntimeNotInBuild
             | Self::NoBuildCarriesRuntime
             | Self::RefusedByBuild => false,
+        }
+    }
+
+    /// mgmt's grouping (its `docs/httpapi.md`, `failure_code`); `None` where
+    /// the cause does not say, which mgmt records as `unspecified`.
+    pub(crate) fn code(self) -> Option<FailureCode> {
+        match self {
+            Self::AttemptTimedOut => Some(FailureCode::AttemptTimeout),
+            Self::KilledByIos | Self::EngineOutOfMemory => Some(FailureCode::OutOfMemory),
+            // EngineTimedOut is the proxy's deadline, not the attempt limit: hung and
+            // slow look the same.
+            Self::EngineFailed | Self::EngineTimedOut => Some(FailureCode::RuntimeError),
+            Self::DeviceUnreachable
+            | Self::DevicectlFailure
+            | Self::IdentityReplaced
+            | Self::LaunchSilent => Some(FailureCode::DeviceError),
+            // RunTimedOut: under half the window in the engine, so a download or a
+            // wait ran out.
+            Self::RunTimedOut
+            | Self::MalformedInvocation
+            | Self::InstallFailed
+            | Self::UninterpretableSpec
+            | Self::UnknownBenchmark
+            | Self::NoAdmittedVersion
+            | Self::RuntimeNotInBuild
+            | Self::NoBuildCarriesRuntime
+            | Self::RefusedByBuild
+            | Self::BuildNotReady
+            | Self::BuildUnusable => Some(FailureCode::HarnessError),
+            Self::RunFailed => None,
         }
     }
 }
@@ -186,6 +225,7 @@ fn format_failure_reason(detail: &str) -> String {
 /// never parsed still reports.
 fn failure_submission(job: &ClaimedJob, failure: &JobFailure) -> FailureSubmission {
     FailureSubmission {
+        failure_code: failure.cause.code(),
         runtime_output: failure.output.clone(),
         ..FailureSubmission::from_claim(
             job,
@@ -381,7 +421,14 @@ mod tests {
     #[case::killed_by_ios(FailureCause::KilledByIos, false, false, "killed_by_ios")]
     #[case::launch_silent(FailureCause::LaunchSilent, true, true, "launch_silent")]
     #[case::engine_failed(FailureCause::EngineFailed, false, false, "engine_failed")]
+    #[case::engine_out_of_memory(
+        FailureCause::EngineOutOfMemory,
+        false,
+        false,
+        "engine_out_of_memory"
+    )]
     #[case::engine_timed_out(FailureCause::EngineTimedOut, false, false, "engine_timed_out")]
+    #[case::attempt_timed_out(FailureCause::AttemptTimedOut, false, false, "attempt_timed_out")]
     #[case::refused_by_build(FailureCause::RefusedByBuild, true, false, "refused_by_build")]
     #[case::build_not_ready(FailureCause::BuildNotReady, true, true, "build_not_ready")]
     #[case::build_unusable(FailureCause::BuildUnusable, true, true, "build_unusable")]
@@ -396,6 +443,33 @@ mod tests {
         assert_eq!(cause.infrastructure(), infrastructure);
         assert_eq!(<&str>::from(cause), slug);
         assert_eq!(JobFailure::new(cause, "detail").retriable(), retriable);
+    }
+
+    #[rstest]
+    #[case::attempt(FailureCause::AttemptTimedOut, "attempt_timeout")]
+    #[case::killed_by_ios(FailureCause::KilledByIos, "out_of_memory")]
+    #[case::engine_out_of_memory(FailureCause::EngineOutOfMemory, "out_of_memory")]
+    #[case::engine_failed(FailureCause::EngineFailed, "runtime_error")]
+    #[case::engine_deadline(FailureCause::EngineTimedOut, "runtime_error")]
+    #[case::run_deadline(FailureCause::RunTimedOut, "harness_error")]
+    #[case::devicectl(FailureCause::DevicectlFailure, "device_error")]
+    #[case::launch_silent(FailureCause::LaunchSilent, "device_error")]
+    fn a_failure_body_carries_its_code(
+        #[case] cause: FailureCause,
+        #[case] code: &str,
+    ) -> anyhow::Result<()> {
+        let wire =
+            serde_json::to_value(failure_submission(&claim(), &JobFailure::new(cause, "d")))?;
+        assert_eq!(wire["failure_code"], code);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_with_no_code_leaves_the_key_out() -> anyhow::Result<()> {
+        let failure = JobFailure::new(FailureCause::RunFailed, "exit 1");
+        let wire = serde_json::to_value(failure_submission(&claim(), &failure))?;
+        assert!(wire.get("failure_code").is_none(), "{wire}");
+        Ok(())
     }
 
     #[test]

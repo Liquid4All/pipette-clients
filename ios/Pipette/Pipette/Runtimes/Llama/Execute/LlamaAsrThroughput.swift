@@ -56,7 +56,7 @@ nonisolated extension LlamaExecute {
         let ((resultData, source), ran) = try await withAsrClip(cell) { clip in
             // Counted even behind a pinned context, as the CLI calibrates, so it can be confirmed.
             try await withCalibratedAudio(request, model, cell, flags: flags, clipPath: clip,
-                                          calibrate: true) { aud, calibrated in
+                                          calibrate: true, observer: observer) { aud, calibrated in
                 try await asrThroughput(benchmark, cell, aud, clipPath: clip,
                                         calibrated: calibrated, pinned: pinned,
                                         readinessGate: readinessGate, observer: observer)
@@ -144,7 +144,7 @@ nonisolated extension LlamaExecute {
     /// helper does; a pinned `ctx_size` is kept.
     static func withCalibratedAudio<T>(
         _ request: RunRequest, _ model: ResolvedGgufVisionModel, _ cell: AsrCell,
-        flags: RuntimeFlags, clipPath: String, calibrate: Bool,
+        flags: RuntimeFlags, clipPath: String, calibrate: Bool, observer: MeasurementObserver,
         _ body: (AudioInference, Int?) async throws -> T
     ) async throws -> (T, RuntimeFlags) {
         var ran = flags
@@ -155,7 +155,10 @@ nonisolated extension LlamaExecute {
             threads: load.threads, swaFull: load.swaFull, loadMode: load.loadMode, media: .audio,
             window: { mtmd in
                 guard calibrate else { return (load.ctxSize, load.nUbatch) }
-                let tokens = try LlamaMtmd.clipAudioTokens(mtmd, clipPath: clipPath)
+                // Calibration is not an attempt (`attempt_timeout_seconds`).
+                let tokens = try observer.outside {
+                    try LlamaMtmd.clipAudioTokens(mtmd, clipPath: clipPath)
+                }
                 guard tokens > 0 else {
                     throw RuntimeError.engine("the clip tokenized to no audio chunk")
                 }

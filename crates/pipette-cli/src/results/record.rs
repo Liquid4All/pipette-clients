@@ -287,6 +287,7 @@ mod tests {
         RunResponse {
             benchmark_flags: Some(
                 BenchmarkFlags::PrefillThroughputLlamacppCliStockToolsGgufText {
+                    attempt_timeout_seconds: None,
                     readiness: Some(ReadinessOverrides {
                         max_wait_secs: Some(300),
                         skip_thermal: Some(false),
@@ -428,7 +429,7 @@ mod tests {
         Ok(RunResponse {
             benchmark_flags: Some(
                 BenchmarkFlags::MaxMemoryUsageLlamacppCliStockToolsGgufText {
-                    bench_timeout_seconds: Some(PositiveSeconds::try_new(2400)?),
+                    attempt_timeout_seconds: Some(PositiveSeconds::try_new(2400)?),
                 },
             ),
             ..RunResponse::new(
@@ -576,7 +577,7 @@ mod tests {
     /// rather than an empty variant.
     #[rstest]
     #[case::gating_cell(outcome(), prefill_benchmark()?, "readiness")]
-    #[case::non_gating_cell(max_memory_outcome()?, max_memory_benchmark()?, "bench_timeout_seconds")]
+    #[case::non_gating_cell(max_memory_outcome()?, max_memory_benchmark()?, "attempt_timeout_seconds")]
     fn payload_benchmark_flags_are_always_a_populated_object(
         #[case] outcome: RunResponse,
         #[case] benchmark: BenchmarkDefinition,

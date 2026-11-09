@@ -549,6 +549,7 @@ fn measure_cell<T>(
             Some(reading) => series.borrow_mut().finish(reading),
             None => Ok(()),
         },
+        ..MeasurementObserver::QUIET
     };
 
     let measured = measurement::run(

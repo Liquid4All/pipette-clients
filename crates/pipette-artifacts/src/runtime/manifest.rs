@@ -56,6 +56,13 @@ fn absolute_install_root(stored: &Runtime) -> Option<&str> {
         LlamacppCliStockToolsSource, OvmsSource, TrtEdgellmSource, UvRuntimeSource,
     };
     match stored {
+        Runtime::AppleCoreAiMacosPipette(rt) => match &rt.source {
+            pipette_plan_types::AppleCoreAiMacosPipetteSource::AbsoluteDir { dir } => {
+                Some(dir.as_ref())
+            }
+            pipette_plan_types::AppleCoreAiMacosPipetteSource::Bundled
+            | pipette_plan_types::AppleCoreAiMacosPipetteSource::RelativeDir { .. } => None,
+        },
         Runtime::LlamacppCliStockTools(rt) => match &rt.source {
             LlamacppCliStockToolsSource::AbsoluteDir { dir } => Some(dir.as_ref()),
             LlamacppCliStockToolsSource::GithubRelease(_)
@@ -112,7 +119,6 @@ fn absolute_install_root(stored: &Runtime) -> Option<&str> {
         | Runtime::OnnxGenaiIosPipette(_)
         | Runtime::DockerVllm(_)
         | Runtime::DockerSglang(_)
-        | Runtime::AppleCoreAiMacosPipette(_)
         | Runtime::AppleFoundation(_) => None,
     }
 }
@@ -127,6 +133,15 @@ fn install_rel(stored: &Runtime) -> Result<Option<&str>, RuntimeManifestError> {
         return Ok(None);
     }
     match stored {
+        Runtime::AppleCoreAiMacosPipette(rt) => match &rt.source {
+            pipette_plan_types::AppleCoreAiMacosPipetteSource::RelativeDir { dir } => {
+                Ok(Some(dir.as_ref()))
+            }
+            pipette_plan_types::AppleCoreAiMacosPipetteSource::Bundled
+            | pipette_plan_types::AppleCoreAiMacosPipetteSource::AbsoluteDir { .. } => Err(
+                RuntimeManifestError::Corrupt("Core AI source is not RelativeDir".into()),
+            ),
+        },
         Runtime::LlamacppCliStockTools(rt) => match &rt.source {
             LlamacppCliStockToolsSource::RelativeDir { dir } => Ok(Some(dir.as_ref())),
             other @ (LlamacppCliStockToolsSource::GithubRelease(_)
@@ -200,7 +215,6 @@ fn install_rel(stored: &Runtime) -> Result<Option<&str>, RuntimeManifestError> {
         | Runtime::LlamacppIosPipette(_)
         | Runtime::MlxIosPipette(_)
         | Runtime::OnnxGenaiIosPipette(_)
-        | Runtime::AppleCoreAiMacosPipette(_)
         | Runtime::AppleFoundation(_)) => Err(RuntimeManifestError::Corrupt(format!(
             "stored runtime has no install dir: {other}"
         ))),
@@ -297,6 +311,14 @@ impl RuntimeManifest {
                 .map_err(|e| RuntimeManifestError::Corrupt(e.to_string()))
         };
         match &self.stored {
+            Runtime::AppleCoreAiMacosPipette(rt) => Ok(Runtime::AppleCoreAiMacosPipette(
+                pipette_plan_types::AppleCoreAiMacosPipette {
+                    packages: rt.packages.clone(),
+                    source: pipette_plan_types::AppleCoreAiMacosPipetteSource::AbsoluteDir {
+                        dir: abs(install)?,
+                    },
+                },
+            )),
             Runtime::LlamacppCliStockTools(rt) => {
                 Ok(Runtime::LlamacppCliStockTools(LlamacppCliStockTools {
                     source: LlamacppCliStockToolsSource::AbsoluteDir { dir: abs(install)? },
@@ -345,7 +367,6 @@ impl RuntimeManifest {
             | Runtime::OnnxGenaiIosPipette(_)
             | Runtime::DockerVllm(_)
             | Runtime::DockerSglang(_)
-            | Runtime::AppleCoreAiMacosPipette(_)
             | Runtime::AppleFoundation(_)) => Ok(other.clone()),
         }
     }

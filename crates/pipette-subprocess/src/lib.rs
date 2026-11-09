@@ -48,7 +48,7 @@ mod spawned;
 
 pub use cleanup::{
     BoundedTeardownGuard, LogStderr, SignalTeardown, install_signal_handler, log_stderr, on_signal,
-    register_bounded_teardown, register_stop_flag, stop_on_closed_output,
+    register_bounded_teardown, register_stop_flag, stop_children, stop_on_closed_output,
 };
 pub use command::{echo_debug, echo_info, render};
 pub use docker_process::{DockerProcess, DockerRun, start_docker_process};
@@ -59,6 +59,6 @@ pub use inherited_fds::close_inherited_fds;
 pub use orphans::{owner, owner_of, owner_runs, reap_orphans};
 pub use output::{OutputError, output_within};
 pub use port::{NoFreePortError, pick_server_port};
-pub use process::{Process, start_process};
+pub use process::{ChildTeardown, Process, spawn_piped, start_process};
 pub use sigpipe::{no_sigpipe_on, reset_sigpipe};
 pub use spawned::{Stream, log_line};

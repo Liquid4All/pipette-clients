@@ -87,6 +87,7 @@ pub fn run(
             &ResolvedOpenvinoModel::try_from(&req.model.bound)?,
             compile_cache,
             http_timeout,
+            observer,
             client_config,
         ),
         BenchmarkDefinition::Eval(_)
@@ -239,10 +240,7 @@ mod tests {
         #[case] expected: &[&str],
     ) -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let req = on(device, benchmark?, dir.path())?;
         let Err(err) = run(&req, &|| Ok(()), observer, dir.path(), None) else {
             anyhow::bail!("expected the cell to fail");
@@ -260,10 +258,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let req = bindable(OpenvinoDevice::Gpu, decode(1)?, dir.path())?;
         let gated = std::cell::Cell::new(false);
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let gate = || {
             gated.set(true);
             Ok(())
@@ -293,10 +288,7 @@ mod tests {
             parameter_prefill_tokens: NonNegativeCount::try_new(128)?,
         });
         let req = bindable(OpenvinoDevice::Npu, benchmark, dir.path())?;
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let Err(err) = run(&req, &|| Ok(()), observer, &dir.path().join("cache"), None) else {
             anyhow::bail!("an NPU memory cell ran off Windows");
         };

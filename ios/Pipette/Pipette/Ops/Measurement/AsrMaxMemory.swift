@@ -6,11 +6,12 @@ import Foundation
 nonisolated extension BenchmarkMeasurement {
     static func asrMaxMemory<C>(
         _ benchmark: AsrMaxMemoryBenchmark,
+        observer: MeasurementObserver,
         warmup: MemoryMeasurementWarmup,
         ctx: C,
         attempt: (inout C) async throws -> VlMaxMemoryMeasurementReading
     ) async throws -> BenchmarkResultData {
-        try await mediaMaxMemory(marker: benchmark.benchmarkId.value, warmup: warmup, ctx: ctx,
-                                 attempt: attempt)
+        try await mediaMaxMemory(marker: benchmark.benchmarkId.value, observer: observer,
+                                 warmup: warmup, ctx: ctx, attempt: attempt)
     }
 }

@@ -271,10 +271,7 @@ mod tests {
     }
 
     fn no_observer() -> MeasurementObserver<'static> {
-        MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        }
+        MeasurementObserver::QUIET
     }
 
     /// The entry behind an open gate, with no observer and no warm-up, its

@@ -619,8 +619,9 @@ foreground):
    variant (`llamacpp_ios_pipette` / `mlx_ios_pipette` / `onnx_genai_ios_pipette` /
    `apple_foundation`); `model` is the `Model`; `runtime_flags` and `model_flags`
    are the flat `…FlagRef` forms, resolved against the cell's own axes by
-   `RunCell.prepare`; `benchmark_flags` carries the cell's readiness gate, and the
-   policy it resolved to is what the result reports. A desktop runtime fails to
+   `RunCell.prepare`; `benchmark_flags` carries the cell's readiness gate and its
+   attempt limit, and the policy it resolved to is what the result reports (the
+   limit only when the plan set it). A desktop runtime fails to
    decode at all, and every `UnrunnableClaimError` is non-retriable. The validated
    cell reaches the manifest whole, never copied field by field.
 4. The benchmark body is the cached one once `GET /benchmarks/{id}` revalidates its
@@ -637,6 +638,10 @@ foreground):
    for naming a model this device has never seen. The heartbeat covers the
    fetch, and a fetch that fails is a retriable failure. The fetch is admitted
    against the storage quota before it starts ([storage-quota.md](../storage-quota.md)).
+   An attempt past `attempt_timeout_seconds` fails the cell when the engine
+   next reaches a readiness gate, a rep or a peak-memory attempt, or returns,
+   since an in-app engine cannot be stopped mid-call, and that failure is not
+   retriable: every client runs the cell under the same limit.
 6. Success and failure are both submitted with the claim's `job_id` through the
    same backoff (`submitPlanResultWithBackoff`: 1 s doubling to 30 s, 32
    attempts). Exhausting it drops the outcome, as the crate's worker does. A stop

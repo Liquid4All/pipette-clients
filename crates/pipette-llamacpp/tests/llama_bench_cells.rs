@@ -287,6 +287,7 @@ fn a_timing_cell_measures_one_invocation_per_rep(
             finished.set(finished.get() + 1);
             Ok(())
         },
+        ..MeasurementObserver::QUIET
     };
     let response = pipette_llamacpp::run(&req, &no_corpus(root.path()), &gate, observer, None)?;
 
@@ -636,7 +637,7 @@ fn the_warm_up_and_the_measured_run_each_get_the_deadline() -> anyhow::Result<()
     )?;
     req.benchmark_flags = Some(
         BenchmarkFlags::MaxMemoryUsageLlamacppCliStockToolsGgufText {
-            bench_timeout_seconds: Some(PositiveSeconds::try_new(SLOW_RUN_DEADLINE)?),
+            attempt_timeout_seconds: Some(PositiveSeconds::try_new(SLOW_RUN_DEADLINE)?),
         },
     );
     let response = pipette_llamacpp::run(

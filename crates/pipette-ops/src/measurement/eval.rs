@@ -374,10 +374,11 @@ pub fn eval_complete_chunked<C: Sync>(
 }
 
 /// The positions, ascending, and ids of the rows of a chunked dataset of
-/// `declared` rows (the row at each position is `id_at(position)`) that
-/// `checkpoint` has not settled: no row, or a failed one with attempts left
-/// ([`MAX_SAMPLE_ATTEMPTS`]). Empty when every row is settled, so nothing is
-/// left to fetch. One pass over the dataset and one over the checkpoint.
+/// `declared` rows (the row at each position is `id_at(position)`) in this
+/// run's group that `checkpoint` has not settled: no row, or a failed one with
+/// attempts left ([`MAX_SAMPLE_ATTEMPTS`]). Empty when every row is settled,
+/// so nothing is left to fetch. One pass over the dataset and one over the
+/// checkpoint.
 pub fn chunked_pending(
     checkpoint: &EvalCompletionSession,
     declared: usize,
@@ -387,7 +388,9 @@ pub fn chunked_pending(
     let retriable: HashSet<&str> = retriable.into_iter().collect();
     (0..declared)
         .map(|position| (position, id_at(position)))
-        .filter(|(_, id)| !checkpoint.contains(id) || retriable.contains(id.as_str()))
+        .filter(|(_, id)| {
+            checkpoint.in_group(id) && (!checkpoint.contains(id) || retriable.contains(id.as_str()))
+        })
         .collect()
 }
 
@@ -784,9 +787,10 @@ fn chat_samples(
         .collect()
 }
 
-/// The samples to send: those the checkpoint does not carry, each id once, in
-/// dataset order. `retry_failed` also sends a failed row that has attempts
-/// left. Those ids are collected once, so a resume stays linear in the rows.
+/// The samples to send: those of this run's group the checkpoint does not
+/// carry, each id once, in dataset order. `retry_failed` also sends a failed
+/// row that has attempts left. Those ids are collected once, so a resume stays
+/// linear in the rows.
 fn pending<'a>(
     samples: &[EvalMeasurementSample<'a>],
     checkpoint: &EvalCompletionSession,
@@ -806,7 +810,7 @@ fn pending<'a>(
         .iter()
         .filter(|sample| {
             let settled = checkpoint.contains(sample.id) && !retry.contains(sample.id);
-            !settled && seen.insert(sample.id)
+            !settled && checkpoint.in_group(sample.id) && seen.insert(sample.id)
         })
         .cloned()
         .collect()
@@ -937,7 +941,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::eval_completions::EvalCompletionsStore;
+    use crate::eval_completions::{EvalCompletionsStore, EvalShard};
 
     /// An eval cell over `ids`, and the store its checkpoint opens in.
     fn cell(ids: &[&str]) -> anyhow::Result<(tempfile::TempDir, EvalCompletionsStore, RunRequest)> {
@@ -1286,6 +1290,84 @@ mod tests {
         )?;
         assert_eq!(*lock(&asked), [3, 7]);
         assert_eq!(*lock(&sent), ["s3", "s7"]);
+        Ok(())
+    }
+
+    const EIGHT: &[&str] = &["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"];
+
+    fn shard(text: &str) -> anyhow::Result<EvalShard> {
+        text.parse().map_err(anyhow::Error::msg)
+    }
+
+    /// Each shard sends just its group and passes though short; the run
+    /// without a shard then has every row and sends nothing.
+    #[test]
+    fn two_shards_and_a_last_run_send_each_sample_once() -> anyhow::Result<()> {
+        let (_dir, store, req) = cell(EIGHT)?;
+        let run =
+            |store: EvalCompletionsStore| -> anyhow::Result<(Vec<String>, BenchmarkResultData)> {
+                let sent = Mutex::new(Vec::new());
+                let data = eval_complete(
+                    req.benchmark.as_eval()?,
+                    parallel(2),
+                    store.open(&req)?,
+                    (),
+                    |_, samples, record| {
+                        lock(&sent).extend(samples.iter().map(|sample| sample.id.to_owned()));
+                        answer_all(samples, record)
+                    },
+                )?;
+                let mut sent = lock(&sent).clone();
+                sent.sort_unstable();
+                Ok((sent, data))
+            };
+        ["0/2", "1/2"]
+            .iter()
+            .try_for_each(|text| -> anyhow::Result<()> {
+                let shard = shard(text)?;
+                let (sent, _) = run(store.clone().with_shard(Some(shard)))?;
+                let group: Vec<&str> = EIGHT.iter().copied().filter(|id| shard.holds(id)).collect();
+                assert!(!group.is_empty(), "shard {shard} holds nothing to send");
+                assert_eq!(sent, group, "shard {shard}");
+                Ok(())
+            })?;
+
+        let (sent, data) = run(store)?;
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(sorted_ids(rows(&data)?), EIGHT);
+        Ok(())
+    }
+
+    #[test]
+    fn a_chunked_shard_reads_and_sends_only_its_group() -> anyhow::Result<()> {
+        let (_dir, store, req) = cell(EIGHT)?;
+        let shard = shard("1/2")?;
+        let asked = Mutex::new(Vec::new());
+        let sent = Mutex::new(Vec::new());
+        eval_complete_chunked(
+            &BenchmarkId::try_new("asr_entry".to_owned())?,
+            EIGHT.len(),
+            positional,
+            chunker(EIGHT, &[1], &asked),
+            parallel(1),
+            store.with_shard(Some(shard)).open(&req)?,
+            (),
+            |_, samples, record| {
+                lock(&sent).extend(samples.iter().map(|sample| sample.id.to_owned()));
+                answer_all(samples, record)
+            },
+        )?;
+        let group: Vec<usize> = (0..EIGHT.len())
+            .filter(|&position| shard.holds(&positional(position)))
+            .collect();
+        assert_eq!(*lock(&asked), group);
+        assert_eq!(
+            *lock(&sent),
+            group
+                .iter()
+                .map(|&position| positional(position))
+                .collect::<Vec<_>>()
+        );
         Ok(())
     }
 

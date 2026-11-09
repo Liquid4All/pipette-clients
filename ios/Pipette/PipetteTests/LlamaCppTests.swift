@@ -83,6 +83,20 @@ struct LlamaCppTests {
                       "unknown model architecture", ""])
     func anotherFailureIsNotClassifiedAsOutOfMemory(_ log: String) {
         #expect(!llamaLogIsOOM(log))
+        #expect(!llamaLogIsUnreadableFile(log))
+    }
+
+    /// The crate's `missing_file` and `truncated_file` lines, so a bad file reads as the CLI
+    /// files it.
+    @Test(arguments: [
+        "gguf_init_from_file: failed to open GGUF file '/m/q.gguf' (No such file or directory)",
+        "gguf_init_from_file_impl: failed to read magic",
+        "llama_model_load: error loading model: tensor 'output.weight' data is not within "
+            + "the file bounds, model is corrupted or incomplete",
+    ])
+    func aFileLlamaCannotReadIsClassified(_ log: String) {
+        #expect(llamaLogIsUnreadableFile(log))
+        #expect(!llamaLogIsOOM(log))
     }
 
     /// `llama_decode` answering `1` means it could not find a KV slot for the batch: the

@@ -71,7 +71,7 @@ as needed; other files keep descriptive names.
 - [Eval checkpoint & resume](pipette-cli/eval-checkpoint.md)
 - [pipette-ctl](pipette-ctl/plan-runner.md): the operator CLI (separate binary) that drives plans across devices and calls the management server
 - [File plans](pipette-ctl/job-generation.md): the guide to a scheduler-mode plan, which the management server expands into jobs when you file it as a campaign
-- [Management routes](pipette-ctl/management.md): the management server's account routes as `pipette-ctl` CLI verbs and an MCP server
+- [Management routes](pipette-ctl/management.md): the management server's account routes as `pipette-ctl` CLI verbs
 - [Submitter identity](pipette-ctl/submitter-identity.md): the user account the management verbs sign as, and the `auth` verbs that manage it
 
 ### Native mobile apps

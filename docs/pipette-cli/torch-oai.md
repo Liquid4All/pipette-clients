@@ -82,7 +82,9 @@ Gated models: see [usage.md](usage.md#gated-models).
 
 ### Docker lifecycle
 
-1. `docker pull` if the daemon lacks the image, so a pull is not timed as startup  
+1. `docker pull` if the daemon lacks the image, so a pull is not timed as
+   startup and does not count against `attempt_timeout_seconds`
+   ([usage.md](usage.md#5c-the-attempt-limit))  
 2. `docker run --rm` with model path + `RuntimeFlags`, attached, so the
    container's output is kept; on a Linux host every cell but the eval family
    (`eval`, `vlm_eval`, `asr_eval`) starts its memory probe here, so the model

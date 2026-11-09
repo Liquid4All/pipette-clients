@@ -1,3 +1,4 @@
+pub mod attempt;
 pub mod custom_label;
 pub mod error;
 pub mod eval_cell;
@@ -17,4 +18,4 @@ pub mod vl_spec_decode;
 pub mod wav;
 
 pub use error::{Error, Result};
-pub use eval_completions::EvalCompletionsStore;
+pub use eval_completions::{EvalCompletionsStore, EvalShard};

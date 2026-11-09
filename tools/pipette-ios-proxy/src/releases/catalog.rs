@@ -11,6 +11,7 @@ use pipette_plan_types::{Runtime, RuntimeBuildFlagError, runtime_build_flag};
 
 use super::store::{Held, Records};
 use super::{Build, BuildVersion, Listing, Reach, list_newest};
+use crate::RUNTIME_BUILD_FLAG_PREFIX;
 use crate::config::ReleasesBucket;
 use crate::state::ReleasePaths;
 use crate::timing;
@@ -23,9 +24,6 @@ const FLAG_PREFIX: &str = "client_version:";
 // Leave room in the 64 KiB PATCH body for device fields and client details.
 const ADVERTISED_FLAGS_MAX_BYTES: usize = 48 * 1024;
 const RUNTIME_DIGEST_HEX_BYTES: usize = 64;
-/// The start of every flag that [`runtime_build_flag`] returns. The descriptor
-/// digest follows it.
-pub(crate) const RUNTIME_BUILD_FLAG_PREFIX: &str = "runtime:descriptor:";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CatalogError {

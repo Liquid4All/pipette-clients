@@ -38,11 +38,12 @@ struct MaxMemoryMeasurementTests {
         async {
         let (reading, vlReading) = readings(peaks)
         let got = await outcome {
-            try await BenchmarkMeasurement.maxMemory(body, warmup: .cold, ctx: ()) { _ in reading }
+            try await BenchmarkMeasurement.maxMemory(body, observer: noObserver(), warmup: .cold,
+                                                     ctx: ()) { _ in reading }
         }
         let vlGot = await outcome {
             try await BenchmarkMeasurement.vlMaxMemory(
-                vlBody, warmup: .cold, ctx: ()
+                vlBody, observer: noObserver(), warmup: .cold, ctx: ()
             ) { _ in vlReading }
         }
         let peak = BenchmarkResultData.maxMemoryUsage(
@@ -69,23 +70,25 @@ struct MaxMemoryMeasurementTests {
         async {
         let (fits, vlFits) = readings((Self.tooLarge - 1, Self.tooLarge - 1, Self.tooLarge - 1))
         await #expect(throws: Never.self) {
-            try await BenchmarkMeasurement.maxMemory(body, warmup: .cold, ctx: ()) { _ in fits }
+            try await BenchmarkMeasurement.maxMemory(body, observer: noObserver(), warmup: .cold,
+                                                     ctx: ()) { _ in fits }
         }
         await #expect(throws: Never.self) {
             try await BenchmarkMeasurement.vlMaxMemory(
-                vlBody, warmup: .cold, ctx: ()
+                vlBody, observer: noObserver(), warmup: .cold, ctx: ()
             ) { _ in vlFits }
         }
 
         let (refused, vlRefused) = readings(peaks)
         await #expect(throws: MaxMemoryMeasurementError.tooLarge(field: field,
                                                                  bytes: Self.tooLarge)) {
-            try await BenchmarkMeasurement.maxMemory(body, warmup: .cold, ctx: ()) { _ in refused }
+            try await BenchmarkMeasurement.maxMemory(body, observer: noObserver(), warmup: .cold,
+                                                     ctx: ()) { _ in refused }
         }
         await #expect(throws: VlMaxMemoryMeasurementError.tooLarge(field: field,
                                                                    bytes: Self.tooLarge)) {
             try await BenchmarkMeasurement.vlMaxMemory(
-                vlBody, warmup: .cold, ctx: ()
+                vlBody, observer: noObserver(), warmup: .cold, ctx: ()
             ) { _ in vlRefused }
         }
     }
@@ -96,7 +99,7 @@ struct MaxMemoryMeasurementTests {
         let recorded = Recorded()
         await #expect(throws: ServerWentAway.self) {
             try await BenchmarkMeasurement.maxMemory(
-                body, warmup: .cold, ctx: recorded
+                body, observer: noObserver(), warmup: .cold, ctx: recorded
             ) { recorded in
                 recorded.attempts.append("loaded")
                 throw ServerWentAway()
@@ -104,7 +107,7 @@ struct MaxMemoryMeasurementTests {
         }
         await #expect(throws: ServerWentAway.self) {
             try await BenchmarkMeasurement.vlMaxMemory(
-                vlBody, warmup: .cold, ctx: recorded
+                vlBody, observer: noObserver(), warmup: .cold, ctx: recorded
             ) { recorded in
                 recorded.attempts.append("loaded")
                 throw ServerWentAway()
@@ -126,7 +129,7 @@ struct MaxMemoryMeasurementTests {
         var read: [UInt64] = []
         var vlRead: [UInt64] = []
         let resultData = try await BenchmarkMeasurement.maxMemory(
-            body, warmup: warmup, ctx: ()
+            body, observer: noObserver(), warmup: warmup, ctx: ()
         ) { _ in
             let next = peaks.next()
             let peak = try #require(next)
@@ -134,7 +137,7 @@ struct MaxMemoryMeasurementTests {
             return readings((peak, nil, nil)).0
         }
         let vlResultData = try await BenchmarkMeasurement.vlMaxMemory(
-            vlBody, warmup: warmup, ctx: ()
+            vlBody, observer: noObserver(), warmup: warmup, ctx: ()
         ) { _ in
             let next = vlPeaks.next()
             let peak = try #require(next)
@@ -149,12 +152,39 @@ struct MaxMemoryMeasurementTests {
         #expect(vlResultData == peak)
     }
 
+    /// Each attempt starts on the attempt clock first, under its name; a refusal there, an
+    /// earlier attempt past the limit, runs nothing more.
+    @Test func eachAttemptStartsOnTheClockFirst() async throws {
+        let recorded = Recorded()
+        let observer = MeasurementObserver(onBeforeRepStart: {}, onAfterRepEnd: {},
+                                           onAttemptStart: { recorded.attempts.append($0) })
+        _ = try await BenchmarkMeasurement.maxMemory(
+            body, observer: observer, warmup: .once, ctx: recorded
+        ) { recorded in
+            recorded.attempts.append("ran")
+            return readings((8, nil, nil)).0
+        }
+        #expect(recorded.attempts == [BenchmarkMeasurement.peakMemoryWarmUp, "ran",
+                                      BenchmarkMeasurement.peakMemoryMeasured, "ran"])
+
+        let refused = MeasurementObserver(onBeforeRepStart: {}, onAfterRepEnd: {},
+                                          onAttemptStart: { throw StepFailed(event: $0) })
+        await #expect(throws: StepFailed(event: BenchmarkMeasurement.peakMemoryMeasured)) {
+            try await BenchmarkMeasurement.vlMaxMemory(
+                vlBody, observer: refused, warmup: .cold, ctx: ()
+            ) { _ in
+                Issue.record("an attempt ran past a refused start")
+                return readings((8, nil, nil)).1
+            }
+        }
+    }
+
     /// A failed or refused warm-up is the cell's error, and the measured attempt never runs.
     @Test func aFailedWarmUpSkipsTheMeasuredAttempt() async {
         let recorded = Recorded()
         await #expect(throws: ServerWentAway.self) {
             try await BenchmarkMeasurement.maxMemory(
-                body, warmup: .once, ctx: recorded
+                body, observer: noObserver(), warmup: .once, ctx: recorded
             ) { recorded in
                 recorded.attempts.append("failed")
                 throw ServerWentAway()
@@ -162,7 +192,7 @@ struct MaxMemoryMeasurementTests {
         }
         await #expect(throws: MaxMemoryMeasurementError.zeroPeak(field: "max_host_bytes")) {
             try await BenchmarkMeasurement.maxMemory(
-                body, warmup: .once, ctx: recorded
+                body, observer: noObserver(), warmup: .once, ctx: recorded
             ) { recorded in
                 recorded.attempts.append("refused")
                 return readings((0, nil, nil)).0
@@ -170,7 +200,7 @@ struct MaxMemoryMeasurementTests {
         }
         await #expect(throws: ServerWentAway.self) {
             try await BenchmarkMeasurement.vlMaxMemory(
-                vlBody, warmup: .once, ctx: recorded
+                vlBody, observer: noObserver(), warmup: .once, ctx: recorded
             ) { recorded in
                 recorded.attempts.append("failed")
                 throw ServerWentAway()
@@ -178,7 +208,7 @@ struct MaxMemoryMeasurementTests {
         }
         await #expect(throws: VlMaxMemoryMeasurementError.zeroPeak(field: "max_host_bytes")) {
             try await BenchmarkMeasurement.vlMaxMemory(
-                vlBody, warmup: .once, ctx: recorded
+                vlBody, observer: noObserver(), warmup: .once, ctx: recorded
             ) { recorded in
                 recorded.attempts.append("refused")
                 return readings((0, nil, nil)).1

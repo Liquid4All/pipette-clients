@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "max_memory_usage",
+  "model_type": "torch",
+  "runtime_type": "uv_vllm"
+}

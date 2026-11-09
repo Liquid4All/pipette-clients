@@ -1,9 +1,8 @@
 //! The management routes an account can call, as data. mgmt files a plan only
 //! into a campaign: `POST /api/v1/plans` answers `405`.
 //!
-//! One row per route drives both front ends: the typed CLI verbs
-//! (`pipette-ctl <area> <verb>`) and the MCP tools (`<area>_<verb>`), so the
-//! two cannot disagree about a parameter. The rows mirror mgmt's
+//! One row per route drives a typed CLI verb (`pipette-ctl <area> <verb>`).
+//! The rows mirror mgmt's
 //! `GET /api/v1/openapi.json`; the server stays the judge of every value, so a
 //! field here carries only what a caller needs to spell it.
 
@@ -16,14 +15,14 @@ use super::{ALL, FIELDS, OUT, OVERWRITE};
 
 #[derive(Debug)]
 pub struct Route {
-    /// CLI group and MCP tool prefix, e.g. `orgs`.
+    /// CLI group, e.g. `orgs`.
     pub area: &'static str,
-    /// CLI verb and MCP tool suffix, e.g. `create`.
+    /// CLI verb, e.g. `create`.
     pub verb: &'static str,
     pub method: HttpMethod,
     /// Server path with `{name}` placeholders, each a required string argument.
     pub path: &'static str,
-    /// First line is the CLI `about` and the MCP tool title; the rest follows.
+    /// First line is the CLI `about`; the rest follows.
     pub about: &'static str,
     pub query: &'static [Field],
     pub body: Body,
@@ -31,11 +30,6 @@ pub struct Route {
     /// The route admits an unsigned request, so a working directory with no
     /// identity can still call it.
     pub public: bool,
-    /// Changes or deletes something that cannot be put back by calling again.
-    pub destructive: bool,
-    /// The `auth` command that covers the route with more than the HTTP call,
-    /// in place of a verb of its own.
-    pub covered_by: Option<&'static str>,
     /// The key holding the records of a listing that is not a
     /// [`Response::Page`], e.g. `jobs` in `{"jobs": […]}`.
     pub rows: Option<&'static str>,
@@ -131,7 +125,8 @@ pub enum Kind {
 }
 
 impl Route {
-    /// The MCP tool name.
+    /// The name catalog text and errors call the route by, e.g. `orgs_create`,
+    /// respelled as its command in CLI help.
     pub fn tool(&self) -> String {
         format!("{}_{}", self.area, self.verb).replace('-', "_")
     }
@@ -181,15 +176,9 @@ impl Route {
             || (self.area == "catalog" && self.verb == "for-device" && param == "client_id")
     }
 
-    /// Has a CLI verb of its own.
-    pub fn has_verb(&self) -> bool {
-        self.covered_by.is_none()
-    }
-
-    /// How the CLI spells the route: its verb, or the command covering it.
+    /// How the CLI spells the route.
     pub fn command(&self) -> String {
-        self.covered_by
-            .map_or_else(|| format!("{} {}", self.area, self.verb), str::to_string)
+        format!("{} {}", self.area, self.verb)
     }
 
     /// Takes `fields`. Only a JSON read, since narrowing can fail, and a write
@@ -317,8 +306,6 @@ const fn route(
         body: Body::None,
         response: Response::Json,
         public: false,
-        destructive: matches!(method, HttpMethod::Delete),
-        covered_by: None,
         rows: None,
     }
 }
@@ -632,17 +619,14 @@ pub static ROUTES: &[Route] = &[
         "Approve a pending device so it may claim work.\n\
          Needs `manage_clients`. Idempotent.",
     ),
-    Route {
-        destructive: true,
-        ..route(
-            "clients",
-            "reject",
-            POST,
-            "/api/v1/clients/{client_id}/reject",
-            "Reject a pending device, deleting its registration.\n\
-             Needs `manage_clients`. 409 if the device is not pending.",
-        )
-    },
+    route(
+        "clients",
+        "reject",
+        POST,
+        "/api/v1/clients/{client_id}/reject",
+        "Reject a pending device, deleting its registration.\n\
+         Needs `manage_clients`. 409 if the device is not pending.",
+    ),
     route(
         "clients",
         "unsuspend",
@@ -667,7 +651,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        destructive: true,
         body: Body::Fields(&[req(
             "permissions",
             Kind::Enums(CLIENT_PERMISSIONS),
@@ -720,52 +703,6 @@ pub static ROUTES: &[Route] = &[
          unknown id also answers success, so check the id with `clients_show` first.",
     ),
     // ── accounts ────────────────────────────────────────────────────────────
-    Route {
-        covered_by: Some("auth me"),
-        ..route(
-            "users",
-            "me",
-            GET,
-            "/api/v1/users/me",
-            "Read the calling account: its status, resolved permissions and keys.",
-        )
-    },
-    Route {
-        covered_by: Some("auth keys add"),
-        body: Body::Fields(&[
-            req(
-                "public_key",
-                Kind::String,
-                "Ed25519 public key, 64 hex characters",
-            ),
-            req("key_details", Kind::String, "Which machine holds the key"),
-            opt(
-                "expires_at",
-                Kind::String,
-                "When the key stops signing: an RFC 3339 time in the future, at most 30 days \
-                 away. Left out, it never expires",
-            ),
-        ]),
-        ..route(
-            "users",
-            "add-key",
-            POST,
-            "/api/v1/users/me/keys",
-            "Register another machine's public key under the calling account.",
-        )
-    },
-    Route {
-        covered_by: Some("auth keys revoke"),
-        ..route(
-            "users",
-            "revoke-key",
-            DELETE,
-            "/api/v1/users/me/keys/{key_id}",
-            "Revoke one of the calling account's key registrations.\n\
-             Revoking the key this session signs with is allowed and locks this session out: \
-             every later call answers 401.",
-        )
-    },
     Route {
         rows: Some("items"),
         ..route(
@@ -839,8 +776,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        // Only the host can make a signed-in account a service again.
-        destructive: true,
         body: Body::Fields(&[req(
             "account_type",
             Kind::Enum(ACCOUNT_TYPES),
@@ -860,7 +795,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        destructive: true,
         body: Body::Fields(&[req(
             "permissions",
             Kind::Enums(PERMISSIONS),
@@ -920,7 +854,7 @@ pub static ROUTES: &[Route] = &[
             GET,
             "/api/v1/users/{user_id}/keys",
             "List the keys an account signs in with, oldest first.\n\
-             Needs `manage_orgs` over the account. `users_me` lists your own too.",
+             Needs `manage_orgs` over the account. `auth me` lists your own too.",
         )
     },
     route(
@@ -932,7 +866,7 @@ pub static ROUTES: &[Route] = &[
          Needs `manage_orgs` over the account. The key stops signing on the next request, and \
          the account's other keys go on signing. To retire a stolen key, revoke it and every \
          key added since (`users_keys` lists them oldest first) before the account is enabled \
-         again. Your own account's keys revoke here too, as through `users_revoke_key`, the \
+         again. Your own account's keys revoke here too, as through `auth keys revoke`, the \
          one this session signs with included, which locks it out.",
     ),
     Route {
@@ -948,8 +882,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        // A mint replaces the account's other keys minted over HTTP.
-        destructive: true,
         body: Body::Fields(&[
             PREAUTH_DAYS,
             opt(
@@ -1188,8 +1120,6 @@ pub static ROUTES: &[Route] = &[
         "Read one of an organization's private benchmarks.",
     ),
     Route {
-        // Replacing loses the definition there was.
-        destructive: true,
         body: Body::Whole(&BENCHMARK_DEF),
         ..route(
             "orgs",
@@ -1297,8 +1227,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        // `labels` replaces the whole set, so a key left out is dropped.
-        destructive: true,
         body: Body::Fields(&[
             opt("name", Kind::String, "New name"),
             opt(
@@ -1365,7 +1293,6 @@ pub static ROUTES: &[Route] = &[
          revision names. 409 if the campaign runs no plan, or one filed as job bodies.",
     ),
     Route {
-        destructive: true,
         query: &[
             req(
                 "base_plan_id",
@@ -1407,7 +1334,6 @@ pub static ROUTES: &[Route] = &[
          409 if the campaign runs no plan, or one filed as job bodies.",
     ),
     Route {
-        destructive: true,
         query: &[
             req(
                 "base_plan_id",
@@ -1446,7 +1372,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        destructive: true,
         query: &[
             opt(
                 "base_plan_id",
@@ -1481,7 +1406,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        destructive: true,
         query: &[
             opt(
                 "base_plan_id",
@@ -1515,8 +1439,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        // A hand-off can leave the caller unable to take it back.
-        destructive: true,
         body: Body::Fields(&[req(
             "owner",
             Kind::Owner { detach: false },
@@ -1657,8 +1579,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        // `overwrite` replaces a local file.
-        destructive: true,
         response: Response::Stream,
         ..route(
             "vault",
@@ -1855,20 +1775,17 @@ pub static ROUTES: &[Route] = &[
         "Explain why a plan's outstanding jobs are or are not being claimed.\n\
          Needs `read_plans`; `read_clients` adds the fleet detail.",
     ),
-    Route {
-        destructive: true,
-        ..route(
-            "plans",
-            "cancel",
-            POST,
-            "/api/v1/plans/{plan_id}/cancel",
-            "Cancel a plan.\n\
-             Needs `cancel_plans` for a plan of your own campaign, your organization's, or a \
-             disabled member's you wind down as your organization's administrator, whoever \
-             filed it, or one you filed outside every campaign; `cancel_any_plans` for any \
-             other, a deleted campaign's included. 409 if the plan is already complete.",
-        )
-    },
+    route(
+        "plans",
+        "cancel",
+        POST,
+        "/api/v1/plans/{plan_id}/cancel",
+        "Cancel a plan.\n\
+         Needs `cancel_plans` for a plan of your own campaign, your organization's, or a \
+         disabled member's you wind down as your organization's administrator, whoever \
+         filed it, or one you filed outside every campaign; `cancel_any_plans` for any \
+         other, a deleted campaign's included. 409 if the plan is already complete.",
+    ),
     // ── model parameters ────────────────────────────────────────────────────
     Route {
         rows: Some("items"),
@@ -1918,8 +1835,6 @@ pub static ROUTES: &[Route] = &[
         )
     },
     Route {
-        // The row is replaced whole, so a note left out is dropped.
-        destructive: true,
         body: Body::Fields(&[
             TOTAL_MILLIONS,
             opt(

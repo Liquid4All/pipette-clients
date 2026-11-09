@@ -373,7 +373,7 @@ decides where the build goes. Every install in the store is under `runtimes/`:
 | `llamacpp-cli-stock-tools://` | upstream release archive | `runtimes catalog llamacpp_cli_stock_tools --flavor <flavor>` |
 | `docker-vllm://` / `docker-sglang://` | image in the docker daemon, plus a workspace record that `runtimes list` shows | — |
 | `mlx-macos-pipette://` | relocatable venv (macOS) | `runtimes catalog mlx_macos_pipette` |
-| `core-ai-macos-pipette://` | the Core AI engine that macOS includes, plus a cached Swift sidecar outside the store (macOS 27+) | [Core AI](coreai.md) |
+| `core-ai-macos-pipette://` | the Core AI engine that macOS includes, plus a Swift sidecar built in the store (macOS 27+) | [Core AI](coreai.md) |
 | `uv-vllm://` / `uv-sglang://` | relocatable venv (Linux) | `runtimes catalog uv_vllm` / `uv_sglang` |
 | `uv-openvino://` | relocatable venv (Linux/Windows). One venv serves cpu, gpu and npu, because `device` is a per-cell setting | `runtimes catalog uv_openvino` |
 | `uv-onnx-genai://` | relocatable venv. One venv per execution provider, because each provider is a separate wheel | `runtimes catalog uv_onnx_genai` |
@@ -474,7 +474,8 @@ pipette benchmarks run \
 `pipette benchmarks run --help` lists the options. The per-cell flag families
 (`--runtime-flags`, `--model-flags`, `--benchmark-flags`) are described in
 [models-and-runtimes.md](models-and-runtimes.md#per-cell-flags), the readiness
-flags in [§5b](#5b-the-readiness-gate), and `--config` in
+flags in [§5b](#5b-the-readiness-gate), `--attempt-timeout-seconds` in
+[§5c](#5c-the-attempt-limit), and `--config` in
 [§8a](#8a-client-configuration). `--sync` submits a result from the synced
 catalog at once; a `local/` run stays on disk regardless.
 
@@ -602,6 +603,107 @@ that way **is not comparable** to a gated one. It is for smoke-testing on a
 working laptop, not for numbers you intend to publish. On a shared or busy
 development machine the load criterion alone can also keep a run waiting: close
 the programs that compete for the CPU, or use a different host for measurement.
+
+## 5c. The attempt limit
+
+`attempt_timeout_seconds` is the wall-clock limit on each attempt of a cell, so
+a hung driver or server fails the cell instead of holding the device. The
+error names the attempt that ran over:
+
+- `the model load and warm-up`: from the end of the downloads up to the first
+  rep, sample or peak-memory run, so on a timing cell the server's start, its
+  model load and the warm-up count against it, except where the first server's
+  start is off the clock (below). A `llama-bench` or `llama-batched-bench` rep
+  loads the model itself, so there the load counts against each rep.
+- `rep N`: one measured rep. `the work after rep N` is what follows it, up to
+  the next rep or the end of the run.
+- `the peak-memory warm-up` and `the measured peak-memory attempt`: each run of
+  a peak-memory cell, from the launch of its own process or server.
+- `vl_spec_decode (speculation on), sample N` (or `speculation off`): one
+  sample of the corpus with all its turns.
+
+Each attempt starts with the whole limit, so the limit bounds attempts, not the
+cell: a warm-up and 5 reps are 11 attempts, the load and warm-up, each rep and
+the work after each rep. The clock stops while:
+
+- a readiness gate waits, since the gate has its own deadline
+  ([§5b](#5b-the-readiness-gate));
+- a llama.cpp cell calibrates its image or audio token count;
+- the first server of a Core AI, OpenVINO or OVMS cell starts, from its launch
+  until it is ready: on a cold cache that start compiles the model (Core AI
+  specializes it), and the compile cannot be told apart from the load, so the
+  load is off the clock too, on a warm cache as well. The servers after it load
+  what it compiled, and their starts count;
+- a torch-oai cell pulls a Docker image that the daemon lacks;
+- a `vl_spec_decode` cell downloads its corpus.
+
+A compile's length depends on what the host's caches hold and a download's on
+the network, and either can use the whole 300 s default by itself. After each
+of these steps the attempt goes on with the whole limit again. A first server
+that hangs in its start is bounded by its own ready timeout of 3600 s instead,
+and fails as a load timeout, which a worker reports as retriable.
+
+A Core AI cell on a cold specialization cache under a 3 s limit, from its log
+on an M3 Max: the first sidecar start took 3.50 s, longer than the limit, and
+did not count. The warm-up request then had the whole 3 s, and the poll at
+7.70 s stopped it 3.16 s in. How the client keeps the clock:
+[architecture.md](../architecture.md#the-attempt-clock).
+
+```mermaid
+gantt
+    title A Core AI cell on a cold cache under a 3 s limit, from its log
+    dateFormat x
+    axisFormat %-S s
+    tickInterval 1second
+    todayMarker off
+    section runs
+    readiness gate               :done, 0, 1036
+    first sidecar start          :done, 1041, 4542
+    warm-up request              :active, 4543, 7702
+    section clock
+    held                         :done, 0, 4542
+    3 s from the resume          :active, 4542, 7542
+    past the limit               :crit, 7542, 7702
+    section watchdog
+    the poll at 7.70 s stops it  :crit, milestone, 7702, 7702
+```
+
+Unset, the limit is 300 s on `prefill_throughput`, `decode_throughput`,
+`end_to_end_latency`, `max_memory_usage`, `vl_throughput`, `vl_max_memory`,
+`asr_throughput` and `asr_max_memory`. `vl_spec_decode` has no default, since
+the corpus sets how long a traversal runs; unset, only `http_timeout_seconds`
+bounds it, one turn at a time. `eval`, `vlm_eval` and `asr_eval` refuse the
+setting. A plan sets it in the cell's `benchmark_flags`; on the command line it
+is `--attempt-timeout-seconds <seconds>`, or `attempt_timeout_seconds` in
+`--benchmark-flags`. Raise it for a device slow enough that the default stops a
+healthy rep.
+
+`pipette-ctl` passes a plan's limit on to every transport but iOS. Its iPhone
+launches carry none of the cell's benchmark flags, so a phone it drives runs
+each cell under the app's default whatever the plan sets: 300 s on the same
+benchmarks as above ([plan-runner.md](../pipette-ctl/plan-runner.md#ios-transport)).
+A job that the farm's `pipette-ios-proxy` claims does carry the cell's limit to
+the phone.
+
+The client checks the clock every 250 ms. Past the limit it stops every program
+the run started, as Ctrl-C would, and the run fails:
+
+```text
+rep 3 ran 300.2s, past attempt_timeout_seconds (300s), and was stopped
+```
+
+When the engine then failed on the stopped programs, its error follows, after
+`; the engine then reported:`. A worker submits the failure as permanent
+(`retriable: false`), since every client runs the cell under the same limit,
+with `failure_code: "attempt_timeout"`. Every worker failure carries the
+`failure_code` its error shows (`out_of_memory`, `runtime_error`,
+`device_error` or `harness_error`), or none when the error does not say.
+
+A result records `attempt_timeout_seconds` in its `benchmark_flags` only when
+the cell set it; a run under the default records none. The retired
+`bench_timeout_seconds` is accepted and ignored, so queued jobs and stored
+results still parse, and the management server warns about a plan that still
+sets it.
 
 ## 6. Sync
 
@@ -802,6 +904,9 @@ pipette-mgmt
   works only on Linux and Android, and only with a workspace that survives the
   reboot. An orderly stop (Ctrl-C, or a reboot that sends SIGTERM) removes the
   marker and is never counted.
+- A run stopped at its attempt limit is reported as a permanent failure, not
+  run again: every client runs the cell under the same limit
+  ([§5c](#5c-the-attempt-limit)).
 
 **Stopping a worker.** Ctrl-C or SIGTERM while the worker is *waiting* (idle
 between jobs, backing off a failing claim, or backing off a failing submit)

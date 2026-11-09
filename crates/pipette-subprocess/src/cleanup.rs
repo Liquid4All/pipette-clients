@@ -25,6 +25,8 @@ struct Entry {
     teardown: Teardown,
     /// Does not hold off a graceful stop.
     bounded: bool,
+    /// Stops a running child, so [`stop_children`] runs it too.
+    child: bool,
 }
 
 fn registry() -> &'static Mutex<Vec<Entry>> {
@@ -40,7 +42,7 @@ fn next_token() -> TeardownToken {
 
 /// Call [`deregister`] with the token once the normal-path teardown has run,
 /// so the handler does not run it again.
-fn register<F>(teardown: F, bounded: bool) -> TeardownToken
+fn register<F>(teardown: F, bounded: bool, child: bool) -> TeardownToken
 where
     F: FnOnce() + Send + 'static,
 {
@@ -52,8 +54,32 @@ where
         token,
         teardown: Box::new(teardown),
         bounded,
+        child,
     });
     token
+}
+
+/// Stop every child this process runs, as ^C would, but stay alive: for a run
+/// past its attempt limit, whose engine then fails on whatever it waited on.
+/// Teardowns that are not a child's (an in-flight job's record, a corpus
+/// file) stay registered. Returns how many children were stopped.
+pub fn stop_children() -> usize {
+    let children = {
+        // As in `handle_signal`: a child mid-start registers before this runs.
+        let _starts = STARTS.write().unwrap_or_else(PoisonError::into_inner);
+        take_children(&mut registry().lock().unwrap_or_else(|p| p.into_inner()))
+    };
+    let count = children.len();
+    // Unlocked, as in `handle_signal`: `docker kill` starts a child of its own.
+    children.into_iter().for_each(|entry| (entry.teardown)());
+    count
+}
+
+/// Remove the children's teardowns from `entries`, so each runs once.
+fn take_children(entries: &mut Vec<Entry>) -> Vec<Entry> {
+    let (children, rest) = std::mem::take(entries).into_iter().partition(|e| e.child);
+    *entries = rest;
+    children
 }
 
 /// Each start holds a read lock from spawn until it registers its teardown.
@@ -326,7 +352,7 @@ impl Guard {
         F: FnOnce() + Send + 'static,
     {
         Self {
-            token: register(f, false),
+            token: register(f, false, false),
         }
     }
 
@@ -337,7 +363,27 @@ impl Guard {
         F: FnOnce() + Send + 'static,
     {
         Self {
-            token: register(f, true),
+            token: register(f, true, false),
+        }
+    }
+
+    /// As [`Guard::register`], for the teardown that stops a running child.
+    pub(crate) fn child<F>(f: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Self {
+            token: register(f, false, true),
+        }
+    }
+
+    /// As [`Guard::child`], for a short child that ends on its own deadline.
+    pub(crate) fn child_bounded<F>(f: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Self {
+            token: register(f, true, true),
         }
     }
 
@@ -480,6 +526,7 @@ mod tests {
                 f.store(true, std::sync::atomic::Ordering::SeqCst);
             },
             false,
+            false,
         );
         assert!(registry_contains(token)?);
         deregister(token);
@@ -491,6 +538,29 @@ mod tests {
     #[test]
     fn deregister_unknown_is_noop() {
         deregister(TeardownToken(u64::MAX));
+    }
+
+    /// On a local list: the process-wide registry holds other tests' children.
+    #[test]
+    fn stopping_children_leaves_other_teardowns_registered() -> anyhow::Result<()> {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let kept = Arc::new(AtomicBool::new(false));
+        let entry = |flag: &Arc<AtomicBool>, child| {
+            let flag = flag.clone();
+            Entry {
+                token: next_token(),
+                teardown: Box::new(move || flag.store(true, Ordering::SeqCst)),
+                bounded: false,
+                child,
+            }
+        };
+        let mut entries = vec![entry(&kept, false), entry(&stopped, true)];
+        let children = take_children(&mut entries);
+        anyhow::ensure!(children.len() == 1 && entries.len() == 1);
+        children.into_iter().for_each(|e| (e.teardown)());
+        anyhow::ensure!(stopped.load(Ordering::SeqCst), "the child's teardown ran");
+        anyhow::ensure!(!kept.load(Ordering::SeqCst), "the other teardown did not");
+        Ok(())
     }
 
     /// A closed output stops only a process that asked for it. The armed path
@@ -508,6 +578,7 @@ mod tests {
             move || {
                 f.store(true, std::sync::atomic::Ordering::SeqCst);
             },
+            false,
             false,
         );
         let guard = Guard { token };

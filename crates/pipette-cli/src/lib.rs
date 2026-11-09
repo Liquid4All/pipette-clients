@@ -13,6 +13,7 @@
 pub const CLIENT_VERSION: &str = env!("PIPETTE_CLI_BUILD_VERSION");
 
 pub mod artifact_ref;
+mod attempt_watchdog;
 pub(crate) mod benchmarks;
 pub(crate) mod client;
 pub(crate) mod client_configuration;

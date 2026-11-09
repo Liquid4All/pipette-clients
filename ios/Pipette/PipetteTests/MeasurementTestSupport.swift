@@ -1,7 +1,7 @@
 @testable import Pipette
 
-/// For tests that record no series: the crate entry tests' `no_observer`. Kept out of the
-/// app so no forwarding layer can default to it.
+/// For tests that record no series and run under no limit: the crate's
+/// `MeasurementObserver::QUIET`. Kept out of the app so no forwarding layer can default to it.
 nonisolated func noObserver() -> MeasurementObserver {
     MeasurementObserver(onBeforeRepStart: {}, onAfterRepEnd: {})
 }

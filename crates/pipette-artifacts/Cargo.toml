@@ -17,6 +17,7 @@ pipette-http.workspace = true
 pipette-mgmt-client.workspace = true
 pipette-plan-types.workspace = true
 pipette-programs.workspace = true
+pipette-subprocess.workspace = true
 pipette-venv.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true

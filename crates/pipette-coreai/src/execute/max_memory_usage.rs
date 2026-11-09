@@ -5,6 +5,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use pipette_memprobe::{Sampler, Watch};
+use pipette_ops::measurement::{MeasurementObserver, PEAK_MEMORY_MEASURED};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::BenchmarkResultData;
 use pipette_plan_types::MaxMemoryUsageBenchmark;
@@ -34,6 +35,7 @@ pub(super) fn run(
     req: &RunRequest,
     benchmark: &MaxMemoryUsageBenchmark,
     sidecar: PathBuf,
+    observer: &MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponse> {
     let prefill_tokens = benchmark
         .parameter_prefill_tokens
@@ -45,7 +47,8 @@ pub(super) fn run(
     // includes the specialization peak; `specialization_cache=hit|miss` on the
     // READY line in `runtime_stderr` records which case applies. See
     // docs/methodology/coreai-specialization.md.
-    let mut server = server::start_server(req, sidecar)?;
+    (observer.on_attempt_start)(PEAK_MEMORY_MEASURED);
+    let mut server = observer.outside(|| server::start_server(req, sidecar))?;
     let phys_poller = Sampler::start(server.process.pid(), Watch::Peak.supported()?)?;
 
     throughput_http::prepare(&server)?;

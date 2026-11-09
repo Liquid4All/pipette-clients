@@ -94,6 +94,7 @@ pub fn run(
             &ResolvedOpenvinoModel::try_from(&req.model.bound)?,
             compile_cache,
             timeout,
+            observer,
             client_config,
         ),
         BenchmarkDefinition::Eval(_) => {
@@ -175,10 +176,7 @@ mod tests {
                 parameter_batch_size: BatchSize::try_new(batch_size)?,
             }),
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let err = run(&req, &|| Ok(()), observer, dir.path(), None)
             .err()
             .context("expected the cell to fail")?;

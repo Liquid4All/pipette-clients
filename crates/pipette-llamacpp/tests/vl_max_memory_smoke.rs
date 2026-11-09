@@ -321,7 +321,7 @@ fn each_server_gets_the_deadline() -> anyhow::Result<()> {
     let mut req = logged_request(root.path(), &["FAKE_LLAMA_CHAT_DELAY_MS=4000"])?;
     req.benchmark_flags = Some(BenchmarkFlags::VlMaxMemoryLlamacppCliStockToolsGgufVision {
         http_timeout_seconds: None,
-        bench_timeout_seconds: Some(PositiveSeconds::try_new(6)?),
+        attempt_timeout_seconds: Some(PositiveSeconds::try_new(6)?),
     });
     run(root.path(), &req)?;
     assert_eq!(logged(root.path(), "pids")?.len(), 2);

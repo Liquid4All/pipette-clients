@@ -7,10 +7,6 @@ use std::time::Duration;
 use pipette_memprobe::{SupportedWatch, Watch, WatchError};
 use pipette_plan_types::{LlamaCppFlavor, PositiveSeconds};
 
-/// A peak-memory run, text or VL, when the cell sets no `bench_timeout_seconds`:
-/// one prefill and its decode, under a minute on a small model.
-const MAX_MEMORY_USAGE_TIMEOUT: Duration = Duration::from_secs(600);
-
 /// Picks the OpenVINO backend's device; upstream runs on the CPU when it is
 /// unset or empty.
 const OPENVINO_DEVICE: &str = "GGML_OPENVINO_DEVICE";
@@ -43,8 +39,10 @@ pub enum NoPeakWatchError {
     },
 }
 
-pub fn bench_timeout(pinned: Option<PositiveSeconds>) -> Duration {
-    pinned.map_or(MAX_MEMORY_USAGE_TIMEOUT, |secs| {
+/// One peak-memory attempt's deadline: the cell's `attempt_timeout_seconds`,
+/// else the shared default.
+pub fn attempt_timeout(pinned: Option<PositiveSeconds>) -> Duration {
+    pinned.map_or(pipette_ops::attempt::DEFAULT_LIMIT, |secs| {
         Duration::from_secs(secs.into_inner())
     })
 }
@@ -201,9 +199,9 @@ mod tests {
 
     #[test]
     fn a_peak_memory_cell_resolves_its_deadline() -> anyhow::Result<()> {
-        assert_eq!(bench_timeout(None), MAX_MEMORY_USAGE_TIMEOUT);
+        assert_eq!(attempt_timeout(None), Duration::from_secs(300));
         assert_eq!(
-            bench_timeout(Some(PositiveSeconds::try_new(2400)?)),
+            attempt_timeout(Some(PositiveSeconds::try_new(2400)?)),
             Duration::from_secs(2400)
         );
         Ok(())

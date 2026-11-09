@@ -10,9 +10,11 @@ nonisolated extension MlxExecute {
     static func maxMemoryUsage(
         _ benchmark: MaxMemoryUsageBenchmark,
         model: ResolvedMlxModel,
-        chunk: Int
+        chunk: Int,
+        observer: MeasurementObserver
     ) async throws -> BenchmarkResultData {
-        try await BenchmarkMeasurement.maxMemory(benchmark, warmup: .cold, ctx: ()) { _ in
+        try await BenchmarkMeasurement.maxMemory(benchmark, observer: observer, warmup: .cold,
+                                                 ctx: ()) { _ in
             try await ProcessMemory.maxMemoryBracket(label: "mlx") {
                 try await MlxRuntime.withFreshModel(path: model.dir) { lm in
                     try MlxRuntime.generate(lm, prefill: Int(benchmark.parameterPrefillTokens.value),

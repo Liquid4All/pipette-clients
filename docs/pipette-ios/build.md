@@ -230,11 +230,12 @@ Some models need a llama.cpp other than the `vendor/llama.cpp` pin. Each
 `vendor/llamacpp-<name>` submodule pins one more for iOS only, built into a
 framework of its own, `llamacpp-<name>.framework`, that the
 [private-API build](private-thermal-release-build.md) carries beside main's
-`llamacpp.framework`. There are two:
+`llamacpp.framework`. There are three:
 
 | Variant | Repository | Pin | For |
 |---|---|---|---|
 | `prismml` | `github.com/PrismML-Eng/llama.cpp` | tag `prism-b10777-e3de715` | PrismML's 1-bit and ternary formats |
+| `prismml-b10828` | `github.com/PrismML-Eng/llama.cpp` | tag `prism-b10828-a153697` | the same formats at the tag PrismML's `Bonsai-demo` repo pins; `prismml` stays for the plans that name b10777 |
 | `lfm3` | `github.com/ggml-org/llama.cpp` | commit `418f905a4efe910d2a75636bbe65d48eca38790a`, the head of its `master` branch, which has no tag (after `b11986`) | the LFM3 architecture, which upstream added after the main pin (#31252, #31257) |
 
 A process that runs cells loads one pin: the one that a headless run's
@@ -261,11 +262,12 @@ carries only main. Its `ci_pre_xcodebuild.sh` fails a workflow that sets
   An untagged commit stays fetchable only while a branch contains it, so a
   force-push or a deletion upstream can fail the `ios-archive` checkout.
 - The patch series is `ios/patches/llamacpp-<name>/` when that directory exists,
-  else the main `ios/patches/` series. Both variants carry their own series.
-  `prismml` sits on an upstream base older than the main pin's and patches it
-  differently. `lfm3` sits on a base later than the main pin's. Upstream
-  `ggml-org/llama.cpp#31321` changed the no-mmap weight load there, so its `003`
-  is rebased onto it. Its `002` is the main one with its hunk offsets moved.
+  else the main `ios/patches/` series. All three variants carry their own series.
+  `prismml` and `prismml-b10828` sit on upstream bases older than the main pin's
+  and patch them differently. `lfm3` sits on a base later than the main pin's.
+  Upstream `ggml-org/llama.cpp#31321` changed the no-mmap weight load there, so
+  its `003` is rebased onto it. Its `002` is the main one with its hunk offsets
+  moved.
 - Swift compiles once, against main's headers. It calls the loaded pin through
   the table that the pin exports, and each pin fills its table from its own
   headers (`ios/native/pipette_llama_table.cpp`). If the prototypes,
@@ -300,7 +302,8 @@ To add one:
 3. In the `ios-archive` job in `.github/workflows/build.yml`:
    - Add `vendor/llamacpp-<name>` to the checkout step's `submodule update`.
    - Add a `Build llama.cpp (<name>)` step that sets `PIPETTE_LLAMA_VARIANT: <name>`.
-   - Add `llamacpp-<name>` to the archive step's `PIPETTE_LLAMA_PINS`.
+   - Add `llamacpp-<name>` to the archive step's `pins` array, which that step
+     passes as `PIPETTE_LLAMA_PINS`.
 
 `ci/checks/llamacpp-variants.py` checks that each variant in `.gitmodules`
 agrees with:
@@ -308,7 +311,7 @@ agrees with:
 - its `.tag` file, which must name the commit that the submodule is pinned at
 - the checkout step's paths
 - the build steps
-- `PIPETTE_LLAMA_PINS`
+- the archive step's `pins` array
 
 The check fails until they agree.
 
@@ -317,7 +320,7 @@ To remove one, as when its pin can no longer be fetched:
 1. In the `ios-archive` job in `.github/workflows/build.yml`:
    - Delete its path from the checkout step.
    - Delete its build step.
-   - Delete its `PIPETTE_LLAMA_PINS` entry.
+   - Delete its entry in the archive step's `pins` array.
 2. Run `git rm vendor/llamacpp-<name>`, which drops its `.gitmodules` entry but
    not a comment above it, and delete `vendor/llamacpp-<name>.tag`,
    `ios/patches/llamacpp-<name>/` if it has one, and its row in the table above.

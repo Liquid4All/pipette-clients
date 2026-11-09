@@ -13,7 +13,9 @@ use base64::Engine;
 
 use pipette_http::HttpClient;
 use pipette_memprobe::Watch;
-use pipette_ops::measurement::{self, MemoryMeasurementWarmup, VlMaxMemoryMeasurementReading};
+use pipette_ops::measurement::{
+    self, MeasurementObserver, MemoryMeasurementWarmup, VlMaxMemoryMeasurementReading,
+};
 use pipette_plan_types::{
     MlxMacosPipetteExtraRuntimeConfiguration, RunResponse, VlMaxMemoryBenchmark,
 };
@@ -26,6 +28,7 @@ pub(super) fn run(
     benchmark: &VlMaxMemoryBenchmark,
     venv_python: &ResolvedMlxPython,
     model_dir: &ResolvedMlxModel,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&MlxMacosPipetteExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     // Before the tokenizer, the first process this cell starts.
@@ -74,6 +77,7 @@ pub(super) fn run(
     let mut served = None;
     let result = measurement::vl_max_memory(
         benchmark,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {
@@ -170,6 +174,7 @@ mod tests {
             &benchmark,
             &ResolvedMlxPython::try_from(&bound_runtime(tmp.path())?)?,
             &ResolvedMlxModel::try_from(&bound_model(tmp.path(), false)?)?,
+            MeasurementObserver::QUIET,
             None,
         )
         .err()
@@ -196,7 +201,13 @@ mod tests {
             parameter_decode_tokens: None,
             parameter_num_images: NonNegativeCount::try_new(2)?,
         };
-        let response = run(&benchmark, &venv_python, &model_dir, None)?;
+        let response = run(
+            &benchmark,
+            &venv_python,
+            &model_dir,
+            MeasurementObserver::QUIET,
+            None,
+        )?;
         eprintln!("{:?}", response.result_data);
         let weights = std::fs::read_dir(&*model_dir)?
             .map(|entry| -> anyhow::Result<u64> {

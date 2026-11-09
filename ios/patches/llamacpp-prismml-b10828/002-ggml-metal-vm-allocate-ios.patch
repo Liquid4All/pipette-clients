@@ -1,0 +1,55 @@
+ggml: allocate host buffers with vm_allocate on iOS, as on macOS
+
+Upstream takes ggml's aligned host buffers and a shared Metal buffer's host memory
+from vm_allocate/vm_deallocate on macOS but posix_memalign/free on iOS, where the
+freed pages stay in the process. After llama_model_free the footprint still holds
+the model (2.5 GB for a 3B on an iPhone 17 Pro), so an in-process max_memory_usage
+cell that follows reads the previous model's size.
+
+Applied at build time by ios/build-llama.sh to a build copy of the vendored
+sources (the submodule stays pristine). Remove once upstreamed to ggml-org.
+---
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 21ea4df..a59bd6e 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1965,7 +1965,7 @@ static void ggml_metal_buffer_rset_free(ggml_metal_buffer_t buf) {
+ static void * ggml_metal_host_malloc(size_t n) {
+     void * data = NULL;
+ 
+-#if TARGET_OS_OSX
++#if TARGET_OS_OSX || TARGET_OS_IOS
+     kern_return_t err = vm_allocate((vm_map_t) mach_task_self(), (void *) &data, n, VM_FLAGS_ANYWHERE);
+     if (err != KERN_SUCCESS) {
+         GGML_LOG_ERROR("%s: error: vm_allocate failed\n", __func__);
+@@ -2157,7 +2157,7 @@ void ggml_metal_buffer_free(ggml_metal_buffer_t buf) {
+     ggml_metal_buffer_rset_free(buf);
+ 
+     if (buf->is_shared && buf->owned) {
+-#if TARGET_OS_OSX
++#if TARGET_OS_OSX || TARGET_OS_IOS
+         vm_deallocate((vm_map_t)mach_task_self(), (vm_address_t)buf->all_data, buf->all_size);
+ #else
+         free(buf->all_data);
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index fa2a9c4..44ac4b0 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -345,7 +345,7 @@ void * ggml_aligned_malloc(size_t size) {
+     void * aligned_memory = NULL;
+   #ifdef GGML_USE_CPU_HBM
+     int result = hbw_posix_memalign(&aligned_memory, alignment, size);
+-  #elif TARGET_OS_OSX
++  #elif TARGET_OS_OSX || TARGET_OS_IOS
+     GGML_UNUSED(alignment);
+     kern_return_t alloc_status = vm_allocate((vm_map_t) mach_task_self(), (vm_address_t *) &aligned_memory, size, VM_FLAGS_ANYWHERE);
+     int result = EFAULT;
+@@ -392,7 +392,7 @@ void ggml_aligned_free(void * ptr, size_t size) {
+     if (ptr != NULL) {
+         hbw_free(ptr);
+     }
+-#elif TARGET_OS_OSX
++#elif TARGET_OS_OSX || TARGET_OS_IOS
+     if (ptr != NULL) {
+         vm_deallocate((vm_map_t)mach_task_self(), (vm_address_t)ptr, size);
+     }

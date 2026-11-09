@@ -123,8 +123,9 @@ enum JobExecutor {
     /// receives the cell's eval checkpoint rather than the executor finalizing it. It holds
     /// one digest, so pass it only with a one-cell manifest.
     ///
-    /// `keepFetchFailure`: for a caller that reports the failure to the server; it receives
-    /// the first cell's typed vault failure, which `errorMessage` holds only as text.
+    /// `keepCellFailure`: for a caller that reports the failure to the server; it receives
+    /// the first cell's typed failure (`KeptCellFailure`), which `errorMessage` holds only as
+    /// text.
     ///
     /// `claimedAt`: when this device received the claim that started the job. Each result
     /// records the time since it as `device_time_ms` (none when nil). Every cell counts from
@@ -143,7 +144,7 @@ enum JobExecutor {
         claimedAt: ContinuousClock.Instant? = nil,
         claimedBenchmarks: [BenchmarkDefinition] = [],
         keepEvalCheckpoint: KeptEvalCheckpoint? = nil,
-        keepFetchFailure: KeptFetchFailure? = nil,
+        keepCellFailure: KeptCellFailure? = nil,
         onFinish: @escaping @MainActor (JobManifest) -> Void = { _ in }
     ) {
         // Scoped to the cells THIS run executes, so a resume of a 90%-done job doesn't
@@ -192,6 +193,9 @@ enum JobExecutor {
         let runner = jobRunner
         let store = jobStore
         let initialManifest = manifest
+        // A launch that answers a claim runs one cell, and `pipette-ios-proxy` waits on its
+        // end, so past the limit it ends at once rather than at the engine's next boundary.
+        let endsAtOverrun = HeadlessRunner.isOneShot && manifest.claimJobId != nil
 
         Task.detached {
             var updatedManifest = initialManifest
@@ -399,6 +403,7 @@ enum JobExecutor {
                                     runner.currentProgressText = memoryWarning ?? "Loading…"
                                 }
                             },
+                            abandon: endsAtOverrun ? Self.abandon(cell, jobId: jobId, ws: ws) : nil,
                             // An eval sample advances the progress bar; a throughput attempt
                             // is a status line only, so that bar advances at cell boundaries.
                             progress: { event in
@@ -472,8 +477,8 @@ enum JobExecutor {
                         AppLog.jobRun.error("\(cell.benchmarkId) / \(cell.modelName) failed: \(formatted)")
                         updatedManifest.cells[index].runStatus = .failed
                         updatedManifest.cells[index].errorMessage = formatted
-                        if let keepFetchFailure {
-                            await MainActor.run { keepFetchFailure.keep(error) }
+                        if let keepCellFailure {
+                            await MainActor.run { keepCellFailure.keep(error, message: formatted) }
                         }
                     }
                     await saveRunManifest(&updatedManifest)
@@ -527,6 +532,27 @@ enum JobExecutor {
             }
         }
     }
+
+    /// Ends a claimed launch at an overrun, on the watchdog's thread: the engine call cannot be
+    /// stopped and may hold the main actor. The cell is saved as failed, as the catch above
+    /// saves it, and its sentinel cleared, so the next launch does not take the exit for an
+    /// iOS kill; then the lines a failed claimed cell ends on, the catch's and `sweepDone`'s.
+    nonisolated private static func abandon(_ cell: JobCell, jobId: JobId, ws: PipetteWorkspace)
+        -> @Sendable (AttemptTimeoutError) -> Never {
+        { failure in
+            let error = failure.localizedDescription
+            if var manifest = ws.loadJobManifest(jobId: jobId),
+               let index = manifest.cells.firstIndex(where: { $0.cellId == cell.cellId }) {
+                manifest.cells[index].runStatus = .failed
+                manifest.cells[index].errorMessage = error
+                ws.saveJobManifest(manifest)
+            }
+            ws.clearActiveCellSentinel(jobId: jobId)
+            AppLog.jobRun.error("\(cell.benchmarkId) / \(cell.modelName) failed: \(error)")
+            HeadlessRunner.benchDone(HeadlessExit.failure, "failed: \(error)")
+            HeadlessExit.abandon(HeadlessExit.failure)
+        }
+    }
 }
 
 /// A saved cell's eval checkpoint, left by `JobExecutor.run` for its caller to finalize.
@@ -535,16 +561,20 @@ final class KeptEvalCheckpoint {
     var digest: EvalRunDigest?
 }
 
-/// The first cell's vault failure, left by `JobExecutor.run` in its type, so the worker
-/// can tell a refusal every device would meet from one worth another claim.
-@MainActor
-final class KeptFetchFailure {
-    private(set) var error: VaultFetchError?
+/// A failed cell as the worker reports it: `error` decides `retriable` and `failure_code`,
+/// and `message`, the cell's `errorMessage`, is the reason.
+nonisolated struct CellFailure: Error {
+    let error: any Error
+    let message: String
+}
 
-    /// Keep `error` if it is the first vault failure of the run. A later failure, or an
-    /// error of another type, leaves the kept failure in place.
-    func keep(_ error: any Error) {
-        guard self.error == nil, let vault = error as? VaultFetchError else { return }
-        self.error = vault
+/// The run's first failed cell, left by `JobExecutor.run` for the worker to report.
+@MainActor
+final class KeptCellFailure {
+    private(set) var failure: CellFailure?
+
+    func keep(_ error: any Error, message: String) {
+        guard failure == nil else { return }
+        failure = CellFailure(error: error, message: message)
     }
 }

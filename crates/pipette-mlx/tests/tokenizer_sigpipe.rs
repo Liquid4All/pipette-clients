@@ -75,10 +75,7 @@ fn a_tokenizer_helper_that_has_gone_fails_the_cell() -> anyhow::Result<()> {
         &request,
         &NoCorpus(dir.path().to_path_buf()),
         &|| Ok(()),
-        MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        },
+        MeasurementObserver::QUIET,
         None,
     ) else {
         anyhow::bail!("a cell whose tokenizer helper had gone was measured");

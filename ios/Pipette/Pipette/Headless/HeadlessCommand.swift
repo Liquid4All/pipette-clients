@@ -156,7 +156,7 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
     /// `runtime=afm`. A probe token in `metrics` runs a diagnostic that neither records nor
     /// submits; otherwise the benchmarks run through the normal job path.
     case afm(metrics: [String], benchmarks: [String], offsets: [Int], submit: Bool,
-             claim: String? = nil)
+             claim: String? = nil, benchmarkFlags: BenchmarkFlags? = nil)
 
     static let afmProbeTokens: Set<String> = [
         "enforceprobe", "capprobe", "genprobe", "tokprobe",
@@ -173,7 +173,7 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
         case .sync: return false
         case .resultsList, .resultsShow, .resultsDelete: return false
         case .authMe, .authSetDevice, .authReset, .diagProbe: return false
-        case .afm(let metrics, _, _, let submit, _):
+        case .afm(let metrics, _, _, let submit, _, _):
             return submit && !metrics.contains(where: Self.afmProbeTokens.contains)
         default: return false
         }
@@ -962,13 +962,15 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
                 .split(separator: ",").map(String.init)
             let offsets = try ints("offsets", default: [256, 512, 1024, 2048, 4096])
             let (runtime, llamaPin) = try runtimeArgument(params["runtime"])
-            // Before the AFM branch: plan-types defines no flags for `apple_foundation`, so
-            // an AFM cell carrying either must be refused rather than silently dropped.
+            // Before the AFM branch: plan-types defines no runtime flags for
+            // `apple_foundation`, so an AFM cell carrying them is refused rather than silently
+            // dropped, and only its decode and end-to-end cells take benchmark flags.
             let flags = try resolvedRuntimeFlags(runtime)
             let benchmarkFlags = try resolvedBenchmarkFlags(runtime)
             if runtime == .appleFoundation {
                 return .afm(metrics: metrics, benchmarks: try benchmarkIds(), offsets: offsets,
-                            submit: submits(coordinate: nil), claim: try claim(picksItsModel: false))
+                            submit: submits(coordinate: nil), claim: try claim(picksItsModel: false),
+                            benchmarkFlags: benchmarkFlags)
             }
             // A bare invocation naming an exact model is a `bench`; the plan runner emits it.
             if let coordinate = try modelCoordinate() {

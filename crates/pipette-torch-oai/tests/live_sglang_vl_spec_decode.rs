@@ -173,10 +173,7 @@ fn a_live_corpus_traversal_on_sglang() -> anyhow::Result<()> {
             dataset,
         }),
     };
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let corpus_turns = corpus.turns();
     let context = LocalCorpus {
         tar: bytes,

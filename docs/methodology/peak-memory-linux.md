@@ -541,8 +541,9 @@ A cell that sets neither `mmap` nor `load_mode` runs with `--load-mode none`.
 On a CPU flavor the weights then load into anonymous memory and count fully
 toward the resident set, rather than as file-backed mmap pages, which would
 under-report. On a GPU flavor they load into the driver's buffers. Each run,
-the warm-up included, leads a session of its own under its own deadline
-killer: 600 s by default, and raisable per cell with `bench_timeout_seconds`.
+the warm-up included, leads a session of its own and is stopped once it passes
+the cell's `attempt_timeout_seconds`: 300 s by default, and raisable per cell
+([the attempt limit](../pipette-cli/usage.md#5c-the-attempt-limit)).
 
 ## OVMS, OpenVINO and ONNX GenAI
 

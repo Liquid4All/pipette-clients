@@ -512,7 +512,7 @@ on each runtime is in [Eval methodology](../methodology/evals.md#model-flags).
 --readiness-max-wait-secs 900 --readiness-skip-thermal   # same thing
 ```
 
-The single-setting flags (`--http-timeout-seconds`, `--bench-timeout-seconds`,
+The single-setting flags (`--http-timeout-seconds`, `--attempt-timeout-seconds`,
 `--readiness-max-wait-secs`, `--readiness-skip-thermal`, and
 `--readiness-skin-below-c` on the Android CLI) are its shorthand, and the two
 forms are mutually exclusive. `pipette benchmarks run --help` says

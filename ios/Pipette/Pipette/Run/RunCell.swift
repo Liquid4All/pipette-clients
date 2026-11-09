@@ -25,6 +25,7 @@ nonisolated enum RunCell {
     /// `preflight` gets the request and the model's weight against the jetsam budget, so the
     /// caller can stamp its crash sentinel first. An eval also returns its checkpoint digest:
     /// the caller retires it with `finalizeEvalCheckpoint` once the result is saved or accepted.
+    /// `abandon` is `dispatchRun`'s.
     static func runCell(
         spec: ClientRunSpec,
         benchmark: BenchmarkDefinition,
@@ -35,6 +36,7 @@ nonisolated enum RunCell {
         fetchProgress: ProgressSink? = nil,
         jobId: JobId? = nil,
         preflight: (RunRequest, MemoryGate.Snapshot?) async -> Void = { _, _ in },
+        abandon: (@Sendable (AttemptTimeoutError) -> Never)? = nil,
         progress: @escaping (BenchmarkProgress) -> Void = { _ in }
     ) async throws -> FinishedRun {
         // Ahead of prepare: its ensure can download weights for minutes, and a stall or a
@@ -61,7 +63,7 @@ nonisolated enum RunCell {
         let (response, telemetry) = try await dispatchRun(
             request, ws: ws, readiness: policy,
             waitUntilReady: { wait.waitUntilReady(observing: $0) },
-            cancelled: cancelled, progress: progress)
+            cancelled: cancelled, abandon: abandon, progress: progress)
         let record = try await finishedRunPayload(
             deviceStore: ws.device, req: request, outcome: response, telemetry: telemetry)
         // The identity every engine opened its checkpoint under: this request.
@@ -96,7 +98,7 @@ nonisolated enum RunCell {
         case .stable:
             return
         case .moving:
-            throw RuntimeError.engine(
+            throw RuntimeError.readiness(
                 "`\(benchmark.benchmarkId)` measures two arms against each other, so it "
                     + "refuses to start while the power state can move under it "
                     + "(device_power_state=\(power.powerState.map(\.rawValue) ?? "nil"), "
@@ -223,6 +225,11 @@ nonisolated enum RunCell {
     /// readings. `readiness` arrives already resolved: resolving twice could straddle a
     /// change, and the gate and the record must agree. `ws` carries the eval store rather
     /// than an open session: only the eval executor knows whether there are samples to resume.
+    ///
+    /// No engine here can be stopped mid-call, so an attempt past its limit fails the cell at
+    /// the next boundary (a gate, a rep, a peak-memory attempt) or once the engine returns.
+    /// `abandon` is for a launch that cannot wait for that: the watchdog's thread calls it at
+    /// the overrun, and it ends the process.
     static func dispatchRun(
         _ request: RunRequest,
         ws: PipetteWorkspace,
@@ -230,6 +237,7 @@ nonisolated enum RunCell {
         waitUntilReady: @escaping (_ observe: @escaping (ReadinessStatus) -> Void)
             -> ReadinessOutcome,
         cancelled: @escaping () -> Bool = { false },
+        abandon: (@Sendable (AttemptTimeoutError) -> Never)? = nil,
         progress: @escaping (BenchmarkProgress) -> Void = { _ in }
     ) async throws -> (response: RunResponse, telemetry: RepTelemetry) {
         // Inference must run off the main actor (JobExecutor's `Task.detached` plus this
@@ -240,8 +248,14 @@ nonisolated enum RunCell {
         // process ran anything before it. On exit, so this cell's own bracket reads clean.
         defer { ProcessMemory.markEngineWork() }
 
+        // After `prepare`'s downloads, so the first attempt starts with the model on disk.
+        let attemptClock = Attempt.limit(request).map { AttemptClock(limit: $0) }
         let gateWaitRecorder = GateWaitRecorder()
         let readinessGate: ReadinessGate = {
+            try attemptClock?.check()
+            // A readiness wait is no part of an attempt; the gate has its own limit.
+            attemptClock?.hold()
+            defer { attemptClock?.resume() }
             gateWaitRecorder.begin()
             try waitUntilReady(gateWaitRecorder.observe).get()
             gateWaitRecorder.pass()
@@ -255,40 +269,53 @@ nonisolated enum RunCell {
                                progress: progress)
         // Sampled inside the device readings, so their IPC stays out of the clock window.
         let clocks = RepClocks(marker: request.benchmark.benchmarkId.value)
+        // Each rep, and the work after it, is an attempt of its own.
         let observer = MeasurementObserver(onBeforeRepStart: {
                                                try series.start(RepSample(
                                                    device: detectDeviceReadings(),
                                                    gate: gateWaitRecorder.take()))
+                                               try attemptClock?.beginRep()
                                                clocks.repStarting()
                                            },
                                            onAfterRepEnd: {
                                                clocks.repEnded()
+                                               try attemptClock?.beginAfterRep()
                                                try series.finish(RepSample(
                                                    device: detectDeviceReadings(),
                                                    gate: nil))
                                                reps.finished()
-                                           })
+                                           },
+                                           onAttemptStart: { try attemptClock?.begin($0) },
+                                           onHold: { attemptClock?.hold() },
+                                           onResume: { attemptClock?.resume() })
 
         // The whole request, so a new field is logged too; `AuthToken` redacts itself.
         AppLog.jobRun.info("dispatch: \(request)")
+        let watchdog = attemptClock.map { AttemptWatchdog(watching: $0, abandon: abandon) }
         var response: RunResponse
-        switch request.runtime.bound {
-        case .llamacppIosPipette:
-            response = try await LlamaExecute.run(
-                request, runContext: ws, readinessGate: readinessGate, observer: observer,
-                isCancelled: cancelled, progress: progress)
-        case .mlxIosPipette:
-            response = try await MlxExecute.run(
-                request, runContext: ws, readinessGate: readinessGate, observer: observer,
-                isCancelled: cancelled, progress: progress)
-        case .onnxGenaiIosPipette:
-            response = try await OnnxGenaiExecute.run(
-                request, readinessGate: readinessGate, observer: observer)
-        case .appleFoundation:
-            response = try await AFMRuntime.run(
-                request, runContext: ws, readinessGate: readinessGate, observer: observer,
-                isCancelled: cancelled, progress: progress)
+        do {
+            switch request.runtime.bound {
+            case .llamacppIosPipette:
+                response = try await LlamaExecute.run(
+                    request, runContext: ws, readinessGate: readinessGate, observer: observer,
+                    isCancelled: cancelled, progress: progress)
+            case .mlxIosPipette:
+                response = try await MlxExecute.run(
+                    request, runContext: ws, readinessGate: readinessGate, observer: observer,
+                    isCancelled: cancelled, progress: progress)
+            case .onnxGenaiIosPipette:
+                response = try await OnnxGenaiExecute.run(
+                    request, readinessGate: readinessGate, observer: observer)
+            case .appleFoundation:
+                response = try await AFMRuntime.run(
+                    request, runContext: ws, readinessGate: readinessGate, observer: observer,
+                    isCancelled: cancelled, progress: progress)
+            }
+        } catch {
+            try watchdog?.finish(after: error)
+            throw error
         }
+        try watchdog?.finish(after: nil)
         // A series that cannot be paired fails the run here, as the crate's `take` does.
         let telemetry = RepTelemetry.fromReps(try series.take())
         response.benchmarkFlags = try resolvedFlags(request, readiness: readiness)
@@ -324,12 +351,13 @@ nonisolated enum RunCell {
             ref.readiness = ReadinessOverrides(maxWaitSecs: readiness.maxWaitSecs(),
                                                skipThermal: readiness.skipThermal())
         }
+        // The authored limit rides on `ref`; a defaulted one is not reported.
         do {
             let flags = try ref.resolve()
             return reportsNothing(flags) ? nil : flags
         } catch BenchmarkFlagsError.noSuchCombination {
-            // A cell the flag schema does not model (Apple Foundation, and the kinds with
-            // no iOS variant) has nothing to report: not a failure.
+            // A cell the flag schema does not model (eval, which has no iOS variant) has
+            // nothing to report: not a failure.
             return nil
         }
     }

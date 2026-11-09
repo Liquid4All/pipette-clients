@@ -60,19 +60,46 @@ struct ProtocolTests {
         #expect(!retriable, "an unreadable claim must not be retried")
 
         let wire = try wireObject(failureFromClaim(
-            job, reason: "[ts] bad spec", retriable: retriable, clientVersion: "9.9.9",
-            deviceTime: .zero))
+            job, reason: "[ts] bad spec", retriable: retriable, failureCode: failureCode(error),
+            clientVersion: "9.9.9", deviceTime: .zero))
         #expect(wire["job_id"] as? String == "job-abc")
         #expect(wire["benchmark_id"] as? String == "prefill_throughput_256")
         #expect(wire["retriable"] as? Bool == false)
+        #expect(wire["failure_code"] as? String == "harness_error")
+    }
+
+    /// The crate's `failure_code`; the engine failures are `JobExecutorTests`', through the
+    /// kept cell failure they arrive in.
+    @Test func aFailureIsCodedByWhatFailed() {
+        let overrun = Attempt.Overrun(what: "rep 2", limit: .seconds(300), elapsed: .seconds(301))
+        #expect(failureCode(AttemptTimeoutError(overrun: overrun, engineError: nil))
+            == .attemptTimeout)
+        #expect(failureCode(UnrunnableClaimError.noSpec) == .harnessError)
+        #expect(failureCode(PlannerWorker.WorkerResolveError.unknownBenchmark("b"))
+            == .harnessError)
+        #expect(failureCode(PlannerWorker.WorkerResolveError.noPayload) == .harnessError)
+        #expect(failureCode(RunCellError.benchmarkMismatch(spec: "a", body: "b")) == .harnessError)
+        #expect(failureCode(PlannerWorker.WorkerResolveError.deviceBusy("busy")) == .deviceError)
+        #expect(failureCode(ModelStoreError.fetchPaused("m")) == nil, "a stop")
+        #expect(failureCode(PlannerWorker.WorkerResolveError.deviceUnavailable("run cancelled"))
+            == nil)
+        #expect(failureCode(URLError(.timedOut)) == nil)
+    }
+
+    /// mgmt refuses a `null` code, so an uncoded failure leaves the key out.
+    @Test func aFailureWithNoCodeLeavesTheKeyOut() throws {
+        let wire = try wireObject(failureFromClaim(
+            try job(), reason: "[ts] x", retriable: true, failureCode: nil,
+            clientVersion: "9.9.9", deviceTime: .zero))
+        #expect(wire["failure_code"] == nil)
     }
 
     @Test func classifyRunErrorDefaultsRetriable() {
-        // Retriable: specific to this device, so another may still succeed. A failed Hub
-        // download arrives here as the cell's error, which is `deviceUnavailable`.
+        // Retriable: specific to this device, so another may still succeed.
         #expect(classifyRunError(URLError(.timedOut)))
-        #expect(classifyRunError(
-            PlannerWorker.WorkerResolveError.deviceUnavailable("busy")))
+        #expect(classifyRunError(ModelStoreError.fetch(model: "m", source: "offline")))
+        #expect(classifyRunError(PlannerWorker.WorkerResolveError.deviceBusy("busy")))
+        #expect(classifyRunError(PlannerWorker.WorkerResolveError.noPayload))
         // Terminal: unreadable by construction, and a benchmark nobody knows.
         #expect(!classifyRunError(UnrunnableClaimError.noSpec))
         #expect(!classifyRunError(UnrunnableClaimError.unparseable))
@@ -95,14 +122,17 @@ struct ProtocolTests {
         #expect(classifyRunError(error) == retriable)
         let wire = try wireObject(failureFromClaim(
             try job(), reason: error.localizedDescription,
-            retriable: classifyRunError(error), clientVersion: "9.9.9", deviceTime: .zero))
+            retriable: classifyRunError(error), failureCode: failureCode(error),
+            clientVersion: "9.9.9", deviceTime: .zero))
         #expect(wire["retriable"] as? Bool == retriable)
+        #expect(wire["failure_code"] as? String == "harness_error")
     }
 
     @Test func failureSubmissionIdentifiesTheJob() throws {
         let wire = try wireObject(failureFromClaim(
-            try job(), reason: "[ts] oom", retriable: true, clientVersion: "9.9.9 (1234)",
-            deviceTime: .milliseconds(1250) + .microseconds(900)))
+            try job(), reason: "[ts] oom", retriable: true, failureCode: .outOfMemory,
+            clientVersion: "9.9.9 (1234)", deviceTime: .milliseconds(1250) + .microseconds(900)))
+        #expect(wire["failure_code"] as? String == "out_of_memory")
         #expect(wire["message_type"] as? String == "failure")
         #expect(wire["job_id"] as? String == "job-abc")
         #expect(wire["benchmark_id"] as? String == "prefill_throughput_256")

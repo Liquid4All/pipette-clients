@@ -36,7 +36,8 @@ nonisolated enum MlxExecute {
                 readinessGate: readinessGate, observer: observer)
         case let .maxMemoryUsage(benchmark):
             resultData = try await maxMemoryUsage(
-                benchmark, model: try ResolvedMlxModel(request.model.bound), chunk: chunk)
+                benchmark, model: try ResolvedMlxModel(request.model.bound), chunk: chunk,
+                observer: observer)
         case let .eval(benchmark):
             // Before the load: a body without rows has nothing to run.
             let cell = try EvalCell(benchmark)

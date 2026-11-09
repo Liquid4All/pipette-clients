@@ -643,10 +643,25 @@ fn classify_run(
     )
 }
 
-/// The app's engine failed on the cell, as its failed-cell `entry` says.
+/// The app's engine failed on the cell, as its failed-cell `entry` says, or the
+/// app stopped an attempt at `attempt_timeout_seconds`.
 fn engine_failed(entry: &str, elapsed: Duration) -> JobFailure {
+    if app::attempt_timed_out(entry) {
+        return JobFailure::new(
+            FailureCause::AttemptTimedOut,
+            format!(
+                "the app stopped the cell after {}s, an attempt past its \
+                 attempt_timeout_seconds: {entry}",
+                elapsed.as_secs()
+            ),
+        );
+    }
     JobFailure::new(
-        FailureCause::EngineFailed,
+        if entry.contains(app::OUT_OF_MEMORY) {
+            FailureCause::EngineOutOfMemory
+        } else {
+            FailureCause::EngineFailed
+        },
         format!(
             "the app's engine failed on the cell after {}s: {entry}",
             elapsed.as_secs()
@@ -1484,14 +1499,30 @@ mod tests {
                                  prism-ml/Bonsai-27B-gguf failed: Engine backend failed: \
                                  prefill decode rc=-3.\n";
 
+    /// A load `LlamaCpp.swift` judged out of memory from llama.cpp's log, as
+    /// `formatJobError` words it: the app's
+    /// `formatJobErrorAugmentsOutOfMemoryWithContextSizeAndDetail` holds the same message.
+    const ENGINE_OUT_OF_MEMORY: &str = "[HEADLESS] error jobRun decode_throughput_4096_100 / \
+                                        prism-ml/Bonsai-27B-gguf failed: Model + context size \
+                                        4096 exceeded available device memory. Try a smaller \
+                                        quant (e.g. Q4_0 instead of Q5_K_M), a smaller model, or \
+                                        a smaller context length. Underlying error: failed to \
+                                        allocate buffer\n";
+
+    /// An attempt the app stopped at its `attempt_timeout_seconds` (`JobExecutor.abandon`):
+    /// the app's `theFailureNamesTheAttemptAndTheLimit` holds the same message.
+    const ATTEMPT_TIMED_OUT: &str = "[HEADLESS] error jobRun decode_throughput_4096_100 / \
+                                     prism-ml/Bonsai-27B-gguf failed: rep 2 ran 300.4s, past \
+                                     attempt_timeout_seconds (300s), and was stopped\n";
+
     /// A cell whose download failed: the same line, from before the engine.
     const DOWNLOAD_FAILED: &str = "[HEADLESS] error jobRun decode_throughput_4096_100 / \
                                    prism-ml/Bonsai-27B-gguf failed: The network connection \
                                    was lost.\n";
 
-    /// `RunCell.refuseOnBattery`, which the app words as an engine error.
-    const POWER_REFUSED: &str = "[HEADLESS] error jobRun vl_spec_decode_x / m failed: Engine \
-                                 error: `vl_spec_decode_x` measures two arms against each \
+    /// `RunCell.refuseOnBattery`, before the engine has the cell.
+    const POWER_REFUSED: &str = "[HEADLESS] error jobRun vl_spec_decode_x / m failed: Device \
+                                 not ready: `vl_spec_decode_x` measures two arms against each \
                                  other, so it refuses to start while the power state can \
                                  move under it (device_power_state=charging, battery 80%). \
                                  Run it on AC with the battery near full..\n";
@@ -1508,6 +1539,18 @@ mod tests {
                              Engine error: failed to load model: llama_model_load: error \
                              loading model:\ntensor 'output.weight' data is not within the \
                              file bounds, model is corrupted or incomplete.\n";
+
+    /// The same load, as `RuntimeError.unreadableModel` words it.
+    const UNREADABLE_MODEL: &str = "[HEADLESS] error jobRun decode_throughput_4096_100 / m \
+                                    failed: Model file unreadable: failed to load model: \
+                                    llama_model_load: error loading model:\ntensor \
+                                    'output.weight' data is not within the file bounds, model \
+                                    is corrupted or incomplete.\n";
+
+    /// The same refusal as `AFM_UNAVAILABLE`, as `RuntimeError.readiness` words it.
+    const AFM_NOT_READY: &str = "[HEADLESS] error jobRun decode_throughput_256 / \
+                                 apple-foundation failed: Device not ready: Apple foundation \
+                                 model unavailable: modelNotReady.\n";
 
     /// The DESIGN section 4 table: the sentinel decides, the exit code is
     /// consulted only when none appeared, and the deadline outranks both. In
@@ -1591,6 +1634,30 @@ mod tests {
         true,
         FailureCause::EngineFailed
     )]
+    #[case::engine_out_of_memory(
+        &format!("{DISPATCHED}{ENGINE_OUT_OF_MEMORY}"),
+        Some(1),
+        Some(0),
+        false,
+        false,
+        FailureCause::EngineOutOfMemory
+    )]
+    #[case::attempt_timed_out(
+        &format!("{DISPATCHED}{ATTEMPT_TIMED_OUT}"),
+        Some(1),
+        Some(1),
+        false,
+        false,
+        FailureCause::AttemptTimedOut
+    )]
+    #[case::version_attempt_timed_out(
+        &format!("{DISPATCHED}{ATTEMPT_TIMED_OUT}"),
+        Some(1),
+        Some(1),
+        false,
+        true,
+        FailureCause::AttemptTimedOut
+    )]
     #[case::download_failed(
         DOWNLOAD_FAILED,
         Some(1),
@@ -1618,6 +1685,22 @@ mod tests {
     )]
     #[case::afm_unavailable(
         &format!("{DISPATCHED}{AFM_UNAVAILABLE}"),
+        Some(1),
+        Some(0),
+        false,
+        true,
+        FailureCause::RunFailed
+    )]
+    #[case::unreadable_model(
+        &format!("{DISPATCHED}{UNREADABLE_MODEL}"),
+        Some(1),
+        Some(0),
+        false,
+        true,
+        FailureCause::RunFailed
+    )]
+    #[case::afm_not_ready(
+        &format!("{DISPATCHED}{AFM_NOT_READY}"),
         Some(1),
         Some(0),
         false,
@@ -1727,6 +1810,34 @@ mod tests {
                 .ends_with(&format!("after 34s: {}", ENGINE_FAILED.trim())),
             "{}",
             failed.detail
+        );
+    }
+
+    /// Terminal, the plan's limit named, the app's line quoted: the cell ran out of time
+    /// in the engine well inside `run_timeout_secs`, which stays the outer bound.
+    #[test]
+    fn an_attempt_the_app_stopped_quotes_its_line() {
+        let stopped = classify_run(
+            &console(
+                "[HEADLESS] BENCH_DONE 1 failed: rep 2 ran 300.4s, past \
+                 attempt_timeout_seconds (300s), and was stopped\n",
+                &format!("{DISPATCHED}{ATTEMPT_TIMED_OUT}"),
+                Some(1),
+                Some(1),
+            ),
+            Duration::from_secs(612),
+            RUN_TIMEOUT,
+            false,
+        );
+        assert_eq!(stopped.cause, FailureCause::AttemptTimedOut);
+        assert!(!stopped.retriable());
+        assert!(
+            stopped.detail.ends_with(&format!(
+                "after 612s, an attempt past its attempt_timeout_seconds: {}",
+                ATTEMPT_TIMED_OUT.trim()
+            )),
+            "{}",
+            stopped.detail
         );
     }
 
