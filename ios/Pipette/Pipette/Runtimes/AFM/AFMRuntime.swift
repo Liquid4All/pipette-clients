@@ -72,7 +72,7 @@ nonisolated enum AFMRuntime {
         let definition = request.benchmark
         switch availability() {
         case .available: break
-        case .unavailable(let reason): throw RuntimeError.engine("Apple foundation model unavailable: \(reason)")
+        case .unavailable(let reason): throw RuntimeError.readiness("Apple foundation model unavailable: \(reason)")
         }
 
         // Before the capability check and the session: the system model serves this

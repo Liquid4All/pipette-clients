@@ -10,16 +10,22 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use pipette_artifacts::VaultFetchError;
+use pipette_artifacts::model::ModelStoreError;
+use pipette_artifacts::runtime::RuntimeStoreError;
 use pipette_http::HttpClient;
 use pipette_mgmt_client::{
     ClientIdentity, ServerUrl, client_api,
     types::{ClaimedJob, FailureSubmission},
 };
-use pipette_subprocess::{ExitError, ReadyError, Stopped};
+use pipette_ops::attempt::AttemptTimeoutError;
+use pipette_plan_types::{EvalContextError, ExtraRuntimeConfigurationError, FailureCode};
+use pipette_readiness::ReadinessError;
+use pipette_subprocess::{ExitError, ReadyError, StartError, Stopped};
 
 use crate::client::claim::UnrunnableClaimError;
 use crate::client::worker::timing::retry_with_backoff;
 use crate::error::{Error, Result};
+use crate::run::{ForeignOsError, HostNotReadyError};
 
 /// Bind a success submission payload (serialized
 /// [`pipette_plan_types::BenchmarkSubmissionPayload`]) to its lease by stamping
@@ -49,9 +55,11 @@ pub fn failure_from_claim(
     job: &ClaimedJob,
     reason: impl Into<String>,
     retriable: bool,
+    failure_code: Option<FailureCode>,
     device_time_ms: Option<u64>,
 ) -> FailureSubmission {
     FailureSubmission {
+        failure_code,
         device_time_ms,
         ..FailureSubmission::from_claim(job, reason, retriable, crate::CLIENT_VERSION)
     }
@@ -76,13 +84,17 @@ const MODEL_LOAD_FAILED: [&str; 3] = [
 ];
 
 /// A load failure that is not the model's: a missing, non-GGUF or truncated
-/// file, which a fresh download repairs, or memory another process may hold (a
-/// cancelled job's GPU allocation outlives it). The memory words are llama.cpp's,
-/// `ENOMEM`'s, Windows' mapping errors and Vulkan's.
-const LOAD_FAILED_ON_FILE_OR_MEMORY: [&str; 11] = [
+/// file, which a fresh download repairs.
+const LOAD_FAILED_ON_FILE: [&str; 3] = [
     "failed to open",
     "failed to read magic",
     "corrupted or incomplete",
+];
+
+/// A load failure on memory another process may hold (a cancelled job's GPU
+/// allocation outlives it), in llama.cpp's, `ENOMEM`'s, Windows' and Vulkan's
+/// words.
+const OUT_OF_MEMORY: [&str; 8] = [
     "unable to allocate",
     "failed to allocate",
     "out of memory",
@@ -98,6 +110,9 @@ const LOAD_FAILED_ON_FILE_OR_MEMORY: [&str; 11] = [
 /// hold. The cost: a refused cell fails for every phone, even one whose chip
 /// could run it, until someone runs `campaigns rerun`.
 const DSP_REFUSED_OP: &str = "dsp-error no-support";
+
+/// Any Hexagon DSP failure llama.cpp aborts on.
+const DSP_ERROR: &str = "dsp-error";
 
 /// A measuring program or a request to the engine's server overran. The server's
 /// case is told from a download by the [`Stopped`] context only an engine
@@ -126,10 +141,54 @@ fn model_failed_to_load(err: &anyhow::Error) -> bool {
             _ => return false,
         };
         MODEL_LOAD_FAILED.iter().any(|m| tail.contains(m))
-            && !LOAD_FAILED_ON_FILE_OR_MEMORY
+            && !LOAD_FAILED_ON_FILE
                 .iter()
+                .chain(&OUT_OF_MEMORY)
                 .any(|m| tail.contains(m))
     })
+}
+
+/// Wording for a benchmark no client of this build runs.
+const UNRUNNABLE_HERE: [&str; 2] = ["benchmark not found", "is not a known, valid definition"];
+
+/// The kind of failure mgmt groups by (its `docs/httpapi.md`, `failure_code`),
+/// named only where the error shows it; `None` is sent as no code, which mgmt
+/// records as `unspecified`.
+pub fn failure_code(err: &anyhow::Error) -> Option<FailureCode> {
+    let any = |is: &dyn Fn(&(dyn std::error::Error + 'static)) -> bool| err.chain().any(is);
+    let text = format!("{err:#}").to_ascii_lowercase();
+    let says = |words: &[&str]| words.iter().any(|w| text.contains(w));
+    if any(&|c| c.is::<AttemptTimeoutError>()) {
+        Some(FailureCode::AttemptTimeout)
+    } else if any(&|c| c.is::<ReadinessError>() || c.is::<HostNotReadyError>()) {
+        Some(FailureCode::DeviceError)
+    } else if any(&|c| {
+        // Ahead of the memory words: an install or a spawn short of memory is still ours.
+        c.is::<UnrunnableClaimError>()
+            || c.is::<VaultFetchError>()
+            || c.is::<ModelStoreError>()
+            || c.is::<RuntimeStoreError>()
+            || c.is::<ExtraRuntimeConfigurationError>()
+            || c.is::<EvalContextError>()
+            || c.is::<ForeignOsError>()
+            || matches!(c.downcast_ref(), Some(StartError::Spawn { .. }))
+    }) {
+        Some(FailureCode::HarnessError)
+    } else if says(&OUT_OF_MEMORY) {
+        Some(FailureCode::OutOfMemory)
+    } else if any(&|c| matches!(c.downcast_ref(), Some(ReadyError::TimedOut { .. })))
+        || says(&LOAD_FAILED_ON_FILE)
+        || says(&UNRUNNABLE_HERE)
+    {
+        Some(FailureCode::HarnessError)
+    } else if err.downcast_ref::<Stopped>().is_some()
+        || any(&|c| c.is::<ExitError>() || c.is::<ReadyError>())
+        || says(&[DSP_ERROR])
+    {
+        Some(FailureCode::RuntimeError)
+    } else {
+        None
+    }
 }
 
 /// Whether a run error is retriable. Defaults to retriable; only jobs no client
@@ -139,6 +198,10 @@ fn model_failed_to_load(err: &anyhow::Error) -> bool {
 /// client meets the same limit or refusal.
 pub fn classify_run_error(err: &anyhow::Error) -> bool {
     if err.chain().any(|cause| cause.is::<UnrunnableClaimError>()) {
+        return false;
+    }
+    // Every client runs the cell under the same attempt limit.
+    if err.chain().any(|cause| cause.is::<AttemptTimeoutError>()) {
         return false;
     }
     // A vault refusal every device with this owner would meet identically
@@ -157,13 +220,10 @@ pub fn classify_run_error(err: &anyhow::Error) -> bool {
     }
     let msg = format!("{err:#}").to_ascii_lowercase();
     // Matching on wording fails the job for every client, so the list stays narrow.
-    let non_retriable_markers = [
-        "benchmark not found",
-        "is not a known, valid definition",
-        "runs on-device only",
-        DSP_REFUSED_OP,
-    ];
-    let looks_permanent = non_retriable_markers.iter().any(|m| msg.contains(m));
+    let looks_permanent = UNRUNNABLE_HERE
+        .iter()
+        .chain(&[DSP_REFUSED_OP])
+        .any(|m| msg.contains(m));
     !looks_permanent
 }
 
@@ -396,11 +456,13 @@ pub(crate) mod tests {
             &job,
             "[ts] bad spec",
             retriable,
+            failure_code(&err),
             Some(0),
         ))?;
         assert_eq!(wire["job_id"], "job-abc");
         assert_eq!(wire["benchmark_id"], "prefill_throughput_256");
         assert_eq!(wire["retriable"], false);
+        assert_eq!(wire["failure_code"], "harness_error");
         Ok(())
     }
 
@@ -514,6 +576,11 @@ pub(crate) mod tests {
         }
         .context("preparing the cell");
         assert_eq!(classify_run_error(&err), retriable, "{err:#}");
+        assert_eq!(
+            failure_code(&err),
+            Some(FailureCode::HarnessError),
+            "{err:#}"
+        );
         Ok(())
     }
 
@@ -521,9 +588,6 @@ pub(crate) mod tests {
     fn classify_run_error_defaults_retriable() {
         assert!(classify_run_error(&anyhow::anyhow!("out of memory")));
         assert!(classify_run_error(&anyhow::anyhow!("connection reset")));
-        assert!(!classify_run_error(&anyhow::anyhow!(
-            "runtime `foo` runs on-device only and is not runnable from the CLI"
-        )));
         assert!(!classify_run_error(&anyhow::anyhow!(
             "benchmark 'x' is not a known, valid definition: missing field"
         )));
@@ -576,21 +640,66 @@ pub(crate) mod tests {
             ))
     }
 
+    fn attempt_overran() -> anyhow::Error {
+        anyhow::Error::from(AttemptTimeoutError {
+            overrun: pipette_ops::attempt::Overrun {
+                what: "rep 2".to_owned(),
+                limit: Duration::from_secs(300),
+                elapsed: Duration::from_secs(301),
+            },
+            engine_error: Some("llama-bench was killed".to_owned()),
+        })
+        .context("decode_throughput_4096_100")
+    }
+
+    fn readiness_ran_out() -> anyhow::Error {
+        anyhow::Error::from(ReadinessError::TimedOut {
+            max_wait: Duration::from_secs(420),
+            observed: "cpu busy 2.1 cores".to_owned(),
+        })
+        .context("readiness gate before rep 1")
+    }
+
+    fn gpu_preflight_failed() -> anyhow::Error {
+        anyhow::Error::from(crate::run::HostNotReadyError(anyhow::anyhow!(
+            "nvidia-smi -L failed: NVIDIA-SMI has failed because it couldn't communicate \
+             with the NVIDIA driver"
+        )))
+        .context("GPU preflight for runtime `docker_vllm`")
+    }
+
+    /// `ENOMEM`, whose words are the memory words.
+    fn spawn_ran_out_of_memory() -> anyhow::Error {
+        anyhow::Error::from(StartError::Spawn {
+            name: "llama-server".to_owned(),
+            program: "/opt/llama/llama-server".to_owned(),
+            source: std::io::Error::other("Cannot allocate memory (os error 12)"),
+        })
+        .context("starting llama-server")
+    }
+
     /// The tails are llama.cpp's own lines.
     #[rstest::rstest]
-    #[case::bench_overran(overran("llama-bench"), false)]
-    #[case::batched_bench_overran(overran("llama-batched-bench"), false)]
-    #[case::a_probe_overran(overran("llama-server"), true)]
+    #[case::an_attempt_overran(attempt_overran(), false, Some(FailureCode::AttemptTimeout))]
+    #[case::bench_overran(overran("llama-bench"), false, Some(FailureCode::RuntimeError))]
+    #[case::batched_bench_overran(
+        overran("llama-batched-bench"),
+        false,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_probe_overran(overran("llama-server"), true, Some(FailureCode::RuntimeError))]
     #[case::bench_would_not_load(
         bench_exited("main: error: failed to load model '/m/q.gguf'"),
-        false
+        false,
+        Some(FailureCode::RuntimeError)
     )]
     #[case::unknown_architecture(
         server_exited(
             "llama_model_load: error loading model: error loading model architecture: \
              unknown model architecture: 'lfm3'\nmain: exiting due to model loading error"
         ),
-        false
+        false,
+        Some(FailureCode::RuntimeError)
     )]
     #[case::unknown_type(
         bench_exited(
@@ -598,14 +707,16 @@ pub(crate) mod tests {
              gguf_init_from_file_impl: failed to read tensor info\n\
              main: error: failed to load model '/m/q.gguf'"
         ),
-        false
+        false,
+        Some(FailureCode::RuntimeError)
     )]
     #[case::missing_file(
         bench_exited(
             "gguf_init_from_file: failed to open GGUF file '/m/q.gguf' (No such file or directory)\n\
              main: error: failed to load model '/m/q.gguf'"
         ),
-        true
+        true,
+        Some(FailureCode::HarnessError)
     )]
     #[case::truncated_file(
         server_exited(
@@ -613,25 +724,40 @@ pub(crate) mod tests {
              the file bounds, model is corrupted or incomplete\n\
              main: exiting due to model loading error"
         ),
-        true
+        true,
+        Some(FailureCode::HarnessError)
     )]
     #[case::out_of_memory_at_load(
         server_exited(
             "llama_model_load: error loading model: unable to allocate Vulkan0 buffer\n\
              main: exiting due to model loading error"
         ),
-        true
+        true,
+        Some(FailureCode::OutOfMemory)
     )]
     #[case::mmap_out_of_memory(
         bench_exited(
             "llama_model_load: error loading model: mmap failed: Cannot allocate memory\n\
              main: error: failed to load model '/m/q.gguf'"
         ),
-        true
+        true,
+        Some(FailureCode::OutOfMemory)
     )]
-    #[case::a_crash(bench_exited("Segmentation fault"), true)]
-    #[case::the_dsp_refused_an_op(dsp_aborted("NO-SUPPORT"), false)]
-    #[case::the_dsp_ran_short_of_vtcm(dsp_aborted("VTCM-TOO-SMALL"), true)]
+    #[case::a_crash(
+        bench_exited("Segmentation fault"),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::the_dsp_refused_an_op(
+        dsp_aborted("NO-SUPPORT"),
+        false,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::the_dsp_ran_short_of_vtcm(
+        dsp_aborted("VTCM-TOO-SMALL"),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
     #[case::the_load_wait_overran(
         anyhow::Error::from(ReadyError::TimedOut {
             name: "llama-server".to_owned(),
@@ -639,24 +765,41 @@ pub(crate) mod tests {
             tail: String::new(),
             source: "HTTP 503 Service Unavailable: loading model".into(),
         }),
-        true
+        true,
+        Some(FailureCode::HarnessError)
     )]
-    fn an_engine_failure_is_final_for_its_limit_or_its_model(
+    #[case::the_readiness_wait_ran_out(readiness_ran_out(), true, Some(FailureCode::DeviceError))]
+    #[case::the_gpu_preflight_failed(gpu_preflight_failed(), true, Some(FailureCode::DeviceError))]
+    #[case::a_spawn_ran_out_of_memory(
+        spawn_ran_out_of_memory(),
+        true,
+        Some(FailureCode::HarnessError)
+    )]
+    #[case::an_unknown_benchmark(
+        anyhow::anyhow!("benchmark 'x' is not a known, valid definition: missing field"),
+        false,
+        Some(FailureCode::HarnessError)
+    )]
+    #[case::nothing_names_it(anyhow::anyhow!("connection reset"), true, None)]
+    fn a_failure_is_classified_and_coded(
         #[case] err: anyhow::Error,
         #[case] retriable: bool,
+        #[case] code: Option<FailureCode>,
     ) {
         assert_eq!(classify_run_error(&err), retriable, "{err:#}");
+        assert_eq!(failure_code(&err), code, "{err:#}");
     }
 
     /// A download's stall and the load wait's last check are the same timeout error.
     #[cfg(unix)]
     #[rstest::rstest]
-    #[case::the_engines_request("request", false)]
-    #[case::the_load_wait("load wait", true)]
-    #[case::a_download("download", true)]
+    #[case::the_engines_request("request", false, FailureCode::RuntimeError)]
+    #[case::the_load_wait("load wait", true, FailureCode::HarnessError)]
+    #[case::a_download("download", true, FailureCode::HarnessError)]
     fn a_request_timeout_is_final_only_in_the_engine(
         #[case] stage: &str,
         #[case] retriable: bool,
+        #[case] code: FailureCode,
     ) -> anyhow::Result<()> {
         use anyhow::Context;
 
@@ -695,6 +838,7 @@ pub(crate) mod tests {
         }
         .context("running the cell");
         assert_eq!(classify_run_error(&err), retriable, "{err:#}");
+        assert_eq!(failure_code(&err), Some(code), "{err:#}");
         Ok(())
     }
 
@@ -925,13 +1069,20 @@ pub(crate) mod tests {
     fn failure_submission_identifies_the_job() -> anyhow::Result<()> {
         let job: ClaimedJob = serde_json::from_str(CLAIM_JOB_BODY)?;
         let device_time = device_time_ms(Duration::from_micros(1_250_900));
-        let failure = failure_from_claim(&job, "[ts] oom", true, Some(device_time));
+        let failure = failure_from_claim(
+            &job,
+            "[ts] oom",
+            true,
+            Some(FailureCode::OutOfMemory),
+            Some(device_time),
+        );
         let wire = serde_json::to_value(&failure)?;
         assert_eq!(wire["message_type"], "failure");
         assert_eq!(wire["job_id"], "job-abc");
         assert_eq!(wire["benchmark_id"], "prefill_throughput_256");
         assert_eq!(wire["retriable"], true);
         assert_eq!(wire["failure_reason"], "[ts] oom");
+        assert_eq!(wire["failure_code"], "out_of_memory");
         // The server cannot recover which build reported this from the job body.
         assert_eq!(wire["client_version"], crate::CLIENT_VERSION);
         // Whole milliseconds, truncated.

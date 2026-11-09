@@ -72,9 +72,9 @@ jobs:
               # Compiled in with `include_str!`: bundled catalogs, the prompt seed.
               - 'crates/**/*.toml'
               - 'crates/**/*.txt'
-              # Compiled in with `include_str!` by pipette-coreai's sidecar module, which
-              # checks them against the files on disk. Only the macos leg compiles it.
-              - 'crates/pipette-coreai/swift/**'
+              # Embedded by pipette-artifacts on every platform for storage keys;
+              # only supported Macs execute the Swift build.
+              - 'crates/pipette-artifacts/swift/**'
               # Parsed by pipette-ctl's `example_plans` and pipette-plan-types' tests.
               - 'examples/plans/**'
               # Read by pipette-ios-proxy's test of the release manifest.
@@ -122,8 +122,8 @@ jobs:
               - 'tools/gpu-keepalive/**'
               - '.github/**'
             coreaiswift:
-              # The Core AI sidecar package, which pipette-coreai builds on first use.
-              - 'crates/pipette-coreai/swift/**'
+              # The Core AI sidecar package, which pipette-artifacts installs on first use.
+              - 'crates/pipette-artifacts/swift/**'
               - '.github/**'
 
   release-metadata:
@@ -508,8 +508,12 @@ jobs:
       - name: Check out the vendored sources
         run: |
           git -c protocol.version=2 submodule update --init --depth=1 --recursive \
-            vendor/llama.cpp vendor/llamacpp-prismml vendor/llamacpp-lfm3 \
-            vendor/onnxruntime vendor/onnxruntime-genai
+            vendor/llama.cpp \
+            vendor/llamacpp-prismml \
+            vendor/llamacpp-prismml-b10828 \
+            vendor/llamacpp-lfm3 \
+            vendor/onnxruntime \
+            vendor/onnxruntime-genai
 
       - name: Cache sccache binary
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -549,6 +553,12 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_GHA_VERSION: "2"
           PIPETTE_LLAMA_VARIANT: prismml
+        run: ./ios/build-llama.sh device
+
+      - name: Build llama.cpp (prismml-b10828)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          PIPETTE_LLAMA_VARIANT: prismml-b10828
         run: ./ios/build-llama.sh device
 
       - name: Build llama.cpp (lfm3)
@@ -598,6 +608,12 @@ jobs:
           # Unconditional: the archive recompiles from scratch, so there is no cache to protect.
           PIPETTE_BUILD_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
+          pins=(
+            llamacpp
+            llamacpp-prismml
+            llamacpp-prismml-b10828
+            llamacpp-lfm3
+          )
           xcodebuild archive \
             -project ios/Pipette/Pipette.xcodeproj \
             -scheme Pipette \
@@ -612,7 +628,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            'PIPETTE_LLAMA_PINS=llamacpp llamacpp-prismml llamacpp-lfm3' \
+            "PIPETTE_LLAMA_PINS=${pins[*]}" \
             'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) PIPETTE_PRIVATE_THERMAL=1' \
             'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) PIPETTE_PRIVATE_THERMAL PIPETTE_PRIVATE_MEMORY'
 
@@ -1136,14 +1152,14 @@ jobs:
           persist-credentials: false
 
       - name: Build the sidecar
-        working-directory: crates/pipette-coreai/swift
-        # The command pipette-coreai runs, plus --force-resolved-versions: a
-        # Package.resolved out of step with Package.swift fails here.
+        working-directory: crates/pipette-artifacts/swift
+        # The command that pipette-artifacts runs. A Package.resolved out of
+        # step with Package.swift fails here.
         run: |
           set -euo pipefail
           ls -d /Applications/Xcode*.app
           xcodebuild -version
-          swift build -c release --force-resolved-versions
+          swift build -c release --disable-automatic-resolution
 
   build-artifact:
     needs: [changes, release-metadata]

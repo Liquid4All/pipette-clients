@@ -1,0 +1,5 @@
+{
+  "benchmark_type": "decode_throughput",
+  "model_type": "core_ai",
+  "runtime_type": "core_ai_macos_pipette"
+}

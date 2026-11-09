@@ -60,7 +60,7 @@ or `bench/` (collides with the benchmark noun).
 | `pipette-mgmt-client` | Management-server API: one call per endpoint, each taking the `ServerUrl` to reach. Split by the principal that authenticates it: `client_api` for what a device calls with a `ClientIdentity`, `user_api` for what an operator calls with a `UserIdentity`. The two public benchmark reads are the exception: they admit anyone, so the identity is optional and signs the read when the caller holds one, and they sit in `client_api` because a device's sync path is what calls them |
 | `pipette-plan-types`  | Not a member: from pipette-mgmt by git; the plan and submission vocabulary |
 | `pipette-contract`    | Test-only: holds the contract's JSON fixtures, checks them against `pipette-plan-types`, and keeps the `variants.json` and the files of what the crate derives from them (`params.json`, `sampling.json`, `defaults.json`) that the mobile clients' contract tests read. Nothing depends on it |
-| `pipette-ctl`         | The operator CLI: drives a typed model/runtime matrix across devices, and calls the management server's account routes as CLI verbs and an MCP server |
+| `pipette-ctl`         | The operator CLI: drives a typed model/runtime matrix across devices, and calls the management server's account routes as CLI verbs |
 | `pipette-cli`         | The unified `pipette` client binary (bundles the runtime libraries below); includes the planner claim loop (`pipette worker`) |
 | `pipette-llamacpp`    | llama.cpp runner (library) |
 | `pipette-mlx`         | MLX runner (library) |
@@ -86,6 +86,14 @@ What the engines share but the plan-types contract does not define:
 - `generation`: what one prompt's generation was, whatever the server speaks.
   An engine reports what arrived and when; this module decides the first
   token, the last token and the end;
+- `attempt`: the rules of `attempt_timeout_seconds` (the limit a request runs
+  under, the 300 s default and the benchmark types that default to it, the name of
+  the first attempt) and `AttemptTimeoutError`, the failure an overrun
+  reports. The clock is not here: `pipette-cli` creates one per run, and the
+  kernels and engines mark it through the `MeasurementObserver` the CLI passes
+  them. Besides the hooks around each rep, the observer has one that starts an
+  attempt no rep brackets (a peak-memory run, a corpus sample) and two that
+  hold the clock over a step the limit leaves out and resume it after;
 - `sse` (the streamed-text reader), `prompt_seed` and `vl_spec_decode`.
 
 An engine contributes a `send`/`read` closure or an attempt. The loop, the
@@ -99,8 +107,63 @@ checks and the reduction are in `pipette-ops`.
 - the `SIGPIPE` reset and the per-pipe guard under it;
 - the child wait with a deadline;
 - teardown of spawned children: when ^C arrives, when the stderr of a worker or
-  a benchmark run closes, when their parent exits on Windows, and at the next
-  start for children that a killed CLI left running.
+  a benchmark run closes, when a run passes its attempt limit, when their
+  parent exits on Windows, and at the next start for children that a killed
+  CLI left running.
+
+## The attempt clock
+
+`attempt_timeout_seconds` limits each attempt of a cell; the rules are in
+[usage.md](pipette-cli/usage.md#5c-the-attempt-limit). `pipette-cli` keeps one
+clock per run. `dispatch_run` starts the first attempt once the downloads are
+done, and the engine marks the rest through the `MeasurementObserver` hooks and
+the readiness gate. A watchdog thread reads the clock every 250 ms. Past the
+limit it stops every child the run started, as Ctrl-C does, so whatever the
+engine waits on fails at once, and `watched` reports the overrun as
+`AttemptTimeoutError` with the engine's error beside it.
+
+```mermaid
+sequenceDiagram
+    participant D as dispatch_run
+    participant E as engine
+    participant C as clock
+    participant W as watchdog thread
+    participant P as child process
+    D->>C: create, with the cell's limit
+    D->>C: begin "the model load and warm-up"
+    D->>W: start, when the cell has a limit
+    Note over C,W: polls every 250 ms until the engine returns
+    D->>E: run the cell
+    opt a step the limit leaves out
+        E->>C: hold
+        E->>E: first server start, image pull, download
+        E->>C: resume, with the whole limit
+    end
+    E->>P: load the model, warm up
+    loop each rep N
+        E->>C: hold, then resume around the readiness gate
+        E->>C: begin "rep N"
+        E->>P: run rep N
+        alt rep N ends within the limit
+            E->>C: begin "the work after rep N"
+        else rep N runs past the limit
+            W->>C: is the attempt past the limit?
+            C-->>W: yes, "rep N"
+            W->>P: stop every child the run started, as on Ctrl-C
+            P-->>E: killed, so the wait or the stream fails
+        end
+    end
+    E-->>D: the engine's error
+    D->>W: finish
+    W-->>D: the first overrun, or one last look at the clock
+    Note over D: AttemptTimeoutError, final for a worker
+```
+
+`begin` and `resume` both give the attempt the whole limit, so a held step never
+shortens the step after it. A cell with no limit runs without the watchdog. The
+iOS app keeps the same clock (`AttemptClock`, `AttemptWatchdog`) but cannot stop
+an engine that runs inside the app: a launch that the farm's proxy claimed exits
+the app, and any other run fails at its next boundary.
 
 ## Dependency graph
 
@@ -171,9 +234,7 @@ the path is already implied, as are leaf helper crates `pipette-http` and
 which no host binary links.)
 
 Only `pipette-cli` depends on a runtime library, and each exports `run` alone,
-so a change to one runtime cannot reach another. (`pipette-coreai` also exports
-the Swift-sidecar functions that the CLI uses to pull, list and remove Core AI,
-because the sidecar lives in a user cache, not in the runtime store.) What two
+so a change to one runtime cannot reach another. What two
 runtimes both need lives in a shared library or is copied, as OVMS copies
 OpenVINO's NPU rules. cargo-deny's `[bans]` in `deny.toml` enforces the first
 half of the rule, and `ci/checks/runtime-crates.py` the second. The check also classifies every workspace crate as a runtime or not, so

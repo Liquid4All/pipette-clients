@@ -37,9 +37,11 @@ nonisolated extension BenchmarkMeasurement {
     /// allocator caches and high-water marks. No readiness gate either: a peak does not
     /// move with the device's temperature. The attempt owns its setup and its checks.
     ///
-    /// `ctx` is lent to the attempt, for what the engine records while it runs.
+    /// `ctx` is lent to the attempt, for what the engine records while it runs. `observer`
+    /// starts each attempt on the clock.
     static func maxMemory<C>(
         _ benchmark: MaxMemoryUsageBenchmark,
+        observer: MeasurementObserver,
         warmup: MemoryMeasurementWarmup,
         ctx: C,
         attempt: (inout C) async throws -> MaxMemoryMeasurementReading
@@ -48,10 +50,16 @@ nonisolated extension BenchmarkMeasurement {
         var ctx = ctx
 
         if warmup == .once {
+            try observer.onAttemptStart(peakMemoryWarmUp)
             _ = try await measure("\(marker) warm-up", &ctx, attempt)
         }
+        try observer.onAttemptStart(peakMemoryMeasured)
         return try await measure(marker, &ctx, attempt)
     }
+
+    /// What the attempt clock names each peak-memory attempt.
+    static let peakMemoryWarmUp = "the peak-memory warm-up"
+    static let peakMemoryMeasured = "the measured peak-memory attempt"
 }
 
 /// One attempt, its reading logged and then checked.

@@ -68,7 +68,7 @@ import Testing
         #expect(flat.nUbatch == 512)
     }
 
-    /// Apple Foundation ships with the OS: nothing to ensure, no path, and no flags
+    /// Apple Foundation ships with the OS: nothing to ensure, no path, and no runtime flags
     /// variant upstream, so the cell carries no entry at all.
     @Test func appleFoundationSkipsTheStoreEntirely() async throws {
         let ws = makeTemporaryWorkspace()
@@ -395,6 +395,52 @@ import Testing
 
         #expect(try RunCell.resolvedFlags(try request(benchmark),
                                           readiness: ResolvedReadiness()) == nil)
+    }
+
+    /// The limit a plan set is what the cell ran under, so the record carries it beside the
+    /// gate; a defaulted one is not reported.
+    @Test func onlyAnAuthoredAttemptLimitIsReported() throws {
+        let gate = resolveReadiness(maxWait: .fromSecs(300), thermal: .enforce)
+        let authored = try #require(try RunCell.resolvedFlags(
+            try request(flags: .prefillThroughputLlamacppIosPipetteGgufText(
+                attemptTimeoutSeconds: 600, readiness: nil)),
+            readiness: gate))
+        #expect(try submitted(authored)["attempt_timeout_seconds"] as? Int == 600)
+
+        let defaulted = try #require(try RunCell.resolvedFlags(try request(flags: nil),
+                                                               readiness: gate))
+        #expect(try submitted(defaulted)["attempt_timeout_seconds"] == nil)
+        #expect(defaulted.readiness == ReadinessOverrides(maxWaitSecs: 300, skipThermal: false))
+    }
+
+    /// A memory cell has no gate to report, so its authored limit is the whole record.
+    @Test func aMemoryCellReportsItsAuthoredLimit() throws {
+        let model = try ggufTextSpec("org/g-GGUF", "g-Q4_0.gguf")
+        let request = RunRequest(
+            runtime: .alreadyBound(Runtime.thisBuild(for: model)), model: .alreadyBound(model),
+            runtimeFlags: nil,
+            benchmarkFlags: .maxMemoryUsageLlamacppIosPipetteGgufText(attemptTimeoutSeconds: 2400),
+            benchmark: .maxMemoryUsage(MaxMemoryUsageBenchmark(
+                benchmarkId: BenchmarkId(validated: "max_memory_usage_512"),
+                parameterPrefillTokens: 512)))
+
+        let flags = try #require(try RunCell.resolvedFlags(request, readiness: ResolvedReadiness()))
+        #expect(try submitted(flags) as NSDictionary == ["attempt_timeout_seconds": 2400] as NSDictionary)
+    }
+
+    /// Apple Foundation's timing cells gate as the others do, and now have a variant to say so.
+    @Test func anAppleFoundationTimingCellReportsThePolicyItApplied() throws {
+        let request = RunRequest(
+            runtime: .alreadyBound(Runtime.thisBuild(for: .appleFoundationText)),
+            model: .alreadyBound(.appleFoundationText), runtimeFlags: nil, benchmarkFlags: nil,
+            benchmark: .decodeThroughput(DecodeThroughputBenchmark(
+                benchmarkId: BenchmarkId(validated: "decode_throughput_256_100"),
+                parameterPrefillTokens: 256, parameterDecodeTokens: 100)))
+
+        let flags = try #require(try RunCell.resolvedFlags(
+            request, readiness: resolveReadiness(maxWait: .fromSecs(300), thermal: .enforce)))
+        #expect(flags == .decodeThroughputAppleFoundationAppleFoundationText(
+            readiness: ReadinessOverrides(maxWaitSecs: 300, skipThermal: false)))
     }
 
     /// Charging is refused with discharging: a fast-charging battery throttles the GPU

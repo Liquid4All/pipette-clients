@@ -7,9 +7,11 @@ nonisolated extension LlamaExecute {
     static func maxMemoryUsage(
         _ benchmark: MaxMemoryUsageBenchmark,
         load: LoadSettings,
-        model: ResolvedGgufTextModel
+        model: ResolvedGgufTextModel,
+        observer: MeasurementObserver
     ) async throws -> BenchmarkResultData {
-        try await BenchmarkMeasurement.maxMemory(benchmark, warmup: .cold, ctx: ()) { _ in
+        try await BenchmarkMeasurement.maxMemory(benchmark, observer: observer, warmup: .cold,
+                                                 ctx: ()) { _ in
             try await ProcessMemory.maxMemoryBracket(label: "llama") {
                 try await load.withInference(model) {
                     try maxMemoryUsage($0, prefillTokens: Int(benchmark.parameterPrefillTokens.value))

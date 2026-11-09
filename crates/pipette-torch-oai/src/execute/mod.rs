@@ -80,11 +80,9 @@ fn run_with(
     }
     // First, as on the other engines: a corpus refusal should not cost a launch.
     let lease = if let BenchmarkDefinition::VlSpecDecode(body) = &req.benchmark {
-        Some(pipette_vl_spec_decode_corpus::download(
-            run_context,
-            &body.benchmark_id,
-            &body.dataset,
-        )?)
+        Some(observer.outside(|| {
+            pipette_vl_spec_decode_corpus::download(run_context, &body.benchmark_id, &body.dataset)
+        })?)
     } else {
         None
     };
@@ -193,15 +191,18 @@ fn run_with(
             })
             .map(|tree| (tree, cgroup::Watch::Observe)),
     };
-    let mut server = server::launch(
-        &req.runtime.bound,
-        &server_args,
-        &flags,
-        &model_dir,
-        drafter.as_ref(),
-        client_config,
-        programs,
-    )?;
+    // Off the clock: a docker launch may pull its image first.
+    let mut server = observer.outside(|| {
+        server::launch(
+            &req.runtime.bound,
+            &server_args,
+            &flags,
+            &model_dir,
+            drafter.as_ref(),
+            client_config,
+            programs,
+        )
+    })?;
     // From the launch, so the load counts, as on every engine.
     let mut probe = watch
         .map(|(tree, watch)| {
@@ -294,6 +295,7 @@ fn dispatch(
             probe
                 .take()
                 .context("`run` starts the memory cell's probe with its server")?,
+            observer,
         ),
         BenchmarkDefinition::Eval(_) => eval::run(req, model, state, eval_completions),
         BenchmarkDefinition::VlSpecDecode(benchmark) => {
@@ -640,10 +642,7 @@ mod batch_tests {
     }
 
     fn no_observer() -> MeasurementObserver<'static> {
-        MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        }
+        MeasurementObserver::QUIET
     }
 
     fn run_cell(

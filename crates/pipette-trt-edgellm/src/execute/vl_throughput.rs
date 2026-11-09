@@ -42,7 +42,8 @@ pub fn run(
         .into_inner()
         .unsigned_abs();
     let num_images = benchmark.parameter_num_images.into_inner().unsigned_abs();
-    engines::build(launch)?;
+    // The build is not an attempt: a cold one takes minutes, before any server.
+    observer.outside(|| engines::build(launch))?;
 
     let timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
     let http = HttpClient::loopback("pipette", timeout)?;

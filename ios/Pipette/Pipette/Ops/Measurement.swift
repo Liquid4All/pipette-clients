@@ -76,13 +76,29 @@ nonisolated enum BenchmarkMeasurement {
     }
 }
 
-/// Called around each measured rep; for spec decode the rep is the whole traversal. A throw
-/// abandons the cell.
+/// The rep hooks are called around each measured rep; for spec decode the rep is the whole
+/// traversal. A throw abandons the cell. The other three drive the `attempt_timeout_seconds`
+/// clock, and do nothing unless set, as for a caller with no limit.
 nonisolated struct MeasurementObserver: Sendable {
     /// After the gate; `RunCell` samples the device.
     let onBeforeRepStart: @Sendable () throws -> Void
     /// After the rep's timed work; `RunCell` samples the device.
     let onAfterRepEnd: @Sendable () throws -> Void
+    /// An attempt the rep hooks do not bracket starts (a peak-memory attempt), named for the
+    /// overrun message. Throws where the crate's does not: an engine here cannot be stopped,
+    /// so an attempt before it that ran past the limit fails the cell here.
+    var onAttemptStart: @Sendable (String) throws -> Void = { _ in }
+    /// A step the limit leaves out starts.
+    var onHold: @Sendable () -> Void = {}
+    /// It ended; the attempt goes on with the whole limit.
+    var onResume: @Sendable () -> Void = {}
+
+    /// Run `step`, which the limit leaves out, with the clock held.
+    func outside<T>(_ step: () throws -> T) rethrows -> T {
+        onHold()
+        defer { onResume() }
+        return try step()
+    }
 }
 
 /// Where a timing entry's warm-up happens.

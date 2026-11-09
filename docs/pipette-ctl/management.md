@@ -1,4 +1,4 @@
-# Management routes: CLI verbs and MCP server
+# Management routes: CLI verbs
 
 `pipette-ctl` reaches the routes of the management server (pipette-mgmt)
 that an account can call. It leaves out the routes
@@ -15,61 +15,13 @@ that an account can call. It leaves out the routes
   and [`docs/api/`](https://github.com/Liquid4All/pipette-mgmt/tree/main/docs/api)
   describe each route.
 
-There are two front ends, both generated from one table,
-`crates/pipette-ctl/src/mgmt/catalog.rs`:
-
-- **CLI verbs**: `pipette-ctl <area> <verb>`, for example
-  `pipette-ctl orgs create --slug acme`.
-- **MCP tools**: `pipette-ctl mcp serve` speaks MCP over stdio, with one tool
-  per route named `<area>_<verb>` (`orgs_create`).
-
-Each tool's input schema matches the verb's flags, because both come from the
-same catalog row. `pipette-ctl mcp tools` lists every tool with its route.
-The shared descriptions and errors name tools and arguments as MCP does; the
+Each verb is `pipette-ctl <area> <verb>`, for example
+`pipette-ctl orgs create --slug acme`, generated from one table,
+`crates/pipette-ctl/src/mgmt/catalog.rs`. The table's descriptions and errors
+name a route `<area>_<verb>` (`vault_blob_put`) and an argument by its name; the
 CLI's help spells them as its verbs, flags and positionals (`vault blob-put`,
-`--overwrite`).
-
-## MCP setup
-
-Register the server with the working directory that holds the identity:
-
-```sh
-claude mcp add pipette -- pipette-ctl --work-dir ~/pipette mcp serve
-```
-
-An MCP client can remove the arguments, or read them as its own options
-(the MCP Inspector does both). With such a client, name the directory
-through the environment:
-
-```sh
-claude mcp add pipette -e PIPETTE_WORK_DIR="$HOME/pipette" -- pipette-ctl mcp serve
-```
-
-`--server` or `PIPETTE_MGMT_SERVER` points it at a different deployment. The
-`initialize` instructions name the server and the account the session signs
-as, with its key id, or say why there is no account; without one, only the
-public catalog tools work. A working directory whose stored identity does not
-resolve reports why on every signed call, and a stored server URL that cannot
-be parsed stops `mcp serve` at startup rather than fall back to production.
-
-`GET` and `HEAD` tools carry the `readOnlyHint` annotation, except
-`vault_download`, which writes a local file. A tool carries
-`destructiveHint` if a second call cannot undo its effect:
-
-- a delete, revoke, reject or cancel;
-- a replacement of a whole set;
-- a campaign hand-off;
-- a retype;
-- a user pre-auth mint that replaces the account's other keys;
-- `vault_download` over an existing file.
-
-`pipette-ctl mcp tools --json` prints each tool's annotations.
-
-A tool call runs beside the protocol, so the server answers `ping`,
-`tools/list` and further calls while a call is in flight. Up to eight calls
-run at once. The server does not answer a call that the client cancels. A
-cancelled call that already reached the management server still takes
-effect; one that still waits for a worker does not run.
+`--overwrite`). `--server` or `PIPETTE_MGMT_SERVER` points a verb at a
+different deployment.
 
 Time limits:
 
@@ -123,11 +75,10 @@ the user identity or from `--server`. To query a different device, pass its
 client id. The server checks that your user has the permission to read that
 device.
 
-The account's own routes (`/api/v1/users/me`, key add and revoke) are MCP
-tools too. Their CLI verbs are under `auth`, which also manages local keys. If
-you revoke the key that the session signs with (`users_revoke_key`, or
-`users key-revoke` / `users_key_revoke` on your own account), every later
-call answers `401`.
+The account's own routes (`/api/v1/users/me`, key add and revoke) are the
+`auth` verbs, which also manage local keys. If you revoke the key that the
+working directory signs with (`users key-revoke` on your own account), every
+later call answers `401`.
 
 **Work is filed only through campaigns.** `campaigns create` files the first
 plan. `campaigns file`, `revise`, `variants`, `rerun` and `recalculate` file
@@ -155,13 +106,12 @@ sign in to it.
 
 ### Left out on purpose
 
-These account routes have no verb and no tool:
+These account routes have no verb:
 
 - `GET /api/v1/openapi.json`, the description of every route, is a document
   for tools to read, not an account action.
 - `POST /api/v1/users/register` is `auth register`, which also stores the
-  identity it registers. As a tool, it would spend a single-use pre-auth key
-  and store nothing.
+  identity it registers.
 - `POST /api/v1/users/register/clerk` is a browser's: a Clerk token
   authenticates it, not a key. `auth login` is the browser path here.
 - The app's page reads, `GET /api/v1/orgs/{org_id}/overview` and
@@ -177,14 +127,14 @@ These account routes have no verb and no tool:
   `benchmark_params` a submission declares; `benchmarks list` and
   `benchmarks show` read the whole entries.
 
-`POST /api/v1/campaigns/{campaign_id}/revert` has no verb and no tool either:
+`POST /api/v1/campaigns/{campaign_id}/revert` has no verb either:
 the catalog does not carry it.
 
 ## Arguments
 
-These conventions hold for every verb and tool. What one verb takes and checks
-(owner ids, plan and benchmark documents, labels, vault files, downloads) is in
-its `--help` and its tool description, both written in the catalog row.
+These conventions hold for every verb. What one verb takes and checks (owner
+ids, plan and benchmark documents, labels, vault files, downloads) is in its
+`--help`, written in the catalog row.
 
 - Path parameters are positional on the CLI (`orgs show acme`). A value of `.`
   or `..`, or one spelled like a route beside it (`clients show capabilities`,
@@ -201,8 +151,8 @@ its `--help` and its tool description, both written in the catalog row.
   addresses or handles on the campaign and vault reads, the submitters'
   addresses on the plan reads; each flag's help says which ids. Under `--all`,
   every page's `names` merge into one.
-- `--fields a,b` (MCP `fields`) keeps only those top-level keys of each row
-  of a listing, or of the answer.
+- `--fields a,b` keeps only those top-level keys of each row of a listing, or
+  of the answer.
   - The server leaves out a key with no value, so a missing key comes back
     `null`, with a note that names the keys there are.
   - A record that holds none of the keys is refused. A listing is not,
@@ -210,20 +160,15 @@ its `--help` and its tool description, both written in the catalog row.
   - Only JSON reads take `--fields`, so a write never reports failure after
     it ran.
   - An `eval` benchmark carries its whole sample set under `samples`. Name
-    `fields` without `samples` to leave the set out.
-- An MCP argument given as `null` counts as left out. The exceptions are
-  `org_id: null` on `users_set_org`, which clears membership, and
-  `owner: null` on `clients_set_owner`, which detaches the device. Both are
-  required, so leaving one out is refused, and the CLI spells the `null`
-  `none` (`users set-org user_… --org-id none`).
+    `--fields` without `samples` to leave the set out.
+- `--org-id none` on `users set-org` clears membership, and `--owner none` on
+  `clients set-owner` detaches the device. Both are required, so leaving one
+  out is refused.
 - A boolean flag, `--all` and `--overwrite` included, reads bare as `true`. A
   value follows an `=` (`--dry-run=false`), so a positional after the flag
   stays a positional.
-- A file argument (a plan, a variant edit, a benchmark definition, a vault
-  file, a download's `out`) given as a relative path over MCP resolves against
-  the directory `pipette-ctl mcp serve` was started in, not `--work-dir`, so an
-  absolute path is safest. A download stages its bytes beside `out` and moves
-  them onto it only once they match the record's digest.
+- A download stages its bytes beside `out` and moves them onto it only once
+  they match the record's digest.
 - A model with an `auth_token` in a plan or a variant edit has special
   handling; see [job generation: gated models](job-generation.md#gated-models).
 - `--json` prints the server's answer as JSON. Under `--all`, every page
@@ -240,27 +185,11 @@ its `--help` and its tool description, both written in the catalog row.
   - A text answer (a plan's document, its variants or its results) prints as
     itself.
 
-Over MCP, results are compact JSON. The tool saves a result longer than
-40,000 characters under `<work_dir>/.pipette-ctl/mcp-results/`. That limit is
-below the size at which Claude Code moves a result into a file of its own.
-The tool then answers a summary:
-
-- the absolute path and the size of the file;
-- the row count and keys of a listing, or the keys of a record;
-- a short preview;
-- a hint that names the arguments of that tool that ask for less (`fields`,
-  `limit`, its filters). A text answer (a
-plan's document, its variants or its results) is saved as itself, a `.txt`
-file, so a saved document can be passed back as a plan file. On Unix only the
-user can read the directory and its files, and only the newest hundred are
-kept. An answer that cannot be saved comes back cut at 40,000 characters with a
-note saying why, since the call has run.
-
 ## Adding a route
 
 Add one row to `ROUTES` in `crates/pipette-ctl/src/mgmt/catalog.rs`. Its CLI
-verb and MCP tool follow from the row. The tests check that tool and argument
-names stay unique and that clap accepts every generated verb.
+verb follows from the row. The tests check that route and argument names stay
+unique and that clap accepts every generated verb.
 
 - A listing that is not paged names its `rows` key.
 - A new path parameter gets a `param_help` entry in the same file.

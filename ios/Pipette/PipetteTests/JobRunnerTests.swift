@@ -121,10 +121,14 @@ import Foundation
         #expect(manifest.displayTitle == "not-a-date · 1 model · 1 benchmark")
     }
 
+    /// `pipette-ios-proxy` files an out-of-memory cell by this wording: its
+    /// `ENGINE_OUT_OF_MEMORY` fixture holds the same message.
     @Test func formatJobErrorAugmentsOutOfMemoryWithContextSizeAndDetail() {
-        let message = formatJobError(RuntimeError.outOfMemory("allocation failed"), contextSize: 8192)
-        #expect(message.contains("context size 8192"))
-        #expect(message.contains("allocation failed"))
+        #expect(formatJobError(RuntimeError.outOfMemory("failed to allocate buffer"),
+                               contextSize: 4096)
+            == "Model + context size 4096 exceeded available device memory. Try a smaller quant "
+            + "(e.g. Q4_0 instead of Q5_K_M), a smaller model, or a smaller context length. "
+            + "Underlying error: failed to allocate buffer")
     }
 
     /// A window only the load knows is not stated at all, rather than as a number the load

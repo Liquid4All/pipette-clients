@@ -120,7 +120,7 @@ import Testing
             outcome.renderedPrompt = try await LlamaExecute.withAsrClip(cell) { clip in
                 try await LlamaExecute.withCalibratedAudio(
                     request, model, cell, flags: try LlamaRuntimeFlags.forRun(request),
-                    clipPath: clip, calibrate: false
+                    clipPath: clip, calibrate: false, observer: noObserver()
                 ) { aud, _ in try await LlamaExecute.asrPrompt(aud, cell).prompt }
             }.0
         } catch {

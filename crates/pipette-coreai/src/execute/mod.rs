@@ -5,46 +5,57 @@ mod end_to_end_latency;
 mod max_memory_usage;
 mod prefill_throughput;
 
-use pipette_ops::measurement::MeasurementObserver;
+use pipette_ops::measurement::{self, MeasurementObserver};
 use pipette_ops::readiness::ReadinessGate;
 use pipette_plan_types::{BenchmarkDefinition, RunRequest, RunResponse};
 
 use crate::sidecar::require_coreai_sidecar;
 
+/// Why a batched entry fails, for [`pipette_ops::measurement::require_one_in_flight`].
+const ONE_AT_A_TIME: &str = "the Core AI sidecar serves one request at a time";
+
 /// Top-level Core AI dispatch: route a prepared [`RunRequest`] by kind.
 ///
-/// Each supported arm resolves the sidecar before its cell runs, so a
-/// first-use `swift build -c release`, which saturates every core for minutes,
-/// finishes before the readiness gate certifies the device as idle.
+/// Installation finishes during preparation. Dispatch only resolves the
+/// executable from the bound runtime before the cell runs.
 pub fn run(
     req: &RunRequest,
     readiness_gate: ReadinessGate,
     observer: &MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponse> {
     match &req.benchmark {
-        BenchmarkDefinition::PrefillThroughput(benchmark) => prefill_throughput::run(
-            req,
-            benchmark,
-            require_coreai_sidecar()?,
-            readiness_gate,
-            observer,
-        ),
-        BenchmarkDefinition::DecodeThroughput(benchmark) => decode_throughput::run(
-            req,
-            benchmark,
-            require_coreai_sidecar()?,
-            readiness_gate,
-            observer,
-        ),
-        BenchmarkDefinition::EndToEndLatency(benchmark) => end_to_end_latency::run(
-            req,
-            benchmark,
-            require_coreai_sidecar()?,
-            readiness_gate,
-            observer,
-        ),
+        BenchmarkDefinition::PrefillThroughput(benchmark) => {
+            measurement::require_one_in_flight(&req.benchmark, ONE_AT_A_TIME)?;
+            prefill_throughput::run(
+                req,
+                benchmark,
+                require_coreai_sidecar(req)?,
+                readiness_gate,
+                observer,
+            )
+        }
+        BenchmarkDefinition::DecodeThroughput(benchmark) => {
+            measurement::require_one_in_flight(&req.benchmark, ONE_AT_A_TIME)?;
+            decode_throughput::run(
+                req,
+                benchmark,
+                require_coreai_sidecar(req)?,
+                readiness_gate,
+                observer,
+            )
+        }
+        BenchmarkDefinition::EndToEndLatency(benchmark) => {
+            measurement::require_one_in_flight(&req.benchmark, ONE_AT_A_TIME)?;
+            end_to_end_latency::run(
+                req,
+                benchmark,
+                require_coreai_sidecar(req)?,
+                readiness_gate,
+                observer,
+            )
+        }
         BenchmarkDefinition::MaxMemoryUsage(benchmark) => {
-            max_memory_usage::run(req, benchmark, require_coreai_sidecar()?)
+            max_memory_usage::run(req, benchmark, require_coreai_sidecar(req)?, observer)
         }
         BenchmarkDefinition::Eval(_) => {
             anyhow::bail!("eval is not yet supported for the Core AI runtime")

@@ -78,10 +78,7 @@ fn every_cell_runs_through_the_server() -> anyhow::Result<()> {
             benchmark_flags: None,
             benchmark,
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let response = pipette_onnx_genai::run(&req, &|| Ok(()), observer, None)
             .with_context(|| req.benchmark.benchmark_id().to_owned())?;
         println!(

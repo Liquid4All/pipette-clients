@@ -1,12 +1,10 @@
-use std::path::PathBuf;
+use std::{num::NonZeroUsize, path::PathBuf};
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use pipette_ops::measurement::MeasurementObserver;
+use pipette_ops::measurement::{self as shared, MeasurementObserver, MeasurementWarmup};
 use pipette_ops::readiness::ReadinessGate;
 use pipette_ops::run_response::RunResponseBuilder;
-use pipette_plan_types::BenchmarkResultData;
 use pipette_plan_types::PrefillThroughputBenchmark;
 use pipette_plan_types::RunRequest;
 use pipette_plan_types::RunResponse;
@@ -39,56 +37,72 @@ pub(super) fn run(
         .unsigned_abs();
 
     readiness_gate()?;
-    let mut server = server::start_server(req, sidecar)?;
+    let mut server = observer.outside(|| server::start_server(req, sidecar))?;
 
-    tracing::info!(cell = ENDPOINT, prefill_tokens, "Core AI prefill warm-up");
-    throughput_http::prepare(&server)?;
-    let warmup: PrefillThroughputResponse = throughput_http::post_json(
-        &server,
-        ENDPOINT,
-        &PrefillThroughputRequest {
-            prompt_tokens: prefill_tokens,
-        },
-    )?;
-    pipette_ops::measurement::expect_tokens(
-        "warmup prompt_tokens",
-        warmup.prompt_tokens,
-        prefill_tokens,
-    )?;
-
-    let measured = pipette_ops::measurement::run(
-        ENDPOINT,
+    let result = shared::prefill(
+        benchmark,
+        NonZeroUsize::try_from(shared::REPS)?,
         readiness_gate,
         *observer,
-        |_| throughput_http::prepare(&server),
-        |_| {
-            throughput_http::post_json::<_, PrefillThroughputResponse>(
-                &server,
+        MeasurementWarmup::Once,
+        &server,
+        |server| {
+            throughput_http::prepare(server)?;
+            let response: PrefillThroughputResponse = throughput_http::post_json(
+                server,
                 ENDPOINT,
                 &PrefillThroughputRequest {
                     prompt_tokens: prefill_tokens,
                 },
-            )
-        },
-        |idx, rep| {
-            let response = &rep.value;
-            pipette_ops::measurement::expect_tokens(
-                "prompt_tokens",
-                response.prompt_tokens,
-                prefill_tokens,
             )?;
-            pipette_ops::measurement::positive_finite("prompt_tps", response.prompt_tps)
-                .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            measurement::time_ms_from_tps(ENDPOINT, prefill_tokens, response.prompt_tps)
+            Ok(shared::PrefillMeasurementReading::PerPrompt(vec![reading(
+                response,
+            )?]))
         },
     )?;
-    let stats = measured.stats();
-    Ok(
-        RunResponseBuilder::new(BenchmarkResultData::PrefillThroughput {
-            prefill_time_ms: stats.mean_ms,
-            prefill_time_ms_stddev: Some(stats.stddev_ms),
-        })
+    Ok(RunResponseBuilder::new(result)
         .process(&mut server.process)
-        .build(),
-    )
+        .build())
+}
+
+fn reading(
+    response: PrefillThroughputResponse,
+) -> anyhow::Result<shared::PrefillMeasurementPerPromptReading> {
+    let ms = measurement::time_ms_from_tps(ENDPOINT, response.prompt_tokens, response.prompt_tps)?;
+    Ok(shared::PrefillMeasurementPerPromptReading::from_millis(
+        response.prompt_tokens.try_into()?,
+        ms,
+    )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[test]
+    fn converts_the_rate_to_a_prefill_time() -> anyhow::Result<()> {
+        let r = reading(PrefillThroughputResponse {
+            prompt_tokens: 4,
+            prompt_tps: 2.0,
+        })?;
+        assert_eq!(r.prefill_time_ms.into_inner(), 2000.0);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::negative(-1.0)]
+    #[case::nan(f64::NAN)]
+    #[case::infinite(f64::INFINITY)]
+    fn rejects_an_invalid_rate(#[case] prompt_tps: f64) {
+        assert!(
+            reading(PrefillThroughputResponse {
+                prompt_tokens: 4,
+                prompt_tps,
+            })
+            .is_err()
+        );
+    }
 }

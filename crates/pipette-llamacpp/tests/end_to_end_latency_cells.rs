@@ -60,6 +60,7 @@ fn one_batch(batch_size: u32) -> anyhow::Result<()> {
             finished.set(finished.get() + 1);
             Ok(())
         },
+        ..MeasurementObserver::QUIET
     };
     let response = pipette_llamacpp::run(&req, &no_corpus(root.path()), &gate, observer, None)?;
 

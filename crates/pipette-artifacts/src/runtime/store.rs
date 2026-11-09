@@ -25,6 +25,9 @@ pub enum RuntimeStoreError {
     /// The manifest parses but is invalid: bad version or placement drift.
     #[error("installed runtime is corrupt: {0}")]
     Corrupt(String),
+    /// A bundled runtime from an older client has different embedded sources or pins.
+    #[error("runtime entry at {0} belongs to a different bundled build")]
+    Obsolete(PathBuf),
     #[error(transparent)]
     Quota(#[from] QuotaError),
     /// The install or the publish failed; staging is already cleaned up.
@@ -287,6 +290,14 @@ impl RuntimeArtifactStore {
                 }
             })
             .filter(|read| match read {
+                Err(RuntimeStoreError::Obsolete(path)) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "skipping a runtime entry from another bundled build; \
+                         run `runtimes pull` to build this client's runtime"
+                    );
+                    false
+                }
                 Err(RuntimeStoreError::Parse { path, source }) if skip_unparseable => {
                     tracing::warn!(
                         path = %path.display(),
@@ -339,7 +350,18 @@ pub(crate) fn read_manifest(entry: &Path) -> Result<RuntimeManifest, RuntimeStor
             crate::runtime::manifest::MANIFEST_VERSION
         )));
     }
-    RuntimeStorageKey::of(&m.declared)?;
+    let key = RuntimeStorageKey::of(&m.declared);
+    if matches!(&m.declared, Runtime::AppleCoreAiMacosPipette(_)) {
+        // Core AI includes this client's embedded sources in its key. An entry
+        // from another build must not advertise the currently bundled runtime.
+        let current = key
+            .as_ref()
+            .is_ok_and(|key| entry.file_name().is_some_and(|name| name == key.as_str()));
+        if !current {
+            return Err(RuntimeStoreError::Obsolete(entry.to_path_buf()));
+        }
+    }
+    key?;
     let expected = to_stored(&m.declared).map_err(|e| RuntimeStoreError::Corrupt(e.to_string()))?;
     if m.stored != expected {
         return Err(RuntimeStoreError::Corrupt(

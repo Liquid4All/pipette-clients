@@ -2,21 +2,15 @@
 //! through [`pipette_artifacts::ensure_runtime`]. It places bytes on this host
 //! without demanding that this host can run them, so there is no GPU preflight.
 
-use std::path::{Path, PathBuf};
-
 use anyhow::Context;
 use clap::{Args, Subcommand, ValueEnum};
 use tabled::Tabled;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use pipette_artifacts::{ensure_runtime, runtime_download_size};
 use pipette_artifacts_catalog::runtime::{llamacpp, mlx, onnx_genai, openvino, ovms, torch_oai};
 use pipette_http::HttpClient;
 use pipette_ops::custom_label::descriptor_sha256;
-use pipette_plan_types::{
-    AppleCoreAiMacosPipette, LlamaCppFlavor, Runtime, VllmFlavor, short_digest,
-};
+use pipette_plan_types::{LlamaCppFlavor, Runtime, VllmFlavor, short_digest};
 use pipette_programs::ExternalPrograms;
 
 use crate::artifact_ref::resolve_runtime_arg;
@@ -210,7 +204,7 @@ impl RuntimeCommand {
         console: &mut dyn Console,
     ) -> anyhow::Result<()> {
         match self {
-            RuntimeCommand::List(args) => list(ws, args.format, coreai_sidecar(), console),
+            RuntimeCommand::List(args) => list(ws, args.format, console),
             RuntimeCommand::Catalog(args) => args.execute(http, console),
             RuntimeCommand::Flavors => write_llamacpp_flavors(console),
             RuntimeCommand::Pull(args) => args.execute(ws, http, programs, console),
@@ -246,22 +240,6 @@ impl PullArgs {
         // finished bar.
         drop(progress);
 
-        // Core AI is OS-bundled: `ensure_runtime` returns the declared pin
-        // without writing a store entry. Build (or reuse) the pin-keyed sidecar
-        // here so `runtimes pull` is the place a first-use `swift build` lands,
-        // not between the readiness gate and a measurement.
-        if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
-            #[cfg(target_os = "macos")]
-            {
-                let path = pipette_coreai::require_coreai_sidecar()?;
-                println!("Ready: `{declared}` (sidecar {})", path.display());
-                return Ok(());
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                anyhow::bail!("Apple Core AI sidecar can only be built on macOS 27+");
-            }
-        }
         let entry = store
             .find(&declared)?
             .ok_or_else(|| anyhow::anyhow!("runtime missing after ensure"))?;
@@ -277,22 +255,6 @@ impl PullArgs {
 impl RemoveArgs {
     pub fn execute(self, ws: &PipetteWorkspace, console: &mut dyn Console) -> anyhow::Result<()> {
         let declared = resolve_runtime_arg(ws, &self.runtime)?;
-        if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
-            #[cfg(target_os = "macos")]
-            {
-                if pipette_coreai::clear_sidecar_cache()? {
-                    println!("Removed sidecar cache for `{declared}`");
-                } else {
-                    println!("`{declared}` is not installed");
-                }
-                return Ok(());
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                println!("`{declared}` is not installed");
-                return Ok(());
-            }
-        }
         let store = ws.runtimes();
         if store.remove(&declared)? {
             writeln!(console.out(), "Removed `{declared}`")?;
@@ -331,57 +293,27 @@ struct RuntimeRow {
     pulled: String,
 }
 
-/// The cached Core AI sidecar. Core AI has no store entry, so `list` shows it
-/// from the sidecar cache.
-fn coreai_sidecar() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        pipette_coreai::cached_sidecar()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
 fn list(
     ws: &PipetteWorkspace,
     format: ListFormat,
-    coreai_sidecar: Option<PathBuf>,
     console: &mut dyn Console,
 ) -> anyhow::Result<()> {
     write_table_or(
         console.out(),
-        &runtime_rows(ws, format, coreai_sidecar.as_deref())?,
+        &runtime_rows(ws, format)?,
         "No runtimes installed.",
     )?;
     Ok(())
 }
 
 /// The installed runtimes as `list` rows, sorted by the rendered runtime column.
-/// A cached Core AI sidecar adds a row for the bundled Core AI runtime, pulled
-/// when the sidecar was built.
-fn runtime_rows(
-    ws: &PipetteWorkspace,
-    format: ListFormat,
-    coreai_sidecar: Option<&Path>,
-) -> anyhow::Result<Vec<RuntimeRow>> {
+fn runtime_rows(ws: &PipetteWorkspace, format: ListFormat) -> anyhow::Result<Vec<RuntimeRow>> {
     let store = ws.runtimes();
     let stored = store
         .list()?
         .into_iter()
         .map(|m| Ok((m.declared.clone(), m.fetched_at_rfc3339()?)));
-    let coreai = coreai_sidecar.map(|bin| {
-        let built = std::fs::metadata(bin)
-            .and_then(|meta| meta.modified())
-            .with_context(|| format!("reading the build time of {}", bin.display()))?;
-        Ok((
-            Runtime::AppleCoreAiMacosPipette(AppleCoreAiMacosPipette::bundled()),
-            OffsetDateTime::from(built).format(&Rfc3339)?,
-        ))
-    });
     let mut rows: Vec<RuntimeRow> = stored
-        .chain(coreai)
         .map(|entry: anyhow::Result<(Runtime, String)>| {
             let (declared, pulled) = entry?;
             Ok(RuntimeRow {
@@ -922,7 +854,7 @@ mod tests {
         let docker = install(&tw.ws, DOCKER_URI)?;
         let llama = install(&tw.ws, LLAMA_URI)?;
 
-        let by_name = runtime_rows(&tw.ws, ListFormat::Name, None)?;
+        let by_name = runtime_rows(&tw.ws, ListFormat::Name)?;
         let mut expected = vec![
             (docker.cli_ref(), docker.headless_token()),
             (llama.cli_ref(), llama.headless_token()),
@@ -938,7 +870,7 @@ mod tests {
         assert!(by_name.iter().all(|row| row.pulled.ends_with('Z')));
         assert!(by_name.iter().all(|row| !row.digest.is_empty()));
 
-        let by_uri = runtime_rows(&tw.ws, ListFormat::Uri, None)?;
+        let by_uri = runtime_rows(&tw.ws, ListFormat::Uri)?;
         let mut uris = vec![DOCKER_URI.to_owned(), LLAMA_URI.to_owned()];
         uris.sort();
         assert_eq!(
@@ -951,21 +883,20 @@ mod tests {
     #[test]
     fn an_empty_store_says_nothing_is_installed() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("runtimes-list-empty")?;
-        assert!(runtime_rows(&tw.ws, ListFormat::Uri, None)?.is_empty());
+        assert!(runtime_rows(&tw.ws, ListFormat::Uri)?.is_empty());
         let mut captured = CapturedConsole::default();
-        list(&tw.ws, ListFormat::Name, None, &mut captured)?;
+        list(&tw.ws, ListFormat::Name, &mut captured)?;
         assert_eq!(captured.out_text(), "No runtimes installed.\n");
         Ok(())
     }
 
-    /// Core AI has no store entry: a cached sidecar is what lists it.
+    /// Core AI is listed from its store manifest.
     #[test]
-    fn a_cached_core_ai_sidecar_lists_the_bundled_runtime() -> anyhow::Result<()> {
+    fn a_stored_core_ai_sidecar_lists_the_bundled_runtime() -> anyhow::Result<()> {
         let tw = TempWorkspace::new("runtimes-list-coreai")?;
-        let sidecar = tw.ws.root().join("pipette-coreai-sidecar");
-        std::fs::write(&sidecar, b"")?;
         let bundled = Runtime::AppleCoreAiMacosPipette(AppleCoreAiMacosPipette::bundled());
-        let rows = runtime_rows(&tw.ws, ListFormat::Name, Some(&sidecar))?;
+        tw.ws.runtimes().ensure(&bundled, |_, _| Ok(()))?;
+        let rows = runtime_rows(&tw.ws, ListFormat::Name)?;
         assert_eq!(
             rows.iter()
                 .map(|r| (r.runtime.clone(), r.runtime_type.as_str()))

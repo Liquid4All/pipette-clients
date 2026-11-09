@@ -1,0 +1,106 @@
+mtmd: take upstream's helper and tokenize signatures
+
+The app's Swift code is shared with the main llama.cpp pin, whose mtmd passes a
+`mtmd_helper_init_opt` to `mtmd_helper_bitmap_init_from_file` and takes
+`mtmd_tokenize`'s bitmaps as `const mtmd_bitmap * const *`. This fork predates
+both, so the app does not compile against it. Adds the options struct (unused) and
+its default, and the const signature; the fork's own callers follow.
+
+Applied at build time by ios/build-llama.sh for vendor/llamacpp-prismml only. Remove
+once the fork carries upstream's signatures.
+---
+diff --git a/tools/mtmd/mtmd-cli.cpp b/tools/mtmd/mtmd-cli.cpp
+index f6c787f..32cacf9 100644
+--- a/tools/mtmd/mtmd-cli.cpp
++++ b/tools/mtmd/mtmd-cli.cpp
+@@ -184,7 +184,7 @@ struct mtmd_cli_context {
+     }
+ 
+     bool load_media(const std::string & fname) {
+-        auto res = mtmd_helper_bitmap_init_from_file(ctx_vision.get(), fname.c_str(), false);
++        auto res = mtmd_helper_bitmap_init_from_file(ctx_vision.get(), fname.c_str(), false, mtmd_helper_init_opt_default());
+         if (!res.bitmap) {
+             return false;
+         }
+diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
+index f1defb6..7d75f11 100644
+--- a/tools/mtmd/mtmd-helper.cpp
++++ b/tools/mtmd/mtmd-helper.cpp
+@@ -456,7 +456,11 @@ mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx,
+     return {nullptr, nullptr};
+ }
+ 
+-mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder) {
++mtmd_helper_init_opt mtmd_helper_init_opt_default(void) {
++    return mtmd_helper_init_opt{0};
++}
++
++mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder, mtmd_helper_init_opt /*opt*/) {
+ #ifdef _WIN32
+     int wlen = MultiByteToWideChar(CP_UTF8, 0, fname, -1, NULL, 0);
+     if (!wlen) {
+diff --git a/tools/mtmd/mtmd-helper.h b/tools/mtmd/mtmd-helper.h
+index 58dfb15..5527d9c 100644
+--- a/tools/mtmd/mtmd-helper.h
++++ b/tools/mtmd/mtmd-helper.h
+@@ -40,7 +40,15 @@ struct mtmd_helper_bitmap_wrapper {
+ // it calls mtmd_helper_bitmap_init_from_buf() internally
+ // returns nullptr on failure
+ // this function is thread-safe
+-MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder);
++// upstream's options for the helpers; nothing in them is used here yet
++struct mtmd_helper_init_opt {
++    int32_t reserved;
++};
++typedef struct mtmd_helper_init_opt mtmd_helper_init_opt;
++
++MTMD_API struct mtmd_helper_init_opt mtmd_helper_init_opt_default(void);
++
++MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder, struct mtmd_helper_init_opt opt);
+ 
+ // helper function to construct a mtmd_bitmap from a buffer containing a file
+ // supported formats:
+diff --git a/tools/mtmd/mtmd.cpp b/tools/mtmd/mtmd.cpp
+index 5b30618..8fe45d8 100644
+--- a/tools/mtmd/mtmd.cpp
++++ b/tools/mtmd/mtmd.cpp
+@@ -1697,10 +1697,11 @@ struct mtmd_tokenizer {
+ int32_t mtmd_tokenize(mtmd_context * ctx,
+             mtmd_input_chunks * output,
+             const mtmd_input_text * text,
+-            const mtmd_bitmap ** bitmaps,
++            const mtmd_bitmap * const * bitmaps,
+             size_t n_bitmaps) {
+     try {
+-        mtmd_tokenizer tokenizer(ctx, text, bitmaps, n_bitmaps);
++        // the tokenizer only reads the array; upstream's signature takes it const
++        mtmd_tokenizer tokenizer(ctx, text, const_cast<const mtmd_bitmap **>(bitmaps), n_bitmaps);
+         return tokenizer.tokenize(output);
+     } catch (const std::exception & e) {
+         LOG_ERR("%s: error: %s\n", __func__, e.what());
+diff --git a/tools/mtmd/mtmd.h b/tools/mtmd/mtmd.h
+index ef88efd..0326270 100644
+--- a/tools/mtmd/mtmd.h
++++ b/tools/mtmd/mtmd.h
+@@ -295,7 +295,7 @@ MTMD_API struct mtmd_decoder_pos mtmd_image_tokens_get_decoder_pos(const mtmd_im
+ MTMD_API int32_t mtmd_tokenize(mtmd_context * ctx,
+                                mtmd_input_chunks * output,
+                                const mtmd_input_text * text,
+-                               const mtmd_bitmap ** bitmaps,
++                               const mtmd_bitmap * const * bitmaps,
+                                size_t n_bitmaps);
+ 
+ DEPRECATED(MTMD_API int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens),
+diff --git a/tools/tts/tts.cpp b/tools/tts/tts.cpp
+index 368123b..6fd1936 100644
+--- a/tools/tts/tts.cpp
++++ b/tools/tts/tts.cpp
+@@ -103,7 +103,7 @@ int main(int argc, char ** argv) {
+ 
+     mtmd::bitmap_ptr speaker_bitmap;
+     if (!params.tts_speaker_file.empty()) {
+-        auto wrapper = mtmd_helper_bitmap_init_from_file(mctx.get(), params.tts_speaker_file.c_str(), false);
++        auto wrapper = mtmd_helper_bitmap_init_from_file(mctx.get(), params.tts_speaker_file.c_str(), false, mtmd_helper_init_opt_default());
+         if (!wrapper.bitmap) {
+             LOG_ERR("failed to load speaker file %s\n", params.tts_speaker_file.c_str());
+             return 1;

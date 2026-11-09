@@ -8,6 +8,7 @@ mod manifest;
 pub(crate) mod store;
 mod stored;
 
+pub(crate) mod coreai;
 pub(crate) mod docker;
 pub(crate) mod llamacpp;
 pub(crate) mod mlx;

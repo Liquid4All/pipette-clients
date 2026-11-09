@@ -54,7 +54,7 @@ pub fn run(
     // The cell's image-token overrides ride along so the helper counts what the
     // server will see.
     let calibration = calibration(&runtime_flags, program, model, client_config);
-    let calibrated_per_image = mtmd::calibrate(&inputs, &calibration);
+    let calibrated_per_image = observer.outside(|| mtmd::calibrate(&inputs, &calibration));
     // The 8192 floor is this benchmark's headroom on top of the shared fallback
     // (vl_max_memory has none).
     let ctx_size = inputs.ctx_size(calibrated_per_image, &runtime_flags.raw, 8192);
@@ -71,7 +71,9 @@ pub fn run(
                 ..inputs
             };
             let frames_ctx = frames.ctx_size(Some(per_image), &runtime_flags.raw, 0);
-            mtmd::calibrate_frames(&inputs, &calibration.ctx_size(Some(frames_ctx)))
+            observer.outside(|| {
+                mtmd::calibrate_frames(&inputs, &calibration.ctx_size(Some(frames_ctx)))
+            })
         })
     } else {
         calibrated_per_image
@@ -346,6 +348,7 @@ mod tests {
             &BenchmarkFlagRef::from(
                 pipette_plan_types::BenchmarkFlags::VlThroughputLlamacppCliStockToolsGgufVision {
                     http_timeout_seconds: None,
+                    attempt_timeout_seconds: None,
                     readiness: None,
                 },
             ),
@@ -358,10 +361,7 @@ mod tests {
                 gated.set(true);
                 Ok(())
             },
-            MeasurementObserver {
-                on_before_rep_start: &|| Ok(()),
-                on_after_rep_end: &|| Ok(()),
-            },
+            MeasurementObserver::QUIET,
             None,
         ) else {
             anyhow::bail!("a one-token decode cell was measured");
@@ -389,6 +389,7 @@ mod tests {
         let with_flag = pinned(Some(
             BenchmarkFlags::VlThroughputLlamacppCliStockToolsGgufVision {
                 http_timeout_seconds: Some(PositiveSeconds::try_new(7)?),
+                attempt_timeout_seconds: None,
                 readiness: None,
             },
         ));

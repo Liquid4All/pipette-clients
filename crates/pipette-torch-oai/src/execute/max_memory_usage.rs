@@ -3,7 +3,9 @@ use anyhow::Context;
 use pipette_completions::TimingRequest;
 use pipette_http::HttpClient;
 use pipette_memprobe::cgroup::{GpuPeak, GpuSource};
-use pipette_ops::measurement::{self, MaxMemoryMeasurementReading, MemoryMeasurementWarmup};
+use pipette_ops::measurement::{
+    self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{MaxMemoryUsageBenchmark, MemoryObservation, PositiveSeconds};
 
@@ -26,6 +28,7 @@ pub(super) fn run(
     model: &str,
     state: &ServerState,
     probe: memprobe::Probe,
+    observer: MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponseBuilder> {
     let prefill_tokens = benchmark
         .parameter_prefill_tokens
@@ -47,6 +50,7 @@ pub(super) fn run(
     let mut probe = Some(probe);
     let result_data = measurement::max_memory(
         &benchmark.benchmark_id,
+        observer,
         MemoryMeasurementWarmup::Cold,
         (),
         |()| {

@@ -195,6 +195,7 @@ struct ContractTests {
         case "client_run_spec": roundTrip(ClientRunSpec.self)
         case "device": roundTrip(DeviceInfo.self)
         case "eval_completion": roundTrip(BenchmarkEvalCompletion.self)
+        case "failure_code": roundTrip(FailureCode.self)
         default: throw UnknownSection(file: file)
         }
     }
@@ -264,8 +265,9 @@ struct ContractTests {
             Issue.record("\(file) does not decode: \(error). Mirror its variants, or refuse one.")
             return
         }
-        let got = try JSONSerialization.jsonObject(with: encoded) as? NSDictionary
-        let want = try JSONSerialization.jsonObject(with: json) as? NSDictionary
+        // As objects, not dictionaries: a `failure_code` example is a bare string.
+        let got = try Self.json(encoded) as? NSObject
+        let want = try Self.json(json) as? NSObject
         #expect(got == want, "\(file) re-encodes differently: \(String(decoding: encoded, as: UTF8.self))")
     }
 

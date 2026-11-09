@@ -23,8 +23,12 @@ decode the first-to-last-token interval scaled from `decode_tokens - 1` to
 `decode_tokens`, and end-to-end one streamed request, from the send to its
 finish chunk. One untimed request at the cell's own shape precedes the five
 repetitions. The load stays outside every request. A request waits up to 3600
-seconds for its headers, then for each chunk, unless the plan pins
-`http_timeout_seconds`; the bound permits a long CPU prefill. The server
+seconds for its headers, then for each chunk, which permits a long CPU
+prefill. That wait is fixed: no ONNX GenAI cell takes `http_timeout_seconds`.
+The limit a plan can set is `attempt_timeout_seconds`: each repetition is one
+attempt under it, 300 s by default, so a prefill longer than that needs a
+higher limit on the cell
+([the attempt limit](pipette-cli/usage.md#5c-the-attempt-limit)). The server
 generates one sequence at a time, so the timing cells refuse a batched entry.
 
 Every cell sends text sized through the server's `/tokenize`. The server encodes

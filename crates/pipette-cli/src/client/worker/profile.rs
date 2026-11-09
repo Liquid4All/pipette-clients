@@ -252,20 +252,7 @@ fn client_version_capability_flag(version: &str) -> Option<String> {
         .then(|| format!("client_version:{canonical}"))
 }
 
-/// Capability of the bundled Core AI engine when this host can run the sidecar.
-fn host_coreai_capabilities() -> Vec<String> {
-    #[cfg(target_os = "macos")]
-    {
-        if pipette_coreai::sidecar_obtainable() {
-            return runtime_capability_flags(&Runtime::AppleCoreAiMacosPipette(Default::default()));
-        }
-    }
-    Vec::new()
-}
-
-/// Union of capability flags across every installed runtime in the workspace,
-/// plus the Core AI flags when this host can run Core AI. Core AI has no store
-/// entry, so a host probe ([`host_coreai_capabilities`]) reports it.
+/// Union of the capability flags of the intact entries in the runtime store.
 ///
 /// No `job_schema:<n>` flag is reported: no plan emits one yet (the mgmt repo's
 /// `docs/plan-ingestion.md`, "Schema revisions ride on capability flags"). Add
@@ -276,17 +263,6 @@ fn host_coreai_capabilities() -> Vec<String> {
 ///
 /// [`RuntimeArtifactStore::list_intact`]: pipette_artifacts::runtime::RuntimeArtifactStore::list_intact
 pub fn installed_runtime_capabilities(
-    runtimes: &pipette_artifacts::runtime::RuntimeArtifactStore,
-) -> Result<Vec<String>> {
-    let flags: std::collections::BTreeSet<_> = stored_runtime_capabilities(runtimes)?
-        .into_iter()
-        .chain(host_coreai_capabilities())
-        .collect();
-    Ok(flags.into_iter().collect())
-}
-
-/// Union of capability flags across the runtime store's entries, sorted.
-fn stored_runtime_capabilities(
     runtimes: &pipette_artifacts::runtime::RuntimeArtifactStore,
 ) -> Result<Vec<String>> {
     let manifests = runtimes.list_intact().map_err(|e| Error::Other(e.into()))?;
@@ -774,14 +750,14 @@ source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3" }"#;
     fn installed_runtime_capabilities_is_empty_when_nothing_is_installed() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
         let never_created = RuntimeArtifactStore::new(tmp.path().join("runtimes"));
-        assert!(stored_runtime_capabilities(&never_created)?.is_empty());
+        assert!(installed_runtime_capabilities(&never_created)?.is_empty());
 
         // An existing but empty `runtimes/` (after `runtimes remove`) is a
         // different code path.
         let emptied = tmp.path().join("emptied");
         std::fs::create_dir_all(&emptied)?;
         let store = RuntimeArtifactStore::new(emptied);
-        assert!(stored_runtime_capabilities(&store)?.is_empty());
+        assert!(installed_runtime_capabilities(&store)?.is_empty());
         Ok(())
     }
 
@@ -793,7 +769,7 @@ source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3" }"#;
         let tmp = tempfile::tempdir()?;
         let store = store_holding(tmp.path(), &[LLAMA_B9050, MLX_0_31_3, LLAMA_B10216])?;
         assert_eq!(
-            stored_runtime_capabilities(&store)?,
+            installed_runtime_capabilities(&store)?,
             vec![
                 "runtime:llama_cpp",
                 "runtime:llama_cpp:b10216",
@@ -805,7 +781,7 @@ source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3" }"#;
         Ok(())
     }
 
-    /// The bundled Core AI runtime's flags, as the host probe reports them.
+    /// The bundled Core AI runtime's flags, as its store manifest reports them.
     #[test]
     fn the_bundled_core_ai_runtime_reports_its_coreai_models_commit() {
         assert_eq!(
@@ -829,7 +805,7 @@ source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3" }"#;
         let tmp = tempfile::tempdir()?;
         let store = store_holding(tmp.path(), &[LLAMA_B9050, MLX_0_31_3])?;
         assert!(
-            stored_runtime_capabilities(&store)?
+            installed_runtime_capabilities(&store)?
                 .iter()
                 .all(|flag| !flag.starts_with("job_schema:"))
         );
@@ -849,7 +825,7 @@ source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3" }"#;
         std::fs::write(&torn, [0u8; 444])?;
 
         let (caps, logged) =
-            crate::test_support::logged_text(|| stored_runtime_capabilities(&store))?;
+            crate::test_support::logged_text(|| installed_runtime_capabilities(&store))?;
 
         assert_eq!(caps?, vec!["runtime:llama_cpp", "runtime:llama_cpp:b9050"]);
         assert!(
@@ -869,7 +845,7 @@ source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3" }"#;
         std::fs::create_dir_all(&unknown)?;
         std::fs::write(unknown.join("manifest.toml"), b"foo = 1\n")?;
 
-        assert!(stored_runtime_capabilities(&store).is_err());
+        assert!(installed_runtime_capabilities(&store).is_err());
         Ok(())
     }
 
@@ -1494,6 +1470,31 @@ source = { type = "pip_requirements_text", contents = "mlx-lm==0.31.3" }"#;
             )
             .is_err()
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coreai_store_tests {
+    use super::*;
+    #[test]
+    fn coreai_capability_requires_an_installed_manifest() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store =
+            pipette_artifacts::runtime::RuntimeArtifactStore::new(tmp.path().join("runtimes"));
+        assert!(installed_runtime_capabilities(&store)?.is_empty());
+        let runtime = Runtime::AppleCoreAiMacosPipette(Default::default());
+        store.ensure(&runtime, |_, blobs| {
+            std::fs::write(blobs.join("pipette-coreai-sidecar"), b"test")?;
+            Ok(())
+        })?;
+        assert_eq!(installed_runtime_capabilities(&store)?, {
+            let mut flags = runtime_capability_flags(&runtime);
+            flags.sort();
+            flags
+        });
+        store.remove(&runtime)?;
+        assert!(installed_runtime_capabilities(&store)?.is_empty());
         Ok(())
     }
 }

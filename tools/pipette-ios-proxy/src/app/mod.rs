@@ -61,13 +61,23 @@ pub(crate) const KILLED_BY_IOS: &str = "App terminated due to signal 9.";
 /// `[HEADLESS] error jobRun <benchmark> / <model> failed: <error>`.
 const CELL_FAILED: &str = "[HEADLESS] error jobRun ";
 
+/// How the app words an attempt it stopped past the plan's
+/// `attempt_timeout_seconds` (`AttemptTimeoutError`): `rep 2 ran 300.4s, past
+/// attempt_timeout_seconds (300s), and was stopped`.
+const ATTEMPT_TIMED_OUT: &str = "s, past attempt_timeout_seconds (";
+
+/// How `formatJobError` words a `RuntimeError.outOfMemory`: the model and its
+/// context did not fit in the app's memory.
+pub(crate) const OUT_OF_MEMORY: &str = "exceeded available device memory";
+
 /// How the app words an engine failure (`RuntimeError`, `formatJobError`): an
-/// engine operation (load, tokenize, decode) or its backend failed, or the model
-/// and its context did not fit in the app's memory.
-const ENGINE_FAILED: [&str; 3] = [
+/// engine operation (load, tokenize, decode) or its backend failed, it ran out
+/// of memory, or an attempt ran past its limit.
+const ENGINE_FAILED: [&str; 4] = [
     " failed: Engine error: ",
     " failed: Engine backend failed: ",
-    "exceeded available device memory",
+    OUT_OF_MEMORY,
+    ATTEMPT_TIMED_OUT,
 ];
 
 /// Engine errors that are not the cell's: llama.cpp's load failures on the file
@@ -121,6 +131,12 @@ pub(crate) fn engine_failure(stderr: &str) -> Option<String> {
             .iter()
             .any(|text| NOT_THE_CELLS.iter().any(|m| text.contains(m)));
     the_cells.then(|| entry.join(" | "))
+}
+
+/// Whether an [`engine_failure`] entry is an attempt the app stopped at its
+/// `attempt_timeout_seconds` rather than an engine error.
+pub(crate) fn attempt_timed_out(entry: &str) -> bool {
+    entry.contains(ATTEMPT_TIMED_OUT)
 }
 
 /// How long the app's engine has had the cell, read off stderr as each line
@@ -395,6 +411,18 @@ mod tests {
 
     const DISPATCH: &str = "[HEADLESS] info jobRun dispatch: RunRequest()";
 
+    /// The app's line for an attempt it stopped is the engine's failure, read as a timeout.
+    #[test]
+    fn an_attempt_past_its_limit_is_the_engines() {
+        let line = "[HEADLESS] error jobRun decode_throughput_256 / LiquidAI/LFM2-350M-GGUF \
+                    failed: rep 2 ran 300.4s, past attempt_timeout_seconds (300s), and was \
+                    stopped";
+        let stderr = format!("{DISPATCH}\n{line}\n");
+        let entry = engine_failure(&stderr);
+        assert_eq!(entry.as_deref(), Some(line));
+        assert!(entry.as_deref().is_some_and(attempt_timed_out));
+    }
+
     #[rstest]
     #[case::dispatched(DISPATCH, true)]
     #[case::before_dispatch("[HEADLESS] info jobRun fetching", false)]
@@ -405,8 +433,9 @@ mod tests {
              llama_model_load: error loading model architecture: unknown model architecture: \
              'lfm3'\n\n[HEADLESS] info jobRun sweep done\n"
         );
+        let entry = engine_failure(&stderr);
         assert_eq!(
-            engine_failure(&stderr),
+            entry,
             found.then(|| {
                 "[HEADLESS] error jobRun decode_throughput_256 / m failed: Engine error: model \
                  load failed: /m/q.gguf: llama_model_loader: loaded meta data | \
@@ -415,5 +444,6 @@ mod tests {
                     .to_owned()
             })
         );
+        assert!(!entry.as_deref().is_some_and(attempt_timed_out));
     }
 }

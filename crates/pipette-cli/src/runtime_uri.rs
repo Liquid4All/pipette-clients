@@ -834,7 +834,7 @@ pub fn runtime_to_uri(runtime: &Runtime) -> Result<String, RuntimeUriError> {
             Ok(body.finish())
         }
         Runtime::AppleCoreAiMacosPipette(rt) => {
-            if !rt.is_bundled() {
+            if !rt.is_bundled() || !rt.source.is_bundled() {
                 return Err(RuntimeUriError::NotRepresentable(
                     "non-bundled Core AI Swift stack".to_owned(),
                 ));
@@ -874,12 +874,13 @@ pub fn parse_runtime_arg(arg: &str) -> anyhow::Result<Runtime> {
     // A JSON/TOML `Runtime` object bypasses the URI grammar, so re-check the
     // Core AI pin here: the sidecar is compiled against the bundled stack only,
     // and a non-bundled `packages` would record a pin the binary does not have.
+    // The store builds the sidecar itself, so the source must also be bundled.
     if let Runtime::AppleCoreAiMacosPipette(rt) = &runtime
-        && !rt.is_bundled()
+        && (!rt.is_bundled() || !rt.source.is_bundled())
     {
         anyhow::bail!(
-            "the core-ai-macos-pipette runtime pins a Swift stack that this client \
-             does not contain. Use the bundled pin."
+            "the core-ai-macos-pipette runtime names a Swift stack or a source that \
+             this client does not bundle. Use the bundled pin."
         );
     }
     Ok(runtime)
@@ -1640,6 +1641,16 @@ mod core_ai_port_tests {
         let json = serde_json::to_string(&Runtime::AppleCoreAiMacosPipette(foreign))?;
         let Err(err) = parse_runtime_arg(&json) else {
             anyhow::bail!("a foreign Swift stack was accepted");
+        };
+        anyhow::ensure!(format!("{err:#}").contains("bundled pin"), "{err:#}");
+
+        let mut relocated = AppleCoreAiMacosPipette::bundled();
+        relocated.source = pipette_plan_types::AppleCoreAiMacosPipetteSource::RelativeDir {
+            dir: pipette_plan_types::RelativePath::try_new("blobs")?,
+        };
+        let json = serde_json::to_string(&Runtime::AppleCoreAiMacosPipette(relocated))?;
+        let Err(err) = parse_runtime_arg(&json) else {
+            anyhow::bail!("a non-bundled Core AI source was accepted");
         };
         anyhow::ensure!(format!("{err:#}").contains("bundled pin"), "{err:#}");
         Ok(())

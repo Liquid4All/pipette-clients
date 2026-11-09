@@ -23,7 +23,7 @@ use pipette_mgmt_client::types::{
 use pipette_mgmt_client::{ClientIdentity, Error as MgmtError, client_api};
 use pipette_plan_types::JobAccepted;
 
-use crate::releases::catalog::RUNTIME_BUILD_FLAG_PREFIX;
+use crate::RUNTIME_BUILD_FLAG_PREFIX;
 use crate::timing;
 
 const USER_AGENT: &str = "pipette-ios-proxy";

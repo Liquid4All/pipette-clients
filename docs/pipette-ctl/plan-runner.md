@@ -224,6 +224,14 @@ launch omits when neither is set. The plan's `auth_token` is not forwarded:
 the app does not read it, and `--environment-variables` sits on the Mac's
 command line.
 
+The launch carries no `benchmark-flags=`, so a cell's `benchmark_flags` do not
+reach the app. A plan's `attempt_timeout_seconds` is dropped: the app runs each
+cell under its own default, 300 s on the timing, throughput and memory cells
+([the attempt limit](../pipette-cli/usage.md#5c-the-attempt-limit)). A
+per-cell `readiness` block is dropped the same way. A job that the farm's
+`pipette-ios-proxy` claims does pass the cell's `benchmark_flags` to the app
+([DESIGN.md section 4](../../tools/pipette-ios-proxy/DESIGN.md#4-one-job)).
+
 ```toml
 [[transports]]
 type = "ios"

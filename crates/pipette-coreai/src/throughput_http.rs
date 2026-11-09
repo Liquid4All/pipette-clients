@@ -24,9 +24,8 @@ where
 }
 
 /// Reset the key-value (KV) cache and let the engine settle. This step is not
-/// timed. Call it from the prepare closure of `measurement::run`, and before
-/// the warm-up, so the 50 ms sleep of the sidecar stays outside the end-to-end
-/// timer.
+/// timed. Call it before each timed request, including the warm-up. The 50 ms
+/// sleep of the sidecar then stays outside the end-to-end timer.
 pub(super) fn prepare(server: &ServerHandle) -> anyhow::Result<()> {
     let _: serde_json::Value = post_json(server, "/prepare", &serde_json::json!({}))?;
     Ok(())

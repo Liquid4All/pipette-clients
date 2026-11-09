@@ -119,10 +119,7 @@ mod tests {
                 gated.set(true);
                 Ok(())
             },
-            MeasurementObserver {
-                on_before_rep_start: &|| Ok(()),
-                on_after_rep_end: &|| Ok(()),
-            },
+            MeasurementObserver::QUIET,
             None,
         ) else {
             anyhow::bail!("a one-token decode cell was measured");

@@ -1014,4 +1014,4 @@ The platform readiness probes are implemented in
 The Core AI runner is
 [`pipette-coreai execute::end_to_end_latency`](../../crates/pipette-coreai/src/execute/end_to_end_latency.rs),
 and its sidecar is
-[`pipette-coreai-sidecar`](../../crates/pipette-coreai/swift/Sources/pipette-coreai-sidecar/main.swift).
+[`pipette-coreai-sidecar`](../../crates/pipette-artifacts/swift/Sources/pipette-coreai-sidecar/main.swift).

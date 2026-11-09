@@ -6,7 +6,8 @@ use anyhow::Context;
 
 use pipette_plan_types::{BenchmarkResultData, ByteCount, VlMaxMemoryBenchmark};
 
-use super::{AttemptError, MemoryMeasurementWarmup};
+use super::max_memory::{PEAK_MEMORY_MEASURED, PEAK_MEMORY_WARM_UP};
+use super::{AttemptError, MeasurementObserver, MemoryMeasurementWarmup};
 use crate::generation::Generation;
 
 /// A reading a VL peak-memory cell cannot use.
@@ -46,6 +47,7 @@ pub struct VlMaxMemoryMeasurementReading {
 /// afterwards, a failed or refused run included.
 pub fn vl_max_memory<C>(
     benchmark: &VlMaxMemoryBenchmark,
+    observer: MeasurementObserver<'_>,
     warmup: MemoryMeasurementWarmup,
     mut ctx: C,
     mut attempt: impl FnMut(&mut C) -> Result<VlMaxMemoryMeasurementReading, AttemptError>,
@@ -55,8 +57,10 @@ pub fn vl_max_memory<C>(
 
     if warmup == MemoryMeasurementWarmup::Once {
         let label = format!("{marker} warm-up");
+        (observer.on_attempt_start)(PEAK_MEMORY_WARM_UP);
         measure(&label, &mut ctx, &mut attempt).context(label)?;
     }
+    (observer.on_attempt_start)(PEAK_MEMORY_MEASURED);
     measure(&marker, &mut ctx, &mut attempt).context(marker)
 }
 
@@ -161,9 +165,13 @@ mod tests {
         #[case] expected: Result<(u64, Option<u64>, Option<u64>), &str>,
     ) -> anyhow::Result<()> {
         match (
-            vl_max_memory(&body()?, MemoryMeasurementWarmup::Cold, (), |()| {
-                Ok(reading)
-            }),
+            vl_max_memory(
+                &body()?,
+                MeasurementObserver::QUIET,
+                MemoryMeasurementWarmup::Cold,
+                (),
+                |()| Ok(reading),
+            ),
             expected,
         ) {
             (Ok(result_data), Ok((host, gpu, npu))) => assert_eq!(
@@ -233,11 +241,24 @@ mod tests {
         #[case] field: &str,
     ) -> anyhow::Result<()> {
         let fits = reading(TOO_LARGE - 1, Some(TOO_LARGE - 1), Some(TOO_LARGE - 1));
-        assert!(vl_max_memory(&body()?, MemoryMeasurementWarmup::Cold, (), |()| Ok(fits)).is_ok());
+        assert!(
+            vl_max_memory(
+                &body()?,
+                MeasurementObserver::QUIET,
+                MemoryMeasurementWarmup::Cold,
+                (),
+                |()| Ok(fits)
+            )
+            .is_ok()
+        );
 
-        let Err(err) = vl_max_memory(&body()?, MemoryMeasurementWarmup::Cold, (), |()| {
-            Ok(too_large)
-        }) else {
+        let Err(err) = vl_max_memory(
+            &body()?,
+            MeasurementObserver::QUIET,
+            MemoryMeasurementWarmup::Cold,
+            (),
+            |()| Ok(too_large),
+        ) else {
             anyhow::bail!("a peak of {TOO_LARGE} bytes was accepted");
         };
         assert!(
@@ -257,6 +278,7 @@ mod tests {
         let mut recorded = Vec::new();
         let err = vl_max_memory(
             &body()?,
+            MeasurementObserver::QUIET,
             MemoryMeasurementWarmup::Cold,
             &mut recorded,
             |recorded| {
@@ -279,21 +301,40 @@ mod tests {
     }
 
     /// A warm-up runs the attempt first; its reading is checked, then dropped
-    /// for the measured one's.
+    /// for the measured one's. Each starts an attempt of its own.
     #[rstest]
-    #[case::cold(MemoryMeasurementWarmup::Cold, vec![8])]
-    #[case::once(MemoryMeasurementWarmup::Once, vec![16, 8])]
+    #[case::cold(MemoryMeasurementWarmup::Cold, vec![8], &[PEAK_MEMORY_MEASURED])]
+    #[case::once(
+        MemoryMeasurementWarmup::Once,
+        vec![16, 8],
+        &[PEAK_MEMORY_WARM_UP, PEAK_MEMORY_MEASURED]
+    )]
     fn a_warm_up_runs_the_attempt_first(
         #[case] warmup: MemoryMeasurementWarmup,
         #[case] expected: Vec<u64>,
+        #[case] attempts: &[&str],
     ) -> anyhow::Result<()> {
+        let started = std::sync::Mutex::new(Vec::new());
+        let observer = MeasurementObserver {
+            on_attempt_start: &|what| {
+                started
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(what.to_owned());
+            },
+            ..MeasurementObserver::QUIET
+        };
         let mut peaks = expected.clone().into_iter();
         let mut read = Vec::new();
-        let result_data = vl_max_memory(&body()?, warmup, &mut read, |read| {
+        let result_data = vl_max_memory(&body()?, observer, warmup, &mut read, |read| {
             let peak = peaks.next().context("the attempt ran once too often")?;
             read.push(peak);
             Ok(reading(peak, None, None))
         })?;
+        let started = started
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        anyhow::ensure!(started == attempts, "{started:?}");
         assert_eq!(read, expected);
         assert_eq!(
             result_data,
@@ -326,6 +367,7 @@ mod tests {
         let mut recorded = Vec::new();
         let err = vl_max_memory(
             &body()?,
+            MeasurementObserver::QUIET,
             MemoryMeasurementWarmup::Once,
             &mut recorded,
             |recorded| {

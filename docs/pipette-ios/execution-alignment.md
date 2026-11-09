@@ -43,6 +43,9 @@ this repo.
 | `REPS` | `crates/pipette-ops/src/measurement/mod.rs` |
 | `build_prompt_text` | `crates/pipette-ops/src/prompt_seed.rs` |
 | `EvalCompletionsStore`, `run_request_digest` | `crates/pipette-ops/src/eval_completions.rs` |
+| `MeasurementObserver` | `crates/pipette-ops/src/measurement/mod.rs` |
+| `attempt` (`limit`, `LOAD_AND_WARM_UP`, `Overrun`; Swift: `Attempt`), `AttemptTimeoutError` | `crates/pipette-ops/src/attempt.rs` |
+| `Clock`, `watched` (Swift: `AttemptClock`, `AttemptWatchdog`) | `crates/pipette-cli/src/attempt_watchdog.rs` |
 
 ## The cell
 
@@ -150,6 +153,20 @@ failure.
 counterpart; desktop MLX leaves them unfilled too. The llama engine's load log
 (`LlamaCpp.capturedLoadLog`) reaches the record and `extras.json` through
 `RuntimeOutput`.
+
+**An attempt past its limit cannot be stopped.** The crate's watchdog stops the
+run's children, which an in-process engine does not have. `RunCell.dispatchRun`
+makes the run's `AttemptClock` as the crate's `dispatch_run` makes its clock,
+and the engines mark it through the same `MeasurementObserver` hooks;
+`AttemptWatchdog` watches it from a thread of its own. Past the limit a claimed
+launch (`claim=`) saves the cell as failed, clears its crash sentinel, logs the
+failed cell and `BENCH_DONE 1 failed: …`, and ends with `HeadlessExit.abandon`,
+which needs no main actor. Every other run, the resident app's included, keeps
+the overrun on the clock and fails the cell with `AttemptTimeoutError` at the
+next boundary: a readiness gate, a rep's start or end, a peak-memory attempt,
+or the engine's return. So `onAttemptStart` throws, where the crate's
+`on_attempt_start` cannot fail. The iOS `vl_spec_decode` cells take no limit,
+so a corpus sample is never an attempt here.
 
 **One in-process load, not a process per rep.** `llama-bench` runs a fresh
 process per rep; this client loads once and measures `REPS` reps against that

@@ -783,7 +783,7 @@ struct ClaimTests {
         #expect(err.map(classifyRunError) == false)
     }
 
-    /// `max_memory_usage` does not gate, so it has no benchmark flags variant.
+    /// `max_memory_usage` does not gate, so its variant has no readiness field.
     @Test func planConfigRetiresBenchmarkFlagsOnAnUngatedCell() throws {
         let job = try Self.claimedJob(benchmarkId: "max_memory_usage_512", spec: [
             "benchmark": "max_memory_usage_512",
@@ -797,7 +797,29 @@ struct ClaimTests {
             ],
         ])
         let err = try refusal(job, "expected an ungated cell to refuse a readiness block")
+        guard case .flagNotAcceptedByCell(_, "readiness", _)? = err else {
+            Issue.record("expected flagNotAcceptedByCell, got \(String(describing: err))"); return
+        }
         #expect(err.map(classifyRunError) == false)
+    }
+
+    /// The attempt limit, and the retired `bench_timeout_seconds` a queued spec may still
+    /// carry, which is absorbed unread.
+    @Test func planConfigCarriesTheAttemptLimit() throws {
+        let cfg = try ClientRunSpec.validated(job: Self.claimedJob(
+            benchmarkId: "max_memory_usage_512", spec: [
+                "benchmark": "max_memory_usage_512",
+                "runtime": Self.llamaRuntime,
+                "model": Self.ggufModel,
+                "benchmark_flags": [
+                    "benchmark_type": "max_memory_usage",
+                    "runtime_type": "llamacpp_ios_pipette",
+                    "model_type": "gguf_text",
+                    "attempt_timeout_seconds": 2400,
+                    "bench_timeout_seconds": 2400,
+                ],
+            ]))
+        #expect(cfg.benchmarkFlags?.attemptTimeoutSeconds == 2400)
     }
 
     // MARK: - Which claims a device will take

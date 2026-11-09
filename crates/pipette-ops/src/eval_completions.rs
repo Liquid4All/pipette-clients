@@ -3,8 +3,9 @@
 //! Layout under `root/` (= workspace `state/evals/`):
 //!
 //! ```text
-//! <digest16>.jsonl          # header + completion lines
-//! <digest16>.jsonl.stale-*  # rotated on digest mismatch / corrupt header
+//! <digest16>.jsonl                             # header + completion lines
+//! <digest16>.part-<i>-of-<N>-<pid>-<ns>.jsonl  # one --eval-shard run's rows
+//! <file>.stale-*                               # rotated on digest mismatch / corrupt header
 //! ```
 //!
 //! The digest covers portable fields only, never bound host paths, so a cell
@@ -59,6 +60,58 @@ struct Header {
     http_timeout_seconds: Option<PositiveSeconds>,
 }
 
+/// Group `index` of `count` of an eval cell's samples (`--eval-shard I/N`):
+/// sample id S is in group `u64::from_be_bytes(SHA-256(S)[..8]) % count`. The
+/// pool dispatcher and a split run by hand rely on this rule never changing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvalShard {
+    index: u32,
+    count: u32,
+}
+
+impl EvalShard {
+    pub fn holds(&self, id: &str) -> bool {
+        Sha256::digest(id.as_bytes())
+            .iter()
+            .take(8)
+            .fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+            % u64::from(self.count)
+            == u64::from(self.index)
+    }
+}
+
+/// `I/N` with `0 <= I < N`, read as pipette-ctl reads `--shard`.
+impl std::str::FromStr for EvalShard {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (i, n) = s
+            .split_once('/')
+            .ok_or_else(|| format!("expected INDEX/COUNT, got '{s}'"))?;
+        let index = i
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| format!("invalid shard index '{i}'"))?;
+        let count = n
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| format!("invalid shard count '{n}'"))?;
+        if count == 0 {
+            return Err("shard count must be >= 1".to_string());
+        }
+        if index >= count {
+            return Err(format!("shard index {index} must be < count {count}"));
+        }
+        Ok(Self { index, count })
+    }
+}
+
+impl std::fmt::Display for EvalShard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.index, self.count)
+    }
+}
+
 /// Capability handle for eval sample completions (`root/` = `state/evals/`).
 ///
 /// Layout is private. A run gets its store from its
@@ -66,13 +119,24 @@ struct Header {
 #[derive(Debug, Clone)]
 pub struct EvalCompletionsStore {
     root: PathBuf,
+    shard: Option<EvalShard>,
 }
 
 impl EvalCompletionsStore {
     /// `root` is this store's directory; it is created on first open, so any
     /// path works. The workspace picks the location (see `PipetteWorkspace`).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            shard: None,
+        }
+    }
+
+    /// Under a shard, an open writes a part file of its own and changes no
+    /// other file, and [`Self::finalize`] refuses.
+    #[must_use]
+    pub fn with_shard(self, shard: Option<EvalShard>) -> Self {
+        Self { shard, ..self }
     }
 
     pub fn root(&self) -> &Path {
@@ -92,23 +156,56 @@ impl EvalCompletionsStore {
                 .as_ref()
                 .and_then(BenchmarkFlags::http_timeout),
         };
-        EvalCompletionSession::open_in(&self.root, &header)
+        EvalCompletionSession::open_in(&self.root, &header, self.shard)
     }
 
-    /// Retire the checkpoint of a run whose result is safe: delete it, or keep
-    /// only its failed rows, one line per attempt spent, so a later run under
-    /// the same HTTP timeout retries each only while it has attempts left
-    /// ([`MAX_SAMPLE_ATTEMPTS`]). Nothing to do when there is no checkpoint.
+    /// Retire the checkpoint of a run whose result is safe, with the parts
+    /// `--eval-shard` runs left beside it: the parts are deleted, and the
+    /// checkpoint is deleted or keeps only the failed rows, one line per
+    /// attempt spent over every file, so a later run under the same HTTP
+    /// timeout retries each only while it has attempts left
+    /// ([`MAX_SAMPLE_ATTEMPTS`]).
     ///
-    /// Reads the file rather than a session, since the engine that wrote it has
-    /// returned: the last row per id is the one that counts, as on resume.
+    /// Reads the files rather than a session, since the engine that wrote them
+    /// has returned: the rows fold as on resume.
     pub fn finalize(&self, digest: &EvalRunDigest) -> anyhow::Result<()> {
-        let path = session_path(&self.root, digest);
-        if !path.exists() {
+        anyhow::ensure!(
+            self.shard.is_none(),
+            "an --eval-shard run finalizes nothing: the run without --eval-shard folds the \
+             parts in and finalizes the cell"
+        );
+        if !self.root.exists() {
             return Ok(());
         }
+        let path = session_path(&self.root, digest);
+        let parts: Vec<PathBuf> = cell_files(&self.root, digest)?
+            .into_iter()
+            .filter(|file| *file != path)
+            .collect();
         // A digest mismatch has already rotated the file away.
-        let Some((header, completions, attempts)) = load_existing(&path, digest)? else {
+        let checkpoint = if path.exists() {
+            load_existing(&path, digest, true)?
+        } else {
+            None
+        };
+        let folded = checkpoint.map(|(header, completions, attempts)| {
+            let parts = parts
+                .iter()
+                .filter_map(|part| read_other(part, &header, None));
+            let rows = fold(std::iter::once((completions, attempts)).chain(parts));
+            (header, rows)
+        });
+        // Before the rewrite, so a crash between the two loses only attempt
+        // history and never hands the parts' answers to a later run.
+        parts
+            .iter()
+            .try_for_each(|part| match fs::remove_file(part) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(e).with_context(|| format!("failed to remove {}", part.display()))
+                }
+                Ok(()) | Err(_) => Ok(()),
+            })?;
+        let Some((header, (completions, attempts))) = folded else {
             return Ok(());
         };
         // Attempts are counted from failed lines, so one line per id would
@@ -392,13 +489,14 @@ fn vlm_eval_digest_view(req: &RunRequest) -> anyhow::Result<Value> {
 fn resume_relevant_benchmark_flags(flags: &Option<BenchmarkFlags>) -> Option<BenchmarkFlagRef> {
     let mut flags = BenchmarkFlagRef::from(flags.clone()?);
     flags.http_timeout_seconds = None;
-    flags.bench_timeout_seconds = None;
+    flags.attempt_timeout_seconds = None;
     let BenchmarkFlagRef {
         runtime_type: _,
         model_type: _,
         benchmark_type: _,
         http_timeout_seconds: _,
-        bench_timeout_seconds: _,
+        attempt_timeout_seconds: _,
+        _bench_timeout_obsolete: _,
         _doomloop_obsolete: _,
         readiness,
     } = &flags;
@@ -419,23 +517,29 @@ pub struct EvalCompletionSession {
     completions: Vec<BenchmarkEvalCompletion>,
     done_ids: HashSet<String>,
     failed_count: usize,
-    /// Failed rows per id in the file, its attempts spent. The file is
-    /// append-only, so every attempt left a line though `completions` keeps
-    /// only the last.
+    /// Failed rows per id over the cell's files, its attempts spent. The
+    /// files are append-only, so every attempt left a line though
+    /// `completions` keeps only one.
     failed_attempts: HashMap<String, u32>,
     /// The ids this run recorded as not fitting its context
     /// ([`Self::record_unfit`]): failed in memory, absent from the file.
     unfit: HashSet<String>,
+    shard: Option<EvalShard>,
 }
 
 impl EvalCompletionSession {
-    fn open_in(root: &Path, header: &Header) -> anyhow::Result<Self> {
+    /// The run's own file is the checkpoint, or under a shard a new part;
+    /// every other file of the cell is read and folded in after it.
+    fn open_in(root: &Path, header: &Header, shard: Option<EvalShard>) -> anyhow::Result<Self> {
         fs::create_dir_all(root)
             .with_context(|| format!("failed to create eval completions dir {}", root.display()))?;
-        let path = session_path(root, &header.digest);
+        let path = match shard {
+            None => session_path(root, &header.digest),
+            Some(shard) => part_path(root, &header.digest, shard)?,
+        };
 
         let loaded = if path.exists() {
-            match load_existing(&path, &header.digest) {
+            match load_existing(&path, &header.digest, true) {
                 Ok(loaded) => loaded,
                 Err(e) => {
                     tracing::warn!(
@@ -450,7 +554,7 @@ impl EvalCompletionSession {
         } else {
             None
         };
-        let (completions, failed_attempts) = match loaded {
+        let own = match loaded {
             Some((found, completions, attempts))
                 if found.http_timeout_seconds == header.http_timeout_seconds =>
             {
@@ -474,6 +578,11 @@ impl EvalCompletionSession {
                 (Vec::new(), HashMap::new())
             }
         };
+        let others = cell_files(root, &header.digest)?
+            .into_iter()
+            .filter(|file| *file != path)
+            .filter_map(|file| read_other(&file, header, shard));
+        let (completions, failed_attempts) = fold(std::iter::once(own).chain(others));
         let done_ids: HashSet<String> = completions.iter().map(|c| c.id.clone()).collect();
 
         let file = OpenOptions::new()
@@ -498,7 +607,13 @@ impl EvalCompletionSession {
             failed_count,
             failed_attempts,
             unfit: HashSet::new(),
+            shard,
         })
+    }
+
+    /// Whether this run sends `id`: under a shard, only its group's.
+    pub fn in_group(&self, id: &str) -> bool {
+        self.shard.is_none_or(|shard| shard.holds(id))
     }
 
     /// Persist one completion (append-only on disk; last-write-wins in memory).
@@ -675,6 +790,10 @@ fn check_complete(
     served_samples: usize,
     waiver: Waiver,
 ) -> anyhow::Result<()> {
+    // A shard sends one group; the run without --eval-shard checks the cell.
+    if checkpoint.shard.is_some() {
+        return Ok(());
+    }
     // No failures does not mean complete: a sample skipped before the loop
     // leaves no failed row. `served_samples` counts distinct ids; vlm_eval's
     // `validate` checks its rows against `parameter_sample_count` and refuses a
@@ -752,6 +871,45 @@ fn check_complete(
 
 fn session_path(root: &Path, digest: &EvalRunDigest) -> PathBuf {
     root.join(format!("{}.jsonl", digest_prefix(digest)))
+}
+
+/// A new part for one run of `shard`; the process id and the time make the
+/// name this writer's alone.
+fn part_path(root: &Path, digest: &EvalRunDigest, shard: EvalShard) -> anyhow::Result<PathBuf> {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    Ok(root.join(format!(
+        "{}.part-{}-of-{}-{}-{nanos}.jsonl",
+        digest_prefix(digest),
+        shard.index,
+        shard.count,
+        std::process::id(),
+    )))
+}
+
+/// The cell's checkpoint and parts in `root`, sorted, so the checkpoint
+/// (`.jsonl` before `.part-`) comes first.
+fn cell_files(root: &Path, digest: &EvalRunDigest) -> anyhow::Result<Vec<PathBuf>> {
+    let checkpoint = session_path(root, digest);
+    let part = format!("{}.part-", digest_prefix(digest));
+    let is_part = |file: &Path| {
+        file.extension().is_some_and(|ext| ext == "jsonl")
+            && file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&part))
+    };
+    let mut files: Vec<PathBuf> = fs::read_dir(root)
+        .and_then(|entries| {
+            entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()
+        })
+        .with_context(|| format!("failed to list {}", root.display()))?
+        .into_iter()
+        .filter(|file| *file == checkpoint || is_part(file))
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 fn digest_prefix(digest: &EvalRunDigest) -> String {
@@ -837,9 +995,22 @@ pub const MAX_SAMPLE_ATTEMPTS: u32 = 3;
 /// each id has (its attempts spent).
 type Loaded = (Header, Vec<BenchmarkEvalCompletion>, HashMap<String, u32>);
 
-/// `None` when the header names another digest, which rotates the file away.
-fn load_existing(path: &Path, expected: &EvalRunDigest) -> anyhow::Result<Option<Loaded>> {
-    let mut body = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+/// [`Loaded`] without the header.
+type Rows = (Vec<BenchmarkEvalCompletion>, HashMap<String, u32>);
+
+/// `None` when the header names another digest, which an owner rotates away,
+/// or when a file it does not own is gone. Only an owner cuts a torn tail on
+/// disk: another file's may be a line its writer is still writing.
+fn load_existing(
+    path: &Path,
+    expected: &EvalRunDigest,
+    owned: bool,
+) -> anyhow::Result<Option<Loaded>> {
+    let mut body = match fs::read(path) {
+        Ok(body) => body,
+        Err(e) if !owned && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+    };
     // A kill mid-append leaves a torn last line; cut it so the next append
     // starts a line of its own instead of gluing its row onto the torn one.
     let complete = body
@@ -848,11 +1019,13 @@ fn load_existing(path: &Path, expected: &EvalRunDigest) -> anyhow::Result<Option
         .map_or(0, |at| at + 1);
     if complete < body.len() {
         body.truncate(complete);
-        OpenOptions::new()
-            .write(true)
-            .open(path)
-            .and_then(|file| file.set_len(body.len() as u64))
-            .with_context(|| format!("failed to cut the torn tail of {}", path.display()))?;
+        if owned {
+            OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_len(body.len() as u64))
+                .with_context(|| format!("failed to cut the torn tail of {}", path.display()))?;
+        }
     }
     let mut lines = body.as_slice().lines();
 
@@ -864,13 +1037,15 @@ fn load_existing(path: &Path, expected: &EvalRunDigest) -> anyhow::Result<Option
     let header: Header =
         serde_json::from_str(&header_line).context("failed to parse completion header")?;
     if &header.digest != expected {
-        tracing::info!(
-            path = %path.display(),
-            digest = %header.digest,
-            expected_digest = %expected,
-            "eval completions digest mismatch; rotating"
-        );
-        rotate_stale(path);
+        if owned {
+            tracing::info!(
+                path = %path.display(),
+                digest = %header.digest,
+                expected_digest = %expected,
+                "eval completions digest mismatch; rotating"
+            );
+            rotate_stale(path);
+        }
         return Ok(None);
     }
 
@@ -904,6 +1079,65 @@ fn load_existing(path: &Path, expected: &EvalRunDigest) -> anyhow::Result<Option
         by_id.into_values().collect(),
         failed_attempts,
     )))
+}
+
+/// The rows of a cell file this run does not own. Under another HTTP timeout
+/// only its successes count, as the owner's rewrite keeps.
+fn read_other(path: &Path, header: &Header, shard: Option<EvalShard>) -> Option<Rows> {
+    match load_existing(path, &header.digest, false) {
+        Ok(Some((found, completions, attempts)))
+            if found.http_timeout_seconds == header.http_timeout_seconds =>
+        {
+            Some((completions, attempts))
+        }
+        Ok(Some((_, completions, _))) => Some((
+            completions.into_iter().filter(|c| !c.failed).collect(),
+            HashMap::new(),
+        )),
+        Ok(None) => None,
+        // A deliberate exception to letting errors propagate: a file nobody
+        // can read costs only its rows, whose samples run again.
+        Err(e) if shard.is_some() => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "eval completions unreadable; skipping it"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "eval completions unreadable; rotating stale"
+            );
+            rotate_stale(path);
+            None
+        }
+    }
+}
+
+/// One cell's rows over its files, in order: per id the first success, or
+/// else the last failed row, and the failed attempts summed over every file.
+fn fold(files: impl IntoIterator<Item = Rows>) -> Rows {
+    let (by_id, attempts) = files.into_iter().fold(
+        (
+            HashMap::<String, BenchmarkEvalCompletion>::new(),
+            HashMap::<String, u32>::new(),
+        ),
+        |(mut by_id, mut attempts), (rows, spent)| {
+            spent
+                .into_iter()
+                .for_each(|(id, n)| *attempts.entry(id).or_insert(0) += n);
+            rows.into_iter().for_each(|row| {
+                if by_id.get(&row.id).is_none_or(|kept| kept.failed) {
+                    by_id.insert(row.id.clone(), row);
+                }
+            });
+            (by_id, attempts)
+        },
+    );
+    (by_id.into_values().collect(), attempts)
 }
 
 /// The stop detail vlm_eval's chat reader attached to a stream that ended
@@ -1326,7 +1560,7 @@ mod tests {
                 r.benchmark_flags = Some(
                     BenchmarkFlags::VlSpecDecodeLlamacppCliStockToolsGgufVision {
                         http_timeout_seconds: Some(PositiveSeconds::try_new(timeout)?),
-                        bench_timeout_seconds: Some(PositiveSeconds::try_new(timeout)?),
+                        attempt_timeout_seconds: Some(PositiveSeconds::try_new(timeout)?),
                         readiness: Some(ReadinessOverrides {
                             max_wait_secs: Some(1_800),
                             skip_thermal: None,
@@ -2564,5 +2798,266 @@ mod tests {
         let s = store.open(&r)?;
         assert!(!s.contains("s1"), "mismatched identity must not resume");
         Ok(())
+    }
+
+    fn shard(text: &str) -> anyhow::Result<EvalShard> {
+        text.parse().map_err(anyhow::Error::msg)
+    }
+
+    /// Every file in `dir`, by name, with its bytes.
+    fn files(dir: &Path) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+        fs::read_dir(dir)?
+            .map(|entry| -> anyhow::Result<_> {
+                let path = entry?.path();
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("a file name")?
+                    .to_owned();
+                Ok((name, fs::read(&path)?))
+            })
+            .collect()
+    }
+
+    #[rstest]
+    #[case::first("0/4", true)]
+    #[case::last("3/4", true)]
+    #[case::whole("0/1", true)]
+    #[case::index_past_the_count("4/4", false)]
+    #[case::no_groups("0/0", false)]
+    #[case::index_not_a_number("a/4", false)]
+    #[case::no_count("4", false)]
+    #[case::count_not_a_number("0/x", false)]
+    fn an_eval_shard_reads_i_slash_n(
+        #[case] text: &str,
+        #[case] valid: bool,
+    ) -> anyhow::Result<()> {
+        assert_eq!(
+            text.parse::<EvalShard>()
+                .ok()
+                .map(|shard| shard.to_string())
+                .as_deref(),
+            valid.then_some(text)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_group_rule_is_pinned_across_builds() -> anyhow::Result<()> {
+        let groups = |id: &str| -> Vec<Option<u32>> {
+            (1..=7)
+                .map(|count| (0..count).find(|&index| EvalShard { index, count }.holds(id)))
+                .collect()
+        };
+        assert_eq!(
+            [groups("s1"), groups("51cd2cdc9277")],
+            [
+                [0, 1, 0, 3, 0, 3, 3].map(Some),
+                [0, 0, 2, 2, 0, 2, 6].map(Some)
+            ],
+            "if you did not mean to change the group rule, shards on two builds now send some \
+             samples twice and leave others to the run that submits"
+        );
+        Ok(())
+    }
+
+    /// A checkpoint whose last line is torn, beside another shard's part.
+    fn a_torn_checkpoint_beside_a_part(store: &EvalCompletionsStore) -> anyhow::Result<RunRequest> {
+        let r = req()?;
+        let path = {
+            let mut s = store.open(&r)?;
+            s.append(c("s1"))?;
+            s.path().to_owned()
+        };
+        store
+            .clone()
+            .with_shard(Some(shard("0/2")?))
+            .open(&r)?
+            .append(c("p0"))?;
+        // Torn last, so the open under test is the first to read the torn line.
+        OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(br#"{"id":"s2","compl"#)?;
+        Ok(r)
+    }
+
+    /// A checkpoint with a failed row under a 60 s HTTP timeout, to open under
+    /// 600 s.
+    fn a_failed_row_under_another_timeout(
+        store: &EvalCompletionsStore,
+    ) -> anyhow::Result<RunRequest> {
+        let under = |seconds: u64| -> anyhow::Result<RunRequest> {
+            let mut r = req()?;
+            r.benchmark_flags = Some(eval_timeout(Some(seconds))?);
+            Ok(r)
+        };
+        let mut s = store.open(&under(60)?)?;
+        s.append(c("done"))?;
+        s.append(failed("slow", "timed out"))?;
+        under(600)
+    }
+
+    /// A shard reads the other files as they are and writes only a new part,
+    /// and its finalize changes nothing.
+    #[rstest]
+    #[case::a_torn_checkpoint_beside_a_part(a_torn_checkpoint_beside_a_part, &["s1", "p0"], &["s2"])]
+    #[case::a_failed_row_under_another_timeout(
+        a_failed_row_under_another_timeout,
+        &["done"],
+        &["slow"]
+    )]
+    fn a_shard_changes_no_file_but_its_own(
+        #[case] setup: fn(&EvalCompletionsStore) -> anyhow::Result<RunRequest>,
+        #[case] settled: &[&str],
+        #[case] unsettled: &[&str],
+    ) -> anyhow::Result<()> {
+        let (root, store, _) = store_and_req()?;
+        let req = setup(&store)?;
+        let before = files(root.path())?;
+        let shard_store = store.with_shard(Some(shard("1/2")?));
+        let own = {
+            let mut session = shard_store.open(&req)?;
+            let ids: Vec<&str> = session.done_ids().collect();
+            assert!(settled.iter().all(|id| session.contains(id)), "{ids:?}");
+            assert!(!unsettled.iter().any(|id| session.contains(id)), "{ids:?}");
+            session.append(c("new"))?;
+            session.path().to_owned()
+        };
+
+        let after = files(root.path())?;
+        let digest = run_request_digest(&req)?;
+        let name = own
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("a part name")?;
+        let added: Vec<&String> = after
+            .keys()
+            .filter(|kept| !before.contains_key(*kept))
+            .collect();
+        assert_eq!(added, [name]);
+        assert!(
+            name.starts_with(&format!("{}.part-1-of-2-", digest_prefix(&digest))),
+            "{name}"
+        );
+        assert_eq!(own.extension(), Some(std::ffi::OsStr::new("jsonl")));
+        assert!(
+            before
+                .iter()
+                .all(|(kept, bytes)| after.get(kept) == Some(bytes)),
+            "a file the shard does not own changed"
+        );
+        let body = fs::read_to_string(&own)?;
+        let mut lines = body.lines();
+        let header: Header = serde_json::from_str(lines.next().context("a header")?)?;
+        let row: BenchmarkEvalCompletion = serde_json::from_str(lines.next().context("a row")?)?;
+        assert!(
+            header.digest == digest && row.id == "new" && lines.next().is_none(),
+            "{body}"
+        );
+
+        assert!(shard_store.finalize(&digest).is_err(), "a shard finalized");
+        assert_eq!(
+            files(root.path())?,
+            after,
+            "a refused finalize changed a file"
+        );
+        Ok(())
+    }
+
+    /// 'x' failed once in the checkpoint and once in each of two parts; 'y'
+    /// succeeded in the first part and failed in the other two files.
+    fn x_and_y_over_three_files(
+        store: &EvalCompletionsStore,
+        req: &RunRequest,
+    ) -> anyhow::Result<()> {
+        let mut checkpoint = store.open(req)?;
+        checkpoint.append(failed("x", "blip"))?;
+        checkpoint.append(failed("y", "blip"))?;
+        drop(checkpoint);
+        let mut first = store.clone().with_shard(Some(shard("0/2")?)).open(req)?;
+        first.append(failed("x", "blip"))?;
+        first.append(succeeded("y", "Y"))?;
+        drop(first);
+        let mut second = store.clone().with_shard(Some(shard("1/2")?)).open(req)?;
+        second.append(failed("x", "blip"))?;
+        second.append(failed("y", "blip"))
+    }
+
+    #[test]
+    fn the_fold_unions_rows_and_sums_attempts() -> anyhow::Result<()> {
+        let (_root, store, req) = store_and_req()?;
+        x_and_y_over_three_files(&store, &req)?;
+
+        let session = store.open(&req)?;
+        assert_eq!(
+            session.failure_split(MAX_SAMPLE_ATTEMPTS),
+            (vec![], vec!["x"]),
+            "x spent an attempt in each file"
+        );
+        assert_eq!(
+            session.failed_count(),
+            1,
+            "y's success wins over its failure"
+        );
+        assert_eq!(session.completions().len(), 2, "one row per id");
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_folds_the_parts_and_removes_them() -> anyhow::Result<()> {
+        let (root, store, req) = store_and_req()?;
+        x_and_y_over_three_files(&store, &req)?;
+
+        store.finalize(&run_request_digest(&req)?)?;
+        let left = files(root.path())?;
+        assert!(
+            !left.keys().any(|name| name.contains(".part-")),
+            "{:?}",
+            left.keys().collect::<Vec<_>>()
+        );
+        let resumed = store.open(&req)?;
+        assert_eq!(
+            resumed.failure_split(MAX_SAMPLE_ATTEMPTS),
+            (vec![], vec!["x"]),
+            "the attempts x spent in the parts must survive the finalize"
+        );
+        assert!(!resumed.contains("y"), "y's success is in the saved result");
+        Ok(())
+    }
+
+    /// A part whose header does not parse costs only its rows: a shard leaves
+    /// it in place, and the run without a shard sets it aside and goes on.
+    #[test]
+    fn an_unreadable_part_is_skipped_then_set_aside() -> anyhow::Result<()> {
+        let (root, store, req) = store_and_req()?;
+        store.open(&req)?.append(c("s1"))?;
+        let digest = run_request_digest(&req)?;
+        let name = format!("{}.part-0-of-2-1-1.jsonl", digest_prefix(&digest));
+        let unreadable = root.path().join(&name);
+        fs::write(&unreadable, "not a header\n")?;
+
+        let shard_session = store.clone().with_shard(Some(shard("1/2")?)).open(&req)?;
+        assert!(shard_session.contains("s1"));
+        assert_eq!(
+            fs::read(&unreadable)?,
+            b"not a header\n",
+            "a shard changed a part it does not own"
+        );
+        drop(shard_session);
+
+        assert!(store.open(&req)?.contains("s1"));
+        assert!(
+            !unreadable.exists(),
+            "the unreadable part was not set aside"
+        );
+        let stale = format!("{name}.stale-");
+        assert!(
+            files(root.path())?
+                .keys()
+                .any(|kept| kept.starts_with(&stale)),
+            "no {stale}*"
+        );
+        store.finalize(&digest)
     }
 }

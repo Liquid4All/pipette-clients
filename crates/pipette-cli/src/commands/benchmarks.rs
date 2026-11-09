@@ -9,12 +9,13 @@ use clap::{Args, Subcommand};
 use tabled::Tabled;
 
 use pipette_http::HttpClient;
+use pipette_ops::eval_completions::EvalRunDigest;
 use pipette_plan_types::{
     AsrDecoding, AsrEvalBenchmark, AudioChannels, AudioDurationMillis, AudioSampleRate, BatchSize,
     BenchmarkDefinition, BenchmarkFlagRef, BenchmarkFlags, BenchmarkId, BenchmarkResultData,
-    BenchmarkType, ClientRunSpec, EvalBenchmark, Model, ModelFlagRef, ModelFlags, ModelType,
-    NonNegativeCount, PositiveCount, PositiveSeconds, ReadinessOverrides, Runtime, RuntimeFlags,
-    RuntimeType, SamplingTemperature, SeedRule, SkinCelsius,
+    BenchmarkSubmissionPayload, BenchmarkType, ClientRunSpec, EvalBenchmark, Model, ModelFlagRef,
+    ModelFlags, ModelType, NonNegativeCount, PositiveCount, PositiveSeconds, ReadinessOverrides,
+    Runtime, RuntimeFlags, RuntimeType, SamplingTemperature, SeedRule, SkinCelsius,
 };
 use pipette_programs::ExternalPrograms;
 
@@ -24,7 +25,10 @@ use crate::client_configuration::ClientConfiguration;
 use crate::commands::write_table_or;
 use crate::console::Console;
 use crate::hf_auth::inject_env_hf_token;
-use crate::results::{RecordSubmitOutcome, record_and_maybe_submit_run};
+use crate::results::{
+    BenchmarkResultExtras, BenchmarkResultLocation, RecordSubmitOutcome,
+    record_and_maybe_submit_run,
+};
 use crate::run::{finalize_eval_checkpoint, refuse_foreign_os, run_cell};
 use crate::workspace::PipetteWorkspace;
 
@@ -632,13 +636,13 @@ pub struct BenchmarkRunArgs {
     pub model_flags: Option<String>,
     /// Run-driving settings as one JSON object, a claim's `benchmark_flags`
     /// without its axis keys: `'{"readiness":{"max_wait_secs":900}}'`. A setting
-    /// the cell does not carry is an error. Mutually exclusive with the four
+    /// the cell does not carry is an error. Mutually exclusive with the five
     /// single-setting flags below, which are its shorthand.
     #[arg(
         long,
         conflicts_with_all = [
             "http_timeout_seconds",
-            "bench_timeout_seconds",
+            "attempt_timeout_seconds",
             "readiness_max_wait_secs",
             "readiness_skip_thermal",
             "readiness_skin_below_c",
@@ -650,15 +654,16 @@ pub struct BenchmarkRunArgs {
     /// vl and asr — and rejected elsewhere.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub http_timeout_seconds: Option<u64>,
-    /// Wall-clock deadline in seconds for the whole measured workload, after
-    /// which it is killed and the run reports a wedge. Accepted on the
-    /// peak-memory cells, max-memory, vl-max-memory and asr-max-memory, and on
-    /// vl-spec-decode. Raise it for a device slow enough that the built-in 600 s
-    /// default false-kills a legitimate run. On vl-max-memory and
-    /// asr-max-memory it sits alongside `--http-timeout-seconds`, which bounds
-    /// one request rather than the run.
+    /// Wall-clock limit in seconds on each attempt: one warm-up (model load
+    /// included) or one measured rep, one sample on vl-spec-decode. An attempt
+    /// past it is stopped and the run fails. Readiness waits, calibration,
+    /// downloads and the steps that can compile do not count: a TensorRT engine
+    /// build, and the whole start of the first server on Core AI, OpenVINO and
+    /// OVMS. 300 s by default on the timing, throughput and peak-memory cells;
+    /// vl-spec-decode has none, and an eval refuses it. Raise it for a device
+    /// slow enough that the default stops a healthy rep.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    pub bench_timeout_seconds: Option<u64>,
+    pub attempt_timeout_seconds: Option<u64>,
     /// Override the readiness wait ceiling (seconds) before the measurement.
     /// Valid only on the timing benchmarks that gate on device readiness
     /// (prefill / decode / end-to-end-latency / vl / asr-throughput); on eval or
@@ -756,6 +761,10 @@ impl BenchmarkRunArgs {
         console: &mut dyn Console,
     ) -> anyhow::Result<()> {
         let sync = self.sync;
+        anyhow::ensure!(
+            !sync || ws.eval_shard().is_none(),
+            "--eval-shard records nothing, so --sync has nothing to send"
+        );
         let held_touch = self.readiness_held_touch;
         crate::run::ensure_held_touch_on_android(held_touch)?;
         // The catalog side is this client's business: it picks the filing
@@ -768,7 +777,7 @@ impl BenchmarkRunArgs {
         let benchmark_type = benchmark.benchmark_type();
         // `prepare` adds the cell's pins; the policy only carries the cap here.
         let artifacts = ws.artifacts(http, programs);
-        let (payload, extras, eval_checkpoint) = run_cell(
+        let run = run_cell(
             &spec,
             benchmark,
             &artifacts,
@@ -779,22 +788,7 @@ impl BenchmarkRunArgs {
             &pipette_wait::never_cancelled,
             programs,
         )?;
-        write_lines(
-            console.out(),
-            &run_summary_lines(&payload.benchmark_id, benchmark_type, &payload.result),
-        )?;
-        let done = record_and_maybe_submit_run(
-            &ws.results(),
-            &ws.registration(),
-            &payload,
-            &extras,
-            location,
-            sync,
-            http,
-        )?;
-        // Saved on disk, so the checkpoint has done its job.
-        finalize_eval_checkpoint(ws, eval_checkpoint.as_ref());
-        write_record_done(console, ws, &done)
+        record_finished_run(ws, http, console, benchmark_type, location, sync, run)
     }
 
     /// Resolve the refs and the benchmark, validate the run knobs into
@@ -872,7 +866,7 @@ impl BenchmarkRunArgs {
                 &model,
                 CellKnobs {
                     http_timeout_seconds: self.http_timeout_seconds,
-                    bench_timeout_seconds: self.bench_timeout_seconds,
+                    attempt_timeout_seconds: self.attempt_timeout_seconds,
                     readiness_max_wait_secs: self.readiness_max_wait_secs,
                     readiness_skip_thermal: self.readiness_skip_thermal,
                     readiness_skin_below_c: self.readiness_skin_below_c,
@@ -959,7 +953,7 @@ fn parse_benchmark_flags_json(
 #[derive(Debug, Default)]
 struct CellKnobs {
     http_timeout_seconds: Option<u64>,
-    bench_timeout_seconds: Option<u64>,
+    attempt_timeout_seconds: Option<u64>,
     readiness_max_wait_secs: Option<u64>,
     readiness_skip_thermal: bool,
     readiness_skin_below_c: Option<u32>,
@@ -974,7 +968,7 @@ fn build_benchmark_flags(
 ) -> anyhow::Result<Option<BenchmarkFlags>> {
     let CellKnobs {
         http_timeout_seconds,
-        bench_timeout_seconds,
+        attempt_timeout_seconds,
         readiness_max_wait_secs,
         readiness_skip_thermal,
         readiness_skin_below_c,
@@ -995,14 +989,14 @@ fn build_benchmark_flags(
         }
     });
     let has_knob =
-        http_timeout_seconds.is_some() || bench_timeout_seconds.is_some() || readiness.is_some();
+        http_timeout_seconds.is_some() || attempt_timeout_seconds.is_some() || readiness.is_some();
     if !has_knob {
         return Ok(None);
     }
     Ok(Some(
         // `TryFrom` routes the (benchmark, runtime, model) triple to its variant
         // and rejects any knob that cell doesn't carry: readiness only on a
-        // cell that gates, the bench deadline only on the two peak-memory cells.
+        // cell that gates, the attempt limit nowhere on an eval.
         BenchmarkFlags::try_from(BenchmarkFlagRef {
             runtime_type: RuntimeType::of(runtime),
             model_type: ModelType::of(model),
@@ -1010,15 +1004,16 @@ fn build_benchmark_flags(
             http_timeout_seconds: http_timeout_seconds
                 .map(PositiveSeconds::try_new)
                 .transpose()?,
-            bench_timeout_seconds: bench_timeout_seconds
+            attempt_timeout_seconds: attempt_timeout_seconds
                 .map(PositiveSeconds::try_new)
                 .transpose()?,
+            _bench_timeout_obsolete: None,
             _doomloop_obsolete: None,
             readiness,
         })
         .with_context(|| {
             format!(
-                "--http-timeout-seconds / --bench-timeout-seconds / \
+                "--http-timeout-seconds / --attempt-timeout-seconds / \
                  --readiness-max-wait-secs / --readiness-skin-below-c are not valid for this \
                  benchmark ({benchmark_type:?})"
             )
@@ -1029,6 +1024,49 @@ fn build_benchmark_flags(
 fn write_lines(out: &mut dyn Write, lines: &[String]) -> anyhow::Result<()> {
     lines.iter().try_for_each(|line| writeln!(out, "{line}"))?;
     Ok(())
+}
+
+/// What `benchmarks run` keeps of a finished run. Split from `execute` so the
+/// shard rule is testable without running a cell: a text eval has no
+/// completeness check, so a shard's saved result could reach mgmt.
+fn record_finished_run(
+    ws: &PipetteWorkspace,
+    http: &HttpClient,
+    console: &mut dyn Console,
+    benchmark_type: BenchmarkType,
+    location: BenchmarkResultLocation,
+    sync: bool,
+    (payload, extras, eval_checkpoint): (
+        BenchmarkSubmissionPayload,
+        BenchmarkResultExtras,
+        Option<EvalRunDigest>,
+    ),
+) -> anyhow::Result<()> {
+    if let Some(shard) = ws.eval_shard() {
+        writeln!(
+            console.out(),
+            "eval shard {shard} of `{}`: its answers are in state/evals; nothing saved, \
+             submitted or finalized",
+            payload.benchmark_id
+        )?;
+        return Ok(());
+    }
+    write_lines(
+        console.out(),
+        &run_summary_lines(&payload.benchmark_id, benchmark_type, &payload.result),
+    )?;
+    let done = record_and_maybe_submit_run(
+        &ws.results(),
+        &ws.registration(),
+        &payload,
+        &extras,
+        location,
+        sync,
+        http,
+    )?;
+    // Saved on disk, so the checkpoint has done its job.
+    finalize_eval_checkpoint(ws, eval_checkpoint.as_ref());
+    write_record_done(console, ws, &done)
 }
 
 fn write_record_done(
@@ -2260,9 +2298,9 @@ mod tests {
         }
     }
 
-    fn bench(secs: u64) -> CellKnobs {
+    fn attempt(secs: u64) -> CellKnobs {
         CellKnobs {
-            bench_timeout_seconds: Some(secs),
+            attempt_timeout_seconds: Some(secs),
             ..Default::default()
         }
     }
@@ -2288,8 +2326,7 @@ mod tests {
     #[case::http_on_prefill(BenchmarkType::PrefillThroughput, http(600))]
     #[case::http_on_decode(BenchmarkType::DecodeThroughput, http(600))]
     #[case::http_on_max_memory(BenchmarkType::MaxMemoryUsage, http(600))]
-    #[case::bench_on_eval(BenchmarkType::Eval, bench(2400))]
-    #[case::bench_on_prefill(BenchmarkType::PrefillThroughput, bench(2400))]
+    #[case::attempt_on_eval(BenchmarkType::Eval, attempt(2400))]
     #[case::readiness_on_eval(BenchmarkType::Eval, readiness_wait(1800))]
     #[case::thermal_on_eval(BenchmarkType::Eval, skip_thermal())]
     fn a_knob_the_cell_does_not_carry_is_rejected(
@@ -2332,10 +2369,10 @@ mod tests {
         CellKnobs { readiness_skin_below_c: Some(34), ..Default::default() },
     )]
     #[case::http(BenchmarkType::Eval, r#"{"http_timeout_seconds":600}"#, http(600))]
-    #[case::bench(
+    #[case::attempt(
         BenchmarkType::MaxMemoryUsage,
-        r#"{"bench_timeout_seconds":2400}"#,
-        bench(2400)
+        r#"{"attempt_timeout_seconds":2400}"#,
+        attempt(2400)
     )]
     #[case::empty(BenchmarkType::PrefillThroughput, "{}", CellKnobs::default())]
     fn benchmark_flags_json_matches_its_shorthand(
@@ -2402,7 +2439,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case::http(&["--http-timeout-seconds", "600"])]
-    #[case::bench(&["--bench-timeout-seconds", "600"])]
+    #[case::attempt(&["--attempt-timeout-seconds", "600"])]
     #[case::readiness_wait(&["--readiness-max-wait-secs", "600"])]
     #[case::skip_thermal(&["--readiness-skip-thermal"])]
     #[case::skin(&["--readiness-skin-below-c", "34"])]
@@ -2535,30 +2572,23 @@ mod tests {
         Ok(())
     }
 
-    /// `--bench-timeout-seconds` is the peak-memory knob: both cells run their
-    /// whole measured workload under a wall-clock watchdog, so the deadline is a
-    /// decision a plan can make on either.
+    /// `--attempt-timeout-seconds` is a plan's to set on every timing,
+    /// throughput and peak-memory cell.
     #[rstest::rstest]
-    #[case::text(BenchmarkType::MaxMemoryUsage, gguf_text_cell())]
-    #[case::vl(BenchmarkType::VlMaxMemory, gguf_vision_cell())]
-    #[case::asr(BenchmarkType::AsrMaxMemory, gguf_vision_cell())]
-    fn bench_timeout_on_a_peak_memory_cell_is_accepted(
+    #[case::prefill(BenchmarkType::PrefillThroughput, gguf_text_cell())]
+    #[case::end_to_end(BenchmarkType::EndToEndLatency, gguf_text_cell())]
+    #[case::vl_throughput(BenchmarkType::VlThroughput, gguf_vision_cell())]
+    #[case::text_memory(BenchmarkType::MaxMemoryUsage, gguf_text_cell())]
+    #[case::vl_memory(BenchmarkType::VlMaxMemory, gguf_vision_cell())]
+    #[case::asr_memory(BenchmarkType::AsrMaxMemory, gguf_vision_cell())]
+    fn the_attempt_limit_is_accepted_on_a_timing_or_memory_cell(
         #[case] benchmark_type: BenchmarkType,
         #[case] cell: anyhow::Result<(Runtime, Model)>,
     ) -> anyhow::Result<()> {
         let (runtime, model) = cell?;
-        let bf = build_benchmark_flags(
-            benchmark_type,
-            &runtime,
-            &model,
-            CellKnobs {
-                bench_timeout_seconds: Some(2400),
-                ..Default::default()
-            },
-        )?
-        .ok_or_else(|| anyhow::anyhow!("a peak-memory cell accepts a bench deadline"))?;
-        assert_eq!(bf.bench_timeout().map(u64::from), Some(2400));
-        assert!(bf.readiness().is_none(), "peak memory does not gate");
+        let bf = build_benchmark_flags(benchmark_type, &runtime, &model, attempt(2400))?
+            .ok_or_else(|| anyhow::anyhow!("the cell accepts an attempt limit"))?;
+        assert_eq!(bf.attempt_timeout().map(u64::from), Some(2400));
         assert_eq!(bf.axes().0, benchmark_type);
         Ok(())
     }
@@ -3075,6 +3105,149 @@ runtime_flags = [{ benchmark_type = "prefill_throughput", runtime_type = "llamac
         assert!(
             format!("{err:#}").contains("not a desktop CLI runtime"),
             "unexpected error: {err:#}"
+        );
+        Ok(())
+    }
+
+    /// A shard refuses a cell that keeps no checkpoint, and `--sync`, before
+    /// anything installs.
+    #[rstest]
+    #[case::a_cell_without_a_checkpoint(
+        &["--benchmark", "local/prefill_throughput_smoke"],
+        "--eval-shard splits only"
+    )]
+    #[case::sync(&["--benchmark", "local/eval_smoke", "--sync"], "--sync has nothing to send")]
+    fn an_eval_shard_refuses_before_anything_installs(
+        #[case] argv: &[&str],
+        #[case] needle: &str,
+    ) -> anyhow::Result<()> {
+        let tw = seeded_workspace("eval-shard-refused")?;
+        let ws = tw.as_shard("0/2")?;
+        let refs = [
+            "--model",
+            r#"{"type":"apple_foundation_text"}"#,
+            "--runtime",
+            r#"{"type":"apple_foundation"}"#,
+        ];
+        let err = parse(&[argv, &refs].concat())?
+            .execute(
+                &ws,
+                &test_http()?,
+                &ClientConfiguration::default(),
+                &ExternalPrograms::at_missing_paths(),
+                &mut CapturedConsole::default(),
+            )
+            .err()
+            .context("a shard must refuse this run")?;
+        assert!(format!("{err:#}").contains(needle), "{err:#}");
+        [
+            ws.runtimes().runtimes_dir().to_path_buf(),
+            ws.models().models_dir().to_path_buf(),
+        ]
+        .iter()
+        .try_for_each(|dir| -> anyhow::Result<()> {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries.count(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(e) => return Err(e.into()),
+            };
+            assert_eq!(entries, 0, "{} was touched", dir.display());
+            Ok(())
+        })
+    }
+
+    /// A shard's run keeps only the rows in its part: nothing is saved or
+    /// sent, even with `sync` asked for, and nothing is finalized. A text eval
+    /// has no completeness check, so this is all that keeps a group's rows out
+    /// of mgmt.
+    #[test]
+    fn a_shard_run_saves_syncs_and_finalizes_nothing() -> anyhow::Result<()> {
+        use pipette_ops::eval_completions::run_request_digest;
+        use pipette_ops::run_context::RunContext;
+        use pipette_plan_types::{BenchmarkEvalCompletion, DeclaredBound, RunRequest};
+
+        let tw = seeded_workspace("eval-shard-run")?;
+        let server = httpmock::MockServer::start();
+        tw.register(&server.base_url())?;
+        let submit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/benchmarks");
+            then.status(200).body(r#"{"job_id":"job-1"}"#);
+        });
+        let ws = tw.as_shard("0/2")?;
+        let req = RunRequest {
+            runtime: DeclaredBound::already_bound(Runtime::AppleFoundation(Default::default())),
+            model: DeclaredBound::already_bound(Model::AppleFoundationText),
+            runtime_flags: None,
+            model_flags: None,
+            benchmark_flags: None,
+            benchmark: tw
+                .ws
+                .benchmarks()
+                .get(&"local/eval_smoke".parse::<SourcedBenchmarkId>()?)?
+                .context("eval_smoke should be seeded")?,
+        };
+        let row = |id: &str| BenchmarkEvalCompletion {
+            id: id.to_owned(),
+            completion: "answer".to_owned(),
+            ..Default::default()
+        };
+        tw.ws.eval_completions().open(&req)?.append(row("s0"))?;
+        ws.eval_completions().open(&req)?.append(row("s1"))?;
+        let evals = tw.ws.root().join("state/evals");
+        let cell_files = || -> anyhow::Result<Vec<(std::path::PathBuf, Vec<u8>)>> {
+            let mut files = std::fs::read_dir(&evals)?
+                .map(|entry| -> anyhow::Result<_> {
+                    let path = entry?.path();
+                    let bytes = std::fs::read(&path)?;
+                    Ok((path, bytes))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            files.sort();
+            Ok(files)
+        };
+        let before = cell_files()?;
+        // The descriptors let a sync reach the server.
+        let payload: BenchmarkSubmissionPayload = serde_json::from_value(serde_json::json!({
+            "benchmark_id": "eval_smoke",
+            "device": {},
+            "thermal": {},
+            "submitted_at": "2026-07-30T00:00:00Z",
+            "model_descriptor": r#"{"type":"apple_foundation_text"}"#,
+            "runtime_descriptor": r#"{"type":"apple_foundation"}"#,
+            "completions": [],
+        }))?;
+        let mut console = CapturedConsole::default();
+
+        record_finished_run(
+            &ws,
+            &test_http()?,
+            &mut console,
+            BenchmarkType::Eval,
+            BenchmarkResultLocation::RemotePending,
+            true,
+            (
+                payload,
+                BenchmarkResultExtras::default(),
+                Some(run_request_digest(&req)?),
+            ),
+        )?;
+
+        submit.assert_calls(0);
+        [
+            BenchmarkResultLocation::Local,
+            BenchmarkResultLocation::RemotePending,
+            BenchmarkResultLocation::RemoteSynced,
+        ]
+        .iter()
+        .try_for_each(|&location| -> anyhow::Result<()> {
+            assert!(ws.results().list_ids(location)?.is_empty(), "{location:?}");
+            Ok(())
+        })?;
+        assert_eq!(cell_files()?, before, "a shard's run finalized its cell");
+        let out = console.out_text();
+        assert!(
+            out.contains("nothing saved, submitted or finalized"),
+            "{out}"
         );
         Ok(())
     }

@@ -226,9 +226,8 @@ object HeadlessCommand {
         submit = reader.flag("submit", default = !args.containsKey("model")),
         prefillBatch = reader.int("batch", default = DEFAULT_PREFILL_BATCH, min = 1),
         nGpuLayers = reader.int("number_gpu_layers", default = DEFAULT_N_GPU_LAYERS, min = 0),
-        // A zero deadline would fail every cell before it measured anything, so the floor is 1 — matching `require_usable_bench_timeout`'s argument
-        // for the sibling knob on the host side. The ceiling is a day: past that the caller has mistyped rather than asked for a longer wait, and
-        // refusing here is how they find out.
+        // A zero deadline would fail every cell before it measured anything, so the floor is 1, as on the host CLI's `--readiness-max-wait-secs`.
+        // The ceiling is a day: past that the caller has mistyped rather than asked for a longer wait, and refusing here is how they find out.
         readinessMaxWaitSecs = reader.longOrNull("readiness_max_wait_secs", min = 1, max = MAX_READINESS_WAIT_SECS),
         readinessSkipThermal = reader.flagOrNull("readiness_skip_thermal"),
       )

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pipette_mgmt_client::{PrivateKey, ServerUrl};
+use pipette_ops::EvalShard;
 use pipette_plan_types::{ClientId, GgufText, GgufTextSource, Model};
 
 use crate::console::Console;
@@ -52,6 +53,12 @@ impl TempWorkspace {
     /// storage tests derive the quota from what they stored.
     pub(crate) fn reopen_with_quota(&self, quota_bytes: u64) -> anyhow::Result<PipetteWorkspace> {
         PipetteWorkspace::open(&self.path, Some(quota_bytes))
+    }
+
+    /// The same workspace under `--eval-shard <shard>`.
+    pub(crate) fn as_shard(&self, shard: &str) -> anyhow::Result<PipetteWorkspace> {
+        let shard = shard.parse::<EvalShard>().map_err(anyhow::Error::msg)?;
+        Ok(PipetteWorkspace::open(&self.path, None)?.with_eval_shard(Some(shard)))
     }
 
     /// A gguf-text model published through the real store with a stub

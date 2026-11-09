@@ -10,16 +10,17 @@ nonisolated extension LlamaExecute {
         _ benchmark: VlMaxMemoryBenchmark,
         _ request: RunRequest,
         flags: RuntimeFlags,
-        model: ResolvedGgufVisionModel
+        model: ResolvedGgufVisionModel,
+        observer: MeasurementObserver
     ) async throws -> (BenchmarkResultData, RuntimeFlags) {
         var ran = flags
         let resultData = try await BenchmarkMeasurement.vlMaxMemory(
-            benchmark, warmup: .cold, ctx: ()
+            benchmark, observer: observer, warmup: .cold, ctx: ()
         ) { _ in
             let peak = try await ProcessMemory.maxMemoryBracket(label: "llama vl") {
                 (_, ran) = try await withCalibratedVision(
                     request, model, flags: flags, width: benchmark.parameterImageWidth.value.magnitude,
-                    height: benchmark.parameterImageHeight.value.magnitude
+                    height: benchmark.parameterImageHeight.value.magnitude, observer: observer
                 ) { try await vlMaxMemory(benchmark, $0) }
             }
             return VlMaxMemoryMeasurementReading(maxHostBytes: peak.maxHostBytes,

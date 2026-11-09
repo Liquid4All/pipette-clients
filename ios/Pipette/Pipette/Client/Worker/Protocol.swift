@@ -27,11 +27,13 @@ nonisolated func failureFromClaim(
     _ job: ClaimedJob,
     reason: String,
     retriable: Bool,
+    failureCode: FailureCode?,
     clientVersion: String,
     deviceTime: Duration
 ) -> FailureSubmission {
     var body = FailureSubmission.fromClaim(
         job, failureReason: reason, retriable: retriable, clientVersion: clientVersion)
+    body.failureCode = failureCode
     body.deviceTimeMs = deviceTimeMs(deviceTime)
     return body
 }
@@ -56,12 +58,34 @@ nonisolated func deviceTimeMs(_ deviceTime: Duration) -> UInt64 {
 nonisolated func classifyRunError(_ error: Error) -> Bool {
     if error is UnrunnableClaimError { return false }
     if case .unknownBenchmark = error as? PlannerWorker.WorkerResolveError { return false }
+    // Every client runs the cell under the same attempt limit.
+    if error is AttemptTimeoutError { return false }
     // A vault refusal every device with this owner would meet identically (ownership,
     // a deleted resource, drifted bytes) is not worth another claim; a transport
     // failure or a `5xx` on the same route still is.
     if let vault = error as? VaultFetchError, vault.isPermanent { return false }
     // Everything else (OOM, thermal, a failed fetch, a busy device) stays retriable.
     return true
+}
+
+/// mgmt's grouping of a run error: the crate's `failure_code`. `nil` where the error does
+/// not say, which mgmt records as `unspecified`.
+nonisolated func failureCode(_ error: Error) -> FailureCode? {
+    let error = (error as? ModelLoadFailure)?.cause ?? error
+    switch error {
+    case is AttemptTimeoutError: return .attemptTimeout
+    case RuntimeError.outOfMemory: return .outOfMemory
+    case RuntimeError.readiness, PlannerWorker.WorkerResolveError.deviceBusy: return .deviceError
+    case RuntimeError.engine, RuntimeError.backend: return .runtimeError
+    // A stop, not a failure.
+    case ModelStoreError.fetchPaused, ModelStoreError.fetchCancelled: return nil
+    case RuntimeError.unreadableModel, is UnrunnableClaimError, is VaultFetchError,
+        is ModelStoreError, is BoundModelDirError, is RunCellError, is VlSpecDecodeCorpusError,
+        is RuntimeFlagsError, is BenchmarkFlagsError,
+        PlannerWorker.WorkerResolveError.unknownBenchmark, PlannerWorker.WorkerResolveError.noPayload:
+        return .harnessError
+    default: return nil
+    }
 }
 
 /// The crate's `MAX_DETAIL_BYTES`: a body the server refuses for its size is a reason

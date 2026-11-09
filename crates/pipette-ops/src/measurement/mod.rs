@@ -43,7 +43,9 @@ pub use self::{
         EvalMeasurementReading, EvalMeasurementRecord, EvalMeasurementSample, EvalMessages,
         EvalRows, chunked_pending, eval, eval_complete, eval_complete_chunked,
     },
-    max_memory::{MaxMemoryMeasurementError, MaxMemoryMeasurementReading, max_memory},
+    max_memory::{
+        MaxMemoryMeasurementError, MaxMemoryMeasurementReading, PEAK_MEMORY_MEASURED, max_memory,
+    },
     prefill::{
         PrefillMeasurementError, PrefillMeasurementPerPromptReading, PrefillMeasurementReading,
         PrefillMeasurementTotalsReading, prefill,
@@ -66,15 +68,43 @@ pub use self::{
 /// different counts would not be comparable.
 pub const REPS: usize = 5;
 
-/// Called around each measured rep, in field order; for spec decode the rep is
-/// the whole traversal. An `Err` from either abandons the cell; a cell that
-/// measures no reps calls neither.
+/// The rep hooks are called around each measured rep, in field order; for spec
+/// decode the rep is the whole traversal. An `Err` from either abandons the
+/// cell; a cell that measures no reps calls neither. The other three drive the
+/// `attempt_timeout_seconds` clock.
 #[derive(Clone, Copy)]
 pub struct MeasurementObserver<'a> {
     /// After the gate; the CLI takes a thermal reading.
     pub on_before_rep_start: &'a dyn Fn() -> anyhow::Result<()>,
     /// After the rep's timed work; the CLI takes a thermal reading.
     pub on_after_rep_end: &'a dyn Fn() -> anyhow::Result<()>,
+    /// An attempt the rep hooks do not bracket starts (a peak-memory attempt,
+    /// a corpus sample), named for the overrun message. `Sync`, as a batched
+    /// traversal starts samples from every slot.
+    pub on_attempt_start: &'a (dyn Fn(&str) + Sync),
+    /// A step the limit leaves out starts.
+    pub on_hold: &'a dyn Fn(),
+    /// It ended; the attempt goes on with the whole limit.
+    pub on_resume: &'a dyn Fn(),
+}
+
+impl MeasurementObserver<'_> {
+    /// For a caller with no attempt limit: every hook does nothing.
+    pub const QUIET: MeasurementObserver<'static> = MeasurementObserver {
+        on_before_rep_start: &|| Ok(()),
+        on_after_rep_end: &|| Ok(()),
+        on_attempt_start: &|_| {},
+        on_hold: &|| {},
+        on_resume: &|| {},
+    };
+
+    /// Run `step`, which the limit leaves out, with the clock held.
+    pub fn outside<T>(&self, step: impl FnOnce() -> T) -> T {
+        (self.on_hold)();
+        let out = step();
+        (self.on_resume)();
+        out
+    }
 }
 
 /// Where a timing entry's warm-up happens.
@@ -664,6 +694,7 @@ mod tests {
                     log.borrow_mut().push(Event::Finished);
                     Ok(())
                 },
+                ..MeasurementObserver::QUIET
             };
             let (mut work, mut sample) = (work, sample);
             run(
@@ -764,10 +795,7 @@ mod tests {
             std::thread::sleep(wait);
             Ok(())
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
 
         let measured = run(
             "test",

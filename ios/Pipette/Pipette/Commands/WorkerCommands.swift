@@ -532,16 +532,21 @@ final class PlannerWorker {
             try await submitSuccess(
                 job, run: run, session: session, http: http, ws: ws, jobStore: jobStore)
         case .failure(let error):
-            let retriable = classifyRunError(error)
-            let reason = formatFailureReason(Self.failureDetail(error))
+            let failed = error as? CellFailure
+            let cause = failed?.error ?? error
+            let retriable = classifyRunError(cause)
+            let code = failureCode(cause)
+            let reason = formatFailureReason(failed?.message ?? Self.failureDetail(cause))
             AppLog.jobRun.warning(
                 "planner worker: \(job.jobId): run failed after \(Self.secondsText(elapsed))s "
-                    + "(retriable=\(retriable)): \(reason)"
+                    + "(retriable=\(retriable), failure_code=\(code?.rawValue ?? "none")): "
+                    + "\(reason)"
             )
             try await Self.submitFailure(
                 job,
                 reason: reason,
                 retriable: retriable,
+                failureCode: code,
                 deviceTime: elapsed,
                 server: session.serverUrl,
                 http: http,
@@ -593,7 +598,7 @@ final class PlannerWorker {
             }
             // Same JobRunner as UI jobs, for mutual exclusion.
             guard !jobRunner.isRunning else {
-                throw WorkerResolveError.deviceUnavailable("device busy with a local job")
+                throw WorkerResolveError.deviceBusy("device busy with a local job")
             }
 
             let manifest = makeManifest(job: job, spec: spec, benchmark: benchmark)
@@ -607,11 +612,11 @@ final class PlannerWorker {
                 completedAtStart: 0,
                 totalToRun: manifest.cells.count
             ) else {
-                throw WorkerResolveError.deviceUnavailable("could not start job runner")
+                throw WorkerResolveError.deviceBusy("could not start job runner")
             }
 
             let kept = KeptEvalCheckpoint()
-            let keptFetch = KeptFetchFailure()
+            let keptFailure = KeptCellFailure()
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 JobExecutor.run(
                     manifest: manifest,
@@ -624,7 +629,7 @@ final class PlannerWorker {
                     claimedAt: claimedAt,
                     claimedBenchmarks: [benchmark],
                     keepEvalCheckpoint: kept,
-                    keepFetchFailure: keptFetch
+                    keepCellFailure: keptFailure
                 ) { _ in
                     cont.resume()
                 }
@@ -653,10 +658,13 @@ final class PlannerWorker {
                   let payload = try? JSONSerialization.jsonObject(with: payloadData)
                     as? [String: Any]
             else {
-                // Typed, so `classifyRunError` can retire a job no device can fetch.
-                if let fetchFailure = keptFetch.error { throw fetchFailure }
-                throw WorkerResolveError.deviceUnavailable(
-                    cell?.errorMessage ?? "run produced no payload")
+                // Typed, so `classifyRunError` can retire a job no device can fetch or run
+                // within its attempt limit, and `failureCode` can name the failure.
+                if let failure = keptFailure.failure { throw failure }
+                if let message = cell?.errorMessage {
+                    throw WorkerResolveError.deviceUnavailable(message)
+                }
+                throw WorkerResolveError.noPayload
             }
             return .success(CompletedRun(manifest: finished, cellId: cell.cellId, payload: payload,
                                          evalCheckpoint: kept.digest))
@@ -753,14 +761,20 @@ final class PlannerWorker {
         /// The server does not know the benchmark (even one cached here), or its body is not
         /// a definition this build can read.
         case unknownBenchmark(String)
-        /// The device is busy, the runner would not start, or the run produced nothing:
-        /// all transient and local.
+        /// A local job holds the device, or the runner would not start.
+        case deviceBusy(String)
+        /// The run was stopped, or its cell failed outside the executor's catch: transient
+        /// and local.
         case deviceUnavailable(String)
+        /// The cell completed, but left no readable payload.
+        case noPayload
 
         var message: String {
             switch self {
-            case .unknownBenchmark(let m), .deviceUnavailable(let m):
+            case .unknownBenchmark(let m), .deviceBusy(let m), .deviceUnavailable(let m):
                 return m
+            case .noPayload:
+                return "run produced no payload"
             }
         }
 
@@ -768,7 +782,7 @@ final class PlannerWorker {
     }
 
     private static func failureDetail(_ error: Error) -> String {
-        (error as? WorkerResolveError)?.message ?? error.localizedDescription
+        (error as? WorkerResolveError)?.message ?? formatJobError(error, contextSize: nil)
     }
 
     /// A soft pin: the run continues, because the result's descriptor is regenerated from
@@ -938,6 +952,7 @@ final class PlannerWorker {
         _ job: ClaimedJob,
         reason: String,
         retriable: Bool,
+        failureCode: FailureCode?,
         deviceTime: Duration,
         server: ServerUrl,
         http: HttpClient = .shared,
@@ -946,8 +961,8 @@ final class PlannerWorker {
         sleep: (TimeInterval) async -> Void
     ) async throws -> SubmitDisposition {
         let body = failureFromClaim(
-            job, reason: reason, retriable: retriable, clientVersion: clientVersion,
-            deviceTime: deviceTime)
+            job, reason: reason, retriable: retriable, failureCode: failureCode,
+            clientVersion: clientVersion, deviceTime: deviceTime)
         AppLog.jobRun.info(
             "planner worker: \(job.jobId): posting the failure body to the server "
                 + "(retriable=\(retriable), "

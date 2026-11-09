@@ -140,7 +140,7 @@ impl Spawned {
         crate::job::assign(&child);
         let pid = child.id();
         let session = Session::led_by(pid);
-        let teardown = cleanup::Guard::register(on_interrupt(&stop, session));
+        let teardown = cleanup::Guard::child(on_interrupt(&stop, session));
         let record = match &stop {
             Stop::Kill | Stop::Terminate(_) => orphans::Record::write(pid, &name, &token),
             Stop::Docker { .. } => None,

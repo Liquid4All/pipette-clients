@@ -98,6 +98,7 @@ fn a_timing_cell_runs_against_the_server(
             Ok(())
         },
         on_after_rep_end: &|| Ok(()),
+        ..MeasurementObserver::QUIET
     };
     let gate = || {
         gates.set(gates.get() + 1);
@@ -161,10 +162,7 @@ fn a_single_decode_token_is_refused_before_the_server_starts() -> anyhow::Result
         gated.set(true);
         Ok(())
     };
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let Err(err) = pipette_onnx_genai::run(&req, &gate, observer, None) else {
         anyhow::bail!("a decode cell under two tokens was measured");
     };
@@ -196,10 +194,7 @@ fn a_failure_after_the_start_names_the_server_and_keeps_its_cause() -> anyhow::R
             Err(std::io::Error::from(std::io::ErrorKind::Interrupted).into())
         }
     };
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let Err(err) = pipette_onnx_genai::run(&req, &gate, observer, None) else {
         anyhow::bail!("expected the shut gate to fail the cell");
     };
@@ -238,10 +233,7 @@ fn a_memory_cell_runs_only_on_a_provider_the_model_declares(
         anyhow::bail!("the fixture's runtime is uv_onnx_genai");
     };
     runtime.execution_provider = provider.clone();
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let result = pipette_onnx_genai::run(&req, &|| Ok(()), observer, None);
     match (provider, result) {
         (OnnxExecutionProvider::Cpu, Ok(response)) => {
@@ -316,10 +308,7 @@ fn an_unreadable_provider_memory_cell_is_refused_before_a_server_starts() -> any
         pipette_venv::venv_python(&dir.path().join("venv")),
         "#!/nonexistent/interpreter\n",
     )?;
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let Err(err) = pipette_onnx_genai::run(&req, &|| Ok(()), observer, None) else {
         anyhow::bail!("a memory cell ran on a provider this OS cannot read");
     };

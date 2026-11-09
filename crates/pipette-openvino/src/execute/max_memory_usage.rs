@@ -23,7 +23,9 @@ use anyhow::Context;
 use pipette_completions::TimingRequest;
 use pipette_http::HttpClient;
 use pipette_memprobe::{Sampler, SupportedWatch, Watch};
-use pipette_ops::measurement::{self, MaxMemoryMeasurementReading, MemoryMeasurementWarmup};
+use pipette_ops::measurement::{
+    self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     MaxMemoryUsageBenchmark, MaxMemoryUsageUvOpenvinoOpenvino, MemoryObservation, OpenvinoDevice,
@@ -39,6 +41,10 @@ use crate::server;
 
 const DECODE_TOKENS: u32 = 1;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub(super) fn run(
     benchmark: &MaxMemoryUsageBenchmark,
     runtime_flags: MaxMemoryUsageUvOpenvinoOpenvino,
@@ -46,6 +52,7 @@ pub(super) fn run(
     model: &ResolvedOpenvinoModel,
     compile_cache: &Path,
     timeout: Duration,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&UvOpenvinoExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     let watch = watch(
@@ -75,9 +82,19 @@ pub(super) fn run(
     let mut served = None;
     let result = measurement::max_memory(
         &benchmark.benchmark_id,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
-        |served| Ok(serve(served, command, watch, &http, prefill_tokens)?),
+        |served| {
+            Ok(serve(
+                served,
+                command,
+                watch,
+                &http,
+                prefill_tokens,
+                observer,
+            )?)
+        },
     );
     let result_data = result.map_err(|err| match &mut served {
         Some((openvino_server, _)) => err.context(openvino_server.stop_with_tail()),
@@ -104,7 +121,9 @@ fn serve(
     watch: SupportedWatch,
     http: &HttpClient,
     prefill_tokens: u32,
+    observer: MeasurementObserver<'_>,
 ) -> anyhow::Result<MaxMemoryMeasurementReading> {
+    let warm_up = served.is_none();
     let earlier = match served.take() {
         Some((mut openvino_server, memory)) => {
             openvino_server.stop();
@@ -118,7 +137,14 @@ fn serve(
         start_process(server::SCRIPT_FILENAME, command(port)?, server::STOP_GRACE)?;
     // Watched from the launch, so the load counts.
     let sampler = Sampler::start(openvino_server.pid(), watch)?;
-    openvino_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    // Off the clock on the warm-up's server, which compiles a cold cache; the
+    // measured one loads what it wrote.
+    if warm_up {
+        observer.outside(|| openvino_server.wait_ready(server::READY_TIMEOUT, ready))?;
+    } else {
+        openvino_server.wait_ready(server::READY_TIMEOUT, ready)?;
+    }
     let measured = measure(http, &url, prefill_tokens);
     // Stopped while the server lives: Linux reads its `/proc` entry.
     let (observed, peak) = sampler.stop();

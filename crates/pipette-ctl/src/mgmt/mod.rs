@@ -1,14 +1,12 @@
 //! The management server's account-facing HTTP surface, driven from
 //! [`catalog::ROUTES`].
 //!
-//! Two front ends share one invoker: typed CLI verbs ([`cli`]) and an MCP
-//! server on stdio ([`mcp`]). Both reach mgmt directly over signed HTTP as the
+//! The typed CLI verbs ([`cli`]) reach mgmt directly over signed HTTP as the
 //! account in `.pipette-ctl/identity/`, and nothing else: no server-host
 //! shell, no `pipette-mgmt` binary.
 
 pub mod catalog;
 pub mod cli;
-pub mod mcp;
 
 use std::{
     fs,
@@ -53,7 +51,11 @@ pub(crate) const JSON_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// mgmt's static routes the catalog does not carry. Each sits where a catalog
 /// route takes a parameter, so a value spelled like one reaches it instead.
-const UNCATALOGUED: &[&str] = &["/api/v1/users/register", "/benchmarks/batch"];
+const UNCATALOGUED: &[&str] = &[
+    "/api/v1/users/register",
+    "/api/v1/users/me",
+    "/benchmarks/batch",
+];
 
 /// Where requests go and who signs them.
 pub struct Session {
@@ -128,10 +130,6 @@ impl Session {
             identity,
             work_dir,
         })
-    }
-
-    pub fn server(&self) -> &ServerUrl {
-        &self.server
     }
 
     pub fn work_dir(&self) -> &Path {
@@ -272,7 +270,7 @@ impl Session {
                  To sign again, run `pipette-ctl auth login` here to approve this key again \
                  from the management app; or delete {}, then run `auth register` with a \
                  pre-auth key (for a person's account, one minted on the server host), or \
-                 `auth adopt` here and `auth keys add` (the `users_add_key` tool) on another \
+                 `auth adopt` here and `auth keys add` on another \
                  machine.",
                 identity::identity_dir(&self.work_dir).display()
             ));
@@ -551,7 +549,7 @@ fn check_names(route: &Route, args: &Args) -> anyhow::Result<()> {
 /// session's user key.
 fn local_catalog_device_id(work_dir: &Path, server: &ServerUrl) -> anyhow::Result<String> {
     let path = storage_root(work_dir, "pipette").join("identity/registration.json");
-    let hint = "pass `client_id` explicitly";
+    let hint = "pass the device's client id";
     let bytes =
         fs::read(&path).with_context(|| format!("cannot read {}: {hint}", path.display()))?;
     let registration: serde_json::Value = serde_json::from_slice(&bytes)
@@ -749,14 +747,11 @@ fn flag(args: &Args, name: &str) -> bool {
     matches!(args.get(name), Some(Value::Bool(true)))
 }
 
-/// The account path needs no check of `user_id`: another account's path
-/// answers 404 for this session's key.
+/// Needs no check of `user_id`: this session's key under another account
+/// answers 404.
 fn revokes_own_key(route: &Route, args: &Args, own: &UserKeyId) -> bool {
     route.method == HttpMethod::Delete
-        && matches!(
-            route.path,
-            "/api/v1/users/me/keys/{key_id}" | "/api/v1/users/{user_id}/keys/{key_id}"
-        )
+        && route.path == "/api/v1/users/{user_id}/keys/{key_id}"
         // mgmt trims the id it parses, so a padded one still revokes this key.
         && UserKeyId::try_new(text_arg(args, "key_id")).is_ok_and(|given| given == *own)
 }
@@ -1016,7 +1011,7 @@ fn check_file_name(field: &str, name: &str) -> anyhow::Result<()> {
         ok,
         "`{field}`: file name `{name}` must start with a letter or digit and hold only letters, \
          digits, `.`, `_` and `-`, at most 255; rename the file, or upload it with \
-         `vault_blob_put` and pass `{{\"filename\": …, \"sha256\": …}}`"
+         `vault blob-put` and pass `{{\"filename\": …, \"sha256\": …}}`"
     );
     Ok(())
 }
@@ -1038,7 +1033,7 @@ fn blob_refusal(error: pipette_mgmt_client::Error, principal: &str) -> anyhow::E
              exists"
         ),
         Some(401) => "the server refused this session's signature (a HEAD answer carries no \
-                      reason): the key may be revoked or the clock skewed; `users_me` shows \
+                      reason): the key may be revoked or the clock skewed; `auth me` shows \
                       the server's reason"
             .to_string(),
         Some(403) => format!(

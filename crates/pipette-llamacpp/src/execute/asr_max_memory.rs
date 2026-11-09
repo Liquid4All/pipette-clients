@@ -16,7 +16,9 @@ use base64::Engine;
 
 use pipette_http::HttpClient;
 use pipette_memprobe::{Peak, Sampler, SupportedWatch};
-use pipette_ops::measurement::{self, MaxMemoryMeasurementReading, MemoryMeasurementWarmup};
+use pipette_ops::measurement::{
+    self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_ops::wav;
 use pipette_plan_types::{
@@ -51,6 +53,10 @@ struct Clip<'a> {
     confirmed_prompt: Cell<Option<u32>>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub fn run(
     benchmark: &AsrMaxMemoryBenchmark,
     runtime_flags: AsrMaxMemoryLlamacppCliStockToolsGgufVision,
@@ -58,6 +64,7 @@ pub fn run(
     flavor: &LlamaCppFlavor,
     program: &ResolvedLlamaServer,
     model: &ResolvedGgufVisionModel,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     // Before the calibration, which loads the model: a flavor refused here
@@ -97,12 +104,14 @@ pub fn run(
     let ctx_pinned = runtime_flags.ctx_size.is_some();
     let calibrated = (!ctx_pinned)
         .then(|| {
-            asr::calibrate(
-                &recipe,
-                duration,
-                format,
-                &calibration(&runtime_flags, program, model, client_config),
-            )
+            observer.outside(|| {
+                asr::calibrate(
+                    &recipe,
+                    duration,
+                    format,
+                    &calibration(&runtime_flags, program, model, client_config),
+                )
+            })
         })
         .flatten();
     let audio_bound = asr::fallback_audio_tokens(duration.as_u32());
@@ -142,7 +151,7 @@ pub fn run(
     let timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
     // One budget per server from spawn through the workload: the model load,
     // then the audio encode, prefill and decode.
-    let deadline = memory::bench_timeout(benchmark_flags.bench_timeout_seconds);
+    let deadline = memory::attempt_timeout(benchmark_flags.attempt_timeout_seconds);
     let mut served = None;
     // How the context was sized, so only a peak sized from the exact audio count
     // is read as the clip's own, and whether the clip is past the model's
@@ -166,6 +175,7 @@ pub fn run(
     ]);
     let result = measurement::max_memory(
         &benchmark.benchmark_id,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {

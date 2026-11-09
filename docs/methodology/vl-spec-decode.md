@@ -335,7 +335,14 @@ In order:
    first and never between the turns of one. A multi-turn sample is one
    conversation whose later prompts carry the earlier replies; a wait inside it
    would split what the corpus defines as a unit. For an MMSpec `test` subset
-   that is 100 gates, so `bench_timeout_seconds` has to allow for them.
+   that is 100 gates.
+
+`attempt_timeout_seconds` has no default here, since the corpus sets how long a
+traversal runs. Set on a cell, it bounds the launch, the model load and the
+warm-up as one attempt, then each sample with all its turns. Neither the corpus
+download nor a gate's wait counts
+([the attempt limit](../pipette-cli/usage.md#5c-the-attempt-limit)).
+The iOS cells refuse it.
 
 **Batched.** `parameter_batch_size = N > 1` runs the same traversal with `N`
 samples in flight, one per server slot: a slot takes the next sample in file
@@ -350,8 +357,11 @@ is derived from those sums and `N` (pipette-mgmt
 not counted here. A batched run gates **once**, before the traversal, and
 never between samples: with every slot busy the host is never idle between
 samples, so a per-sample gate would stall the other `N − 1` slots and measure
-the stall it caused. Expect the greedy identity check to diverge more often
-than at `N = 1`, since a fuller batch is a less bitwise-stable forward pass.
+the stall it caused. Under `attempt_timeout_seconds` the slots share one clock,
+which restarts each time a slot takes a sample, so a stuck sample is stopped
+only once no slot has taken one for the whole limit. Expect the greedy identity
+check to diverge more often than at `N = 1`, since a fuller batch is a less
+bitwise-stable forward pass.
 The slot flags (`--parallel` / `-np` on llama-server) are reserved in the
 cell's `raw` for the same reason the draft length is.
 
@@ -522,10 +532,12 @@ a batch of one.
 `crates/pipette-vl-spec-decode-corpus/src/turn.rs` holds the traversal (warm-up,
 gate, samples) and the run's summary in `client_extras` (`Traversal::reduce`).
 It also holds the invocation, so no engine repeats it. `turn::Params` reads the
-benchmark's parameters, refuses the ones that cannot be run, starts the
-`bench_timeout_seconds` deadline and sets one turn's HTTP timeout: a pinned
-`http_timeout_seconds` passes through unscaled, otherwise 600 s times the
-slots, on every engine. `turn::Envelope` builds the protocol half of the body
+benchmark's parameters, refuses the ones that cannot be run and sets one turn's
+HTTP timeout: a pinned `http_timeout_seconds` passes through unscaled,
+otherwise 600 s times the slots, on every engine. Each sample starts an attempt
+for `attempt_timeout_seconds` through the run's `MeasurementObserver`; the
+clock it marks is the CLI's, one per run.
+`turn::Envelope` builds the protocol half of the body
 (`messages`, the benchmark's `temperature`, `max_tokens`, `stream: true`) and
 sends it. A batch of one runs through `turn::measure`, which drives the typed
 entry over the same turns, checks and summary; a batched traversal runs
@@ -533,7 +545,8 @@ through `turn::run`. Both hand the row back as a `RunResponseBuilder`
 (`pipette_ops::run_response`). The engine records its server's output on it,
 and on a failed traversal adds the end of that output to the error. The model
 load is not a turn: `llama-server`'s readiness wait keeps the 120 s times the
-slots every llama.cpp cell gives it.
+slots every llama.cpp cell gives it. Under `attempt_timeout_seconds` the load
+and the warm-up are the first attempt.
 Each engine contributes only its own observations: how its server is
 launched and waited for, its HTTP client, the request extras merged into the
 shared body, whose clocks the stream reader trusts (`TimingsSource`), and the

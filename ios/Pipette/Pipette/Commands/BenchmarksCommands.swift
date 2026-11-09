@@ -162,6 +162,7 @@ enum BenchmarksCommands {
     /// the file-backed runtimes. `true` only if the job completed (the exit code).
     static func runAFM(benchmarkIds: [String], submit: Bool, claim: String? = nil,
                        claimedAt: ContinuousClock.Instant? = nil,
+                       benchmarkFlags: BenchmarkFlags? = nil,
                        ws: PipetteWorkspace, http: HttpClient) async -> Bool {
         setvbuf(stdout, nil, _IONBF, 0)   // unbuffered, so per-token progress shows live
         HeadlessRunner.log("afm availability=\(AFMRuntime.availabilityText()) benchmarks=\(benchmarkIds) submit=\(submit)")
@@ -173,7 +174,8 @@ enum BenchmarksCommands {
         // The bare `.appleFoundation` source makes the executor skip path resolution and
         // the memory gate: AFM has no weights on disk.
         let cells = JobCell.pending(benchmarkIds: resolved.references, for: .appleFoundation,
-                                    store: ws.benchmarks) {
+                                    store: ws.benchmarks,
+                                    benchmarkFlags: benchmarkFlags.map(BenchmarkFlagRef.init)) {
             HeadlessRunner.log("skip \($0): unrecognized benchmark id")
         }
         guard !cells.isEmpty else {
@@ -292,7 +294,8 @@ enum BenchmarksCommands {
 
         if runtime == .appleFoundation {
             return await runAFM(benchmarkIds: requested, submit: submit, claim: claim,
-                                claimedAt: claimedAt, ws: ws, http: http)
+                                claimedAt: claimedAt, benchmarkFlags: benchmarkFlags,
+                                ws: ws, http: http)
         }
 
         // Before the download, so an unknown id fails in seconds rather than after it.
@@ -385,7 +388,8 @@ enum BenchmarksCommands {
     }
 
     /// The run knobs as the command line carried them, before the cell's `BenchmarkFlags`
-    /// variant decides which it accepts. No timeouts: iOS's `BenchmarkFlagRef` has none.
+    /// variant decides which it accepts. The attempt limit has no shorthand here;
+    /// `benchmark-flags=` carries it.
     nonisolated struct CellKnobs: Equatable, Sendable {
         var readinessMaxWaitSecs: UInt64?
         var readinessSkipThermal = false

@@ -10,8 +10,7 @@
 # `speculative_enabled` unset follows the model (on for a spec-decoding model,
 # off for a regular one); it is written out so the plan says what it measures.
 #
-# Six datasets rather than one so each can run on its own day, keep
-# `bench_timeout_seconds` sized for one subset, and fail alone.
+# Six datasets rather than one so each can run on its own day and fail alone.
 #
 # The benchmark ids are the management server's: its catalog serves the corpus
 # and there is no local form of this benchmark, so run `pipette sync` first. The
@@ -70,10 +69,11 @@ runtimes = [
 runtime_flags = [
   { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", speculative_enabled = false, flash_attention = "on", number_gpu_layers = 99, ctx_size = 8192, mmap = true },
 ]
-# `bench_timeout_seconds` bounds the traversal, gate waits included: one
-# readiness gate per sample.
+# `http_timeout_seconds` bounds one turn. `vl_spec_decode` has no default
+# `attempt_timeout_seconds`; one set here would bound each sample, all its
+# turns together.
 benchmark_flags = [
-  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600 },
 ]
 
 # The spec-decoding model: speculation on. Its drafter is merged into the
@@ -92,5 +92,5 @@ runtime_flags = [
   { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", speculative_enabled = true, flash_attention = "on", number_gpu_layers = 99, ctx_size = 8192, mmap = true, envs = ["DRAFT_FUSED=1", "GGML_DRAFT_DELTA=16"], raw = ["--spec-type", "draft-fused", "--spec-draft-n-min", "0"] },
 ]
 benchmark_flags = [
-  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", http_timeout_seconds = 600 },
 ]

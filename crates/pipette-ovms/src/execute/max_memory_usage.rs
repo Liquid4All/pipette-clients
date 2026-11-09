@@ -16,7 +16,9 @@ use anyhow::Context;
 use pipette_completions::TimingRequest;
 use pipette_http::HttpClient;
 use pipette_memprobe::{Sampler, SupportedWatch, Watch};
-use pipette_ops::measurement::{self, MaxMemoryMeasurementReading, MemoryMeasurementWarmup};
+use pipette_ops::measurement::{
+    self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     BatchSize, MaxMemoryUsageBenchmark, MaxMemoryUsageOvmsOpenvino, MemoryObservation,
@@ -33,6 +35,10 @@ use crate::server;
 /// its buffers count toward the peak.
 const DECODE_TOKENS: u32 = 2;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub(super) fn run(
     benchmark: &MaxMemoryUsageBenchmark,
     runtime_flags: MaxMemoryUsageOvmsOpenvino,
@@ -40,6 +46,7 @@ pub(super) fn run(
     model: &ResolvedOpenvinoModel,
     compile_cache: &Path,
     http_timeout: Option<PositiveSeconds>,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&OvmsExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     let watch = watch(
@@ -73,6 +80,7 @@ pub(super) fn run(
         &server::url(sizing_port),
         &http,
         prefill_tokens,
+        observer,
     )?;
 
     let mut served = None;
@@ -80,6 +88,7 @@ pub(super) fn run(
     // the warm-up.
     let result = measurement::max_memory(
         &benchmark.benchmark_id,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {

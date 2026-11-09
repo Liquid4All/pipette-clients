@@ -110,6 +110,7 @@ fn a_timing_cell_runs_against_the_server(
             Ok(())
         },
         on_after_rep_end: &|| Ok(()),
+        ..MeasurementObserver::QUIET
     };
     let gate = || {
         gates.set(gates.get() + 1);
@@ -175,10 +176,7 @@ fn a_single_decode_token_is_refused_before_the_server_starts() -> anyhow::Result
         gated.set(true);
         Ok(())
     };
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let Err(err) = pipette_openvino::run(&req, &gate, observer, &dir.path().join("cache"), None)
     else {
         anyhow::bail!("a decode cell under two tokens was measured");
@@ -211,10 +209,7 @@ fn a_failure_after_the_start_names_the_server_and_keeps_its_cause() -> anyhow::R
             Err(std::io::Error::from(std::io::ErrorKind::Interrupted).into())
         }
     };
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let Err(err) = pipette_openvino::run(&req, &gate, observer, &dir.path().join("cache"), None)
     else {
         anyhow::bail!("expected the shut gate to fail the cell");
@@ -250,10 +245,7 @@ fn an_npu_memory_cell_is_refused_before_a_server_starts() -> anyhow::Result<()> 
     flags.device = Some(OpenvinoDevice::Npu);
     req.runtime_flags = Some(RuntimeFlags::try_from(flags)?);
     std::fs::write(pipette_venv::venv_python(&dir.path().join("venv")), b"")?;
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let Err(err) =
         pipette_openvino::run(&req, &|| Ok(()), observer, &dir.path().join("cache"), None)
     else {
@@ -282,10 +274,7 @@ fn a_memory_cell_reads_the_servers_peak() -> anyhow::Result<()> {
             parameter_prefill_tokens: NonNegativeCount::try_new(128)?,
         }),
     )?;
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let response =
         pipette_openvino::run(&req, &|| Ok(()), observer, &dir.path().join("cache"), None)?;
     let BenchmarkResultData::MaxMemoryUsage {
@@ -330,10 +319,7 @@ fn a_memory_cell_failure_quotes_the_servers_tail() -> anyhow::Result<()> {
     let mut flags = req.runtime_flags_ref()?;
     flags.device = Some(OpenvinoDevice::Gpu);
     req.runtime_flags = Some(RuntimeFlags::try_from(flags)?);
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let Err(err) =
         pipette_openvino::run(&req, &|| Ok(()), observer, &dir.path().join("cache"), None)
     else {

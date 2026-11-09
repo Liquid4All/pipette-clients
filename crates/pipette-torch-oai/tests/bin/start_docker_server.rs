@@ -62,10 +62,7 @@ fn main() -> anyhow::Result<()> {
         &req,
         &NoCorpus(std::env::temp_dir()),
         &|| Ok(()),
-        MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        },
+        MeasurementObserver::QUIET,
         None,
         &ExternalPrograms {
             docker: ResolvedProgram::at(docker),

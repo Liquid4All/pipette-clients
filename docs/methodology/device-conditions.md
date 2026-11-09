@@ -58,8 +58,9 @@ These conditions are of two kinds, treated differently:
   held constant for the duration of a run. They are not gated; they are part of
   the test condition, so two numbers are comparable only when they ran under the
   same power, cooling, and OS setup. On Android the rig holds that state over
-  `adb`; on the other platforms a technician sets it, and on iOS configuration
-  profiles carry part of it.
+  `adb`, and the CLI worker turns doze off each time it starts, because a
+  reboot turns doze back on. On the other platforms a technician sets it, and on
+  iOS configuration profiles carry part of it.
 
 ## Active cooling
 
@@ -191,7 +192,9 @@ The readiness gate reads thermal, throttle and load signals. It reads none of
 this configuration. The harness therefore records no error for a misconfigured phone.
 Instead the phone produces run-to-run scatter that nothing explains, or it
 reboots and drops off the fleet part-way through a batch. On Android a check
-outside the harness catches such a phone before a batch runs.
+outside the harness catches such a phone before a batch runs. Doze is the one
+exception: the Android CLI worker turns it off when it starts, reads it back,
+and exits without taking work if it is still on.
 
 ### Android (Samsung Galaxy S26 Ultra)
 
@@ -220,14 +223,18 @@ off, the Google Discover panel off, the Do not disturb schedule deleted, and the
 home screen emptied. Developer options and USB debugging are set by hand as
 well, because `adb` cannot enable the thing `adb` needs.
 
-Two conditions are runtime state, and a reboot clears them.
-`svc power stayon true` holds the handset awake, and `dumpsys deviceidle
-disable` holds it out of doze. A dozing handset accrues wall clock while its CPU
-sleeps, so its latency and its run-to-run spread both increase. The
-readiness gate cannot catch this, because a suspended handset looks idle: one
-handset at 30 % awake measured 2.2× slow, with a 758 ms standard deviation
-against a 9 ms fleet norm. The rig writes both again before a batch, and it
-reports how much of the last window each handset spent awake.
+Two conditions keep the handset awake, and only one survives a reboot.
+`svc power stayon true` holds the handset awake. It writes the global setting
+`stay_on_while_plugged_in`, which persists across a reboot. `dumpsys deviceidle
+disable` holds the handset out of doze. It is runtime state, so a reboot turns
+doze back on. A dozing handset accrues wall clock while its CPU sleeps, so its
+latency and its run-to-run spread both increase. The readiness gate cannot catch
+this, because a suspended handset looks idle: one handset at 30 % awake measured
+2.2× slow, with a 758 ms standard deviation against a 9 ms fleet norm. The
+fleet's configuration run writes both, and it reports how much of the last
+window each handset spent awake; a person starts that run. The CLI worker turns
+doze off each time it starts, and it restarts after every reboot, so a reboot
+does not leave doze on.
 
 #### Settings
 

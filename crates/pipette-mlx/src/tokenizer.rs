@@ -9,7 +9,7 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command},
     thread::{self, JoinHandle},
 };
 
@@ -53,6 +53,8 @@ struct TokenizerSession {
     // pipe and stall the helper; read back only to explain a failure.
     stderr: Option<JoinHandle<String>>,
     eos_ids: Vec<u32>,
+    /// Last, so it deregisters once `Drop` has reaped the helper.
+    _teardown: pipette_subprocess::ChildTeardown,
 }
 
 impl TokenizerSession {
@@ -70,16 +72,8 @@ impl TokenizerSession {
         if trust_remote_code {
             command.arg("--trust-remote-code");
         }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "every stream is piped: the helper talks over stdin and stdout"
-        )]
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| {
+        let (mut child, teardown) =
+            pipette_subprocess::spawn_piped(command).with_context(|| {
                 format!(
                     "failed to spawn tokenizer helper via {}",
                     venv_python.display()
@@ -100,6 +94,7 @@ impl TokenizerSession {
             stdout: BufReader::new(stdout.context("tokenizer helper stdout missing")?),
             stderr,
             eos_ids: Vec::new(),
+            _teardown: teardown,
         };
         // A write to a helper that has gone fails with EPIPE rather than
         // raising the SIGPIPE the CLI makes fatal. This crate builds for macOS

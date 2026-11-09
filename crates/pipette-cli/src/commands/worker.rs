@@ -44,6 +44,16 @@
 //! ([`pipette_subprocess::stop_on_closed_output`]): over adb or ssh the output
 //! pipe is the session, so the worker tears down what it started and exits 141,
 //! at once on Unix and at the next log line on Windows.
+//!
+//! ## Eval shards
+//!
+//! Under `--eval-shard I/N` the worker takes one claim, runs that group of the
+//! cell's samples into a part file beside its checkpoint, and returns the
+//! run's outcome: success exits 0 and an error exits 1. It heartbeats as for
+//! any job, but writes no in-flight marker, submits no result or failure and
+//! finalizes nothing. It runs only behind the pool dispatcher, which holds the
+//! lease and later has the run without the flag fold the parts in and submit
+//! the cell.
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -61,6 +71,7 @@ use pipette_mgmt_client::ConditionalResponse;
 use pipette_mgmt_client::types::{ClaimedJob, IfNoneMatch};
 use pipette_mgmt_client::{ClientIdentity, ClientStatus, ServerUrl, client_api};
 use pipette_ops::eval_completions::EvalRunDigest;
+use pipette_plan_types::FailureCode;
 use pipette_programs::{ExternalProgram, ExternalPrograms};
 
 use crate::client::claim::{redacted_spec, run_spec_from_claim};
@@ -68,10 +79,10 @@ use crate::client::worker::in_flight::{self, Boot, ClaimDecision, InFlight, InFl
 use crate::client::worker::{
     ClaimPoll, DEFAULT_IDLE_JITTER, DEFAULT_IDLE_WAIT, LeaseKeepalive, ReindexCallbacks,
     ReindexStatus, ReindexWait, SubmitDisposition, SubmitRefusedError,
-    attach_claim_to_success_payload, classify_run_error, device_time_ms, failure_from_claim,
-    format_failure_reason, idle_wait_with_jitter, installed_runtime_capabilities, keepalive_lease,
-    poll_claim, refresh_profile_at_startup, resolve_heartbeat_interval,
-    submit_plan_result_with_backoff,
+    attach_claim_to_success_payload, classify_run_error, device_time_ms, failure_code,
+    failure_from_claim, format_failure_reason, idle_wait_with_jitter,
+    installed_runtime_capabilities, keepalive_lease, poll_claim, refresh_profile_at_startup,
+    resolve_heartbeat_interval, submit_plan_result_with_backoff,
 };
 use crate::client_configuration::ClientConfiguration;
 use crate::identity::DeviceLabels;
@@ -330,6 +341,8 @@ impl WorkerArgs {
         // Before the first claim: a job's prepare would otherwise share the
         // device with what a dead worker left running.
         pipette_subprocess::reap_orphans();
+        #[cfg(target_os = "android")]
+        crate::client::worker::android_doze::disable_doze()?;
         tracing::info!("entering claim loop");
         loop {
             if stop.load(Ordering::SeqCst) {
@@ -353,6 +366,37 @@ impl WorkerArgs {
                     // so no call site below prefixes it.
                     let span = tracing::info_span!("job", id = %job.job_id);
                     let _job = span.enter();
+                    if let Some(shard) = ws.eval_shard() {
+                        tracing::info!(
+                            %shard,
+                            "eval shard: running its group into a part file; nothing is reported"
+                        );
+                        // Keeps the call heard of on the pool, where the listener answers
+                        // it; a lost lease changes nothing for a run that reports nothing.
+                        let _heartbeat = spawn_heartbeat(
+                            server.clone(),
+                            http.clone(),
+                            auth.clone(),
+                            job.job_id.clone(),
+                            resolve_heartbeat_interval(&job.time_window, self.heartbeat_secs),
+                            Arc::default(),
+                        );
+                        // No in-flight marker: a killed shard's would later fail the
+                        // parent's job for good. One claim whatever --max-jobs says, so a
+                        // failed group exits 1 instead of claiming the job again.
+                        return execute_job(
+                            ws,
+                            server,
+                            http,
+                            auth,
+                            labels,
+                            &job,
+                            client_config,
+                            programs,
+                            stop,
+                        )
+                        .map(drop);
+                    }
                     let marker_store = ws.in_flight_marker();
                     let previous = match marker_store.read() {
                         Ok(marker) => marker,
@@ -399,6 +443,7 @@ impl WorkerArgs {
                             &job,
                             format_failure_reason(&reason),
                             false,
+                            Some(FailureCode::DeviceError),
                             Some(device_time_ms(claimed_at.elapsed())),
                             stop,
                         )
@@ -753,10 +798,12 @@ fn submit_finished_run(
         }
         Err(err) => {
             let retriable = classify_run_error(&err);
+            let code = failure_code(&err);
             let reason = format_failure_reason(&format!("{err:#}"));
             tracing::warn!(
                 ?elapsed,
                 retriable,
+                ?code,
                 error = %reason,
                 "run failed"
             );
@@ -768,6 +815,7 @@ fn submit_finished_run(
                 job,
                 reason,
                 retriable,
+                code,
                 device_time,
                 stop,
             )
@@ -1068,7 +1116,18 @@ fn report_refused_submission(
         error = %reason,
         "reporting the refused result as a retriable failure"
     );
-    submit_failure(server, http, auth, job, reason, true, device_time_ms, stop).map(|_delivered| ())
+    submit_failure(
+        server,
+        http,
+        auth,
+        job,
+        reason,
+        true,
+        Some(FailureCode::HarnessError),
+        device_time_ms,
+        stop,
+    )
+    .map(|_delivered| ())
 }
 
 /// Keep a completed job's result on disk under the id and location `sync`
@@ -1105,12 +1164,14 @@ fn submit_failure(
     job: &ClaimedJob,
     reason: String,
     retriable: bool,
+    failure_code: Option<FailureCode>,
     device_time_ms: Option<u64>,
     stop: &AtomicBool,
 ) -> anyhow::Result<bool> {
-    let body = failure_from_claim(job, reason, retriable, device_time_ms);
+    let body = failure_from_claim(job, reason, retriable, failure_code, device_time_ms);
     tracing::info!(
         retriable,
+        ?failure_code,
         device_time_ms = body.device_time_ms,
         "posting the failure body to the server"
     );
@@ -1784,11 +1845,13 @@ mod tests {
     #[rstest::rstest]
     #[case::a_local_failure_is_retriable(
         anyhow::anyhow!("out of memory").context("loading the model"),
-        true
+        true,
+        "out_of_memory"
     )]
     #[case::an_unreadable_claim_is_terminal(
         anyhow::Error::from(UnrunnableClaimError::NoSpec),
-        false
+        false,
+        "harness_error"
     )]
     #[case::a_warm_up_past_its_limit_is_terminal(
         anyhow::Error::from(pipette_subprocess::ExitError::TimedOut {
@@ -1797,11 +1860,25 @@ mod tests {
             tail: String::new(),
         })
         .context("decode_throughput_4096_100 warm-up"),
-        false
+        false,
+        "runtime_error"
+    )]
+    #[case::an_attempt_past_attempt_timeout_seconds_is_terminal(
+        anyhow::Error::from(pipette_ops::attempt::AttemptTimeoutError {
+            overrun: pipette_ops::attempt::Overrun {
+                what: "rep 1".to_owned(),
+                limit: Duration::from_secs(10),
+                elapsed: Duration::from_millis(10_020),
+            },
+            engine_error: Some("llama-server exited with signal: 9 (SIGKILL)".to_owned()),
+        }),
+        false,
+        "attempt_timeout"
     )]
     fn a_failed_run_is_reported_against_the_claim(
         #[case] error: anyhow::Error,
         #[case] retriable: bool,
+        #[case] failure_code: &str,
     ) -> anyhow::Result<()> {
         let temp = TempWorkspace::new("worker-submit-failure")?;
         let server = MockServer::start();
@@ -1818,6 +1895,7 @@ mod tests {
                         "job_id": "job-abc",
                         "benchmark_id": "prefill_throughput_256",
                         "retriable": retriable,
+                        "failure_code": failure_code,
                         "device_time_ms": 3000,
                     })
                     .to_string(),
@@ -3040,6 +3118,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn a_shard_workspace_opens_a_part_of_its_own() -> anyhow::Result<()> {
+        let temp = TempWorkspace::new("worker-eval-shard")?;
+        let req = eval_request()?;
+        let session = temp.as_shard("1/2")?.eval_completions().open(&req)?;
+        let digest16: String = run_request_digest(&req)?
+            .as_ref()
+            .chars()
+            .take(16)
+            .collect();
+        let name = session
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("a part name")?;
+        assert!(
+            name.starts_with(&format!("{digest16}.part-1-of-2-")),
+            "{name}"
+        );
+        assert_eq!(
+            session.path().extension(),
+            Some(std::ffi::OsStr::new("jsonl"))
+        );
+        Ok(())
+    }
+
     /// A refused failure report stops the worker after exactly one claim,
     /// rather than re-claiming the same leased job (see [`SubmitRefusedError`]).
     /// Driven through `execute`, so it is the real loop that has to stop.
@@ -3127,6 +3231,74 @@ mod tests {
         assert_eq!(failure.calls(), 1);
         assert_eq!(benchmark.calls(), 0, "the job started again");
         assert!(store.read()?.is_none(), "reboot marker was not removed");
+        Ok(())
+    }
+
+    /// Where an ordinary worker would fail the job for the reboot its marker
+    /// shows, a shard leaves the marker as it was, heartbeats while its run
+    /// lasts, reports nothing, not even a run that failed, and exits with that
+    /// failure after its one claim.
+    #[test]
+    fn a_shard_claims_once_heartbeats_and_never_touches_the_marker_or_a_result()
+    -> anyhow::Result<()> {
+        let temp = TempWorkspace::new("worker-shard")?;
+        let server = MockServer::start();
+        register(&temp.ws, &server)?;
+        let store = temp.ws.in_flight_marker();
+        let marker = InFlight::new("job-abc", Some("boot-old".into()));
+        store.write(&marker)?;
+        let claimed = server.mock(|when, then| {
+            when.method(POST).path("/plans/claim");
+            then.status(200).body(CLAIM_JOB_BODY);
+        });
+        // Fails the run a second after its first heartbeat is due.
+        server.mock(|when, then| {
+            when.method(GET).path("/benchmarks/prefill_throughput_256");
+            then.status(404).delay(Duration::from_secs(2));
+        });
+        let beat = server.mock(|when, then| {
+            when.method(PUT).path("/plans/job-abc/heartbeat");
+            then.status(200);
+        });
+        let posted = server.mock(|when, then| {
+            when.method(POST).path("/benchmarks");
+            then.status(202).body(r#"{"job_id":"job-abc"}"#);
+        });
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let outcome = thread::scope(|scope| -> anyhow::Result<anyhow::Result<()>> {
+            // Ends a loop that claims again, which --max-jobs 0 would not.
+            let signaller = scope.spawn(|| -> anyhow::Result<()> {
+                let waited = wait_until("the first claim", || claimed.calls() >= 1);
+                stop.store(true, Ordering::SeqCst);
+                waited
+            });
+            let outcome = WorkerArgs {
+                heartbeat_secs: Some(1),
+                ..worker_args()
+            }
+            .run_until_stopped_on_boot(
+                &temp.as_shard("0/2")?,
+                &test_http()?,
+                &ClientConfiguration::default(),
+                &ExternalPrograms::at_missing_paths(),
+                &stop,
+                Boot {
+                    id: Some("boot-new".into()),
+                    started_at: Some(time::OffsetDateTime::now_utc()),
+                },
+            );
+            signaller
+                .join()
+                .map_err(|_| anyhow::anyhow!("signaller panicked"))??;
+            Ok(outcome)
+        })?;
+        let error = outcome.err().context("a shard whose run failed exited 0")?;
+
+        assert_eq!(claimed.calls(), 1, "{error:#}");
+        assert!(beat.calls() >= 1, "a shard's run sent no heartbeat");
+        assert_eq!(posted.calls(), 0, "a shard reported to the server");
+        assert_eq!(store.read()?, Some(marker));
         Ok(())
     }
 

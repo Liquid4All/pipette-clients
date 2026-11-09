@@ -60,7 +60,9 @@ pub(super) fn run(
         server::STOP_GRACE,
     )?;
     let sampler = Sampler::start(openvino_server.pid(), SupportedWatch::OBSERVE)?;
-    openvino_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    // Off the clock: readiness waits out the model's compile.
+    observer.outside(|| openvino_server.wait_ready(server::READY_TIMEOUT, ready))?;
     let result = measure(benchmark, &url, timeout, readiness_gate, observer);
     let (memory, _) = sampler.stop();
     let result_data = result.map_err(|err| err.context(openvino_server.stop_with_tail()))?;
@@ -144,10 +146,7 @@ mod tests {
             parameter_decode_tokens: PositiveCount::try_new(16)?,
             parameter_batch_size: BatchSize::one(),
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let result = measure(
             &benchmark,
             &server.base_url(),

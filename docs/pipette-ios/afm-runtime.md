@@ -42,8 +42,11 @@ A batched entry is refused by name: the system model answers one request at a ti
 The submitted `runtime_descriptor` is the bare `apple_foundation` tag plus the
 private-API build flags; there is no package or version pin to embed.
 `runtime_flags` is `nil`: plan-types declares no `RuntimeFlags` variant for this
-runtime on any benchmark, so an AFM cell that carries runtime or benchmark flags is
-refused rather than having them dropped.
+runtime on any benchmark, so an AFM cell that carries runtime flags is refused
+rather than having them dropped. Benchmark flags are refused the same way except
+on `decode_throughput` and `end_to_end_latency`, whose variants take
+`attempt_timeout_seconds` and `readiness`; the other AFM cells have no
+benchmark-flag variant.
 
 ## Throughput benches: forcing a fixed token count
 

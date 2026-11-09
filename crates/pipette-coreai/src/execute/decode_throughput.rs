@@ -1,12 +1,10 @@
-use std::path::PathBuf;
+use std::{num::NonZeroUsize, path::PathBuf};
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use pipette_ops::measurement::MeasurementObserver;
+use pipette_ops::measurement::{self as shared, MeasurementObserver, MeasurementWarmup};
 use pipette_ops::readiness::ReadinessGate;
 use pipette_ops::run_response::RunResponseBuilder;
-use pipette_plan_types::BenchmarkResultData;
 use pipette_plan_types::DecodeThroughputBenchmark;
 use pipette_plan_types::RunRequest;
 use pipette_plan_types::RunResponse;
@@ -24,6 +22,7 @@ struct DecodeThroughputRequest {
 #[derive(Debug, Deserialize)]
 struct DecodeThroughputResponse {
     generation_tps: f64,
+    prompt_tokens: u32,
     decode_tokens: u32,
 }
 
@@ -45,66 +44,33 @@ pub(super) fn run(
     require_decode_interval(decode_tokens)?;
 
     readiness_gate()?;
-    let mut server = server::start_server(req, sidecar)?;
+    let mut server = observer.outside(|| server::start_server(req, sidecar))?;
 
-    tracing::info!(
-        cell = ENDPOINT,
-        prefill_tokens,
-        decode_tokens,
-        "Core AI decode warm-up"
-    );
-    throughput_http::prepare(&server)?;
-    let warmup: DecodeThroughputResponse = throughput_http::post_json(
-        &server,
-        ENDPOINT,
-        &DecodeThroughputRequest {
-            prompt_tokens: prefill_tokens,
-            decode_tokens,
-        },
-    )?;
-    pipette_ops::measurement::expect_tokens(
-        &format!("{ENDPOINT} warmup decode_tokens"),
-        warmup.decode_tokens,
-        decode_tokens,
-    )?;
-    let measured = pipette_ops::measurement::run(
-        ENDPOINT,
+    let result = shared::decode(
+        benchmark,
+        NonZeroUsize::try_from(shared::REPS)?,
         readiness_gate,
         *observer,
-        |_| throughput_http::prepare(&server),
-        |_| {
-            throughput_http::post_json::<_, DecodeThroughputResponse>(
-                &server,
+        MeasurementWarmup::Once,
+        &server,
+        |server| {
+            throughput_http::prepare(server)?;
+            let response: DecodeThroughputResponse = throughput_http::post_json(
+                server,
                 ENDPOINT,
                 &DecodeThroughputRequest {
                     prompt_tokens: prefill_tokens,
                     decode_tokens,
                 },
-            )
-        },
-        |idx, rep| {
-            let response = &rep.value;
-            pipette_ops::measurement::expect_tokens(
-                "decode_tokens",
-                response.decode_tokens,
-                decode_tokens,
             )?;
-            pipette_ops::measurement::positive_finite("generation_tps", response.generation_tps)
-                .with_context(|| format!("invalid {ENDPOINT} rep {idx}"))?;
-            // `generation_tps` counts the N-1 intervals between tokens, so the
-            // span from the first token to the last is (N-1) / tps.
-            measurement::time_ms_from_tps(ENDPOINT, decode_tokens - 1, response.generation_tps)
+            Ok(shared::DecodeMeasurementReading::PerPrompt(vec![reading(
+                response,
+            )?]))
         },
     )?;
-    let stats = measured.stats();
-    Ok(
-        RunResponseBuilder::new(BenchmarkResultData::DecodeThroughput {
-            decode_time_ms: stats.mean_ms,
-            decode_time_ms_stddev: Some(stats.stddev_ms),
-        })
+    Ok(RunResponseBuilder::new(result)
         .process(&mut server.process)
-        .build(),
-    )
+        .build())
 }
 
 /// The decode rate (tokens per second, tps) uses the N-1 intervals between
@@ -147,5 +113,57 @@ mod tests {
             (Ok(()), Some(_)) => anyhow::bail!("{decode_tokens}-token decode must fail"),
             (Err(err), None) => Err(err.context(format!("{decode_tokens}-token decode must pass"))),
         }
+    }
+}
+
+fn reading(
+    response: DecodeThroughputResponse,
+) -> anyhow::Result<shared::DecodeMeasurementPerPromptReading> {
+    require_decode_interval(response.decode_tokens)?;
+    // Core AI reports N-1 intervals. Preserve that span without from_stream's scaling.
+    let ms = measurement::time_ms_from_tps(
+        ENDPOINT,
+        response.decode_tokens - 1,
+        response.generation_tps,
+    )?;
+    Ok(shared::DecodeMeasurementPerPromptReading::from_millis(
+        response.prompt_tokens,
+        response.decode_tokens.try_into()?,
+        ms,
+    )?)
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[test]
+    fn preserves_first_to_last_token_span() -> anyhow::Result<()> {
+        let r = reading(DecodeThroughputResponse {
+            prompt_tokens: 4,
+            decode_tokens: 3,
+            generation_tps: 2.0,
+        })?;
+        assert_eq!(r.decode_time_ms.into_inner(), 1000.0);
+        assert_eq!(r.prefill_tokens, 4);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::negative(-1.0)]
+    #[case::nan(f64::NAN)]
+    #[case::infinite(f64::INFINITY)]
+    fn rejects_an_invalid_rate(#[case] generation_tps: f64) {
+        assert!(
+            reading(DecodeThroughputResponse {
+                prompt_tokens: 4,
+                decode_tokens: 3,
+                generation_tps,
+            })
+            .is_err()
+        );
     }
 }

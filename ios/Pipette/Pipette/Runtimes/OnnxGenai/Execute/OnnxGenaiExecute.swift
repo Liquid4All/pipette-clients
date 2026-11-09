@@ -29,7 +29,8 @@ nonisolated enum OnnxGenaiExecute {
                 readinessGate: readinessGate, observer: observer)
         case let .maxMemoryUsage(benchmark):
             resultData = try await maxMemoryUsage(
-                benchmark, model: try ResolvedOnnxGenaiModel(request.model.bound))
+                benchmark, model: try ResolvedOnnxGenaiModel(request.model.bound),
+                observer: observer)
         case .eval:
             // `OGATokenizer` exposes no chat template, and a borrowed renderer would score a
             // prompt no other runtime ran.

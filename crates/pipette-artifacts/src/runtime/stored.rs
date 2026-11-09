@@ -86,11 +86,18 @@ pub fn to_stored(declared: &Runtime) -> Result<Runtime, RuntimeStoredError> {
                 dir: blobs_venv_dir()?,
             },
         })),
+        Runtime::AppleCoreAiMacosPipette(rt) => Ok(Runtime::AppleCoreAiMacosPipette(
+            pipette_plan_types::AppleCoreAiMacosPipette {
+                packages: rt.packages.clone(),
+                source: pipette_plan_types::AppleCoreAiMacosPipetteSource::RelativeDir {
+                    dir: blobs_dir()?,
+                },
+            },
+        )),
         Runtime::LlamacppApkPipette(_)
         | Runtime::LlamacppIosPipette(_)
         | Runtime::MlxIosPipette(_)
         | Runtime::OnnxGenaiIosPipette(_)
-        | Runtime::AppleCoreAiMacosPipette(_)
         | Runtime::AppleFoundation(_) => Err(RuntimeStoredError::NotStorable(declared.to_string())),
     }
 }

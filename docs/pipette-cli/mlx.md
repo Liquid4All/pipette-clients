@@ -85,8 +85,10 @@ leaves the image encode out on some model families:
 - `total_time_ms`: from the send to the chunk that carries `finish_reason`.
 
 `--http-timeout-seconds` bounds the wait for the first token and the wait
-between tokens (default 3600 s). It does not bound the whole request. The
-`--readiness-*` flags apply as on the text timing cells. See
+between tokens (default 3600 s). It does not bound the whole request;
+`--attempt-timeout-seconds` bounds each repetition, 300 s by default
+([usage.md](usage.md#5c-the-attempt-limit)). The `--readiness-*` flags apply
+as on the text timing cells. See
 [../methodology/vl-throughput.md](../methodology/vl-throughput.md#runtime-details).
 
 ```bash
@@ -98,10 +100,12 @@ pipette benchmarks run --benchmark local/vl_throughput_smoke \
 `vl_max_memory` runs on the same runtime row: one chat request with the cell's
 gray images and text and a one-token reply, reporting the server's peak
 `phys_footprint` as `max_host_bytes` (`max_gpu_bytes` is null: unified memory).
-Like `max_memory_usage` it takes no plan flags, so `--http-timeout-seconds` and
-`--bench-timeout-seconds` are refused and the request waits up to 3600s. Both
-memory cells first send their request to a warm-up server of their own, its
-reading dropped, so the measured server finds its Metal kernels compiled. See
+Like `max_memory_usage` it takes `attempt_timeout_seconds` and no other
+benchmark flag, so `--http-timeout-seconds` is refused. Both memory cells first
+send their request to a warm-up server of their own, its reading dropped, so
+the measured server finds its Metal kernels compiled. Each server is one
+attempt from its launch (300 s by default), and its request waits up to
+3600 s. See
 [../methodology/vl-max-memory.md](../methodology/vl-max-memory.md#mlx-macos)
 and [../methodology/peak-memory-macos.md](../methodology/peak-memory-macos.md#mlx).
 
@@ -139,13 +143,13 @@ RUNTIME='mlx-macos-pipette://version=0.7.4'
 pipette benchmarks run --benchmark vl_spec_decode_mmspec_test_gqa_k8 \
   --model 'mlx://repo=LiquidAI/LFM2.5-VL-3B-MLX-bf16' --runtime "$RUNTIME" \
   --runtime-flags '{"speculative_enabled":false}' \
-  --http-timeout-seconds 600 --bench-timeout-seconds 10800 --sync
+  --http-timeout-seconds 600 --sync
 
 # The spec-decoding pair: speculation on, same benchmark id and corpus.
 pipette benchmarks run --benchmark vl_spec_decode_mmspec_test_gqa_k8 \
   --model 'mlx-speculative://repo=LiquidAI/LFM2.5-VL-3B-MLX-bf16&draft_repo=LiquidAI/LFM2.5-VL-3B-DSpark' \
   --runtime "$RUNTIME" --runtime-flags '{"speculative_enabled":true}' \
-  --http-timeout-seconds 600 --bench-timeout-seconds 10800 --sync
+  --http-timeout-seconds 600 --sync
 ```
 
 The MLX path runs upstream `mlx-vlm`'s `dflash` loop over the separate drafter,
@@ -157,7 +161,9 @@ benchmark. The run refuses to start on battery or while charging, since the two
 arms must run under the same power state. The first import of `mlx_vlm`
 in a venv takes about two minutes, because Python compiles the bytecode of a
 large package tree. This time is part of the server start, before the warm-up
-of the arm, so the cell does not measure it.
+of the arm, so the cell does not measure it, though a cell with an attempt
+limit counts it against the first attempt
+([usage.md](usage.md#5c-the-attempt-limit)).
 
 `--runtime-flags` is **refused** for MLX, not ignored, on every benchmark but
 `vl_spec_decode`: the `mlx_macos_pipette` runtime has no other flag cell, so

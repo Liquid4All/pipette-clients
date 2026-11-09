@@ -31,9 +31,9 @@ pub struct ServerHandle {
 /// Start the Swift sidecar for the bound Core AI model, and wait for its ready
 /// marker (`PIPETTE_COREAI_READY`) on stderr.
 ///
-/// The execute modules resolve `sidecar` through
-/// [`crate::sidecar::require_coreai_sidecar`] before the readiness gate, so a
-/// first-use `swift build` never runs between the gate and the measurement.
+/// The artifact installer builds `sidecar` before dispatch and the readiness
+/// gate. A `swift build` therefore never runs between the gate and the
+/// measurement.
 pub fn start_server(req: &RunRequest, sidecar: PathBuf) -> anyhow::Result<ServerHandle> {
     let model_dir = require_coreai_model_dir(req)?;
     let http = HttpClient::loopback("pipette", HTTP_TIMEOUT)

@@ -12,7 +12,9 @@ use base64::Engine;
 use pipette_completions::llama_server;
 use pipette_http::HttpClient;
 use pipette_memprobe::{Peak, Sampler, SupportedWatch, Watch};
-use pipette_ops::measurement::{self, MemoryMeasurementWarmup, VlMaxMemoryMeasurementReading};
+use pipette_ops::measurement::{
+    self, MeasurementObserver, MemoryMeasurementWarmup, VlMaxMemoryMeasurementReading,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     BenchmarkFlagRef, MemoryObservation, PositiveSeconds, RunResponse, RuntimeFlags,
@@ -22,10 +24,6 @@ use pipette_subprocess::{Process, start_process};
 
 use crate::engines;
 use crate::server::{self, Launch};
-
-/// As llama.cpp's peak-memory cells, when the cell sets no
-/// `bench_timeout_seconds`: one server from spawn through its workload.
-const BENCH_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The request one server serves.
 struct Inputs {
@@ -40,6 +38,7 @@ pub fn run(
     benchmark: &VlMaxMemoryBenchmark,
     benchmark_flags: &BenchmarkFlagRef,
     launch: &Launch,
+    observer: MeasurementObserver<'_>,
 ) -> anyhow::Result<RunResponse> {
     // Before the build: a host that cannot read the peak builds nothing.
     let watch = Watch::PeakWithGpu.supported()?;
@@ -53,18 +52,20 @@ pub fn run(
             .map_or(1, |tokens| tokens.into_inner().unsigned_abs()),
         num_images: benchmark.parameter_num_images.into_inner().unsigned_abs(),
     };
-    engines::build(launch)?;
+    // The build is not an attempt: a cold one takes minutes, before any server.
+    observer.outside(|| engines::build(launch))?;
 
     let timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
-    let deadline = benchmark_flags
-        .bench_timeout_seconds
-        .map_or(BENCH_TIMEOUT, |secs: PositiveSeconds| {
-            Duration::from_secs(secs.into_inner())
-        });
+    // One server from spawn through its workload is one attempt.
+    let deadline = benchmark_flags.attempt_timeout_seconds.map_or(
+        pipette_ops::attempt::DEFAULT_LIMIT,
+        |secs: PositiveSeconds| Duration::from_secs(secs.into_inner()),
+    );
     let mut served = None;
     let mut extras = serde_json::Map::new();
     let result = measurement::vl_max_memory(
         benchmark,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {

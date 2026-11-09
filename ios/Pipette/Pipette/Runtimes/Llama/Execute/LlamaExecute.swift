@@ -51,7 +51,8 @@ nonisolated enum LlamaExecute {
         case let .maxMemoryUsage(benchmark):
             // Ungated: a peak is thermal-invariant.
             resultData = try await maxMemoryUsage(
-                benchmark, load: load, model: try ResolvedGgufTextModel(request.model.bound))
+                benchmark, load: load, model: try ResolvedGgufTextModel(request.model.bound),
+                observer: observer)
         case let .eval(benchmark):
             // Before the load: a body without rows has nothing to run.
             let cell = try EvalCell(benchmark)
@@ -68,7 +69,7 @@ nonisolated enum LlamaExecute {
             try readinessGate()
             (resultData, flags) = try await withCalibratedVision(
                 request, model, flags: flags, width: benchmark.parameterImageWidth.value.magnitude,
-                height: benchmark.parameterImageHeight.value.magnitude
+                height: benchmark.parameterImageHeight.value.magnitude, observer: observer
             ) {
                 try await vlThroughput(benchmark, $0, readinessGate: readinessGate,
                                        observer: observer)
@@ -78,7 +79,7 @@ nonisolated enum LlamaExecute {
             _ = try LlamaMtmd.CtxInputs(benchmark)
             // Ungated: a peak is thermal-invariant.
             (resultData, flags) = try await vlMaxMemory(benchmark, request, flags: flags,
-                                                        model: model)
+                                                        model: model, observer: observer)
         case let .vlSpecDecode(benchmark):
             // Before the corpus download, which a batched cell would waste.
             try BenchmarkMeasurement.requireOneInFlight(definition, engine: oneAtATime)
@@ -117,7 +118,7 @@ nonisolated enum LlamaExecute {
             let cell = try AsrCell(benchmark, recipe: AsrRecipe.forMmproj(model.mmproj))
             // Ungated: a peak is thermal-invariant.
             (resultData, flags, clientExtras) = try await asrMaxMemory(
-                benchmark, request, cell: cell, model: model, flags: flags)
+                benchmark, request, cell: cell, model: model, flags: flags, observer: observer)
         }
         var response = traversed
             ?? RunResponse(resultData: resultData, runtimeOutput: RuntimeOutput())
@@ -159,7 +160,8 @@ nonisolated enum LlamaExecute {
     /// flags the cell ran with.
     static func withCalibratedVision<T>(
         _ request: RunRequest, _ model: ResolvedGgufVisionModel, flags: RuntimeFlags,
-        width: UInt32, height: UInt32, _ body: (VisionInference) async throws -> T
+        width: UInt32, height: UInt32, observer: MeasurementObserver,
+        _ body: (VisionInference) async throws -> T
     ) async throws -> (T, RuntimeFlags) {
         var ran = flags
         let load = LoadSettings(flags, request.benchmark)
@@ -167,7 +169,10 @@ nonisolated enum LlamaExecute {
             path: model.backbone, mmprojPath: model.mmproj, nGpuLayers: load.numberGpuLayers,
             threads: load.threads, swaFull: load.swaFull, loadMode: load.loadMode,
             window: { mtmd in
-                let perImage = try LlamaMtmd.perImageTokens(mtmd, width: width, height: height)
+                // Calibration is not an attempt (`attempt_timeout_seconds`).
+                let perImage = try observer.outside {
+                    try LlamaMtmd.perImageTokens(mtmd, width: width, height: height)
+                }
                 ran = try LlamaRuntimeFlags.forRun(request, perImageTokens: UInt32(perImage))
                 // Both from the counted flags: the estimate's micro-batch is clamped to the
                 // estimate's window, which the count can exceed.

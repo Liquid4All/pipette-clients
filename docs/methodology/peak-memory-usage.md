@@ -241,10 +241,11 @@ once first, in a process of their own, and drop that reading:
   ([ONNX GenAI](../onnx-genai-measurement.md#host-memory)).
 
 The warm-up is watched and checked as the measured run is, and its reading is
-dropped. If it fails, the cell fails. It gets the cell's deadline for itself, so
-it does not shorten the measured run's deadline. The result is the measured
-run's. The observation spans the whole cell, so it covers the warm-up, compile
-included.
+dropped. If it fails, the cell fails. It is an attempt of its own under the
+cell's `attempt_timeout_seconds`
+([the attempt limit](../pipette-cli/usage.md#5c-the-attempt-limit)), so the
+measured run still gets the whole limit. The result is the measured run's. The
+observation spans the whole cell, so it covers the warm-up, compile included.
 
 MLX ships most of its kernels prebuilt, but Metal still builds their GPU code
 into the `com.apple.metal` cache. The MLX warm-up cannot run in the measured

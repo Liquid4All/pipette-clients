@@ -74,11 +74,20 @@
     "asr_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
       "benchmark_flags/asr_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
     ],
+    "asr_max_memory_llamacpp_ios_pipette_gguf_vision": [
+      "benchmark_flags/asr_max_memory.llamacpp_ios_pipette.gguf_vision.json"
+    ],
     "asr_throughput_llamacpp_cli_stock_tools_gguf_vision": [
       "benchmark_flags/asr_throughput.llamacpp_cli_stock_tools.gguf_vision.json"
     ],
     "asr_throughput_llamacpp_ios_pipette_gguf_vision": [
       "benchmark_flags/asr_throughput.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "decode_throughput_apple_core_ai_macos_pipette_apple_core_ai": [
+      "benchmark_flags/decode_throughput.core_ai_macos_pipette.core_ai.json"
+    ],
+    "decode_throughput_apple_foundation_apple_foundation_text": [
+      "benchmark_flags/decode_throughput.apple_foundation.apple_foundation_text.json"
     ],
     "decode_throughput_docker_sglang_torch": [
       "benchmark_flags/decode_throughput.docker_sglang.torch.json"
@@ -119,6 +128,12 @@
     ],
     "decode_throughput_uv_vllm_torch": [
       "benchmark_flags/decode_throughput.uv_vllm.torch.json"
+    ],
+    "end_to_end_latency_apple_core_ai_macos_pipette_apple_core_ai": [
+      "benchmark_flags/end_to_end_latency.core_ai_macos_pipette.core_ai.json"
+    ],
+    "end_to_end_latency_apple_foundation_apple_foundation_text": [
+      "benchmark_flags/end_to_end_latency.apple_foundation.apple_foundation_text.json"
     ],
     "end_to_end_latency_docker_sglang_torch": [
       "benchmark_flags/end_to_end_latency.docker_sglang.torch.json"
@@ -177,8 +192,50 @@
     "eval_uv_vllm_torch": [
       "benchmark_flags/eval.uv_vllm.torch.json"
     ],
+    "max_memory_usage_apple_core_ai_macos_pipette_apple_core_ai": [
+      "benchmark_flags/max_memory_usage.core_ai_macos_pipette.core_ai.json"
+    ],
+    "max_memory_usage_docker_sglang_torch": [
+      "benchmark_flags/max_memory_usage.docker_sglang.torch.json"
+    ],
+    "max_memory_usage_docker_vllm_torch": [
+      "benchmark_flags/max_memory_usage.docker_vllm.torch.json"
+    ],
+    "max_memory_usage_llamacpp_apk_pipette_gguf_text": [
+      "benchmark_flags/max_memory_usage.llamacpp_apk_pipette.gguf_text.json"
+    ],
     "max_memory_usage_llamacpp_cli_stock_tools_gguf_text": [
       "benchmark_flags/max_memory_usage.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "max_memory_usage_llamacpp_ios_pipette_gguf_text": [
+      "benchmark_flags/max_memory_usage.llamacpp_ios_pipette.gguf_text.json"
+    ],
+    "max_memory_usage_mlx_ios_pipette_mlx": [
+      "benchmark_flags/max_memory_usage.mlx_ios_pipette.mlx.json"
+    ],
+    "max_memory_usage_mlx_macos_pipette_mlx": [
+      "benchmark_flags/max_memory_usage.mlx_macos_pipette.mlx.json"
+    ],
+    "max_memory_usage_onnx_genai_ios_pipette_onnx_genai": [
+      "benchmark_flags/max_memory_usage.onnx_genai_ios_pipette.onnx_genai.json"
+    ],
+    "max_memory_usage_ovms_openvino": [
+      "benchmark_flags/max_memory_usage.ovms.openvino.json"
+    ],
+    "max_memory_usage_uv_onnx_genai_onnx_genai": [
+      "benchmark_flags/max_memory_usage.uv_onnx_genai.onnx_genai.json"
+    ],
+    "max_memory_usage_uv_openvino_openvino": [
+      "benchmark_flags/max_memory_usage.uv_openvino.openvino.json"
+    ],
+    "max_memory_usage_uv_sglang_torch": [
+      "benchmark_flags/max_memory_usage.uv_sglang.torch.json"
+    ],
+    "max_memory_usage_uv_vllm_torch": [
+      "benchmark_flags/max_memory_usage.uv_vllm.torch.json"
+    ],
+    "prefill_throughput_apple_core_ai_macos_pipette_apple_core_ai": [
+      "benchmark_flags/prefill_throughput.core_ai_macos_pipette.core_ai.json"
     ],
     "prefill_throughput_docker_sglang_torch": [
       "benchmark_flags/prefill_throughput.docker_sglang.torch.json"
@@ -221,6 +278,12 @@
     ],
     "vl_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
       "benchmark_flags/vl_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "vl_max_memory_llamacpp_ios_pipette_gguf_vision": [
+      "benchmark_flags/vl_max_memory.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "vl_max_memory_mlx_macos_pipette_mlx": [
+      "benchmark_flags/vl_max_memory.mlx_macos_pipette.mlx.json"
     ],
     "vl_max_memory_trt_edgellm_gguf_vision": [
       "benchmark_flags/vl_max_memory.trt_edgellm.gguf_vision.json"
@@ -392,6 +455,26 @@
     ],
     "shareable": [
       "runtime_flags/eval.docker_sglang.torch.shareable.json"
+    ]
+  },
+  "FailureCode": {
+    "attempt_timeout": [
+      "failure_code/attempt_timeout.json"
+    ],
+    "device_error": [
+      "failure_code/device_error.json"
+    ],
+    "harness_error": [
+      "failure_code/harness_error.json"
+    ],
+    "out_of_memory": [
+      "failure_code/out_of_memory.json"
+    ],
+    "runtime_error": [
+      "failure_code/runtime_error.json"
+    ],
+    "unspecified": [
+      "failure_code/unspecified.json"
     ]
   },
   "GgufTextSource": {

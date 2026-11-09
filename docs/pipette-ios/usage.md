@@ -284,8 +284,8 @@ sweep-form parameter and is refused here as an unknown key.
 `readiness-max-wait-secs` and `readiness-skip-thermal` become the cell's
 benchmark flags, resolved as the CLI's `build_benchmark_flags` resolves them, so
 they are valid only where the cell's flags carry a readiness field: the timing
-benchmarks. On eval, max-memory and Apple Foundation the cell has none, so
-passing one is an error rather than a value nothing reads. The deadline is
+benchmarks, Apple Foundation's included. On eval and the memory cells the cell
+has none, so passing one is an error rather than a value nothing reads. The deadline is
 whole seconds, at least one as the CLI's `value_parser!(u64).range(1..)` makes
 it, and is held to a one-day ceiling as the crate holds it.
 `readiness-skip-thermal` waives every thermal signal (the thermal state and the
@@ -306,9 +306,26 @@ launch environment, as the CLI does. `pipette-ctl` sets them through
 neither, so it keeps the default.
 
 `--model-flags` / `--model-enable-thinking` have no counterpart.
-`--http-timeout-seconds` and `--bench-timeout-seconds` do not apply: they bound a
-server or subprocess the cell starts, and the phone runs its engines in the app,
-so plan-types gives no iOS cell either knob.
+`--http-timeout-seconds` does not apply: it bounds a request to a server the
+cell starts, and the phone runs its engines in the app, so plan-types gives no
+iOS cell the knob.
+
+`--attempt-timeout-seconds` has no shorthand: `benchmark-flags=` carries it, as
+`{"attempt_timeout_seconds":600}`. It is the limit on each attempt, timed on its
+own: the model load and warm-up, each measured rep, the work after a rep, and
+each peak-memory attempt. Unset, it is 300 s on the timing, throughput and
+memory cells. `vl_spec_decode` has no limit and its iOS cells refuse the key;
+eval takes no benchmark flags on iOS. Readiness waits and the VL and ASR
+context calibration do not count. The app cannot stop llama.cpp, MLX, ONNX
+Runtime GenAI or Apple Foundation mid-call, so past the limit a claimed launch
+(`claim=`) saves the cell as failed, logs its failure (`error jobRun
+<benchmark> / <model> failed: rep 2 ran 300.4s, past attempt_timeout_seconds
+(300s), and was stopped`), prints `BENCH_DONE 1 failed: <the same error>` and
+exits at once. Every other launch, and the resident app (the UI, `worker`),
+fails the cell with that error when the engine next reaches a readiness gate,
+a rep or a peak-memory attempt, or returns, and goes on to the next cell; the
+worker reports the failure as not retriable. A result reports
+`attempt_timeout_seconds` in `benchmark_flags` only when the cell set it.
 
 ### The sweep forms: `bench` and the bare invocation
 
@@ -346,7 +363,7 @@ benchmark. It records nothing and submits nothing.
 `model=` and one `benchmarks=` id, so a `match=` or a ladder is refused.
 `pipette-ios-proxy` dispatches a claim through the bare form with its
 `benchmark_flags` as `benchmark-flags=`, so this is where a plan's per-cell
-`readiness` block arrives. The launch carries the claim, so the app fetches a missing
+`readiness` block and attempt limit arrive. The launch carries the claim, so the app fetches a missing
 `benchmarks=` id from the server ([architecture.md § 1.3](architecture.md#13-benchmark)).
 
 **`submit=` defaults to on**, where the CLI's `--sync` is opt-in. A phone that

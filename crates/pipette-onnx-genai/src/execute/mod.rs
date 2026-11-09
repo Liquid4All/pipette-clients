@@ -80,7 +80,14 @@ pub fn run(
         }
         BenchmarkDefinition::MaxMemoryUsage(benchmark) => {
             let (install, model) = bind(req)?;
-            max_memory_usage::run(benchmark, &install, &model, timeout, client_config)
+            max_memory_usage::run(
+                benchmark,
+                &install,
+                &model,
+                timeout,
+                observer,
+                client_config,
+            )
         }
         BenchmarkDefinition::Eval(_) => {
             anyhow::bail!("eval benchmarks are not yet supported for ONNX GenAI")
@@ -180,10 +187,7 @@ mod tests {
                 parameter_batch_size: BatchSize::try_new(batch_size)?,
             }),
         )?;
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let Err(err) = run(&req, &|| Ok(()), observer, None) else {
             anyhow::bail!("expected a batch refusal or a missing-runtime failure");
         };
@@ -238,10 +242,7 @@ mod tests {
             gated.set(true);
             Ok(())
         };
-        let observer = MeasurementObserver {
-            on_before_rep_start: &|| Ok(()),
-            on_after_rep_end: &|| Ok(()),
-        };
+        let observer = MeasurementObserver::QUIET;
         let Err(err) = run(&req, &gate, observer, None) else {
             anyhow::bail!("a Windows ML cell ran");
         };

@@ -92,14 +92,6 @@ pub fn ensure_runtime(
     store: &RuntimeArtifactStore,
     declared: &Runtime,
 ) -> Result<(Runtime, Option<File>), RuntimeStoreError> {
-    if let Runtime::AppleCoreAiMacosPipette(rt) = declared {
-        if !rt.is_bundled() {
-            return Err(RuntimeStoreError::NotStorable(
-                crate::runtime::RuntimeStorageKeyError::NotStorable(declared.to_string()),
-            ));
-        }
-        return Ok((declared.clone(), None));
-    }
     let stored = store.find_intact(declared)?.is_some();
     if stored {
         tracing::info!(runtime = %declared.cli_ref(), "runtime in store");
@@ -245,9 +237,6 @@ pub fn runtime_download_size(
     store: &RuntimeArtifactStore,
     declared: &Runtime,
 ) -> Result<Option<u64>, RuntimeStoreError> {
-    if matches!(declared, Runtime::AppleCoreAiMacosPipette(_)) {
-        return Ok(Some(0));
-    }
     if store.find_intact(declared)?.is_some() {
         return Ok(Some(0));
     }
@@ -296,6 +285,7 @@ fn install_runtime(
     )?;
     let wheelhouse = wheelhouse.as_deref();
     match declared {
+        Runtime::AppleCoreAiMacosPipette(_) => crate::runtime::coreai::install(blobs_dir),
         Runtime::DockerVllm(_) | Runtime::DockerSglang(_) => {
             docker_image_pull(ctx.programs.docker.path()?, declared)
         }
@@ -339,8 +329,7 @@ fn install_runtime(
         | Runtime::LlamacppIosPipette(_)
         | Runtime::MlxIosPipette(_)
         | Runtime::OnnxGenaiIosPipette(_)
-        | Runtime::AppleFoundation(_)
-        | Runtime::AppleCoreAiMacosPipette(_)) => anyhow::bail!(
+        | Runtime::AppleFoundation(_)) => anyhow::bail!(
             "no built-in installer for runtime `{}`",
             other.headless_token()
         ),
@@ -754,17 +743,20 @@ fi
     }
 
     #[test]
-    fn ensure_runtime_returns_core_ai_without_a_store_entry() -> anyhow::Result<()> {
+    fn ensure_runtime_binds_core_ai_from_the_store() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir()?;
         let store = RuntimeArtifactStore::new(tmp.path().join("runtimes"));
         let declared = Runtime::AppleCoreAiMacosPipette(Default::default());
-        let (bound, hold) = ensure_runtime(&test_ctx()?, &store, &declared)?;
-        assert!(hold.is_none());
-        assert_eq!(bound, declared);
+        assert_eq!(runtime_download_size(&store, &declared)?, None);
+        store.ensure(&declared, |_, blobs| {
+            std::fs::write(blobs.join("pipette-coreai-sidecar"), b"test")?;
+            Ok(())
+        })?;
+        let (bound, _hold) = ensure_runtime(&test_ctx()?, &store, &declared)?;
         assert!(
-            store.list()?.is_empty(),
-            "Core AI must not publish a store entry"
+            matches!(bound, Runtime::AppleCoreAiMacosPipette(rt) if matches!(rt.source, pipette_plan_types::AppleCoreAiMacosPipetteSource::AbsoluteDir { .. }))
         );
+        assert_eq!(store.list()?.len(), 1);
         assert_eq!(runtime_download_size(&store, &declared)?, Some(0));
         Ok(())
     }

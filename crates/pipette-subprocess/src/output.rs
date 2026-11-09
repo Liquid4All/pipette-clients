@@ -49,7 +49,7 @@ pub fn output_within(mut cmd: Command, timeout: Duration) -> Result<Output, Outp
     crate::job::assign(&child);
     let session = Session::led_by(child.id());
     let _record = Record::write(child.id(), &cmd.get_program().to_string_lossy(), &token);
-    let _teardown = Guard::register_bounded(move || {
+    let _teardown = Guard::child_bounded(move || {
         session.kill();
     });
     drop(starting);

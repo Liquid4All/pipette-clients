@@ -10,7 +10,8 @@ use serde_json::Value;
 
 pub use pipette_plan_types::{ClientStatus, ContactEmail, JobStatus};
 use pipette_plan_types::{
-    ContactEmailError, OrgId, OrgSlug, RuntimeOutput, Sha256, UserId, UserKeyId, VaultResourceId,
+    ContactEmailError, FailureCode, OrgId, OrgSlug, RuntimeOutput, Sha256, UserId, UserKeyId,
+    VaultResourceId,
 };
 
 /// An ETag value is invalid when it contains bytes that are not legal in
@@ -814,6 +815,9 @@ pub struct FailureSubmission {
     pub benchmark_id: String,
     pub failure_reason: String,
     pub retriable: bool,
+    /// Left out when the client cannot tell: mgmt refuses a `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<FailureCode>,
     pub client_version: String,
     /// Milliseconds from the claim to the failure being ready to submit, on a
     /// monotonic clock, excluding the submit and its retries.
@@ -839,6 +843,7 @@ impl FailureSubmission {
             benchmark_id: job.benchmark_id.clone(),
             failure_reason: failure_reason.into(),
             retriable,
+            failure_code: None,
             client_version: client_version.into(),
             device_time_ms: None,
             runtime_output: RuntimeOutput::default(),
@@ -1614,6 +1619,19 @@ mod tests {
         let wire = serde_json::to_value(&bare)?;
         assert!(wire.get("runtime_stdout").is_none() && wire.get("runtime_stderr").is_none());
         assert!(wire.get("device_time_ms").is_none(), "untimed: {wire}");
+        assert!(
+            wire.get("failure_code").is_none(),
+            "mgmt refuses a null: {wire}"
+        );
+
+        let coded = FailureSubmission {
+            failure_code: Some(FailureCode::AttemptTimeout),
+            ..bare.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&coded)?["failure_code"],
+            "attempt_timeout"
+        );
 
         let with_output = FailureSubmission {
             runtime_output: RuntimeOutput {

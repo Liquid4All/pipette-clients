@@ -1,11 +1,4 @@
-use std::{
-    collections::HashSet,
-    fs,
-    io::Read,
-    net::TcpListener,
-    thread,
-    time::{Duration, SystemTime},
-};
+use std::{collections::HashSet, fs, io::Read, net::TcpListener, thread, time::Duration};
 
 use anyhow::Context;
 use clap::CommandFactory;
@@ -115,7 +108,7 @@ fn catalog_reads_use_signed_routes_and_local_device_registration() -> anyhow::Re
     let Err(missing) = session.invoke(route("catalog_for_device")?, &args(json!({}))?) else {
         anyhow::bail!("for-device succeeded without a registration file");
     };
-    assert!(missing.to_string().contains("pass `client_id` explicitly"));
+    assert!(missing.to_string().contains("pass the device's client id"));
     let Err(bad_fields) =
         session.invoke(route("catalog_for_device")?, &args(json!({"fields": []}))?)
     else {
@@ -153,7 +146,7 @@ fn local_catalog_device_id_refuses_an_unusable_registration(
     let Err(error) = local_catalog_device_id(work.path(), &ServerUrl::try_new(REGISTERED)?) else {
         anyhow::bail!("an unusable registration named a device");
     };
-    assert!(error.to_string().contains("pass `client_id` explicitly"));
+    assert!(error.to_string().contains("pass the device's client id"));
     Ok(())
 }
 
@@ -263,8 +256,7 @@ fn the_mock_answers_read_back_as_mgmts(
     Ok(())
 }
 
-/// Tool names are the MCP contract and a name each argument is found by, so
-/// neither may repeat.
+/// Catalog text names a route and an argument by name, so neither may repeat.
 #[test]
 fn tools_and_argument_names_are_unique() -> anyhow::Result<()> {
     let mut tools = HashSet::new();
@@ -1129,7 +1121,7 @@ fn an_unusable_identity_keeps_its_server_and_its_reason() -> anyhow::Result<()> 
         .err()
         .context("no key to sign with")?;
     let message = format!("{refused:#}");
-    // The missing piece, not the submission flags `mcp serve` does not take.
+    // Names the missing key, not a --user-id flag to pass.
     assert!(message.contains("no key to sign with"), "{message}");
     assert!(!message.contains("--user-id"), "{message}");
 
@@ -1594,18 +1586,6 @@ fn call_less_path(route: &Route, call: &Value) -> anyhow::Result<Map<String, Val
     json!({ "user_id": "user_1", "account_type": "human" }),
     200,
     json!({ "user_id": "user_1", "changed": true }),
-)]
-#[case::key_expiry(
-    "users_add_key",
-    POST,
-    "/api/v1/users/me/keys",
-    json!({
-        "public_key": "ab".repeat(32),
-        "key_details": "one browser",
-        "expires_at": "2026-11-01T00:00:00Z",
-    }),
-    201,
-    json!({ "user_id": "user_1", "status": "active", "key_id": "userkey_1" }),
 )]
 #[case::labels_alone(
     "campaigns_rename",
@@ -2418,518 +2398,33 @@ fn a_download_that_does_not_match_its_record_is_discarded() -> anyhow::Result<()
     Ok(())
 }
 
-fn exchange(session: &Session, input: &[u8]) -> anyhow::Result<Vec<Value>> {
-    let mut output = Vec::new();
-    mcp::serve(session, input, &mut output)?;
-    Ok(String::from_utf8(output)?
-        .lines()
-        .map(serde_json::from_str::<Value>)
-        .collect::<Result<Vec<_>, _>>()?)
-}
-
-fn lines(messages: &[Value]) -> Vec<u8> {
-    messages
-        .iter()
-        .map(|message| format!("{message}\n"))
-        .collect::<String>()
-        .into_bytes()
-}
-
-fn reply(replies: &[Value], id: i64) -> anyhow::Result<&Value> {
-    replies
-        .iter()
-        .find(|reply| reply["id"] == id)
-        .with_context(|| format!("no reply to {id} in {replies:?}"))
-}
-
+/// Revoking the key the session signs with says every later call answers 401;
+/// another key says nothing.
 #[test]
-fn mcp_serves_the_catalog_over_stdio() -> anyhow::Result<()> {
+fn revoking_the_session_key_says_it_locks_the_session_out() -> anyhow::Result<()> {
     let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(POST).path("/api/v1/plans/plan-1/cancel");
-        then.status(202)
-            .json_body(json!({ "outcome": "requested" }));
-    });
-    server.mock(|when, then| {
-        when.method(DELETE).path("/api/v1/orgs/acme");
-        then.status(409)
-            .json_body(json!({ "error": "the organization cannot be deleted: 2 member(s) still reference it" }));
-    });
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26" } }),
-        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
-        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
-        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "plans_cancel", "arguments": { "plan_id": "plan-1" } } }),
-        json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "orgs_delete", "arguments": { "org_id": "acme" } } }),
-        json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "nope" } }),
-    ]);
-    let replies = exchange(&session(&server, true)?, &input)?;
-    assert_eq!(
-        replies.len(),
-        5,
-        "the notification gets no reply: {replies:?}"
-    );
-
-    let init = reply(&replies, 1)?;
-    assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-    let instructions = init["result"]["instructions"].as_str().unwrap_or_default();
-    assert!(
-        instructions.contains("user_0192f0c1") && instructions.contains(&server.base_url()),
-        "{instructions}"
-    );
-    let tools = reply(&replies, 2)?["result"]["tools"]
-        .as_array()
-        .context("tools/list answers a list")?;
-    assert_eq!(tools.len(), ROUTES.len());
-    let cancelled = reply(&replies, 3)?;
-    assert_eq!(cancelled["result"]["isError"], false);
-    assert!(
-        cancelled["result"]["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("requested"))
-    );
-    let refused = reply(&replies, 4)?;
-    assert_eq!(refused["result"]["isError"], true);
-    assert!(
-        refused["result"]["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("409") && text.contains("still reference it"))
-    );
-    assert_eq!(reply(&replies, 5)?["error"]["code"], -32602);
-    Ok(())
-}
-
-#[test]
-fn mcp_answers_a_malformed_message_and_keeps_serving() -> anyhow::Result<()> {
-    let server = MockServer::start();
-    let mut input =
-        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{\"x\":\"\xff\xfe\"}}\n"
-            .to_vec();
-    input.extend(lines(&[
-        json!([{ "jsonrpc": "2.0", "id": 2, "method": "ping" }]),
-        json!({ "jsonrpc": "2.0", "id": null, "method": "ping" }),
-        json!({ "jsonrpc": "2.0", "id": 1.5, "method": "ping" }),
-        json!({ "jsonrpc": "2.0", "id": 3, "method": 5 }),
-        json!({ "jsonrpc": "1.0", "id": 4, "method": "ping" }),
-        json!({ "jsonrpc": "1.0", "method": "notifications/initialized" }),
-        json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {} }),
-        json!({ "jsonrpc": "2.0", "id": 6, "method": "ping" }),
-    ]));
-    let replies = exchange(&session(&server, true)?, &input)?;
-    assert_eq!(replies.len(), 8, "{replies:?}");
-    let codes = |id: Value| {
-        replies
-            .iter()
-            .filter(|reply| reply["id"] == id)
-            .map(|reply| reply["error"]["code"].clone())
-            .collect::<Vec<_>>()
+    ["userkey_9f2c", "userkey_other"]
+        .into_iter()
+        .for_each(|key_id| {
+            server.mock(|when, then| {
+                when.method(DELETE)
+                    .path(format!("/api/v1/users/user_0192f0c1/keys/{key_id}"));
+                then.status(204);
+            });
+        });
+    let session = session(&server, true)?;
+    let revoke = |key_id: &str| {
+        session.invoke(
+            route("users_key_revoke")?,
+            &args(json!({ "user_id": "user_0192f0c1", "key_id": key_id }))?,
+        )
     };
-    // Bad UTF-8, the batch, the null id and the float id have no usable id.
-    assert_eq!(
-        codes(Value::Null),
-        [json!(-32700), json!(-32600), json!(-32600), json!(-32600)]
-    );
-    assert_eq!(codes(json!(3)), [json!(-32600)]);
-    assert_eq!(codes(json!(4)), [json!(-32600)]);
-    assert_eq!(codes(json!(5)), [json!(-32602)]);
-    assert_eq!(reply(&replies, 6)?["result"], json!({}));
-    Ok(())
-}
-
-#[test]
-fn mcp_answers_ping_during_a_call_and_drops_a_cancelled_one() -> anyhow::Result<()> {
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(GET).path("/api/v1/orgs");
-        then.status(200)
-            .delay(Duration::from_millis(800))
-            .json_body(json!({ "items": [], "next_cursor": null, "unreadable": 0 }));
-    });
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "orgs_list" } }),
-        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "orgs_list" } }),
-        json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 2 } }),
-        json!({ "jsonrpc": "2.0", "id": 3, "method": "ping" }),
-    ]);
-    let replies = exchange(&session(&server, true)?, &input)?;
-    let ids: Vec<&Value> = replies.iter().map(|reply| &reply["id"]).collect();
-    assert_eq!(ids, [&json!(3), &json!(1)]);
-    Ok(())
-}
-
-/// An answer too long for a model is saved, and the result says where, what
-/// it holds, and which arguments of the tool ask for less.
-#[test]
-fn mcp_saves_an_answer_too_long_to_return() -> anyhow::Result<()> {
-    let rows: Vec<Value> = (0..400)
-        .map(|n| json!({ "plan_id": format!("plan-{n}"), "detail": "x".repeat(200) }))
-        .collect();
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(GET).path("/api/v1/plans");
-        then.status(200)
-            .json_body(json!({ "items": rows, "next_cursor": null, "unreadable": 0 }));
-    });
-    let work = tempfile::tempdir()?;
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "plans_list" } }),
-    ]);
-    let replies = exchange(&session_in(&server, true, work.path())?, &input)?;
-    let text = reply(&replies, 1)?["result"]["content"][0]["text"]
-        .as_str()
-        .context("a text result")?;
-    let summary: Value = serde_json::from_str(text)?;
-    assert_eq!(summary["rows"], 400);
-    let keys = summary["keys"].as_array().context("keys")?;
+    let own = revoke("userkey_9f2c")?.notes;
     assert!(
-        keys.len() == 2 && keys.contains(&json!("plan_id")) && keys.contains(&json!("detail")),
-        "{keys:?}"
+        own.iter()
+            .any(|note| note.contains("signing key") && note.contains("401")),
+        "{own:?}"
     );
-    let saved: Value = serde_json::from_str(&fs::read_to_string(
-        summary["saved_to"].as_str().context("saved_to")?,
-    )?)?;
-    assert_eq!(saved["items"].as_array().map(Vec::len), Some(400));
-    anyhow::ensure!(text.len() < 20_000, "the summary is {} bytes", text.len());
-    Ok(())
-}
-
-/// A saved answer's hint names a read's filters but not its additions, which ask for more.
-#[rstest::rstest]
-#[case::vault_list("vault_list", "/api/v1/vault/resources", json!({}), "items", &["`limit`"], &["`object`"])]
-#[case::campaigns_list("campaigns_list", "/api/v1/campaigns", json!({}), "items", &["`plan_id`"], &["`plan`"])]
-#[case::plans_list(
-    "plans_list",
-    "/api/v1/plans",
-    json!({}),
-    "items",
-    &["`fields`", "`limit`", "`submitted_by`"],
-    &["`all`", "`cursor`", "`order`", "`names`"],
-)]
-#[case::plans_jobs(
-    "plans_jobs",
-    "/api/v1/plans/plan-1/jobs",
-    json!({ "plan_id": "plan-1" }),
-    "jobs",
-    &["`limit`"],
-    &["`results`", "`all`"],
-)]
-fn a_saved_answers_hint_leaves_out_additions(
-    #[case] tool: &str,
-    #[case] path: &str,
-    #[case] arguments: Value,
-    #[case] rows_key: &str,
-    #[case] named: &[&str],
-    #[case] left_out: &[&str],
-) -> anyhow::Result<()> {
-    let rows: Vec<Value> = (0..400)
-        .map(|n| json!({ "id": format!("row-{n}"), "detail": "x".repeat(200) }))
-        .collect();
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(GET).path(path);
-        then.status(200).json_body(json!({ rows_key: rows }));
-    });
-    let work = tempfile::tempdir()?;
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": tool, "arguments": arguments } }),
-    ]);
-    let replies = exchange(&session_in(&server, true, work.path())?, &input)?;
-    let text = reply(&replies, 1)?["result"]["content"][0]["text"]
-        .as_str()
-        .context("a text result")?;
-    let summary: Value = serde_json::from_str(text)?;
-    let hint = summary["hint"].as_str().context("a hint")?;
-    assert!(
-        named.iter().all(|name| hint.contains(name))
-            && !left_out.iter().any(|name| hint.contains(name)),
-        "{hint}"
-    );
-    Ok(())
-}
-
-/// A record's summary stays short however wide the record, and its hint
-/// names only what the tool takes: `fields`, no `limit` and no filter.
-#[test]
-fn a_saved_record_is_narrowed_by_fields_alone() -> anyhow::Result<()> {
-    let mut record = json!({ "benchmark_id": "eval_x", "samples": vec!["x".repeat(100); 1_000] });
-    for n in 0..150 {
-        record[format!("k{n}")] = json!("y".repeat(400));
-    }
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(GET).path("/benchmarks/eval_x");
-        then.status(200).json_body(record);
-    });
-    let work = tempfile::tempdir()?;
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "benchmarks_show", "arguments": { "benchmark_id": "eval_x" } } }),
-    ]);
-    let replies = exchange(&session_in(&server, true, work.path())?, &input)?;
-    let text = reply(&replies, 1)?["result"]["content"][0]["text"]
-        .as_str()
-        .context("a text result")?;
-    anyhow::ensure!(text.len() < 20_000, "the summary is {} bytes", text.len());
-    let summary: Value = serde_json::from_str(text)?;
-    assert_eq!(
-        summary["hint"],
-        "The whole answer is in `saved_to`; ask for less with `fields`."
-    );
-    Ok(())
-}
-
-#[test]
-fn saved_answers_are_private_and_bounded() -> anyhow::Result<()> {
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(GET).path("/api/v1/orgs");
-        then.status(200).json_body(json!({
-            "items": vec![json!({ "slug": "x".repeat(100) }); 1_000],
-            "next_cursor": null,
-            "unreadable": 0,
-        }));
-    });
-    let work = tempfile::tempdir()?;
-    let dir = work.path().join(".pipette-ctl").join("mcp-results");
-    fs::create_dir_all(&dir)?;
-    let oldest = dir.join("orgs_list-oldest.json");
-    fs::write(&oldest, "{}")?;
-    fs::File::options()
-        .write(true)
-        .open(&oldest)?
-        .set_modified(SystemTime::now() - Duration::from_secs(24 * 60 * 60))?;
-    for n in 0..99 {
-        fs::write(dir.join(format!("orgs_list-{n}.json")), "{}")?;
-    }
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "orgs_list" } }),
-    ]);
-    let replies = exchange(&session_in(&server, true, work.path())?, &input)?;
-    let summary: Value = serde_json::from_str(
-        reply(&replies, 1)?["result"]["content"][0]["text"]
-            .as_str()
-            .context("a text result")?,
-    )?;
-    let saved_to = PathBuf::from(summary["saved_to"].as_str().context("saved_to")?);
-    assert!(saved_to.is_file(), "{}", saved_to.display());
-    assert!(
-        !oldest.exists(),
-        "{} outlived the newest hundred",
-        oldest.display()
-    );
-    assert_eq!(fs::read_dir(&dir)?.count(), 100);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
-        assert_eq!(fs::metadata(&saved_to)?.permissions().mode() & 0o777, 0o600);
-    }
-    Ok(())
-}
-
-/// The route ran, so an answer that cannot be saved is not reported as a
-/// failure: it comes back cut, with why.
-#[test]
-fn an_answer_that_cannot_be_saved_comes_back_cut() -> anyhow::Result<()> {
-    let mut created = campaign_created();
-    created["plan"]["job_count"] = json!(1_000);
-    created["plan"]["job_ids"] = (0..1_000)
-        .map(|index| {
-            let job_id = format!("job-0190a1b2-0000-7000-8000-{index:012}");
-            (index.to_string(), json!(job_id))
-        })
-        .collect::<Map<_, _>>()
-        .into();
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(POST).path("/api/v1/campaigns");
-        then.status(201).json_body(created);
-    });
-    let work = tempfile::tempdir()?;
-    // A file where the results directory would go.
-    fs::create_dir_all(work.path().join(".pipette-ctl"))?;
-    fs::write(work.path().join(".pipette-ctl").join("mcp-results"), "")?;
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "campaigns_create", "arguments": { "name": "n", "plan": "benchmarks = [\"b\"]\n" } } }),
-    ]);
-    let replies = exchange(&session_in(&server, true, work.path())?, &input)?;
-    let result = &reply(&replies, 1)?["result"];
-    assert_eq!(result["isError"], false, "{result}");
-    let answer = result["content"][0]["text"]
-        .as_str()
-        .context("the answer")?;
-    assert_eq!(answer.chars().count(), 40_000);
-    let note = result["content"][1]["text"].as_str().context("a note")?;
-    assert!(
-        note.contains("cut") && note.contains("mcp-results"),
-        "{note}"
-    );
-    Ok(())
-}
-
-/// A long text answer is saved as the text itself, so a plan's document can be
-/// passed back as a plan file.
-#[test]
-fn mcp_saves_a_long_text_answer_as_itself() -> anyhow::Result<()> {
-    let document = "[[benchmarks]]\nid = \"decode_throughput_512_100\"\n".repeat(2_000);
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(GET).path("/api/v1/plans/plan-1/document");
-        then.status(200)
-            .header("content-type", "application/toml")
-            .body(&document);
-    });
-    let work = tempfile::tempdir()?;
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "plans_document", "arguments": { "plan_id": "plan-1" } } }),
-    ]);
-    let replies = exchange(&session_in(&server, true, work.path())?, &input)?;
-    let summary: Value = serde_json::from_str(
-        reply(&replies, 1)?["result"]["content"][0]["text"]
-            .as_str()
-            .context("a text result")?,
-    )?;
-    let saved_to = summary["saved_to"].as_str().context("saved_to")?;
-    assert_eq!(
-        Path::new(saved_to).extension(),
-        Some("txt".as_ref()),
-        "{saved_to}"
-    );
-    assert_eq!(fs::read_to_string(saved_to)?, document);
-    let hint = summary["hint"].as_str().unwrap_or_default();
-    assert!(!hint.contains("fields"), "{hint}");
-    Ok(())
-}
-
-#[test]
-fn mcp_says_revoking_the_session_key_locks_it_out() -> anyhow::Result<()> {
-    let server = MockServer::start();
-    server.mock(|when, then| {
-        when.method(DELETE)
-            .path("/api/v1/users/me/keys/userkey_9f2c");
-        then.status(204);
-    });
-    server.mock(|when, then| {
-        when.method(DELETE)
-            .path("/api/v1/users/user_0192f0c1/keys/userkey_9f2c");
-        then.status(204);
-    });
-    let input = lines(&[
-        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "users_revoke_key", "arguments": { "key_id": "userkey_9f2c" } } }),
-        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "users_key_revoke", "arguments": { "user_id": "user_0192f0c1", "key_id": "userkey_9f2c" } } }),
-    ]);
-    let replies = exchange(&session(&server, true)?, &input)?;
-    [2, 3].into_iter().try_for_each(|id| -> anyhow::Result<()> {
-        let content = &reply(&replies, id)?["result"]["content"];
-        let lockout = content
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item["text"].as_str())
-            .any(|text| text.contains("signing key") && text.contains("401"));
-        assert!(lockout, "{content}");
-        Ok(())
-    })
-}
-
-/// The schema admits what the invoker takes, and the annotations say what
-/// each tool does to its environment.
-#[test]
-fn tool_schemas_and_annotations_match_the_invoker() -> anyhow::Result<()> {
-    let tool = |name: &str| -> anyhow::Result<Value> { Ok(mcp::tool(route(name)?)) };
-    let download = tool("vault_download")?;
-    assert_eq!(download["annotations"]["readOnlyHint"], false);
-    [
-        ("campaigns_set_owner", true),
-        ("users_set_type", true),
-        ("campaigns_rename", true),
-        ("campaigns_revise", true),
-        ("campaigns_recalculate", true),
-        ("orgs_benchmark_put", true),
-        ("vault_download", true),
-        ("campaigns_document", false),
-        ("clients_set_permissions", true),
-        ("clients_amend_permissions", false),
-        // A user's mint replaces the account's other keys; a device's replaces none.
-        ("users_preauth_create", true),
-        ("orgs_client_preauth_create", false),
-        ("model_params_update", true),
-        ("model_params_create", false),
-    ]
-    .into_iter()
-    .try_for_each(|(name, destructive)| {
-        anyhow::ensure!(
-            tool(name)?["annotations"]["destructiveHint"] == destructive,
-            "{name} destructiveHint is not {destructive}"
-        );
-        Ok(())
-    })?;
-    let takes_fields = |tool: &Value| tool["inputSchema"]["properties"].get("fields").is_some();
-    assert!(takes_fields(&tool("orgs_list")?) && takes_fields(&tool("clients_show")?));
-    // A write, and a text answer, have no keys to keep.
-    for name in [
-        "orgs_create",
-        "orgs_delete",
-        "vault_blob_put",
-        "campaigns_create",
-        "plans_document",
-        "plans_variants",
-        "plans_results",
-    ] {
-        anyhow::ensure!(!takes_fields(&tool(name)?), "{name} offers `fields`");
-    }
-    let nullable = |tool: &Value| {
-        tool["inputSchema"]["properties"]["owner"]["anyOf"]
-            .as_array()
-            .is_some_and(|any| any.contains(&json!({ "type": "null" })))
-    };
-    assert!(nullable(&tool("clients_set_owner")?));
-    assert!(!nullable(&tool("campaigns_set_owner")?));
-    let set_org = tool("users_set_org")?;
-    assert_eq!(
-        set_org["inputSchema"]["required"],
-        json!(["user_id", "org_id"])
-    );
-    assert!(
-        set_org["inputSchema"]["properties"]["org_id"]["anyOf"]
-            .as_array()
-            .is_some_and(|any| any.contains(&json!({ "type": "null" })))
-    );
-    let definition =
-        tool("orgs_benchmark_put")?["inputSchema"]["properties"]["definition"]["anyOf"]
-            .as_array()
-            .context("the definition takes JSON or TOML")?
-            .iter()
-            .map(|kind| kind["type"].clone())
-            .collect::<Vec<_>>();
-    assert_eq!(definition, [json!("object"), json!("string")]);
-    assert_eq!(
-        tool("plans_jobs")?["inputSchema"]["properties"]["offset"]["minimum"],
-        0
-    );
-    // The invoker joins a comma list, so the model sends an array.
-    let variants = &tool("campaigns_variants")?["inputSchema"];
-    assert_eq!(
-        variants["properties"]["add_from"]["items"]["type"],
-        "string"
-    );
-    assert_eq!(variants["required"], json!(["campaign_id", "base_plan_id"]));
-    assert_eq!(
-        tool("audit_list")?["inputSchema"]["properties"]["outcome"]["items"]["enum"],
-        json!(["succeeded", "refused", "failed"])
-    );
-    let labels = &tool("campaigns_rename")?["inputSchema"]["properties"]["labels"];
-    assert_eq!(
-        (&labels["type"], &labels["additionalProperties"]),
-        (&json!("object"), &json!({ "type": "string" }))
-    );
-    for route in ROUTES {
-        for name in route.path_params() {
-            anyhow::ensure!(
-                catalog::param_help(name) != "Path parameter",
-                "`{name}` of {} has no description",
-                route.tool()
-            );
-        }
-    }
+    assert!(revoke("userkey_other")?.notes.is_empty());
     Ok(())
 }

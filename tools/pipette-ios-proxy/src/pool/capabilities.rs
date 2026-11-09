@@ -130,7 +130,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::releases::catalog::RUNTIME_BUILD_FLAG_PREFIX;
+    use crate::RUNTIME_BUILD_FLAG_PREFIX;
 
     fn source(url: &str, version: &str) -> anyhow::Result<SourceRepository> {
         Ok(SourceRepository {

@@ -150,10 +150,7 @@ fn the_four_cells_run_against_a_live_server() -> anyhow::Result<()> {
     let scratch = tempfile::tempdir()?;
     let cache = std::env::var("PIPETTE_LIVE_OVMS_CACHE")
         .map_or_else(|_| scratch.path().to_path_buf(), std::path::PathBuf::from);
-    let observer = MeasurementObserver {
-        on_before_rep_start: &|| Ok(()),
-        on_after_rep_end: &|| Ok(()),
-    };
+    let observer = MeasurementObserver::QUIET;
     let batch = if device == OpenvinoDevice::Npu {
         1
     } else {

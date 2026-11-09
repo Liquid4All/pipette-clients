@@ -166,11 +166,16 @@ impl RuntimeStorageKey {
                 segs.extend(uv_declared_key_tail(&rt.source).map_err(|_| not_storable())?);
                 segs
             }
+            Runtime::AppleCoreAiMacosPipette(rt) => {
+                if !rt.is_bundled() || !rt.source.is_bundled() {
+                    return Err(not_storable());
+                }
+                vec!["core-ai".to_owned(), super::coreai::source_digest(rt)]
+            }
             Runtime::LlamacppApkPipette(_)
             | Runtime::LlamacppIosPipette(_)
             | Runtime::MlxIosPipette(_)
             | Runtime::OnnxGenaiIosPipette(_)
-            | Runtime::AppleCoreAiMacosPipette(_)
             | Runtime::AppleFoundation(_) => return Err(not_storable()),
         };
         Ok(RuntimeStorageKey(bound_to(

@@ -42,7 +42,8 @@ gets the same estimate without the 16384 cap, capped instead by the cell's
 `--image-max-tokens` (retried once without it if the helper fails), plus 1024,
 between 4096 and the vlm_eval ceiling of 131072: a dataset's own images tile
 past 16384 (SmolVLM2 counts a 35-megapixel OCRBench page at about 16k tokens).
-Each run is bounded at 600 s. The runner sums the `n_tokens_batch = N` values
+Each run is bounded at 600 s and does not count against the cell's
+`attempt_timeout_seconds`. The runner sums the `n_tokens_batch = N` values
 from the `decoding image batch …` lines the mtmd layer logs on stderr, and
 trusts them only after a clean exit. That is the **marker-free image content** count (the
 raw embedding grid; the image markers are logged as separate text chunks and

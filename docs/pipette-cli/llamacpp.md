@@ -162,23 +162,23 @@ The full workflow (init, register, seed local benchmarks, sync, submit) is in
   [vl-throughput.md](../methodology/vl-throughput.md#context-checkpoints),
   [vl-spec-decode.md](../methodology/vl-spec-decode.md#context-checkpoints),
   [vl-max-memory.md](../methodology/vl-max-memory.md#server-flags).
-- **Deadlines:** the cells that own a subprocess run under a wall-clock
-  deadline. A driver bug or a platform hang then fails the cell and does not
-  block the runner.
-  - Each prefill and decode throughput process gets 1 hour.
-  - The peak-memory cells get 600 s, unless `bench_timeout_seconds` sets
-    another value. On `max_memory_usage` the deadline bounds the `llama-bench`
-    subprocess. On `vl_max_memory` and `asr_max_memory` it bounds the server
-    run from launch to the peak read.
-  - The warm-up run (text) or warm-up server (vision and audio cells) gets the
-    same budget, so a memory cell can take up to twice the deadline.
-  - `vl_spec_decode` checks `bench_timeout_seconds` between samples, because
-    no child process ends the HTTP loop. Left unset, it has no deadline: the
-    corpus sets the length of a traversal, and a fixed deadline would stop a
-    healthy three-hour run.
-  - The other server cells (`eval`, `vlm_eval`, `end_to_end_latency`,
-    `vl_throughput`, `asr_throughput`) are bounded per HTTP request, through
-    `http_timeout_seconds`.
+- **Deadlines:** each attempt of a timing, throughput or peak-memory cell runs
+  under `attempt_timeout_seconds`, 300 s unless the cell sets another value
+  ([the attempt limit](usage.md#5c-the-attempt-limit)). A driver bug or a
+  platform hang then fails the cell and does not block the runner.
+  - A `llama-bench` or `llama-batched-bench` rep is one attempt, its model load
+    included. Each such process also has a 1-hour deadline of its own, which
+    fires first only under a limit above 3600 s.
+  - On `max_memory_usage` the warm-up run and the measured run are an attempt
+    each. On `vl_max_memory` and `asr_max_memory` each server, the warm-up
+    server included, is one attempt from launch to the peak read.
+  - The image and audio token calibration does not count against the limit; its
+    helper has a 600 s bound of its own.
+  - `vl_spec_decode` has no default, because the corpus sets the length of a
+    traversal. Set on a cell, `attempt_timeout_seconds` bounds each sample, all
+    its turns together. The corpus download does not count against it.
+  - `eval`, `vlm_eval` and `asr_eval` take no attempt limit. Each request of a
+    server cell is bounded on its own, through `http_timeout_seconds`.
 - **ASR (automatic speech recognition):** `asr_throughput` and `asr_max_memory` run every server with
   `--reasoning off`, so they need llama.cpp `b8287` or newer, where `-rea` /
   `--reasoning` first appears; an older build's server exits on the unknown

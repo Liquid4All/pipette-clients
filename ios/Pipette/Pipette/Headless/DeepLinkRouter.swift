@@ -94,8 +94,9 @@ final class DeepLinkRouter {
                         benchmarks: benchmarks, metrics: metrics, offsets: offsets,
                         ws: ws, jobRunner: jobRunner, jobStore: jobStore)
 
-        case let .afm(metrics, benchmarks, offsets, _, _):
+        case let .afm(metrics, benchmarks, offsets, _, _, benchmarkFlags):
             launchAFM(metrics: metrics, benchmarks: benchmarks, offsets: offsets,
+                      benchmarkFlags: benchmarkFlags,
                       jobRunner: jobRunner, jobStore: jobStore, ws: ws)
 
         case let .runJob(id, scope):
@@ -199,6 +200,7 @@ final class DeepLinkRouter {
                              ws: PipetteWorkspace, jobRunner: JobRunner, jobStore: JobStore) {
         if runtime == .appleFoundation {
             launchAFM(metrics: metrics, benchmarks: benchmarks, offsets: offsets,
+                      benchmarkFlags: benchmarkFlags,
                       jobRunner: jobRunner, jobStore: jobStore, ws: ws)
             return
         }
@@ -241,10 +243,12 @@ final class DeepLinkRouter {
     }
 
     private func launchAFM(metrics: [String], benchmarks: [String], offsets: [Int],
+                           benchmarkFlags: BenchmarkFlags?,
                            jobRunner: JobRunner, jobStore: JobStore, ws: PipetteWorkspace) {
         let ids = BenchmarksCommands.resolveBenchmarkIds(metrics: metrics, offsets: offsets, explicit: benchmarks)
         let cells = JobCell.pending(benchmarkIds: ids, for: .appleFoundation,
-                                    store: ws.benchmarks)
+                                    store: ws.benchmarks,
+                                    benchmarkFlags: benchmarkFlags.map(BenchmarkFlagRef.init))
         // AFM has no load knobs: ngl/ctx/batch are inert placeholders.
         launch(cells: cells, contextSize: 4096, batch: 512, runtimeFlags: nil,
                jobRunner: jobRunner, jobStore: jobStore, ws: ws)

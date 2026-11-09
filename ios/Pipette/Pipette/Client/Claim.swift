@@ -209,7 +209,7 @@ extension ClientRunSpec {
         _ = try Self.resolve(ref, group: group, cell: cell)
     }
 
-    /// A cell with no readiness variant (see `BenchmarkFlagRef.resolve`) is a `noFlagsForCell`.
+    /// A cell with no variant (see `BenchmarkFlagRef.resolve`) is a `noFlagsForCell`.
     private static func checkBenchmarkFlags(_ ref: BenchmarkFlagRef, cell: Cell) throws {
         let group = ClientRunSpec.CodingKeys.benchmarkFlags.rawValue
         try Self.checkAxis(ref.benchmarkType.rawValue, cell.benchmarkType, group: group)
@@ -219,6 +219,9 @@ extension ClientRunSpec {
             _ = try ref.resolve()
         } catch .noSuchCombination {
             throw UnrunnableClaimError.noFlagsForCell(group: group, cell: cell.description)
+        } catch let .knobNotAllowed(knob, _, _, _) {
+            throw UnrunnableClaimError.flagNotAcceptedByCell(
+                group: group, knob: knob, cell: cell.description)
         }
     }
 

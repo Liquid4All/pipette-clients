@@ -62,7 +62,7 @@ runtime_flags = [
   { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch", speculative_enabled = false, envs = ["SGLANG_ENABLE_JIT_DEEPGEMM=0"], raw = ["--mem-fraction-static", "0.60"] },
 ]
 benchmark_flags = [
-  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch", http_timeout_seconds = 600 },
 ]
 
 [[variants.runtimes]]
@@ -96,7 +96,7 @@ runtime_flags = [
   { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch_speculative", speculative_enabled = true, envs = ["SGLANG_ENABLE_JIT_DEEPGEMM=0"], raw = ["--mem-fraction-static", "0.60", "--speculative-draft-attention-backend", "flashinfer"] },
 ]
 benchmark_flags = [
-  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch_speculative", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+  { benchmark_type = "vl_spec_decode", runtime_type = "uv_sglang", model_type = "torch_speculative", http_timeout_seconds = 600 },
 ]
 
 [[variants.runtimes]]

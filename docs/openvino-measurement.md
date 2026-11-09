@@ -39,7 +39,11 @@ server-driven engine; the methodology pages define each figure.
 | `max_memory_usage` | peak resident memory of the server process after one request; its GPU memory too on Windows and Linux, its NPU memory on Windows | n/a | no (see below) |
 
 The readiness wait for the server covers the compile, so the compile is outside
-every measured *time*. Each server process compiles one pipeline, so no
+every measured *time*, and
+[`attempt_timeout_seconds`](pipette-cli/usage.md#5c-the-attempt-limit) does
+not count the first server's wait, the load in it included. A peak-memory
+cell's measured server loads what its warm-up compiled, and its wait counts.
+Each server process compiles one pipeline, so no
 process compiles twice (the constraint that [openvino-ir.md](openvino-ir.md#npu-constraints)
 records). Sequential processes are safe on the NPU: five sequential compiles
 caused no device loss, and throughput stayed at 153.8 to 154.0 tok/s.

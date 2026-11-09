@@ -56,7 +56,7 @@ runtime_flags = [
   { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", speculative_enabled = false, flash_attention = "on", number_gpu_layers = 99, ctx_size = 8192, mmap = true },
 ]
 benchmark_flags = [
-  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision", http_timeout_seconds = 600 },
 ]
 
 # The spec-decoding model: speculation on. See the local twin for the drafter
@@ -73,5 +73,5 @@ runtime_flags = [
   { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", speculative_enabled = true, flash_attention = "on", number_gpu_layers = 99, ctx_size = 8192, mmap = true, envs = ["DRAFT_FUSED=1", "GGML_DRAFT_DELTA=16"], raw = ["--spec-type", "draft-fused", "--spec-draft-n-min", "0"] },
 ]
 benchmark_flags = [
-  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", http_timeout_seconds = 600, bench_timeout_seconds = 10800 },
+  { benchmark_type = "vl_spec_decode", runtime_type = "llamacpp_cli_stock_tools", model_type = "gguf_vision_speculative", http_timeout_seconds = 600 },
 ]

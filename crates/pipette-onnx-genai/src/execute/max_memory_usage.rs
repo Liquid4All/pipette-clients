@@ -19,7 +19,9 @@ use anyhow::Context;
 use pipette_completions::TimingRequest;
 use pipette_http::HttpClient;
 use pipette_memprobe::{Sampler, SupportedWatch, Watch};
-use pipette_ops::measurement::{self, MaxMemoryMeasurementReading, MemoryMeasurementWarmup};
+use pipette_ops::measurement::{
+    self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
+};
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     MaxMemoryUsageBenchmark, MemoryObservation, OnnxExecutionProvider, RunResponse,
@@ -40,6 +42,7 @@ pub(super) fn run(
     install: &ResolvedOnnxGenaiInstall,
     model: &ResolvedOnnxGenaiModel,
     timeout: Duration,
+    observer: MeasurementObserver<'_>,
     client_config: Option<&UvOnnxGenaiExtraRuntimeConfiguration>,
 ) -> anyhow::Result<RunResponse> {
     let watch = watch(&install.execution_provider)?;
@@ -53,6 +56,7 @@ pub(super) fn run(
     let mut served = None;
     let result = measurement::max_memory(
         &benchmark.benchmark_id,
+        observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| Ok(serve(served, command, watch, &http, prefill_tokens)?),

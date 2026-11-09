@@ -12,10 +12,6 @@ the rule then apply to the runtime crates:
   every module private and re-exports `execute::run`. A `pub mod` or a second
   `pub use` compiles, and hands other crates the runtime's insides.
 
-One crate has an exception, listed in `EXTRA_EXPORTS`. pipette-coreai keeps its
-Swift sidecar in a user cache, not in the runtime store, so the CLI pulls,
-lists and removes Core AI through the sidecar functions it names.
-
 `lib.rs` is the only file read for `pub` items: an item in a private module is
 out of reach unless `lib.rs` re-exports it. A `#[macro_export]` macro lands at
 the crate root from any file, so every source file is read for that.
@@ -66,17 +62,6 @@ OTHER_CRATES = (
     "pipette-workspace",
 )
 RUN = "pub use execute::run;"
-# The items a runtime crate may export beyond `run`, by crate.
-EXTRA_EXPORTS = {
-    "pipette-coreai": {
-        "cached_sidecar",
-        "clear_sidecar_cache",
-        "require_coreai_sidecar",
-        "sidecar_obtainable",
-    },
-}
-# A `pub use` of one item or a braced list, read as one statement.
-USE_NAMES = re.compile(r"pub use [\w:]+::(?:\{([^}]*)\}|(\w+));")
 # pipette-plan-types' `BenchmarkType`, as the files in `execute/` are named.
 BENCHMARKS = (
     "asr_eval",
@@ -175,24 +160,11 @@ def sources(crate: Path) -> list[Path]:
     return [Path(line) for line in result.stdout.splitlines() if line.endswith(".rs")]
 
 
-def exported_names(statement: str) -> set[str]:
-    """The names a `pub use` statement exports, or `{statement}` itself for any
-    other `pub` item, so it never matches an allowed name."""
-    match = USE_NAMES.fullmatch(statement.replace("{ ", "{").replace(" }", "}"))
-    if match is None:
-        return {statement}
-    listed = match.group(1)
-    if listed is None:
-        return {match.group(2)}
-    return {name.strip() for name in listed.split(",") if name.strip()}
-
-
 def exports(crate: Path) -> list[str]:
     """What `crate` exports beyond `run`, and a missing `run`."""
     lib = crate / "src" / "lib.rs"
     found = []
     exports_run = False
-    allowed = EXTRA_EXPORTS.get(crate.name, set())
     lines = lib.read_text(encoding="utf-8").splitlines()
     for lineno, line in enumerate(lines, 1):
         if not PUB.match(line):
@@ -207,7 +179,7 @@ def exports(crate: Path) -> list[str]:
             statement = f"{statement} {rest.strip()}"
         if statement == RUN:
             exports_run = True
-        elif not exported_names(statement) <= allowed:
+        else:
             found.append(f"{lib}:{lineno}: `{statement}`")
     if not exports_run:
         found.append(f"{lib}: no `{RUN}`")
@@ -295,8 +267,8 @@ def main() -> int:
         return 1
     print(
         f"runtime-crates OK ({len(workspace)} crates classified, "
-        f"{len(RUNTIME_CRATES)} runtime crates export `run` and their "
-        "EXTRA_EXPORTS alone and keep `execute/` to their benchmarks)"
+        f"{len(RUNTIME_CRATES)} runtime crates export only `run` "
+        "and keep `execute/` to their benchmarks)"
     )
     return 0
 
