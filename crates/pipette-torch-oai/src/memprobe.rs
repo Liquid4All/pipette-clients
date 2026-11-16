@@ -28,7 +28,7 @@ use crate::{cell_flags, flavor::sglang_to_vllm_flavor};
 /// cannot hold the probe, or the drop that joins its thread, for good.
 pub(crate) const DOCKER_LIMIT: Duration = Duration::from_secs(30);
 
-pub(crate) type Probe = cgroup::Sampler<LocateError>;
+pub(crate) type Probe = cgroup::Sampler;
 
 /// Why one of the probe's commands has no output.
 #[derive(Debug, thiserror::Error)]

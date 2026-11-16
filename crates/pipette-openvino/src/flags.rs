@@ -135,7 +135,9 @@ fn cell_shape(req: &RunRequest) -> anyhow::Result<(u32, u32)> {
         | BenchmarkType::VlMaxMemory
         | BenchmarkType::VlSpecDecode
         | BenchmarkType::AsrThroughput
-        | BenchmarkType::AsrMaxMemory) => {
+        | BenchmarkType::AsrMaxMemory
+        | BenchmarkType::DecisionLatency
+        | BenchmarkType::DecisionMaxMemory) => {
             anyhow::bail!("{other:?} cells are not supported for OpenVINO")
         }
     })

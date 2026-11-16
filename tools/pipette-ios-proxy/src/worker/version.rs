@@ -1013,8 +1013,8 @@ mod tests {
         Ok(std::fs::read(zip)?)
     }
 
-    /// A phone in version mode, the bucket publishing [`V1`] then [`V2`], and
-    /// stand-ins for `security` and `xcodebuild`.
+    /// A phone in version mode, the bucket publishing two builds ([`V1`] then [`V2`]
+    /// unless named), and stand-ins for `security` and `xcodebuild`.
     struct Fixture {
         dir: tempfile::TempDir,
         bucket: FakeBucket,
@@ -1058,13 +1058,20 @@ mod tests {
         /// `memory[i]` is whether the i-th version's archive carries the
         /// memory entitlement. Both manifests name llama.cpp `b10216`.
         fn new(memory: [bool; 2]) -> anyhow::Result<Self> {
-            Self::carrying(memory, &[b10216()])
+            Self::carrying([V1, V2], memory, &[b10216()])
         }
 
-        /// As [`Fixture::new`], both manifests naming `runtimes`.
-        fn carrying(memory: [bool; 2], runtimes: &[serde_json::Value]) -> anyhow::Result<Self> {
-            let zips = [release_zip(V1, memory[0])?, release_zip(V2, memory[1])?];
-            let published = [V1, V2]
+        /// As [`Fixture::new`], publishing `versions`, both manifests naming `runtimes`.
+        fn carrying(
+            versions: [&str; 2],
+            memory: [bool; 2],
+            runtimes: &[serde_json::Value],
+        ) -> anyhow::Result<Self> {
+            let zips = [
+                release_zip(versions[0], memory[0])?,
+                release_zip(versions[1], memory[1])?,
+            ];
+            let published = versions
                 .iter()
                 .zip(&zips)
                 .zip([1, 2])
@@ -1323,6 +1330,55 @@ mod tests {
         Ok(())
     }
 
+    /// With `[cdn_proxy]` set, the run carries `cdn-proxy=` only on a chosen build that
+    /// reads it: an older one would refuse the launch, so it downloads directly. One line
+    /// says which. Unset, no run carries it and nothing is logged.
+    #[rstest::rstest]
+    #[case::an_older_build(V2, Some("cdn-cache:8090"), false)]
+    #[case::the_first_release_that_reads_it(
+        "2026.11.11-1a87cd9-internal",
+        Some("cdn-cache:8090"),
+        true
+    )]
+    #[case::unset("2026.11.11-1a87cd9-internal", None, false)]
+    fn the_cdn_proxy_goes_only_to_a_build_that_reads_it(
+        #[case] version: &str,
+        #[case] endpoint: Option<&str>,
+        #[case] passed: bool,
+    ) -> anyhow::Result<()> {
+        let fixture = Fixture::carrying([V1, version], [true, true], &[b10216()])?;
+        let mut fake = fixture.phone(a_run(found_running(version)?, version))?;
+        let mut config = (*fake.phone.config).clone();
+        config.cdn_proxy = endpoint.map(str::to_owned);
+        fake.phone.config = Arc::new(config);
+        let mut builds = version_mode(fixture.releases(None, 0, "")?);
+        let submit = fixture.submitted(json!({ "job_id": "job-1", "client_version": version }));
+        let ctx = fixture.session(&fake.phone)?;
+        let claim = claim(Some(&[version]))?;
+
+        let (ran, log) = captured(|| run_claimed_job(&mut fake.phone, &mut builds, &ctx, &claim));
+
+        ran?;
+        submit.assert();
+        let carries = |args: &[String]| args.iter().any(|arg| arg.starts_with("cdn-proxy="));
+        let proxied = fake
+            .calls()?
+            .iter()
+            .any(|call| matches!(call, Call::Launch { app_args, .. } if carries(app_args)));
+        assert_eq!(proxied, passed);
+        let said: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("the CDN proxy"))
+            .collect();
+        assert_eq!(said.len(), usize::from(endpoint.is_some()), "{log}");
+        assert_eq!(
+            said.iter().any(|line| line.contains("not passing")),
+            endpoint.is_some() && !passed,
+            "{log}"
+        );
+        Ok(())
+    }
+
     /// Only a runtime no listed build carries fails the job for good: the
     /// listing taken again says so, and the claim names the builds. Without
     /// `client_versions` the admitted builds are not known.
@@ -1399,7 +1455,7 @@ mod tests {
     fn a_runtime_in_no_build_names_what_the_builds_carry() -> anyhow::Result<()> {
         let mut gated = b10216();
         gated["private_thermal"] = true.into();
-        let fixture = Fixture::carrying([true, true], &[gated, mlx()])?;
+        let fixture = Fixture::carrying([V1, V2], [true, true], &[gated, mlx()])?;
         let mut fake = fixture.phone(FakeDevice::new("phone-a"))?;
         let mut builds = version_mode(fixture.releases(None, 0, "")?);
         let failed = fixture.failure(
@@ -2085,14 +2141,22 @@ mod tests {
     }
 
     /// A build that reports its failed cell as `BENCH_DONE 0 completed` and leaves
-    /// no payload still logs the engine's failure; the reason names the build and
-    /// quotes the app's line.
-    #[test]
-    fn an_engine_failure_reported_as_success_is_filed_non_retriable() -> anyhow::Result<()> {
+    /// no payload still logs why, an engine failure or a readiness wait that ran out;
+    /// the reason names the build and quotes the app's line.
+    #[rstest::rstest]
+    #[case::engine_failed(
+        "[HEADLESS] error jobRun decode_throughput_4096_100 / prism-ml/Bonsai-27B-gguf \
+         failed: Engine backend failed: prefill decode rc=-3."
+    )]
+    #[case::readiness_timed_out(
+        "[HEADLESS] info jobRun readiness: ios thermal=state:serious die:45C(hot) \
+         cpu=busy:1.2cores(busy) → timed out after 300s"
+    )]
+    fn a_cell_failure_reported_as_success_is_filed_non_retriable(
+        #[case] line: &str,
+    ) -> anyhow::Result<()> {
         let fixture = Fixture::new([true, true])?;
         let claim = claim(Some(&[V2]))?;
-        let line = "[HEADLESS] error jobRun decode_throughput_4096_100 / prism-ml/Bonsai-27B-gguf \
-                    failed: Engine backend failed: prefill decode rc=-3.";
         let device = found_running(V2)?
             .then_console(ok(
                 "[HEADLESS] results count=0\n[HEADLESS] BENCH_DONE 0\n",

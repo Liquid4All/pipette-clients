@@ -28,7 +28,7 @@ nonisolated enum LlamaExecute {
             let model = try ResolvedGgufTextModel(request.model.bound)
             // Before the load, which would warm the device the gate waited to cool.
             try readinessGate()
-            resultData = try await load.withInference(model) {
+            resultData = try await load.withInference(model, observer: observer) {
                 try await prefillThroughput(benchmark, $0, readinessGate: readinessGate,
                                             observer: observer)
             }
@@ -36,7 +36,7 @@ nonisolated enum LlamaExecute {
             try BenchmarkMeasurement.requireOneInFlight(definition, engine: oneAtATime)
             let model = try ResolvedGgufTextModel(request.model.bound)
             try readinessGate()
-            resultData = try await load.withInference(model) {
+            resultData = try await load.withInference(model, observer: observer) {
                 try await decodeThroughput(benchmark, $0, readinessGate: readinessGate,
                                            observer: observer)
             }
@@ -44,7 +44,7 @@ nonisolated enum LlamaExecute {
             try BenchmarkMeasurement.requireOneInFlight(definition, engine: oneAtATime)
             let model = try ResolvedGgufTextModel(request.model.bound)
             try readinessGate()
-            resultData = try await load.withInference(model) {
+            resultData = try await load.withInference(model, observer: observer) {
                 try await endToEndLatency(benchmark, $0, readinessGate: readinessGate,
                                           observer: observer)
             }
@@ -58,7 +58,7 @@ nonisolated enum LlamaExecute {
             let cell = try EvalCell(benchmark)
             let model = try ResolvedGgufTextModel(request.model.bound)
             let checkpoint = try runContext.evalCompletions.open(request)
-            resultData = try await load.withInference(model) {
+            resultData = try await load.withInference(model, observer: observer) {
                 try await eval(benchmark, cell: cell, $0, checkpoint: checkpoint,
                                isCancelled: isCancelled, progress: progress)
             }
@@ -147,11 +147,12 @@ nonisolated enum LlamaExecute {
             loadMode = flags.loadMode ?? LlamaCpp.defaultLoadMode
         }
 
-        func withInference<T>(_ model: ResolvedGgufTextModel,
+        func withInference<T>(_ model: ResolvedGgufTextModel, observer: MeasurementObserver,
                               _ body: (Inference) async throws -> T) async throws -> T {
             try await Pipette.withInference(
                 path: model.path, nGpuLayers: numberGpuLayers, contextSize: ctxSize,
-                nUbatch: nUbatch, threads: threads, swaFull: swaFull, loadMode: loadMode, body)
+                nUbatch: nUbatch, threads: threads, swaFull: swaFull, loadMode: loadMode,
+                observer: observer, body)
         }
     }
 
@@ -168,6 +169,7 @@ nonisolated enum LlamaExecute {
         let result = try await Pipette.withVisionInference(
             path: model.backbone, mmprojPath: model.mmproj, nGpuLayers: load.numberGpuLayers,
             threads: load.threads, swaFull: load.swaFull, loadMode: load.loadMode,
+            observer: observer,
             window: { mtmd in
                 // Calibration is not an attempt (`attempt_timeout_seconds`).
                 let perImage = try observer.outside {

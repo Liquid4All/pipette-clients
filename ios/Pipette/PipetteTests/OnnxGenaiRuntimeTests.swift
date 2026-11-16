@@ -413,7 +413,7 @@ import Testing
     @Test(.enabled(if: fixtureModel() != nil)) func theEngineLoadsAndGeneratesAgainstARealPackage() async throws {
         let model = try #require(Self.fixtureModel())
 
-        let timing = try await OnnxGenaiRuntime.withFreshModel(path: model) { loaded in
+        let timing = try await OnnxGenaiRuntime.withFreshModel(path: model, observer: noObserver()) { loaded in
             try OnnxGenaiRuntime.generate(loaded, promptIds: [1, 2, 3, 4], decodeTokens: 8)
         }
 
@@ -430,7 +430,7 @@ import Testing
     @Test(.enabled(if: fixtureModel() != nil)) func theTokenizerEncodesThroughTheBridge() async throws {
         let model = try #require(Self.fixtureModel())
 
-        let ids = try await OnnxGenaiRuntime.withFreshModel(path: model) { loaded in
+        let ids = try await OnnxGenaiRuntime.withFreshModel(path: model, observer: noObserver()) { loaded in
             try OnnxGenaiRuntime.encode("The capital of France is", with: loaded.tokenizer)
         }
 
@@ -444,7 +444,7 @@ import Testing
         let model = try #require(Self.fixtureModel())
 
         for decode in [2, 16] {
-            let timing = try await OnnxGenaiRuntime.withFreshModel(path: model) { loaded in
+            let timing = try await OnnxGenaiRuntime.withFreshModel(path: model, observer: noObserver()) { loaded in
                 try OnnxGenaiRuntime.generate(loaded, promptIds: [1, 2, 3, 4],
                                               decodeTokens: decode)
             }
@@ -458,7 +458,7 @@ import Testing
         let model = try #require(Self.fixtureModel())
 
         await #expect(throws: RuntimeError.self) {
-            try await OnnxGenaiRuntime.withFreshModel(path: model) { loaded in
+            try await OnnxGenaiRuntime.withFreshModel(path: model, observer: noObserver()) { loaded in
                 try OnnxGenaiRuntime.generate(loaded, promptIds: [1, 2], decodeTokens: 0)
             }
         }

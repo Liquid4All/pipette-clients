@@ -168,13 +168,13 @@ mod tests {
     #[test]
     fn an_attempt_overruns_only_past_the_limit() -> anyhow::Result<()> {
         let start = Instant::now();
-        let attempt = Attempt::starting(pipette_ops::attempt::LOAD_AND_WARM_UP, start);
+        let attempt = Attempt::starting(pipette_ops::attempt::WARM_UP, start);
         anyhow::ensure!(attempt.overrun(LIMIT, start + LIMIT).is_none());
         let overrun = attempt.overrun(LIMIT, start + Duration::from_secs(301));
         anyhow::ensure!(
             overrun
                 == Some(Overrun {
-                    what: pipette_ops::attempt::LOAD_AND_WARM_UP.to_string(),
+                    what: pipette_ops::attempt::WARM_UP.to_string(),
                     limit: LIMIT,
                     elapsed: Duration::from_secs(301),
                 }),
@@ -282,7 +282,7 @@ mod tests {
             Ok(pipette_subprocess::start_process(
                 "sleep",
                 sleep,
-                Duration::ZERO,
+                pipette_subprocess::OnStop::SIGKILL,
             )?)
         }
 

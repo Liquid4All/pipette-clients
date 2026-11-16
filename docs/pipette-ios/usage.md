@@ -46,6 +46,26 @@ xcrun devicectl device process launch --device <UDID> --console \
 `-v` / `--verbose` is a global switch rather than any verb's parameter: it
 mirrors debug diagnostics into the console capture.
 
+`cdn-proxy=HOST:PORT` is a global setting too, the CLI's `--cdn-proxy`, which
+`pipette-ios-proxy` passes from its `[cdn_proxy]` table to a build that reads it,
+`2026.11.11-1a87cd9` or one dated later, and leaves out for any other and for
+every build in pool mode, whose version it does not know, since an older one
+refuses the unknown key. Every Hugging Face and
+`url` model download then goes to that caching proxy as the requests the app
+would send to the site, over plain HTTP, with `Host` naming the site and a
+Hugging Face token when the repo has one: a GGUF file, the size checks before a
+fetch, and a directory model's (MLX, ONNX Runtime GenAI) listing, file checks
+and files. A vault source goes direct, as the CLI's does. The app sends
+a directory model's requests itself rather than through `HubApi`, whose own
+sessions cannot name the site, and lays the files out as `HubApi` does; a file
+whose transfer breaks continues from the bytes it has. A redirect through the
+proxy fails the download. Only this spelling is read, and a value the CLI
+would refuse is refused. App Transport Security lets plain HTTP through to a
+loopback, private or link-local address (`10.x`, `172.16.x` to `172.31.x`,
+`192.168.x`, `169.254.x`) and to an unqualified name, and refuses a public or
+tailnet address (the tailnet's are in `100.64.0.0/10`) and a fully qualified
+name, so give the proxy as a LAN address or an unqualified name.
+
 `runtime=` takes one of four short tokens, `llama`, `mlx`, `onnx` or `afm`, or a
 JSON `Runtime` object. A type tag such as `mlx_ios_pipette` is refused, because it
 names an engine but not a build. The sweep forms default to `mlx` when `runtime=`
@@ -312,11 +332,11 @@ iOS cell the knob.
 
 `--attempt-timeout-seconds` has no shorthand: `benchmark-flags=` carries it, as
 `{"attempt_timeout_seconds":600}`. It is the limit on each attempt, timed on its
-own: the model load and warm-up, each measured rep, the work after a rep, and
-each peak-memory attempt. Unset, it is 300 s on the timing, throughput and
-memory cells. `vl_spec_decode` has no limit and its iOS cells refuse the key;
-eval takes no benchmark flags on iOS. Readiness waits and the VL and ASR
-context calibration do not count. The app cannot stop llama.cpp, MLX, ONNX
+own: the warm-up, each measured rep, the work after a rep, and each peak-memory
+attempt. Unset, it is 300 s on the timing, throughput and memory cells.
+`vl_spec_decode` has no limit and its iOS cells refuse the key; eval takes no
+benchmark flags on iOS. Model loads, readiness waits and the VL and ASR context
+calibration do not count. The app cannot stop llama.cpp, MLX, ONNX
 Runtime GenAI or Apple Foundation mid-call, so past the limit a claimed launch
 (`claim=`) saves the cell as failed, logs its failure (`error jobRun
 <benchmark> / <model> failed: rep 2 ran 300.4s, past attempt_timeout_seconds
@@ -570,7 +590,8 @@ identity or stored data. A URL can be opened by any app, web page, or QR code.
 `auth export` is the most important case: a link must never print a signing key.
 
 Permitted: the bench forms, `job run`, `job submit`, `job export`, `status`.
-Everything else is command-line only.
+Everything else is command-line only. A link cannot carry `cdn-proxy=`: the
+proxy receives the downloads' tokens.
 
 ## What has no counterpart
 

@@ -59,6 +59,7 @@ pub(super) fn run(
                 server::TEXT_SERVER_MODULE,
                 text_command,
                 watch,
+                observer,
                 generate,
             )?;
             Ok(MaxMemoryMeasurementReading {

@@ -153,6 +153,7 @@ nonisolated extension LlamaExecute {
         let result = try await withMtmd(
             path: model.backbone, mmprojPath: model.mmproj, nGpuLayers: load.numberGpuLayers,
             threads: load.threads, swaFull: load.swaFull, loadMode: load.loadMode, media: .audio,
+            observer: observer,
             window: { mtmd in
                 guard calibrate else { return (load.ctxSize, load.nUbatch) }
                 // Calibration is not an attempt (`attempt_timeout_seconds`).

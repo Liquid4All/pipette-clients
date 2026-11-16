@@ -69,24 +69,28 @@ extension VisionInference {
 nonisolated func withVisionInference<T>(path: String, mmprojPath: String, nGpuLayers: UInt32,
                                         threads: UInt32, swaFull: Bool,
                                         loadMode: LlamacppLoadMode,
+                                        observer: MeasurementObserver,
                                         window: (MtmdContext) throws
                                             -> (contextSize: UInt32, nUbatch: UInt32),
                                         _ body: (VisionInference) async throws -> T) async throws -> T {
     try await withMtmd(path: path, mmprojPath: mmprojPath, nGpuLayers: nGpuLayers,
                        threads: threads, swaFull: swaFull, loadMode: loadMode, media: .vision,
-                       window: window) { try await body(.live($0, $1)) }
+                       observer: observer, window: window) { try await body(.live($0, $1)) }
 }
 
 /// `withInference` for the multimodal path. The projector loads before the context so
 /// `window` can size the context (and its clamped micro-batch) from one frame's or one
-/// clip's count. mtmd holds the model, so it must be freed first.
+/// clip's count. mtmd holds the model, so it must be freed first. Each load step is off
+/// `observer`'s attempt clock, one at a time: holds do not nest, and `window` holds the
+/// clock itself where it calibrates.
 nonisolated func withMtmd<T>(path: String, mmprojPath: String, nGpuLayers: UInt32,
                              threads: UInt32, swaFull: Bool, loadMode: LlamacppLoadMode,
-                             media: MtmdMedia,
+                             media: MtmdMedia, observer: MeasurementObserver,
                              window: (MtmdContext) throws -> (contextSize: UInt32, nUbatch: UInt32),
                              _ body: (LlamaModel, MtmdContext) async throws -> T) async throws -> T {
-    let weights = try LlamaCpp.loadWeights(path: path, nGpuLayers: nGpuLayers,
-                                           loadMode: loadMode)
+    let weights = try observer.outside {
+        try LlamaCpp.loadWeights(path: path, nGpuLayers: nGpuLayers, loadMode: loadMode)
+    }
     // On the accelerator regardless of `nGpuLayers`, as `llama-server`'s `mmproj_use_gpu`
     // defaults on independently of `-ngl` (and `llamacpp_ios_pipette` has no
     // `--no-mmproj-offload`). The simulator has no Metal backend.
@@ -97,8 +101,10 @@ nonisolated func withMtmd<T>(path: String, mmprojPath: String, nGpuLayers: UInt3
     #endif
     let mtmd: MtmdContext
     do {
-        mtmd = try LlamaMtmd.load(model: weights, mmprojPath: mmprojPath, useGpu: useGpu,
-                                  threads: threads, media: media)
+        mtmd = try observer.outside {
+            try LlamaMtmd.load(model: weights, mmprojPath: mmprojPath, useGpu: useGpu,
+                               threads: threads, media: media)
+        }
     } catch {
         LlamaCpp.freeWeights(weights)
         throw error
@@ -106,8 +112,10 @@ nonisolated func withMtmd<T>(path: String, mmprojPath: String, nGpuLayers: UInt3
     let m: LlamaModel
     do {
         let (contextSize, nUbatch) = try window(mtmd)
-        m = try LlamaCpp.initContext(weights, contextSize: contextSize, nUbatch: nUbatch,
+        m = try observer.outside {
+            try LlamaCpp.initContext(weights, contextSize: contextSize, nUbatch: nUbatch,
                                      threads: threads, swaFull: swaFull)
+        }
     } catch {
         mtmd.free()
         LlamaCpp.freeWeights(weights)

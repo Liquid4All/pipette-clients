@@ -6,7 +6,8 @@ use std::process::Command;
 use std::time::Duration;
 
 fn main() -> Result<(), pipette_subprocess::StartError> {
-    let process = pipette_subprocess::start_process("sleep", sleep(), Duration::ZERO)?;
+    let process =
+        pipette_subprocess::start_process("sleep", sleep(), pipette_subprocess::OnStop::SIGKILL)?;
     println!("{}", process.pid());
     std::thread::sleep(Duration::from_secs(300));
     Ok(())

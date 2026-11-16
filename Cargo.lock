@@ -1393,6 +1393,7 @@ dependencies = [
  "pipette-device",
  "pipette-http",
  "pipette-llamacpp",
+ "pipette-memprobe",
  "pipette-mgmt-client",
  "pipette-mlx",
  "pipette-onnx-genai",
@@ -1730,7 +1731,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
- "time",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -1759,7 +1759,7 @@ dependencies = [
 [[package]]
 name = "pipette-plan-types"
 version = "0.1.0"
-source = "git+https://github.com/Liquid4All/pipette-mgmt.git?rev=b74d06c514b6df8963338118885e9aa99d8982dc#b74d06c514b6df8963338118885e9aa99d8982dc"
+source = "git+https://github.com/Liquid4All/pipette-mgmt.git?rev=06471959ae5f5c5730d7b1d2e7b1e0e0a408e858#06471959ae5f5c5730d7b1d2e7b1e0e0a408e858"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -2128,9 +2128,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",

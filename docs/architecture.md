@@ -115,12 +115,16 @@ checks and the reduction are in `pipette-ops`.
 
 `attempt_timeout_seconds` limits each attempt of a cell; the rules are in
 [usage.md](pipette-cli/usage.md#5c-the-attempt-limit). `pipette-cli` keeps one
-clock per run. `dispatch_run` starts the first attempt once the downloads are
-done, and the engine marks the rest through the `MeasurementObserver` hooks and
-the readiness gate. A watchdog thread reads the clock every 250 ms. Past the
-limit it stops every child the run started, as Ctrl-C does, so whatever the
-engine waits on fails at once, and `watched` reports the overrun as
-`AttemptTimeoutError` with the engine's error beside it.
+clock per run. `dispatch_run` starts the first attempt, the warm-up, once the
+downloads are done, and the engine marks the rest through the
+`MeasurementObserver` hooks and the readiness gate. Every server's start is
+held, from its launch until it is ready, the model load included; a
+`llama-bench` or `llama-batched-bench` rep loads the model itself, so its load
+counts. A watchdog
+thread reads the clock every 250 ms. Past the limit it stops every child the
+run started, as Ctrl-C does, so whatever the engine waits on fails at once, and
+`watched` reports the overrun as `AttemptTimeoutError` with the engine's error
+beside it.
 
 ```mermaid
 sequenceDiagram
@@ -130,16 +134,22 @@ sequenceDiagram
     participant W as watchdog thread
     participant P as child process
     D->>C: create, with the cell's limit
-    D->>C: begin "the model load and warm-up"
+    D->>C: begin "the warm-up"
     D->>W: start, when the cell has a limit
     Note over C,W: polls every 250 ms until the engine returns
     D->>E: run the cell
     opt a step the limit leaves out
         E->>C: hold
-        E->>E: first server start, image pull, download
+        E->>E: image pull, download, calibration
         E->>C: resume, with the whole limit
     end
-    E->>P: load the model, warm up
+    opt a server engine
+        E->>C: hold
+        E->>P: start the server, which loads the model
+        P-->>E: ready
+        E->>C: resume, with the whole limit
+    end
+    E->>P: warm up
     loop each rep N
         E->>C: hold, then resume around the readiness gate
         E->>C: begin "rep N"
@@ -160,10 +170,12 @@ sequenceDiagram
 ```
 
 `begin` and `resume` both give the attempt the whole limit, so a held step never
-shortens the step after it. A cell with no limit runs without the watchdog. The
-iOS app keeps the same clock (`AttemptClock`, `AttemptWatchdog`) but cannot stop
-an engine that runs inside the app: a launch that the farm's proxy claimed exits
-the app, and any other run fails at its next boundary.
+shortens the step after it. Holds do not nest: a resume restarts the clock
+whatever held it. A cell with no limit runs without the watchdog. The iOS app
+keeps the same clock (`AttemptClock`, `AttemptWatchdog`), held around each
+in-app model load, but cannot stop an engine that runs inside the app: a launch
+that the farm's proxy claimed exits the app, and any other run fails at its
+next boundary.
 
 ## Dependency graph
 

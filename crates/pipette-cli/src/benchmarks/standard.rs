@@ -129,7 +129,9 @@ fn ladder_entry(kind: BenchmarkType, tokens: i32) -> Result<Option<BenchmarkDefi
         | BenchmarkType::VlMaxMemory
         | BenchmarkType::VlSpecDecode
         | BenchmarkType::AsrThroughput
-        | BenchmarkType::AsrMaxMemory => None,
+        | BenchmarkType::AsrMaxMemory
+        | BenchmarkType::DecisionLatency
+        | BenchmarkType::DecisionMaxMemory => None,
     })
 }
 
@@ -243,6 +245,8 @@ fn smoke_entry(kind: BenchmarkType) -> Result<Option<BenchmarkDefinition>> {
         // Their samples come only as the corpus a catalog entry pins, from the
         // management server at run time, so a local definition would have none.
         BenchmarkType::VlSpecDecode | BenchmarkType::AsrEval => return Ok(None),
+        // Every engine refuses these until #1679 lands, so a local one could not run.
+        BenchmarkType::DecisionLatency | BenchmarkType::DecisionMaxMemory => return Ok(None),
         BenchmarkType::AsrMaxMemory => BenchmarkDefinition::AsrMaxMemory(AsrMaxMemoryBenchmark {
             benchmark_id: benchmark_id("asr_max_memory_smoke")?,
             parameter_audio_duration_ms: smoke_duration()?,

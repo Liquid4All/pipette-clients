@@ -28,5 +28,6 @@ pub use ensure::{
     ensure_model, ensure_runtime, model_download_size, runtime_download_size, runtime_tool,
 };
 pub use entry::{sync_dir, sync_file};
+pub use io_kind::names_the_host;
 pub use progress::{FetchProgress, ProgressSink};
 pub use vault::{VaultAccess, VaultFetchError};

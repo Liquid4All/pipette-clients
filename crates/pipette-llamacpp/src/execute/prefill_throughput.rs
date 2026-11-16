@@ -3,7 +3,6 @@
 
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::Context;
 
@@ -19,7 +18,7 @@ use pipette_plan_types::{
     PrefillThroughputBenchmark, PrefillThroughputLlamacppCliStockToolsGgufText, RunResponse,
     RuntimeFlags,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::models::ResolvedGgufTextModel;
 use crate::runtimes::{self, ResolvedLlamaBatchedBench, ResolvedLlamaBench};
@@ -45,11 +44,11 @@ pub fn run(
         NonZeroUsize::try_from(measurement::REPS)?,
         readiness_gate,
         observer,
-        MeasurementWarmup::Inline,
+        MeasurementWarmup::Once,
         &mut runs,
         |runs| {
             let command = launch.build();
-            let mut llama_bench = start_process("llama-bench", command, Duration::ZERO)
+            let mut llama_bench = start_process("llama-bench", command, OnStop::SIGTERM)
                 .map_err(anyhow::Error::from)?;
             let sampler = Sampler::start(llama_bench.pid(), SupportedWatch::OBSERVE)
                 .map_err(anyhow::Error::from)?;
@@ -106,7 +105,7 @@ pub fn run_batched(
         |runs| {
             let command = launch.build();
             let mut llama_batched_bench =
-                start_process("llama-batched-bench", command, Duration::ZERO)
+                start_process("llama-batched-bench", command, OnStop::SIGTERM)
                     .map_err(anyhow::Error::from)?;
             let sampler = Sampler::start(llama_batched_bench.pid(), SupportedWatch::OBSERVE)
                 .map_err(anyhow::Error::from)?;
@@ -173,6 +172,8 @@ fn bench_launch(
         .raw(raw)
         .envs(envs)
         .client_config(client_config.cloned())
+        // The warm-up is the cell's own untimed first run.
+        .no_warmup(true)
 }
 
 /// Every field of the cell is named: a flag plan-types adds fails to compile
@@ -278,7 +279,7 @@ mod tests {
     fn llama_bench_reads_the_prompt_alone() -> anyhow::Result<()> {
         assert_eq!(
             bench_args(&benchmark()?, &runtime_flags()).join(" "),
-            "--flash-attn on --load-mode dio --n-gpu-layers 7 --poll 0 --repetitions 1 --threads 3 --n-prompt 512 --n-gen 0"
+            "--flash-attn on --load-mode dio --n-gpu-layers 7 --no-warmup --poll 0 --repetitions 1 --threads 3 --n-prompt 512 --n-gen 0"
         );
         Ok(())
     }

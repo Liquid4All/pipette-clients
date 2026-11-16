@@ -154,7 +154,7 @@ submitting a timing from an unstable condition.
 
 | Path | Workload | Timing source | Notes |
 | --- | --- | --- | --- |
-| llama.cpp CLI | `llama-bench --output json --model <path> --n-prompt <P> --n-gen 0 --repetitions 1` per measured repetition | row `avg_ns`, converted to milliseconds | Five separate one-repetition invocations so readiness can run between samples. |
+| llama.cpp CLI | `llama-bench --output json --model <path> --n-prompt <P> --n-gen 0 --repetitions 1 --no-warmup` per measured repetition | row `avg_ns`, converted to milliseconds | One untimed invocation of the same command first, then five separate one-repetition invocations so readiness can run between samples. |
 | llama.cpp CLI, batch of `N` | `llama-batched-bench --output-format jsonl --model <path> --ctx-size <N × (P + 1)> -npp <P> -ntg 1 -npl <N>,<N>` per measured repetition | second row's `t_pp`, converted to milliseconds | The first row warms the process at the cell's shape. |
 | MLX CLI | streamed `/v1/completions` with a `<P>`-token prompt, `max_tokens = 1` | client time to first token | Server prompt cache disabled. |
 | torch-oai (vLLM / SGLang, docker or uv) | streamed `/v1/completions` with a `<P>`-token prompt, `max_tokens = 1`, `ignore_eos` | client time to first token | Prefix caching disabled at launch. |
@@ -193,9 +193,10 @@ Backend choice, token handling and the measured cache effects are in
 ### llama.cpp
 
 `pipette-llamacpp` runs one `llama-bench` process per measured sample and
-passes `--repetitions 1`. Each process first warms itself with one untimed pass
-over the cell's own prompt (`--no-warmup` is reserved), which is not part of
-the row's `avg_ns`. The run must print exactly one JSON row, the one test its
+passes `--repetitions 1 --no-warmup`, so each process reads the prompt once.
+Before the samples, one untimed process runs the same command as the warm-up:
+it pays the first run's kernel builds and page-ins, and its row is checked and
+dropped. `--no-warmup` stays reserved in a cell's raw flags. The run must print exactly one JSON row, the one test its
 arguments ask for (`n_gen == 0`), with `n_prompt == parameter_prefill_tokens`.
 The row's `avg_ns` is converted to milliseconds for that sample.
 

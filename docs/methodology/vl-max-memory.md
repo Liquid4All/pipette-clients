@@ -198,7 +198,8 @@ sends it the cell's request, checks its reading and drops it, and stops it, then
 starts the measured server; why is in
 [peak memory: compile caches](peak-memory-usage.md#compile-caches). If that first
 server fails to start or to answer, the cell fails. Each server is an attempt
-of its own under the cell's `attempt_timeout_seconds`, 300 s by default
+of its own under the cell's `attempt_timeout_seconds`, 300 s by default, from
+the end of its load
 ([the attempt limit](../pipette-cli/usage.md#5c-the-attempt-limit)). The
 response and the peak are the measured server's; the observation covers both
 servers.
@@ -350,8 +351,8 @@ It differs from the `llama-server` runner in two ways:
   256-token steps, so nothing is reserved ahead of the request.
 - **No HTTP timeout.** Like the MLX text memory cell, it carries
   `attempt_timeout_seconds` alone, no `http_timeout_seconds`. Each server is
-  one attempt from its launch (300 s by default), and its request waits up to
-  3600 s.
+  one attempt from the end of its load (300 s by default), and its request
+  waits up to 3600 s.
 
 The figure is the whole Python server: the interpreter, the processor, the
 weights and the request's buffers, which the server frees afterwards. After

@@ -416,6 +416,8 @@ pub(crate) const BENCHMARK_TYPES: &[&str] = &[
     "vl_spec_decode",
     "asr_throughput",
     "asr_max_memory",
+    "decision_latency",
+    "decision_max_memory",
 ];
 const NOTE: Field = opt(
     "note",

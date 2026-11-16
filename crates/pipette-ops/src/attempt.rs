@@ -8,9 +8,10 @@ use pipette_plan_types::{BenchmarkFlags, BenchmarkType, RunRequest};
 /// The limit on a cell whose flags set none, on the kinds that take a default.
 pub const DEFAULT_LIMIT: Duration = Duration::from_secs(300);
 
-/// What a client's clock names the first attempt: the model load counts
-/// against it.
-pub const LOAD_AND_WARM_UP: &str = "the model load and warm-up";
+/// What a client's clock names the first attempt. A server's start, until it
+/// answers ready, is off the clock; a load that runs after that, or inside a
+/// `llama-bench` rep, counts.
+pub const WARM_UP: &str = "the warm-up";
 
 /// The cell's limit: its flags' `attempt_timeout_seconds`, else the default for
 /// its kind. `None` leaves it unbounded.
@@ -32,7 +33,9 @@ pub fn default_limit(benchmark: BenchmarkType) -> Option<Duration> {
         | BenchmarkType::VlThroughput
         | BenchmarkType::VlMaxMemory
         | BenchmarkType::AsrThroughput
-        | BenchmarkType::AsrMaxMemory => Some(DEFAULT_LIMIT),
+        | BenchmarkType::AsrMaxMemory
+        | BenchmarkType::DecisionLatency
+        | BenchmarkType::DecisionMaxMemory => Some(DEFAULT_LIMIT),
         // A corpus or an eval sets its own length, so a fixed default would cut
         // healthy runs.
         BenchmarkType::VlSpecDecode
@@ -105,6 +108,8 @@ mod tests {
     fn only_the_timing_and_memory_kinds_default() -> anyhow::Result<()> {
         anyhow::ensure!(default_limit(BenchmarkType::DecodeThroughput) == Some(DEFAULT_LIMIT));
         anyhow::ensure!(default_limit(BenchmarkType::VlMaxMemory) == Some(DEFAULT_LIMIT));
+        anyhow::ensure!(default_limit(BenchmarkType::DecisionLatency) == Some(DEFAULT_LIMIT));
+        anyhow::ensure!(default_limit(BenchmarkType::DecisionMaxMemory) == Some(DEFAULT_LIMIT));
         anyhow::ensure!(default_limit(BenchmarkType::VlSpecDecode).is_none());
         anyhow::ensure!(default_limit(BenchmarkType::Eval).is_none());
         Ok(())

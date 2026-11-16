@@ -14,13 +14,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use pipette_plan_types::{
     ContentPart, EnvForward, EvalSample, LlamacppCliStockToolsExtraRuntimeConfiguration,
     MessageContent,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::runtimes::{
     CommonKnobs, ResolvedLlamaServer, canonical_flag_name, canonicalize_flag_order,
@@ -708,7 +707,7 @@ pub(crate) fn run_counting_helper(
     batch_line: &'static str,
     deadline: std::time::Duration,
 ) -> Option<u32> {
-    let Ok(mut helper) = start_process("llama-mtmd-cli", command, Duration::ZERO) else {
+    let Ok(mut helper) = start_process("llama-mtmd-cli", command, OnStop::SIGTERM) else {
         let _ = std::fs::remove_file(media);
         return None;
     };

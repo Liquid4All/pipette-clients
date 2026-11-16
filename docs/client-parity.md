@@ -54,6 +54,7 @@ to design.
 | 14 | `vl_max_memory` | Android trails | **Open on Android.** Closed on iOS; see below |
 | 15 | North-Mini-Code's reasoning markers in eval text | iOS trails | **Open on iOS.** Out of reach of the phones today; see below |
 | 16 | `asr_throughput`, `asr_max_memory` | Android trails | **Open on Android.** Closed on iOS; see below |
+| 17 | CDN proxy (`--cdn-proxy`) | Both trail | **Open.** iOS sends no `X-Expected-Sha256`; the Android app has no setting, but the fleet's Android phones run the CLI, which has it; see below |
 
 Gaps 4, 5, 6, 7a and 7b are closed. Their numbers are not reused, because code
 and other docs cite gaps by number.
@@ -545,6 +546,28 @@ no `llamacpp_apk_pipette` variant for either kind, and the catalog sync skips
 the benchmark types as unrecognized (its native dispatch would refuse them as
 unsupported). Closing it there starts in plan-types, then the same clip, recipe
 and count on that engine.
+
+## Gap 17: the apps fetch through a CDN proxy without a declared sha256, or not at all
+
+The CLI's `--cdn-proxy HOST:PORT` (`PIPETTE_CDN_PROXY`) sends every Hugging
+Face and `url` model download to a caching proxy on the local network as the
+request it would send to the site, with `Host` naming the site and
+`X-Expected-Sha256` on a file whose sha256 it knows, and a vault source direct
+([usage.md](pipette-cli/usage.md#downloading-through-a-cdn-proxy)).
+The fleet runs the CLI on its Android phones, so they can use one. The Android
+app's own download path has no such setting and always fetches from the site.
+
+The iOS app takes `cdn-proxy=HOST:PORT` at launch, which `pipette-ios-proxy`
+passes from its `[cdn_proxy]` table
+([usage.md](pipette-ios/usage.md#the-grammar)). Every Hugging Face and `url`
+model download goes to the proxy as the CLI sends it, a repo's token with it
+(`Networking/PipetteHttp/CdnProxy.swift`): a GGUF file, the size checks before a
+fetch, and a directory model's (MLX, ONNX Runtime GenAI) listing and files,
+which the app sends on its own session in place of `HubApi`'s, laid out as
+`HubApi` lays them (`ProxiedHub` in `Models/ModelTransport.swift`). A vault
+source goes direct, as the CLI's does. The app sends no `X-Expected-Sha256`, so
+a `url` source's file passes through the proxy uncached. Closing it on iOS means
+that header.
 
 ---
 

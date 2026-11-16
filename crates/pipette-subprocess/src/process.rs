@@ -18,6 +18,23 @@ pub struct Process {
     spawned: Spawned,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnStop {
+    Sigkill,
+    /// SIGTERM, then SIGKILL after `cleanup` if it is still running.
+    Sigterm {
+        cleanup: Duration,
+    },
+}
+
+impl OnStop {
+    pub const SIGKILL: Self = Self::Sigkill;
+    /// llama-server frees its Hexagon NPU buffers within 0.15 s of SIGTERM.
+    pub const SIGTERM: Self = Self::Sigterm {
+        cleanup: Duration::from_secs(5),
+    };
+}
+
 /// Spawn `command` leading a session of its own, with an empty stdin and both
 /// output streams kept, so a program that talks over stdin and stdout needs
 /// [`spawn_piped`] instead. Its environment is the command's:
@@ -25,10 +42,9 @@ pub struct Process {
 /// [`apply_envs`](crate::apply_envs). Returns while it runs.
 ///
 /// `name` is what logs and errors call it: `mlx_lm.server` rather than the
-/// `python` running it. `stop_grace` is how long [`Process::stop`] waits after
-/// SIGTERM before SIGKILL; zero kills at once. Each line it prints goes to
-/// [`log_line`](crate::log_line) until [`Process::on_line`] names another
-/// callback.
+/// `python` running it. `on_stop` is how [`Process::stop`] signals it. Each
+/// line it prints goes to [`log_line`](crate::log_line) until
+/// [`Process::on_line`] names another callback.
 ///
 /// Whatever it starts goes with it when it is stopped or exits, a daemon
 /// included.
@@ -39,15 +55,10 @@ pub struct Process {
 /// Signal cleanup waits for spawn and teardown registration without a deadline.
 /// On Unix, caller-supplied `pre_exec` callbacks must return promptly; a blocked
 /// callback can stall signal cleanup.
-pub fn start_process(
-    name: &str,
-    command: Command,
-    stop_grace: Duration,
-) -> Result<Process, StartError> {
-    let stop = if stop_grace.is_zero() {
-        Stop::Kill
-    } else {
-        Stop::Terminate(stop_grace)
+pub fn start_process(name: &str, command: Command, on_stop: OnStop) -> Result<Process, StartError> {
+    let stop = match on_stop {
+        OnStop::Sigkill => Stop::Kill,
+        OnStop::Sigterm { cleanup } => Stop::Terminate(cleanup),
     };
     Ok(Process {
         spawned: Spawned::start(command, name.to_owned(), stop)?,
@@ -161,9 +172,10 @@ impl Process {
         self.spawned.on_line(Arc::new(on_line));
     }
 
-    /// SIGTERM its process group and SIGKILL its session once the stop grace
-    /// has passed; with no grace, SIGKILL at once. Windows kills the process
-    /// tree at once. Nothing to do once it has exited.
+    /// SIGKILL its session, at once for [`OnStop::Sigkill`], or for
+    /// [`OnStop::Sigterm`] after a SIGTERM to its process group and its
+    /// cleanup time. Windows kills the process tree at once. Nothing to do
+    /// once it has exited.
     pub fn stop(&mut self) {
         self.spawned.stop();
     }
@@ -228,7 +240,7 @@ mod tests {
     #[test]
     fn an_exit_reports_its_status_and_what_it_printed() -> anyhow::Result<()> {
         let mut process =
-            start_process("sh", sh("echo out; echo err >&2; exit 3"), Duration::ZERO)?;
+            start_process("sh", sh("echo out; echo err >&2; exit 3"), OnStop::SIGKILL)?;
         let status = process
             .wait(Duration::from_secs(10))?
             .context("still running")?;
@@ -244,7 +256,7 @@ mod tests {
     /// the program goes on writing to.
     #[test]
     fn output_after_a_line_that_is_not_utf8_is_kept() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh(r"printf 'a\n\377\nb\n' >&2"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh(r"printf 'a\n\377\nb\n' >&2"), OnStop::SIGKILL)?;
         let status = process
             .wait(Duration::from_secs(10))?
             .context("still running")?;
@@ -258,7 +270,7 @@ mod tests {
 
     #[test]
     fn a_wait_that_runs_out_leaves_it_running() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh("exec sleep 30"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh("exec sleep 30"), OnStop::SIGKILL)?;
         assert_eq!(process.wait(Duration::from_millis(100))?, None);
         assert!(process.is_running());
         process.stop();
@@ -268,7 +280,7 @@ mod tests {
 
     #[test]
     fn wait_success_returns_once_it_exits_with_success() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh("echo done"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh("echo done"), OnStop::SIGKILL)?;
         process.wait_success(LONG)?;
         assert_eq!(process.output().runtime_stdout.as_deref(), Some("done\n"));
         Ok(())
@@ -287,7 +299,7 @@ mod tests {
         #[case] ended: &str,
     ) -> anyhow::Result<()> {
         let script = format!("echo 'unknown argument: --bogus' >&2; {then}");
-        let mut process = start_process("llama-bench", sh(&script), Duration::ZERO)?;
+        let mut process = start_process("llama-bench", sh(&script), OnStop::SIGKILL)?;
         process
             .wait_for_output(Stream::Stderr, LONG, |text| text.contains("--bogus"))
             .context("the line never arrived")?;
@@ -322,7 +334,7 @@ mod tests {
 
     #[test]
     fn before_reap_runs_on_the_exited_process_before_it_is_reaped() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh("echo done"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh("echo done"), OnStop::SIGKILL)?;
         let pid = process.pid();
         assert!(process.wait_success_before_reap(LONG, || unreaped(pid))?);
         assert!(gone(pid)?, "{pid} was not reaped after");
@@ -338,7 +350,7 @@ mod tests {
         #[case] timeout: Duration,
         #[case] ended: &str,
     ) -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh(script), Duration::ZERO)?;
+        let mut process = start_process("sh", sh(script), OnStop::SIGKILL)?;
         let called = Cell::new(false);
         let Err(err) = process.wait_success_before_reap(timeout, || called.set(true)) else {
             anyhow::bail!("expected the wait to fail");
@@ -352,7 +364,7 @@ mod tests {
 
     #[test]
     fn stop_kills_what_it_started() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh("sleep 30 & echo $!; wait"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh("sleep 30 & echo $!; wait"), OnStop::SIGKILL)?;
         let child: u32 = process
             .wait_for_output(Stream::Stdout, LONG, |text| {
                 text.trim().parse::<u32>().is_ok()
@@ -370,7 +382,7 @@ mod tests {
         let process = start_process(
             "sh",
             sh("sleep 0.2; echo up; exec sleep 30"),
-            Duration::ZERO,
+            OnStop::SIGKILL,
         )?;
         let started = Instant::now();
         let printed = process
@@ -385,7 +397,7 @@ mod tests {
     /// ends the wait rather than the timeout.
     #[test]
     fn a_wait_for_output_ends_when_its_stream_closes() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh("echo up >&2"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh("echo up >&2"), OnStop::SIGKILL)?;
         let started = Instant::now();
         let seen = process.wait_for_output(Stream::Stdout, LONG, |text| text.contains("up"));
         assert_eq!(seen, None);
@@ -410,7 +422,7 @@ mod tests {
             "echo early; while [ ! -e '{}' ]; do sleep 0.05; done; echo late; echo err >&2",
             gate.display()
         );
-        let mut process = start_process("sh", sh(&script), Duration::ZERO)?;
+        let mut process = start_process("sh", sh(&script), OnStop::SIGKILL)?;
         process
             .wait_for_output(Stream::Stdout, LONG, |text| text.contains("early"))
             .context("the first line never arrived")?;
@@ -431,7 +443,7 @@ mod tests {
 
     #[test]
     fn a_wait_for_output_gives_up_at_the_timeout() -> anyhow::Result<()> {
-        let process = start_process("sh", sh("exec sleep 30"), Duration::ZERO)?;
+        let process = start_process("sh", sh("exec sleep 30"), OnStop::SIGKILL)?;
         let timeout = Duration::from_millis(200);
         let started = Instant::now();
         let seen = process.wait_for_output(Stream::Stdout, timeout, |text| !text.is_empty());
@@ -442,7 +454,7 @@ mod tests {
 
     #[test]
     fn dropping_it_stops_it() -> anyhow::Result<()> {
-        let process = start_process("sh", sh("exec sleep 30"), Duration::ZERO)?;
+        let process = start_process("sh", sh("exec sleep 30"), OnStop::SIGKILL)?;
         let pid = process.pid();
         drop(process);
         assert!(gone(pid)?, "{pid} outlived the drop");
@@ -453,7 +465,7 @@ mod tests {
     /// gave up on it.
     #[test]
     fn an_exit_takes_what_it_left_running_with_it() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh("sleep 30 & echo $!; exit 0"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh("sleep 30 & echo $!; exit 0"), OnStop::SIGKILL)?;
         let started = Instant::now();
         let status = process.wait(LONG)?.context("still running")?;
         assert!(status.success(), "{status}");
@@ -473,7 +485,7 @@ mod tests {
 
     #[test]
     fn a_chatty_process_keeps_its_newest_whole_lines() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh("seq 1 300000"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh("seq 1 300000"), OnStop::SIGKILL)?;
         process.wait(LONG)?.context("still running")?;
         let stdout = process.output().runtime_stdout.unwrap_or_default();
         assert!(stdout.len() <= OUTPUT_CAP, "kept {} bytes", stdout.len());
@@ -487,7 +499,7 @@ mod tests {
 
     #[test]
     fn a_carriage_return_before_the_newline_is_dropped() -> anyhow::Result<()> {
-        let mut process = start_process("sh", sh(r"printf 'a\r\nb\n'"), Duration::ZERO)?;
+        let mut process = start_process("sh", sh(r"printf 'a\r\nb\n'"), OnStop::SIGKILL)?;
         process.wait(LONG)?.context("still running")?;
         assert_eq!(process.output().runtime_stdout.as_deref(), Some("a\nb\n"));
         Ok(())
@@ -500,7 +512,7 @@ mod tests {
         let mut process = start_process(
             "sh",
             sh("read line; echo \"read exited $?\""),
-            Duration::ZERO,
+            OnStop::SIGKILL,
         )?;
         process.wait(LONG)?.context("waited on stdin")?;
         assert_eq!(
@@ -515,7 +527,7 @@ mod tests {
         let Err(err) = start_process(
             "no-such-server",
             Command::new("/nonexistent/pipette-no-such-program"),
-            Duration::ZERO,
+            OnStop::SIGKILL,
         ) else {
             anyhow::bail!("expected the spawn to fail");
         };
@@ -535,7 +547,7 @@ mod tests {
             anyhow::ensure!(asked.get() == 3, "asked {} times", asked.get());
             Ok(())
         };
-        let mut service = start_process("sh", sh("exec sleep 30"), Duration::ZERO)?;
+        let mut service = start_process("sh", sh("exec sleep 30"), OnStop::SIGKILL)?;
         service.wait_ready(LONG, |_| ask().map_err(NotReadyError::yet))?;
         assert_eq!(asked.get(), 3);
         assert!(service.is_running());
@@ -548,7 +560,7 @@ mod tests {
     fn a_service_that_exits_before_it_is_ready_fails_at_once_with_its_output() -> anyhow::Result<()>
     {
         let script = "echo loading failed >&2; exit 4";
-        let mut service = start_process("mlx_lm.server", sh(script), Duration::ZERO)?;
+        let mut service = start_process("mlx_lm.server", sh(script), OnStop::SIGKILL)?;
         assert_eq!(service.command(), ["sh", "-c", script]);
         let started = Instant::now();
         let Err(err @ ReadyError::Exited { .. }) =
@@ -570,7 +582,7 @@ mod tests {
     #[test]
     fn a_check_that_fails_on_its_output_stops_it_at_once() -> anyhow::Result<()> {
         let script = "echo 'OSError: [Errno 48] Address already in use' >&2; exec sleep 30";
-        let mut service = start_process("mlx_lm.server", sh(script), Duration::ZERO)?;
+        let mut service = start_process("mlx_lm.server", sh(script), OnStop::SIGKILL)?;
         let started = Instant::now();
         let Err(err @ ReadyError::Failed { .. }) =
             service.wait_ready(Duration::from_secs(60), |output| {
@@ -601,7 +613,7 @@ mod tests {
         let mut service = start_process(
             "sh",
             sh("echo still loading >&2; exec sleep 30"),
-            Duration::ZERO,
+            OnStop::SIGKILL,
         )?;
         let timeout = Duration::from_millis(300);
         let started = Instant::now();
@@ -632,7 +644,7 @@ mod tests {
             "trap 'echo terminated; exit 0' TERM; touch '{}'; while :; do sleep 0.05; done",
             armed.display()
         );
-        let mut service = start_process("sh", sh(&script), LONG)?;
+        let mut service = start_process("sh", sh(&script), OnStop::Sigterm { cleanup: LONG })?;
         service.wait_ready(LONG, |_| touched(&armed))?;
         let started = Instant::now();
         service.stop();
@@ -653,7 +665,7 @@ mod tests {
             armed.display()
         );
         let grace = Duration::from_millis(300);
-        let mut service = start_process("sh", sh(&script), grace)?;
+        let mut service = start_process("sh", sh(&script), OnStop::Sigterm { cleanup: grace })?;
         service.wait_ready(LONG, |_| touched(&armed))?;
         let started = Instant::now();
         service.stop();
@@ -672,7 +684,7 @@ mod tests {
         #[case] state: &str,
     ) -> anyhow::Result<()> {
         let script = format!("echo loading >&2; {then}");
-        let mut server = start_process("llama-server", sh(&script), Duration::ZERO)?;
+        let mut server = start_process("llama-server", sh(&script), OnStop::SIGKILL)?;
         server
             .wait_for_output(Stream::Stderr, LONG, |text| text.contains("loading"))
             .context("the line never arrived")?;
@@ -696,7 +708,7 @@ mod tests {
 
     #[test]
     fn one_that_died_is_started_again() -> anyhow::Result<()> {
-        let start = || start_process("sh", sh("exec sleep 30"), Duration::ZERO);
+        let start = || start_process("sh", sh("exec sleep 30"), OnStop::SIGKILL);
         let mut process = start()?;
         let first = process.pid();
         let pid = libc::pid_t::try_from(first)?;

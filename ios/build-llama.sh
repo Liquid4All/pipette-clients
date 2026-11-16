@@ -203,7 +203,11 @@ MTMD_INCLUDE="$BUILD_SRC/tools/mtmd"
 # ---------------------------------------------------------------------------
 # llama.cpp's own CMake against the build copy (not the repo-root Android CMake).
 # ---------------------------------------------------------------------------
-SCCACHE_ARGS=()
+# Clear cached launchers too, so an uncached retry cannot reuse sccache from a
+# previous CMake configuration. GGML_CCACHE=OFF: with no launcher set, ggml
+# picks sccache from PATH itself.
+UNCACHED_ARGS=(-DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER= -DGGML_CCACHE=OFF)
+SCCACHE_ARGS=("${UNCACHED_ARGS[@]}")
 if [[ "${PIPETTE_NO_SCCACHE:-}" != "1" ]] && command -v sccache >/dev/null 2>&1; then
     SCCACHE="$(command -v sccache)"
     SCCACHE_ARGS=(-DCMAKE_C_COMPILER_LAUNCHER="$SCCACHE" -DCMAKE_CXX_COMPILER_LAUNCHER="$SCCACHE")
@@ -218,29 +222,32 @@ if [[ -f "$BUILD_DIR/CMakeCache.txt" ]] && \
 fi
 
 echo "==> Configuring llama.cpp ($MODE / $SDK / metal=$USE_METAL, commit=$GGML_COMMIT)"
-cmake -G Ninja -S "$BUILD_SRC" -B "$BUILD_DIR" \
-    -DCMAKE_SYSTEM_NAME=iOS \
-    -DCMAKE_OSX_SYSROOT="$SDK" \
-    -DCMAKE_OSX_ARCHITECTURES=arm64 \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DGGML_NATIVE=OFF \
-    -DGGML_OPENMP=OFF \
-    -DGGML_ACCELERATE=ON \
-    -DLLAMA_BUILD_COMMON=OFF \
-    -DLLAMA_BUILD_TOOLS=OFF \
-    -DLLAMA_BUILD_SERVER=OFF \
-    -DLLAMA_BUILD_TESTS=OFF \
-    -DLLAMA_BUILD_EXAMPLES=OFF \
-    -DLLAMA_BUILD_MTMD=ON \
-    -DMTMD_VIDEO=OFF \
-    -DLLAMA_BUILD_COMMON=ON \
-    -DLLAMA_CURL=OFF \
-    -DLLAMA_OPENSSL=OFF \
-    -DLLAMA_SUBPROCESS=OFF \
-    "${METAL_ARGS[@]}" \
-    ${SCCACHE_ARGS[@]+"${SCCACHE_ARGS[@]}"}  # +"${..}" guard: expanding an empty array under `set -u` errors on bash 3.2 (macOS/Xcode Cloud)
+configure_llama() {
+    cmake -G Ninja -S "$BUILD_SRC" -B "$BUILD_DIR" \
+        -DCMAKE_SYSTEM_NAME=iOS \
+        -DCMAKE_OSX_SYSROOT="$SDK" \
+        -DCMAKE_OSX_ARCHITECTURES=arm64 \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DGGML_NATIVE=OFF \
+        -DGGML_OPENMP=OFF \
+        -DGGML_ACCELERATE=ON \
+        -DLLAMA_BUILD_COMMON=OFF \
+        -DLLAMA_BUILD_TOOLS=OFF \
+        -DLLAMA_BUILD_SERVER=OFF \
+        -DLLAMA_BUILD_TESTS=OFF \
+        -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_MTMD=ON \
+        -DMTMD_VIDEO=OFF \
+        -DLLAMA_BUILD_COMMON=ON \
+        -DLLAMA_CURL=OFF \
+        -DLLAMA_OPENSSL=OFF \
+        -DLLAMA_SUBPROCESS=OFF \
+        "${METAL_ARGS[@]}" \
+        "$@"
+}
+configure_llama "${SCCACHE_ARGS[@]}"
 
 # Named explicitly, though llama + ggml would bring the rest, so a missing
 # target fails loudly.
@@ -258,7 +265,13 @@ cmake -G Ninja -S "$BUILD_SRC" -B "$BUILD_DIR" \
 BUILD_TARGETS=(llama ggml ggml-base ggml-cpu mtmd llama-common)
 [[ "$USE_METAL" == "1" ]] && BUILD_TARGETS+=(ggml-metal)
 echo "==> Building: ${BUILD_TARGETS[*]}"
-cmake --build "$BUILD_DIR" --target "${BUILD_TARGETS[@]}"
+if ! cmake --build "$BUILD_DIR" --target "${BUILD_TARGETS[@]}" 2>&1 | tee "$BUILD_DIR/build.log"; then
+    # sccache 0.17 fails a compile outright when the server it starts mid-build cannot read the cache.
+    grep -qF 'sccache: error:' "$BUILD_DIR/build.log" || exit 1
+    echo "warning: sccache failed during the build; rebuilding without it" >&2
+    configure_llama "${UNCACHED_ARGS[@]}"
+    cmake --build "$BUILD_DIR" --target "${BUILD_TARGETS[@]}"
+fi
 
 
 # ---------------------------------------------------------------------------

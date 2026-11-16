@@ -2,9 +2,8 @@
 #![cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 mod common;
 
@@ -21,7 +20,7 @@ fn the_next_start_kills_what_a_killed_run_left() -> anyhow::Result<()> {
     anyhow::ensure!(left > 1, "not a child's pid: {left}");
 
     // The reap runs before the spawn, so it has run even if the spawn failed.
-    let next = start_process("true", Command::new("true"), Duration::ZERO);
+    let next = start_process("true", Command::new("true"), OnStop::SIGKILL);
     if !common::gone(left) {
         // SAFETY: `kill` takes no pointers; `left` leads the group the run made,
         // as it leads its session.

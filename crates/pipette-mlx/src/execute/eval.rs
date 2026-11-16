@@ -26,7 +26,7 @@ use pipette_plan_types::{
     BenchmarkResultData, EvalBenchmark, MinP, MlxMacosPipetteExtraRuntimeConfiguration,
     RunResponse, TopK, TopP,
 };
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::models::ResolvedMlxModel;
 use crate::runtimes::ResolvedMlxPython;
@@ -80,7 +80,7 @@ fn start_server(
     let mut mlx_server = start_process(
         server::TEXT_SERVER_MODULE,
         server::text_command(venv_python, model_dir, port, client_config)?,
-        server::STOP_GRACE,
+        OnStop::SIGKILL,
     )?;
     mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
     Ok((mlx_server, url))
@@ -560,7 +560,7 @@ data: [DONE]
         Ok(start_process(
             server::TEXT_SERVER_MODULE,
             command,
-            server::STOP_GRACE,
+            OnStop::SIGKILL,
         )?)
     }
 

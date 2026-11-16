@@ -1,7 +1,6 @@
 use std::{
     num::NonZeroUsize,
     sync::{Mutex, PoisonError},
-    time::Duration,
 };
 
 use anyhow::Context;
@@ -25,7 +24,7 @@ use pipette_plan_types::{
     KnownAsrPromptProfile, LlamacppCliStockToolsExtraRuntimeConfiguration, MessageContent,
     RunResponse, RuntimeFlags,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 use pipette_vl_spec_decode_corpus::asr_eval as asr_corpus;
 
 use crate::eval_pool::{
@@ -312,7 +311,7 @@ pub fn run(
         let url = server::url(port);
         let ready = server::health(&url, request_timeout)?;
         let command = launch.build(port)?;
-        let mut llama_server = start_process("llama-server", command, Duration::ZERO)?;
+        let mut llama_server = start_process("llama-server", command, OnStop::SIGTERM)?;
         llama_server.wait_ready(request_timeout, ready)?;
         Ok((llama_server, url))
     };

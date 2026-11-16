@@ -87,6 +87,14 @@ first_line_timeout_secs = 60      # no app line by then: relaunch once, then giv
 # run with a PATH that omits ~/.local/bin.
 # pymobiledevice3       = "/opt/pymobiledevice3/bin/pymobiledevice3"
 
+# The CLI's --cdn-proxy value (HOST:PORT, plain HTTP), as an unqualified name or
+# a LAN address: App Transport Security refuses plain HTTP to any other. A run
+# passes it to the app as cdn-proxy= only on a build that reads it
+# (2026.11.11-1a87cd9, or one dated later); any other run, and every run in pool
+# mode, downloads directly, as it does unset.
+# [cdn_proxy]
+# endpoint = "cdn-cache:8090"
+
 [log]
 level  = "info"               # error|warn|info|debug|trace
 format = "text"               # text|json

@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
-use pipette_memprobe::{SupportedWatch, Watch, WatchError};
+use pipette_memprobe::{OsBoundWatchError, SupportedWatch, Watch};
 use pipette_plan_types::{LlamaCppFlavor, PositiveSeconds};
 
 /// Picks the OpenVINO backend's device; upstream runs on the CPU when it is
@@ -35,7 +35,7 @@ pub enum NoPeakWatchError {
     #[error("flavor {flavor}'s devices cannot be read here")]
     Unsupported {
         flavor: LlamaCppFlavor,
-        source: WatchError,
+        source: OsBoundWatchError,
     },
 }
 
@@ -112,7 +112,7 @@ pub fn peak(
         .supported()
         .map_err(|source| NoPeakWatchError::Unsupported {
             flavor: flavor.clone(),
-            source,
+            source: source.into(),
         })
 }
 
@@ -141,7 +141,7 @@ mod tests {
             .supported()
             .map_err(|source| NoPeakWatchError::Unsupported {
                 flavor: flavor.clone(),
-                source,
+                source: source.into(),
             })
     }
 

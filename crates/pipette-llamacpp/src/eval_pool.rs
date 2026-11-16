@@ -18,7 +18,7 @@ use pipette_http::StreamClient;
 use pipette_ops::measurement::{self, EvalMeasurementReading, EvalMeasurementSample};
 use pipette_ops::readiness::ReadinessGate;
 use pipette_ops::sse::{self, ChatReply};
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::server::{self, LoggingMarker, ServerCommandBuilder};
 
@@ -52,7 +52,7 @@ pub(crate) fn spawn_server(
     let url = server::url(port);
     let ready = server::health(&url, request_timeout)?;
     let command = launch.build(port)?;
-    let mut llama_server = start_process("llama-server", command, Duration::ZERO)?;
+    let mut llama_server = start_process("llama-server", command, OnStop::SIGTERM)?;
     llama_server.wait_ready(request_timeout, ready)?;
     Ok((llama_server, url))
 }

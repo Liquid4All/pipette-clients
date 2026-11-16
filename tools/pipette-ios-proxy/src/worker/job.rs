@@ -254,6 +254,8 @@ pub(super) fn run_and_submit(
     );
 
     let pin = pin_gpu(phone)?;
+    let proxied = cdn_proxied(phone, plan, version);
+    let plan = proxied.as_ref().unwrap_or(plan);
     let started = Instant::now();
     let heartbeat = &lease.heartbeat;
     let outcome = app::run_benchmark(
@@ -327,6 +329,28 @@ pub(super) fn run_and_submit(
     })
 }
 
+/// `plan` with the `[cdn_proxy]` endpoint when the build it launches, `version` (not
+/// known in pool mode), reads `cdn-proxy=`. Logged either way while the table is set.
+fn cdn_proxied(
+    phone: &Phone,
+    plan: &LaunchPlan,
+    version: Option<&BuildVersion>,
+) -> Option<LaunchPlan> {
+    let endpoint = phone.config.cdn_proxy.as_deref()?;
+    let version = version.map(BuildVersion::as_str);
+    let proxied = plan.with_cdn_proxy(endpoint, version);
+    if proxied.is_some() {
+        tracing::info!(endpoint = %endpoint, "passing the CDN proxy to the app");
+    } else {
+        tracing::info!(
+            version = %version.unwrap_or("unknown"),
+            "not passing the CDN proxy: this build is not known to read cdn-proxy=, so the \
+             app downloads directly"
+        );
+    }
+    proxied
+}
+
 /// The GPU performance state, held for the run when `[devicectl] pymobiledevice3`
 /// is set. A pin that cannot be set fails the job, retriable: an unpinned run
 /// would publish rows that read like pinned ones.
@@ -384,17 +408,16 @@ fn submit_results(
         // Success with nothing to show for it: a build that reports its cell's
         // failure as success still logs it. Not terminal otherwise: a rerun may work.
         // The whole stderr, not the output's tail, which can lose the dispatch line.
-        let failure = match app::engine_failure(&run.stderr) {
-            Some(entry) => engine_failed(&entry, elapsed),
-            None => JobFailure::new(
+        let failure = cell_failed(&run.stderr, elapsed).unwrap_or_else(|| {
+            JobFailure::new(
                 FailureCause::RunFailed,
                 format!(
                     "the run reported success after {}s but left no new result payload on the \
                      phone",
                     elapsed.as_secs()
                 ),
-            ),
-        };
+            )
+        });
         return Err(failure.with_output(output.clone()).into());
     }
     if collected.len() > 1 {
@@ -561,9 +584,10 @@ impl<T> OrFail<T> for anyhow::Result<T> {
 
 /// Turn a finished-but-unsuccessful run into a classified failure. The deadline
 /// outranks everything, terminal once the engine had half the window, then a kill by
-/// iOS (terminal), then the sentinel, then the engine's failure (terminal); the
-/// exit code is consulted only when no sentinel appeared. In version mode the
-/// proxy chose the build, so a refusal another build may not make is retriable.
+/// iOS (terminal), then the sentinel, then the app's account of the cell (terminal,
+/// [`cell_failed`]); the exit code is consulted only when no sentinel appeared. In
+/// version mode the proxy chose the build, so a refusal another build may not make
+/// is retriable.
 fn classify_run(
     run: &ConsoleRun,
     elapsed: Duration,
@@ -625,8 +649,8 @@ fn classify_run(
             format!("the app refused the invocation as malformed: {detail}"),
         );
     }
-    if let Some(entry) = app::engine_failure(&run.stderr) {
-        return engine_failed(&entry, elapsed);
+    if let Some(failure) = cell_failed(&run.stderr, elapsed) {
+        return failure;
     }
     JobFailure::new(
         FailureCause::RunFailed,
@@ -641,6 +665,24 @@ fn classify_run(
                 .unwrap_or_else(|| "signal".to_string()),
         ),
     )
+}
+
+/// How the app's `stderr` says the cell ended, if it does: its engine failed, it
+/// stopped an attempt, or its readiness wait ran out.
+fn cell_failed(stderr: &str, elapsed: Duration) -> Option<JobFailure> {
+    if let Some(entry) = app::engine_failure(stderr) {
+        return Some(engine_failed(&entry, elapsed));
+    }
+    app::readiness_timeout(stderr).map(|line| {
+        JobFailure::new(
+            FailureCause::ReadinessTimedOut,
+            format!(
+                "the app failed the cell after {}s, its readiness wait timed out with the \
+                 phone too hot or busy to measure: {line}",
+                elapsed.as_secs()
+            ),
+        )
+    })
 }
 
 /// The app's engine failed on the cell, as its failed-cell `entry` says, or the
@@ -1515,6 +1557,15 @@ mod tests {
                                      prism-ml/Bonsai-27B-gguf failed: rep 2 ran 300.4s, past \
                                      attempt_timeout_seconds (300s), and was stopped\n";
 
+    /// A readiness wait that ran out, its last poll as the app's `ReadinessCallbacksTests`
+    /// words it, then the failed cell (`RuntimeError.readiness`).
+    const READINESS_TIMED_OUT: &str = "[HEADLESS] info jobRun readiness: ios \
+                                       thermal=state:serious die:45C(hot) cpu=busy:1.2cores(busy) \
+                                       → timed out after 300s\n[HEADLESS] error jobRun \
+                                       decode_throughput_4096_100 / prism-ml/Bonsai-27B-gguf \
+                                       failed: Device not ready: thermal=state:serious \
+                                       die:45C(hot) cpu=busy:1.2cores(busy) after 300s.\n";
+
     /// A cell whose download failed: the same line, from before the engine.
     const DOWNLOAD_FAILED: &str = "[HEADLESS] error jobRun decode_throughput_4096_100 / \
                                    prism-ml/Bonsai-27B-gguf failed: The network connection \
@@ -1657,6 +1708,30 @@ mod tests {
         false,
         true,
         FailureCause::AttemptTimedOut
+    )]
+    #[case::readiness_timed_out(
+        &format!("{DISPATCHED}{READINESS_TIMED_OUT}"),
+        Some(1),
+        Some(1),
+        false,
+        false,
+        FailureCause::ReadinessTimedOut
+    )]
+    #[case::version_readiness_timed_out(
+        &format!("{DISPATCHED}{READINESS_TIMED_OUT}"),
+        Some(1),
+        Some(1),
+        false,
+        true,
+        FailureCause::ReadinessTimedOut
+    )]
+    #[case::readiness_proceeded(
+        &format!("{DISPATCHED}[HEADLESS] info jobRun readiness: ios soc=35C → proceeding\n"),
+        Some(1),
+        Some(1),
+        false,
+        true,
+        FailureCause::RunFailed
     )]
     #[case::download_failed(
         DOWNLOAD_FAILED,

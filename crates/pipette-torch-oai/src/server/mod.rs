@@ -47,7 +47,7 @@ const READY_PATH: &str = "/v1/models";
 /// between requests.
 const READY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a stop waits for the server to exit before killing it.
-const STOP_GRACE: Duration = Duration::from_secs(30);
+const TORCH_CLEANUP: Duration = Duration::from_secs(30);
 
 /// Starts the server, after removing the containers a crashed run of this
 /// workspace left behind; [`Server::wait_ready`] waits until it serves.
@@ -275,7 +275,7 @@ impl Server {
     }
 
     /// `docker stop`, or SIGTERM to its process group, then a kill of its
-    /// session once [`STOP_GRACE`] has passed.
+    /// session once [`TORCH_CLEANUP`] has passed.
     pub fn stop(&mut self) {
         match &mut self.transport {
             Transport::Docker(process) => process.stop(),

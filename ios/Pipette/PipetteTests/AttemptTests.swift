@@ -11,7 +11,7 @@ struct AttemptTests {
         let clock = AttemptClock(limit: .seconds(300), at: start)
         #expect(clock.overrun(at: start + .seconds(300)) == nil)
         #expect(clock.overrun(at: start + .seconds(301)) == Attempt.Overrun(
-            what: Attempt.loadAndWarmUp, limit: .seconds(300), elapsed: .seconds(301)))
+            what: Attempt.warmUp, limit: .seconds(300), elapsed: .seconds(301)))
     }
 
     @Test func aNewAttemptGetsTheWholeLimitAgain() throws {
@@ -131,7 +131,7 @@ struct AttemptTests {
         let clock = AttemptClock(limit: .seconds(300), at: .now - .seconds(301))
         let watchdog = AttemptWatchdog(watching: clock, abandon: nil)
         let run = #expect(throws: AttemptTimeoutError.self) { try watchdog.finish(after: nil) }
-        #expect(run?.overrun.what == Attempt.loadAndWarmUp)
+        #expect(run?.overrun.what == Attempt.warmUp)
     }
 
     @Test func aRunInsideTheLimitReportsNoOverrun() throws {

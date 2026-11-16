@@ -46,7 +46,8 @@ nonisolated enum MlxExecute {
                 benchmark, cell: cell,
                 // Opened once the model resolved: it writes the checkpoint.
                 checkpoint: try runContext.evalCompletions.open(request),
-                model: model, chunk: chunk, isCancelled: isCancelled, progress: progress)
+                model: model, chunk: chunk, observer: observer, isCancelled: isCancelled,
+                progress: progress)
         case .vlThroughput, .vlMaxMemory, .vlSpecDecode, .asrThroughput, .asrMaxMemory:
             // plan-types gives these kinds no `mlx_ios_pipette` variant.
             throw RuntimeError.unsupported(definition.benchmarkId.value)

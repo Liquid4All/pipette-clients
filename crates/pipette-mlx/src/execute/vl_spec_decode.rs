@@ -21,7 +21,7 @@ use pipette_plan_types::{
     BenchmarkFlags, MlxMacosPipetteExtraRuntimeConfiguration, Model, RunResponse, RuntimeFlags,
     SamplingTemperature, VlSpecDecodeBenchmark,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 use pipette_vl_spec_decode_corpus::{VlSpecDecodeCorpus, turn};
 
 use crate::models::{ResolvedMlxModel, ResolvedMlxSpeculativeModel};
@@ -63,9 +63,10 @@ pub(super) fn run(
         params.batch_size,
         client_config,
     )?;
-    let mut mlx_server = start_process(server::VISION_SERVER_MODULE, command, server::STOP_GRACE)?;
+    let mut mlx_server = start_process(server::VISION_SERVER_MODULE, command, OnStop::SIGKILL)?;
     let sampler = Sampler::start(mlx_server.pid(), SupportedWatch::OBSERVE)?;
-    mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| mlx_server.wait_ready(server::READY_TIMEOUT, ready))?;
     let client = HttpClient::loopback("pipette", params.http_timeout)?
         .client()
         .clone();
@@ -199,7 +200,7 @@ mod tests {
                 let mut mlx_server = start_process(
                     server::VISION_SERVER_MODULE,
                     server::vision_command(&python, &target, port, draft, one, None)?,
-                    server::STOP_GRACE,
+                    OnStop::SIGKILL,
                 )?;
                 mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
                 let record = envelope

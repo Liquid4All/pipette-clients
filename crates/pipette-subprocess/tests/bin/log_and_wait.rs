@@ -21,7 +21,8 @@ fn main() -> Result<(), pipette_subprocess::StartError> {
     }
     let mut sleep = Command::new("sleep");
     sleep.arg("300");
-    let process = pipette_subprocess::start_process("sleep", sleep, Duration::ZERO)?;
+    let process =
+        pipette_subprocess::start_process("sleep", sleep, pipette_subprocess::OnStop::SIGKILL)?;
     println!("{}", process.pid());
     for _ in 0..6000 {
         if mode != "quiet" {

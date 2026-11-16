@@ -41,7 +41,8 @@ enum HfTokenSource: String {
 /// Logs which it did: an anonymous fetch of a public repo looks like an authenticated one
 /// until HF starts answering 429. Only the tier's name is logged, never the token.
 func attachHfAuth(_ request: inout URLRequest, claimToken: AuthToken? = nil, model: Model? = nil) {
-    guard let host = request.url?.host, host.hasSuffix("huggingface.co") else { return }
+    guard let host = request.url?.host, host == "huggingface.co" || host.hasSuffix(".huggingface.co")
+    else { return }
     let path = request.url?.path ?? "?"
     guard let credential = resolveHfToken(claimToken: claimToken, model: model) else {
         AppLog.storage.info("hf auth: no token available — requesting \(host)\(path) anonymously")

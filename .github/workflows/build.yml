@@ -178,6 +178,9 @@ jobs:
             runner: macos-26
           - os: windows
             runner: windows-2025
+    env:
+      # Test binaries link faster with less debug info; `test` inherits `dev`.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       # No submodules: pipette-android's build script skips vendor/ off Android.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -230,6 +233,9 @@ jobs:
         # Load-bearing: pwsh does not abort on a failing native command, so a red
         # nextest went green behind `--doc`. bash gets `-e -o pipefail`.
         shell: bash
+        env:
+          # The slowest tests wait on timeouts, not CPU, so run more than one per vCPU.
+          NEXTEST_TEST_THREADS: 8
         # --no-fail-fast: one red run reports every failure. nextest skips doctests,
         # hence the `--doc` pass.
         run: |
@@ -267,6 +273,9 @@ jobs:
 
       - name: Coverage
         shell: bash
+        env:
+          # As in rust-check: the slowest tests wait, so 2 vCPUs run 8 at once.
+          NEXTEST_TEST_THREADS: 8
         run: |
           cargo llvm-cov nextest --workspace --no-fail-fast --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
@@ -378,6 +387,32 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
         with:
           version: ${{ env.SCCACHE_VERSION }}
+          # Report stats ourselves so an unavailable server cannot fail the post step.
+          disable_annotations: 'true'
+
+      - name: Start sccache (retry once, then compile uncached)
+        id: sccache
+        env:
+          # The daemon must start with the same backend as the build below.
+          SCCACHE_GHA_ENABLED: "true"
+        run: |
+          for attempt in 1 2; do
+            # Connect to a server that started late, or start one if absent.
+            if sccache --show-stats; then
+              echo "enabled=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$attempt" == 1 ]]; then
+              # sccache exposes the startup timeout through its config file.
+              export SCCACHE_CONF="$RUNNER_TEMP/sccache-retry.toml"
+              echo 'server_startup_timeout_ms = 30000' > "$SCCACHE_CONF"
+              echo "::warning::sccache startup failed; retrying in 5 seconds with a 30-second startup timeout"
+              sleep 5
+            fi
+          done
+          echo "::warning::sccache failed both startup attempts; building without compiler caching"
+          echo "PIPETTE_NO_SCCACHE=1" >> "$GITHUB_ENV"
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
 
       # Xcode's compilation cache excludes SPM dependencies, so persisting DerivedData's
       # Build tree is the only cross-run reuse. SourcePackages stays at its default path:
@@ -491,6 +526,13 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -parallel-testing-enabled NO \
             -collect-test-diagnostics never
+
+      - name: Show sccache statistics
+        if: ${{ !cancelled() && steps.sccache.outputs.enabled == 'true' }}
+        continue-on-error: true
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+        run: sccache --show-stats
 
   ios-archive:
     # One app carrying every llama.cpp pin. ci/checks/llamacpp-variants.py keeps its
@@ -985,10 +1027,23 @@ jobs:
   gpu-keepalive:
     # The runner has no GPU: the smoke test covers packaging, the service protocol and
     # the CLI, not the idle-eviction workaround itself.
-    name: gpu-keepalive
+    name: gpu-keepalive (${{ matrix.target }})
     needs: [changes, release-metadata]
     if: github.event_name != 'pull_request' || needs.changes.outputs.gpukeepalive == 'true'
-    runs-on: windows-2025
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            wix_arch: x64
+            native: true
+          - target: aarch64-pc-windows-msvc
+            # GitHub-hosted for the reason given at build-artifact's arm64 Windows leg. It
+            # cross-compiles on x64, so it can neither run the tests nor install its MSI.
+            runner: windows-2022
+            wix_arch: arm64
     env:
       # WiX v5 is MS-RL. v6 introduced the Open Source Maintenance Fee, which is a
       # licensing decision rather than a build one, so the major version is pinned.
@@ -1017,15 +1072,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
         with:
+          targets: ${{ matrix.target }}
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: tools/gpu-keepalive
-          key: gpu-keepalive-v1
+          key: gpu-keepalive-${{ matrix.target }}-v1
 
       # A standalone workspace that rust-check never sees, so its gates run here.
       - name: Lint and test
+        if: matrix.native
         working-directory: tools/gpu-keepalive
         shell: pwsh
         run: |
@@ -1045,7 +1102,7 @@ jobs:
           GPU_KEEPALIVE_VERSION: ${{ steps.version.outputs.numeric }}
           GPU_KEEPALIVE_BUILD: ${{ steps.version.outputs.build }}
         run: |
-          cargo build --release --locked
+          cargo build --release --locked --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
       - name: Install WiX
@@ -1063,27 +1120,28 @@ jobs:
           $version = '${{ steps.version.outputs.numeric }}'
           # Built twice: the second package carries the same version but its own
           # ProductCode, which is what the smoke test upgrades with.
-          foreach ($output in "dist\pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi", "$env:RUNNER_TEMP\upgrade.msi") {
+          foreach ($output in "dist\pipette-gpu-keepalive-${{ matrix.target }}.msi", "$env:RUNNER_TEMP\upgrade.msi") {
             & "$env:RUNNER_TEMP\wix\wix.exe" build tools/gpu-keepalive/package/Package.wxs `
-              -arch x64 `
+              -arch ${{ matrix.wix_arch }} `
               -ext WixToolset.Util.wixext `
               -d "Version=$version" `
-              -d "BinDir=tools/gpu-keepalive/target/release" `
+              -d "BinDir=tools/gpu-keepalive/target/${{ matrix.target }}/release" `
               -o $output
             if ($LASTEXITCODE -ne 0) { throw "wix build failed for $output" }
           }
 
       - name: Smoke test (install, toggle, upgrade, uninstall)
+        if: matrix.native
         shell: pwsh
         run: |
           ./tools/gpu-keepalive/package/smoke-test.ps1 `
-            -Msi "dist\pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi" `
+            -Msi "dist\pipette-gpu-keepalive-${{ matrix.target }}.msi" `
             -UpgradeMsi "$env:RUNNER_TEMP\upgrade.msi"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi
-          path: dist/pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi
+          name: pipette-gpu-keepalive-${{ matrix.target }}.msi
+          path: dist/pipette-gpu-keepalive-${{ matrix.target }}.msi
           # github-release publishes this path; a missing file must fail here
           # rather than become an empty release asset.
           if-no-files-found: error
@@ -1092,7 +1150,7 @@ jobs:
         if: failure()
         with:
           # Deliberately not named pipette-*: github-release downloads that prefix.
-          name: gpu-keepalive-smoke-logs
+          name: gpu-keepalive-smoke-logs-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/msi-*.log
             ${{ runner.temp }}/service-*.txt
@@ -1296,6 +1354,14 @@ jobs:
           echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
 
+      # Since Rust 1.100 rustc gets one -L per dependency under the build dir, which
+      # pushes pipette-cli's command past Windows' 32767 chars; sccache, unlike cargo,
+      # does not retry through an argument file, so a short build dir keeps it under.
+      - name: Short build dir on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: printf '%s\n' 'CARGO_BUILD_BUILD_DIR=C:\b' >> "$GITHUB_ENV"
+
       # sccache barely helps the Rust graph (~38% hit), so the target dir is cached too.
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
@@ -1306,6 +1372,8 @@ jobs:
           key: build-artifact-${{ matrix.asset_name }}-v4
           cache-bin: false
           cache-workspace-crates: true
+          # The build dir sits outside the workspace, where rust-cache does not look.
+          cache-directories: ${{ runner.os == 'Windows' && 'C:\b' || '' }}
 
       # --release shares the C++ build with the build step; no --all-targets since
       # cross tests can't run here.
@@ -1534,6 +1602,7 @@ jobs:
             dist/pipette-cli-aarch64-pc-windows-msvc.zip
             dist/pipette-cli-aarch64-linux-android.tar.gz
             dist/pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi
+            dist/pipette-gpu-keepalive-aarch64-pc-windows-msvc.msi
             dist/pipette-ios-proxy-aarch64-apple-darwin.tar.gz
             dist/*.sha256
 

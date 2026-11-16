@@ -102,7 +102,9 @@ enum ReclaimOutcome {
 }
 
 pub(crate) fn poll_claim(ctx: &Session) -> ClaimPoll {
-    match client_api::claim(&ctx.server, &ctx.http, &ctx.auth) {
+    // The proxy cannot inspect the phone's stores, so it sends no cache set.
+    // The server uses its fallback for absent cache information.
+    match client_api::claim(&ctx.server, &ctx.http, &ctx.auth, None) {
         Ok(Some(job)) => ClaimPoll::Job(Box::new(job)),
         Ok(None) => ClaimPoll::Idle,
         Err(e) if e.http_status() == Some(403) => ClaimPoll::NotApproved,

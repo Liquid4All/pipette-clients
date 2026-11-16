@@ -90,6 +90,10 @@ impl ScriptedServer {
         format!("http://{}{path}", self.addr)
     }
 
+    pub(crate) fn address(&self) -> SocketAddr {
+        self.addr
+    }
+
     /// The request heads received so far.
     pub(crate) fn requests(&self) -> Vec<String> {
         self.requests

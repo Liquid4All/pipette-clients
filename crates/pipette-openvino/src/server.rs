@@ -30,8 +30,6 @@ pub(crate) const SCRIPT_FILENAME: &str = "pipette_openvino_server.py";
 /// `MAX_PROMPT_LEN` 4096), and the device is documented to wedge.
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(3600);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The server holds nothing worth flushing, so a stop kills it at once.
-pub(crate) const STOP_GRACE: Duration = Duration::ZERO;
 
 /// A temp dir holding the script, which must outlive the server run from it.
 pub(crate) fn script() -> anyhow::Result<tempfile::TempDir> {
@@ -201,7 +199,7 @@ mod tests {
     mod start {
         use std::time::Instant;
 
-        use pipette_subprocess::start_process;
+        use pipette_subprocess::{OnStop, start_process};
 
         use super::*;
 
@@ -226,7 +224,7 @@ mod tests {
                     port,
                     None,
                 )?,
-                STOP_GRACE,
+                OnStop::SIGKILL,
             )?;
             Ok(openvino_server.wait_ready(ready_timeout, ready(&url(port))?)?)
         }

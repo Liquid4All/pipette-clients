@@ -3,7 +3,7 @@
 # Install a pinned CI tool, verifying its SHA-256 before anything is unpacked or
 # executed.
 #
-#   ci/install-tool.sh <cargo-deny|cargo-machete|gitleaks>
+#   ci/install-tool.sh <cargo-deny|gitleaks>
 #
 # Pins live here rather than at call sites so they cannot drift between
 # workflows. This file is meant to be identical in each Pipette repository, so a
@@ -21,16 +21,12 @@ case "${name}" in
     url="https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz"
     sha="9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
     ;;
-  cargo-machete)
-    url="https://github.com/bnjbvr/cargo-machete/releases/download/v0.9.2/cargo-machete-v0.9.2-x86_64-unknown-linux-musl.tar.gz"
-    sha="48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9"
-    ;;
   gitleaks)
     url="https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
     sha="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     ;;
   *)
-    echo "usage: $0 <cargo-deny|cargo-machete|gitleaks>" >&2
+    echo "usage: $0 <cargo-deny|gitleaks>" >&2
     exit 2
     ;;
 esac

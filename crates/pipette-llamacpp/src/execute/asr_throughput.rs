@@ -3,7 +3,6 @@
 //! `vl_throughput`.
 
 use std::num::NonZeroUsize;
-use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
@@ -23,7 +22,7 @@ use pipette_plan_types::{
     EngineExtraRuntimeConfiguration, LlamacppCliStockToolsExtraRuntimeConfiguration, PositiveCount,
     RunResponse, RuntimeFlags,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::asr::{self, CtxInputs, Recipe};
 use crate::models::ResolvedGgufVisionModel;
@@ -109,9 +108,9 @@ pub fn run(
     let ready = server::health(&url, timeout)?;
     let command = launch.build(port)?;
 
-    let mut llama_server = start_process("llama-server", command, Duration::ZERO)?;
+    let mut llama_server = start_process("llama-server", command, OnStop::SIGTERM)?;
     let sampler = Sampler::start(llama_server.pid(), SupportedWatch::OBSERVE)?;
-    llama_server.wait_ready(timeout, ready)?;
+    observer.outside(|| llama_server.wait_ready(timeout, ready))?;
     let source = std::cell::Cell::new(None);
     let worked = (|| {
         recipe.check_served_template(|| server::chat_template(&http, &url))?;

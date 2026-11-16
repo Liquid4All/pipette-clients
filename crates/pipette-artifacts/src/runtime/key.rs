@@ -63,6 +63,10 @@ impl RuntimeStorageKey {
                     | LlamacppCliStockToolsSource::AbsoluteDir { .. } => return Err(not_storable()),
                 }
                 segs.push(rt.flavor.to_string());
+                // Re-keyed so an entry installed without its CUDA runtime archive is not reused.
+                if !matches!(rt.cudart_asset(), Ok(None)) {
+                    segs.push("cudart".to_owned());
+                }
                 segs
             }
             Runtime::Ovms(rt) => {
@@ -525,6 +529,14 @@ mod tests {
             LlamaCppFlavor::LinuxX64Rocm,
         )?,
         "llama-cpp__ggml-org_llama.cpp__b11399__llama-b11399-bin-ubuntu-rocm-10.0-x64.tar.gz__linux-x64-rocm"
+    )]
+    #[case::llamacpp_release_win_cuda(
+        llamacpp_repo("b12292", LlamaCppFlavor::WindowsArm64Cuda13)?,
+        "llama-cpp__ggml-org_llama.cpp__b12292__windows-arm64-cuda-13__cudart"
+    )]
+    #[case::llamacpp_release_win_vulkan(
+        llamacpp_repo("b12292", LlamaCppFlavor::WindowsArm64Vulkan)?,
+        "llama-cpp__ggml-org_llama.cpp__b12292__windows-arm64-vulkan"
     )]
     #[case::llamacpp_archive(
         Runtime::LlamacppCliStockTools(LlamacppCliStockTools {

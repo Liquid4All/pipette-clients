@@ -22,7 +22,7 @@ pub(crate) const EXPIRY_MARGIN: Duration = Duration::from_secs(7 * 24 * 60 * 60)
 
 /// The flavour suffix the app appends to `PipetteBuildVersion`
 /// (`BuildFlavor.versionSuffix`).
-const INTERNAL_SUFFIX: &str = "-internal";
+pub(crate) const INTERNAL_SUFFIX: &str = "-internal";
 
 /// What a build this Mac signed for the fleet must carry.
 #[derive(Debug, Clone)]

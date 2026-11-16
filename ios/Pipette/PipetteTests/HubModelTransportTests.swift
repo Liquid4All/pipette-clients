@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Hub
 import HuggingFace
@@ -214,5 +215,147 @@ struct HubModelTransportTests {
         for (error, expected) in cases {
             #expect(Disposition(ofHub: error) == expected, "\(error)")
         }
+    }
+}
+
+/// A directory pull through `cdn-proxy=`: the listing, a `HEAD` per file and each file go to
+/// the proxy on the app's own session, naming the Hub in `Host`, and land as HubApi lays them
+/// out. `RoutedURLProtocol` stands in for the proxy.
+struct HubModelTransportProxyTests {
+    nonisolated private static let commit = String(repeating: "c", count: 40)
+    /// Long enough to break part-way, as the GGUF resume tests' payload is.
+    nonisolated private static let weights =
+        Data((0..<(256 * 1024)).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+    /// The Hub tags an LFS file with its sha256 and a git file with its blob id.
+    nonisolated private static let files: [String: (body: Data, tag: String)] = [
+        "config.json": (Data(#"{"model_type":"lfm2"}"#.utf8), String(repeating: "b", count: 40)),
+        "model.safetensors": (weights, Data(SHA256.hash(data: weights)).hexEncodedString()),
+    ]
+
+    /// The proxy answering as the Hub would: the listing at `main`, a `HEAD` per file, and
+    /// each file from the offset a `Range` asks for.
+    nonisolated private static func answer(_ request: URLRequest) -> StubResponse {
+        let path = request.url?.path ?? ""
+        if path == "/api/models/org/m/revision/main" {
+            let names = ["README.md", "config.json", "model.safetensors"]
+                .map { #"{"rfilename":"\#($0)"}"# }
+            return .reply(200, #"{"siblings":[\#(names.joined(separator: ","))]}"#)
+        }
+        guard let file = files[(path as NSString).lastPathComponent] else { return .reply(404) }
+        if request.httpMethod == "HEAD" {
+            return StubResponse(status: 200, body: Data(), headers: [
+                "X-Repo-Commit": commit, "X-Linked-Etag": "\"\(file.tag)\"",
+                "X-Linked-Size": "\(file.body.count)",
+            ])
+        }
+        let from = request.value(forHTTPHeaderField: "Range")
+            .flatMap { Int($0.dropFirst("bytes=".count).prefix { $0 != "-" }) } ?? 0
+        var headers = ["ETag": "\"\(file.tag)\"", "Accept-Ranges": "bytes",
+                       "Content-Length": "\(file.body.count - from)"]
+        if from > 0 { headers["Content-Range"] = "bytes \(from)-\(file.body.count - 1)/\(file.body.count)" }
+        return StubResponse(status: from > 0 ? 206 : 200,
+                            body: file.body.subdata(in: from..<file.body.count), headers: headers)
+    }
+
+    /// A transport whose proxy is a route of its own, answering by `answer`.
+    private func serving(
+        _ answer: @escaping RoutedURLProtocol.Handler
+    ) throws -> (HubModelTransport, StubRecorder) {
+        let (http, server, seen) = try RoutedURLProtocol.serve(answer)
+        let host = try #require(URL(string: server.value)?.host)
+        let base = FileManager.default.temporaryDirectory
+            .appending(path: "proxied-\(UUID().uuidString)")
+        let proxy = try #require(CdnProxy("\(host):8090"))
+        return (HubModelTransport(downloadBase: base, proxy: proxy, http: http), seen)
+    }
+
+    private func pull(_ transport: HubModelTransport) async throws -> TransferOutcome {
+        let ref = try HfModelRef.parse(repo: "org/m")
+        return try await transport.download(.mlx(ref.asMlx()), ref: ref,
+                                            token: try AuthToken("hf_test"),
+                                            admit: { _ in }, progress: { _ in })
+    }
+
+    private func gets(_ seen: StubRecorder, _ name: String) -> [URLRequest] {
+        seen.requests.filter { $0.httpMethod == "GET" && $0.url?.lastPathComponent == name }
+    }
+
+    /// Every request is HubApi's, sent to the proxy with the Hub in `Host` and the token, and
+    /// the files land where HubApi keeps them, so its offline snapshot takes them.
+    @Test func aPullGoesToTheProxyAndLandsAsHubApiLaysItOut() async throws {
+        let (transport, seen) = try serving { request, _ in Self.answer(request) }
+        defer { try? FileManager.default.removeItem(at: transport.downloadBase) }
+
+        let outcome = try await pull(transport)
+
+        #expect(seen.methodsAndPaths == [
+            "GET /api/models/org/m/revision/main",
+            "HEAD /org/m/resolve/main/config.json",
+            "HEAD /org/m/resolve/main/model.safetensors",
+            "GET /org/m/resolve/\(Self.commit)/config.json",
+            "GET /org/m/resolve/\(Self.commit)/model.safetensors",
+        ])
+        for request in seen.requests {
+            #expect(request.url?.port == 8090)
+            #expect(request.value(forHTTPHeaderField: "Host") == "huggingface.co")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer hf_test")
+        }
+        #expect(outcome.resolved?.commit == Self.commit)
+        let hub = HubApi(downloadBase: transport.downloadBase, cache: nil, useOfflineMode: true)
+        let root = hub.localRepoLocation(Hub.Repo(id: "org/m"))
+        #expect(outcome.directory == root)
+        #expect(try Data(contentsOf: root.appending(path: "model.safetensors")) == Self.weights)
+        let metadata = try #require(try hub.readDownloadMetadata(metadataPath: root.appending(
+            path: ".cache/huggingface/download/model.safetensors.metadata")))
+        #expect(metadata.commitHash == Self.commit)
+        #expect(metadata.etag == Self.files["model.safetensors"]?.tag)
+        // Offline, HubApi wants every file's metadata and an LFS file's sha256 to match.
+        #expect(try await hub.snapshot(from: Hub.Repo(id: "org/m")) == root)
+    }
+
+    /// A transfer that breaks part-way continues from the bytes it has, still at the proxy
+    /// and naming the Hub.
+    @Test func aBrokenFileResumesWhereItStopped() async throws {
+        let (transport, seen) = try serving { request, _ in
+            var reply = Self.answer(request)
+            if request.httpMethod == "GET", request.url?.lastPathComponent == "model.safetensors",
+               request.value(forHTTPHeaderField: "Range") == nil {
+                reply.cutAfter = 100 * 1024
+            }
+            return reply
+        }
+        defer { try? FileManager.default.removeItem(at: transport.downloadBase) }
+
+        let outcome = try await pull(transport)
+
+        let weights = gets(seen, "model.safetensors")
+        #expect(weights.map { $0.value(forHTTPHeaderField: "Range") } == [nil, "bytes=102400-"])
+        #expect(weights.allSatisfy {
+            $0.url?.port == 8090 && $0.value(forHTTPHeaderField: "Host") == "huggingface.co"
+        })
+        #expect(try Data(contentsOf: outcome.directory.appending(path: "model.safetensors"))
+            == Self.weights)
+    }
+
+    /// A refused file fails the pull on its first answer, naming the status and the URL and
+    /// nothing else. The next pull fetches only the file the first did not land.
+    @Test func aRefusedFileFailsThePullAndTheNextFetchesOnlyTheRest() async throws {
+        // The first pull's fifth request is the weights.
+        let (transport, seen) = try serving { request, index in
+            index == 4 ? .reply(404, "Entry not found") : Self.answer(request)
+        }
+        defer { try? FileManager.default.removeItem(at: transport.downloadBase) }
+
+        await #expect(throws: DownloadError.transport(
+            "Response error (Status 404): GET https://huggingface.co/org/m/resolve/\(Self.commit)/model.safetensors"
+        )) { try await pull(transport) }
+        #expect(gets(seen, "model.safetensors").count == 1)
+
+        let outcome = try await pull(transport)
+
+        #expect(gets(seen, "config.json").count == 1)
+        #expect(gets(seen, "model.safetensors").count == 2)
+        #expect(try Data(contentsOf: outcome.directory.appending(path: "model.safetensors"))
+            == Self.weights)
     }
 }

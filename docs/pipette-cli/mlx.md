@@ -104,8 +104,10 @@ Like `max_memory_usage` it takes `attempt_timeout_seconds` and no other
 benchmark flag, so `--http-timeout-seconds` is refused. Both memory cells first
 send their request to a warm-up server of their own, its reading dropped, so
 the measured server finds its Metal kernels compiled. Each server is one
-attempt from its launch (300 s by default), and its request waits up to
-3600 s. See
+attempt from the moment it answers `/health` (300 s by default), and its
+request waits up to 3600 s. `mlx_vlm.server` answers once its model is loaded;
+`mlx_lm.server` answers while its model still loads, so a `max_memory_usage`
+server's load counts against its attempt. See
 [../methodology/vl-max-memory.md](../methodology/vl-max-memory.md#mlx-macos)
 and [../methodology/peak-memory-macos.md](../methodology/peak-memory-macos.md#mlx).
 
@@ -161,9 +163,8 @@ benchmark. The run refuses to start on battery or while charging, since the two
 arms must run under the same power state. The first import of `mlx_vlm`
 in a venv takes about two minutes, because Python compiles the bytecode of a
 large package tree. This time is part of the server start, before the warm-up
-of the arm, so the cell does not measure it, though a cell with an attempt
-limit counts it against the first attempt
-([usage.md](usage.md#5c-the-attempt-limit)).
+of the arm, so the cell does not measure it, and an attempt limit does not
+count it ([usage.md](usage.md#5c-the-attempt-limit)).
 
 `--runtime-flags` is **refused** for MLX, not ignored, on every benchmark but
 `vl_spec_decode`: the `mlx_macos_pipette` runtime has no other flag cell, so

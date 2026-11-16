@@ -7,7 +7,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use pipette_plan_types::MlxMacosPipetteExtraRuntimeConfiguration;
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::server;
 
@@ -49,7 +49,7 @@ pub(crate) fn count(
     if trust_remote_code {
         command.arg("--trust-remote-code");
     }
-    let mut process = start_process("pipette_mlx_image_tokens", command, Duration::ZERO)?;
+    let mut process = start_process("pipette_mlx_image_tokens", command, OnStop::SIGKILL)?;
     process.wait_success(IMAGE_TOKENS_TIMEOUT)?;
     parse(&process.output().runtime_stdout.unwrap_or_default())
 }

@@ -17,6 +17,8 @@ nonisolated final class RoutedURLProtocol: URLProtocol {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var routes: [String: Route] = [:]
 
+    private var cut: Timer?
+
     static func serve(
         _ reply: @escaping Handler
     ) throws -> (http: HttpClient, server: ServerUrl, seen: StubRecorder) {
@@ -53,13 +55,26 @@ nonisolated final class RoutedURLProtocol: URLProtocol {
             return
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if let cutAfter = reply.cutAfter {
+            client?.urlProtocol(self, didLoad: reply.body.prefix(cutAfter))
+            // Delayed for the reason `ScriptedURLProtocol` gives.
+            let cut = Timer(timeInterval: ScriptedURLProtocol.cutDelay, repeats: false) { [weak self] _ in
+                guard let self else { return }
+                self.client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            }
+            RunLoop.current.add(cut, forMode: .common)
+            self.cut = cut
+            return
+        }
         if !reply.body.isEmpty {
             client?.urlProtocol(self, didLoad: reply.body)
         }
         client?.urlProtocolDidFinishLoading(self)
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        cut?.invalidate()
+    }
 }
 
 extension StubResponse {

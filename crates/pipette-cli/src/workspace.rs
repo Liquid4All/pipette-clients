@@ -20,7 +20,7 @@ use anyhow::Context;
 
 use pipette_artifacts::quota::StoragePolicy;
 use pipette_artifacts::{ArtifactsContext, VaultAccess};
-use pipette_http::HttpClient;
+use pipette_http::{CdnProxy, HttpClient};
 use pipette_mgmt_client::client_api;
 use pipette_ops::run_context::RunContext;
 use pipette_ops::{EvalCompletionsStore, EvalShard};
@@ -40,6 +40,7 @@ pub struct PipetteWorkspace {
     root: PathBuf,
     storage_quota: StorageQuota,
     eval_shard: Option<EvalShard>,
+    cdn_proxy: Option<CdnProxy>,
 }
 
 impl PipetteWorkspace {
@@ -61,12 +62,13 @@ impl PipetteWorkspace {
     /// the command line. Unregistered, a `vault_*` source is refused at fetch
     /// time, so no registration is required here.
     pub fn artifacts(&self, http: &HttpClient, programs: &ExternalPrograms) -> ArtifactsContext {
-        let ctx =
-            ArtifactsContext::new(http.clone(), programs.clone()).with_storage(StoragePolicy::new(
+        let ctx = ArtifactsContext::new(http.clone(), programs.clone())
+            .with_storage(StoragePolicy::new(
                 self.storage_quota.bytes,
                 self.models().models_dir().to_path_buf(),
                 self.runtimes().runtimes_dir().to_path_buf(),
-            ));
+            ))
+            .with_cdn_proxy(self.cdn_proxy.clone());
         match self.vault_access() {
             Some(access) => ctx.with_vault(access),
             None => ctx,
@@ -165,6 +167,7 @@ impl PipetteWorkspace {
             root,
             storage_quota,
             eval_shard: None,
+            cdn_proxy: None,
         })
     }
 
@@ -173,6 +176,13 @@ impl PipetteWorkspace {
     #[must_use]
     pub fn with_eval_shard(self, eval_shard: Option<EvalShard>) -> Self {
         Self { eval_shard, ..self }
+    }
+
+    /// The proxy `--cdn-proxy` names, which every artifacts context this
+    /// workspace mints fetches models through.
+    #[must_use]
+    pub fn with_cdn_proxy(self, cdn_proxy: Option<CdnProxy>) -> Self {
+        Self { cdn_proxy, ..self }
     }
 
     pub fn eval_shard(&self) -> Option<EvalShard> {

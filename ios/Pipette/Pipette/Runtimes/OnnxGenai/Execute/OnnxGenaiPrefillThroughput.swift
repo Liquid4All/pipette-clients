@@ -12,7 +12,7 @@ nonisolated extension OnnxGenaiExecute {
         observer: MeasurementObserver
     ) async throws -> BenchmarkResultData {
         try readinessGate()
-        return try await OnnxGenaiRuntime.withFreshModel(path: model.dir) { loaded in
+        return try await OnnxGenaiRuntime.withFreshModel(path: model.dir, observer: observer) { loaded in
             let ids = try await OnnxGenaiRuntime.promptIds(
                 targetTokens: Int(benchmark.parameterPrefillTokens.value), tokenizer: loaded.tokenizer)
             return try await BenchmarkMeasurement.prefill(

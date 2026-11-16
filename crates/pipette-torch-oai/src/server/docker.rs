@@ -112,7 +112,7 @@ pub fn launch(
         transport: Transport::Docker(pipette_subprocess::start_docker_process(
             docker,
             run,
-            super::STOP_GRACE,
+            super::TORCH_CLEANUP,
         )?),
     })
 }

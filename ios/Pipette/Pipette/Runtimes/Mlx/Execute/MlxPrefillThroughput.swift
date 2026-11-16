@@ -17,7 +17,7 @@ nonisolated extension MlxExecute {
 
         // Before the load, which would warm the device the gate waited to cool.
         try readinessGate()
-        return try await MlxRuntime.withFreshModel(path: model.dir) { lm in
+        return try await MlxRuntime.withFreshModel(path: model.dir, observer: observer) { lm in
             let ids = MLXArray(prompt).reshaped(1, -1)
             return try await measuringCell(benchmark.benchmarkId, chunk: chunk) {
                 try await BenchmarkMeasurement.prefill(

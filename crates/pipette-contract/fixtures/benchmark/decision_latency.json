@@ -1,0 +1,8 @@
+{
+  "benchmark_id": "decision_latency_text64_q3_bs4",
+  "benchmark_type": "decision_latency",
+  "parameter_batch_size": 4,
+  "parameter_num_images": 0,
+  "parameter_questions": 3,
+  "parameter_text_tokens": 64
+}

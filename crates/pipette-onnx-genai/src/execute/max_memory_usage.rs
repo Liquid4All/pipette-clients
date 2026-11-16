@@ -27,7 +27,7 @@ use pipette_plan_types::{
     MaxMemoryUsageBenchmark, MemoryObservation, OnnxExecutionProvider, RunResponse,
     UvOnnxGenaiExtraRuntimeConfiguration,
 };
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::completions;
 use crate::models::ResolvedOnnxGenaiModel;
@@ -59,7 +59,16 @@ pub(super) fn run(
         observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
-        |served| Ok(serve(served, command, watch, &http, prefill_tokens)?),
+        |served| {
+            Ok(serve(
+                served,
+                command,
+                watch,
+                &http,
+                observer,
+                prefill_tokens,
+            )?)
+        },
     );
     let result_data = result.map_err(|err| match &mut served {
         Some((onnx_server, _)) => err.context(onnx_server.stop_with_tail()),
@@ -75,15 +84,16 @@ pub(super) fn run(
         .build())
 }
 
-/// One server from its launch through one request at the cell's shape, left
-/// in `served` for the entry to check its reading and the cell to record or
-/// quote it. One an earlier attempt left there stops first; the observation
-/// covers both.
+/// One server from its launch, its load off the attempt clock, through one
+/// request at the cell's shape, left in `served` for the entry to check its
+/// reading and the cell to record or quote it. One an earlier attempt left
+/// there stops first; the observation covers both.
 fn serve(
     served: &mut Option<(Process, MemoryObservation)>,
     command: impl Fn(u16) -> anyhow::Result<Command>,
     watch: SupportedWatch,
     http: &HttpClient,
+    observer: MeasurementObserver<'_>,
     prefill_tokens: u32,
 ) -> anyhow::Result<MaxMemoryMeasurementReading> {
     let earlier = match served.take() {
@@ -95,11 +105,11 @@ fn serve(
     };
     let port = pipette_subprocess::pick_server_port()?;
     let url = server::url(port);
-    let mut onnx_server =
-        start_process(server::SCRIPT_FILENAME, command(port)?, server::STOP_GRACE)?;
+    let mut onnx_server = start_process(server::SCRIPT_FILENAME, command(port)?, OnStop::SIGKILL)?;
     // From the launch, so the load counts.
     let sampler = Sampler::start(onnx_server.pid(), watch)?;
-    onnx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| onnx_server.wait_ready(server::READY_TIMEOUT, ready))?;
     let measured = measure(http, &url, prefill_tokens);
     // While the server lives: Linux reads its `/proc` entry.
     let (observed, peak) = sampler.stop();

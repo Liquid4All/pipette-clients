@@ -602,7 +602,8 @@ fn check_image_budget(
 mod tests {
     use std::io::{BufRead, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex, PoisonError};
 
     use rstest::rstest;
 
@@ -1069,9 +1070,17 @@ mod tests {
     /// again alone, and failed when it breaks again.
     #[test]
     fn a_stream_cut_short_is_not_an_answer() -> anyhow::Result<()> {
-        let server = FakeVllm::spawn(|path, body| match path {
+        // The first two sends wait for each other: a loss stops further
+        // claims, so a sample not yet claimed would go out alone and fail once.
+        let (first_sends, together) = (AtomicUsize::new(0), Barrier::new(2));
+        let server = FakeVllm::spawn(move |path, body| match path {
             TOKENIZE_ENDPOINT => tokens(body, false),
-            _ => Reply::Stream(vec![json!({"choices": [{"delta": {"content": "B"}}]})]),
+            _ => {
+                if first_sends.fetch_add(1, Ordering::SeqCst) < 2 {
+                    together.wait();
+                }
+                Reply::Stream(vec![json!({"choices": [{"delta": {"content": "B"}}]})])
+            }
         })?;
         let (outcome, rows) =
             refused_rows(&server, &benchmark(&["a", "b"])?, &flags(Some(2), None)?)?;

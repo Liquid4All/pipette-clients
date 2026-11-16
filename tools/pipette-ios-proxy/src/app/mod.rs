@@ -104,6 +104,18 @@ const CORPUS_READY: &str = "[HEADLESS] info corpus corpus for ";
 /// while it holds the rep, then `→ proceeding` or `→ timed out after 300s`.
 const READINESS: &str = "[HEADLESS] info jobRun readiness: ";
 
+/// A wait that ran out. The app's gate throws on it, so the cell fails.
+const READINESS_TIMED_OUT: &str = " → timed out";
+
+/// The app's line for a readiness wait that ran out: the phone stayed too hot or
+/// busy to measure the cell.
+pub(crate) fn readiness_timeout(stderr: &str) -> Option<&str> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|line| line.starts_with(READINESS) && line.contains(READINESS_TIMED_OUT))
+}
+
 /// The app's last failed-cell line in `stderr`, joined with the lines below it
 /// (llama.cpp's log tail, which says why a load failed, and is also checked for
 /// a failure on the file), when the engine failed on the cell: any phone running
@@ -162,7 +174,7 @@ impl EngineClock {
         } else if line.starts_with(CORPUS_FETCH) || (readiness && line.contains(" → waiting ")) {
             self.held_from.get_or_insert(at);
         } else if line.starts_with(CORPUS_READY)
-            || (readiness && (line.contains(" → proceeding") || line.contains(" → timed out")))
+            || (readiness && (line.contains(" → proceeding") || line.contains(READINESS_TIMED_OUT)))
         {
             self.held += self
                 .held_from

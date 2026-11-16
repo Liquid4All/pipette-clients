@@ -99,6 +99,13 @@ nonisolated struct MeasurementObserver: Sendable {
         defer { onResume() }
         return try step()
     }
+
+    /// `outside` for a step that awaits.
+    func outside<T>(_ step: () async throws -> T) async rethrows -> T {
+        onHold()
+        defer { onResume() }
+        return try await step()
+    }
 }
 
 /// Where a timing entry's warm-up happens.

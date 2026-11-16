@@ -4,12 +4,6 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-# cargo-machete scans only this crate's directory, so it cannot see
-# android/native/benchmarks.rs (included via `#[path]` in src/lib.rs), the sole
-# user of anyhow, serde and pipette-ops. `tracing` is here only for its `log` feature.
-[package.metadata.cargo-machete]
-ignored = ["anyhow", "serde", "pipette-ops", "tracing"]
-
 [lints]
 workspace = true
 

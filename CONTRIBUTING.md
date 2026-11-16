@@ -83,7 +83,7 @@ versions where they are pinned rather than from a copy here:
   Python and SwiftLint are pinned in each `build.yml` job that uses them (search
   `build.yml` for the tool's name before you bump one). Python's version is also
   `target-version` in `ruff.toml`.
-- cargo-deny, cargo-machete and gitleaks are pinned in `ci/install-tool.sh`,
+- cargo-deny and gitleaks are pinned in `ci/install-tool.sh`,
   each as a release tarball with a SHA-256. Dependabot cannot see these pins;
   [ci/README.md](ci/README.md#whats-here) says how to bump them.
 
@@ -132,6 +132,13 @@ installs it in the `rust-check` job). `pipette-mlx` is `cfg(target_os = "macos")
 and resolves to an empty crate elsewhere, so its lints and tests only mean
 anything on a Mac.
 
+An unused dependency fails the build: `[workspace.lints.cargo]` in the root
+`Cargo.toml` denies it per target, on Rust 1.100 and newer. A dependency used on
+one OS goes in that OS's `[target.'cfg(...)'.dependencies]`, one used only by
+tests in `[dev-dependencies]`. One listed only to turn a feature on is kept with
+`use <crate> as _;` and a comment naming the feature (`tracing` in
+`pipette-android`).
+
 The `rust-coverage` job measures line coverage for every crate, posts a
 per-file table to its run summary and uploads `lcov.info`. It gates one crate:
 the job fails if `pipette-cli`'s line coverage is below 90 %. To read the same
@@ -149,7 +156,6 @@ tree.
 
 ```bash
 cargo deny check -D advisory-not-detected -D unnecessary-skip -D unmatched-skip advisories bans sources
-cargo-machete
 gitleaks git --redact --config .gitleaks.toml --log-opts="origin/main..HEAD" .
 ```
 
@@ -162,22 +168,6 @@ and the same pinned tool, but a different job (`rust-check`).
 crate has left the lockfile, into an error rather than a warning that still
 exits 0, so the change that drops the last affected crate deletes the ignore
 with it. It is a lint level, so it only works on the command line.
-
-cargo-machete greps the sources under a crate's own directory, so three shapes
-read as dead when they are not:
-
-- a crate reached only through a macro expansion (`regex`, via nutype's
-  `validate(regex = ...)`);
-- a crate named only by a module `#[path]`-included from outside the crate
-  directory (`android/native/benchmarks.rs`, in `pipette-android`);
-- a dependency listed only to turn a feature on for a crate something else also
-  pulls. Nothing names it, and deleting it compiles fine wherever another crate
-  happens to activate the same feature, so the loss shows up as a missing
-  feature on some other target rather than as an error here.
-
-Suppress these in that crate's `[package.metadata.cargo-machete]` with the
-reason written next to it. Deleting the dependency is the wrong fix for all
-three.
 
 A gitleaks finding is a secret until shown otherwise: rotate first, then decide
 what to do about the commit. `.gitleaks.toml` allow-lists values that are public

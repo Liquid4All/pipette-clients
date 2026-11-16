@@ -20,7 +20,7 @@ use pipette_plan_types::{
     MemoryObservation, RunResponse, RuntimeFlags, VlMaxMemoryBenchmark,
     VlMaxMemoryLlamacppCliStockToolsGgufVision,
 };
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::memory;
 use crate::models::ResolvedGgufVisionModel;
@@ -81,8 +81,8 @@ pub fn run(
         client_config,
     );
     let timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
-    // One budget per server from spawn through the workload: the model load,
-    // then the vision encode and prefill.
+    // One budget per server from the end of its load through the workload: the
+    // vision encode and prefill.
     let deadline = memory::attempt_timeout(benchmark_flags.attempt_timeout_seconds);
     let mut served = None;
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -93,7 +93,7 @@ pub fn run(
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {
-            let peak = serve(served, &launch, watch, &inputs, timeout, deadline)?;
+            let peak = serve(served, &launch, watch, &inputs, observer, timeout, deadline)?;
             #[cfg(any(target_os = "linux", target_os = "android"))]
             let peak = {
                 extras = swap_aware::extras(&peak.footprint);
@@ -138,14 +138,16 @@ fn inputs(benchmark: &VlMaxMemoryBenchmark) -> anyhow::Result<CtxInputs> {
     )
 }
 
-/// One server from its launch through the workload, within `deadline`, left in
-/// `served`. One an earlier attempt left there stops first; the observation
-/// covers both.
+/// One server from its launch through the workload, left in `served`: its start
+/// off the attempt clock within `deadline`, then the workload within `deadline`
+/// again. One an earlier attempt left there stops first; the observation covers
+/// both.
 fn serve(
     served: &mut Option<(Process, MemoryObservation)>,
     launch: &ServerCommandBuilder,
     watch: SupportedWatch,
     inputs: &CtxInputs,
+    observer: MeasurementObserver<'_>,
     timeout: Duration,
     deadline: Duration,
 ) -> anyhow::Result<Peak> {
@@ -159,12 +161,11 @@ fn serve(
     let port = pipette_subprocess::pick_server_port()?;
     let url = server::url(port);
     let ready = server::health(&url, timeout)?;
-    let started = Instant::now();
-    let mut llama_server = start_process("llama-server", launch.build(port)?, Duration::ZERO)?;
+    let mut llama_server = start_process("llama-server", launch.build(port)?, OnStop::SIGTERM)?;
     let sampler = Sampler::start(llama_server.pid(), watch)?;
-    llama_server.wait_ready(deadline, ready)?;
-    let left = deadline.saturating_sub(started.elapsed());
-    let worked = drive(&url, inputs, timeout.min(left)).map_err(|err| {
+    observer.outside(|| llama_server.wait_ready(deadline, ready))?;
+    let started = Instant::now();
+    let worked = drive(&url, inputs, timeout.min(deadline)).map_err(|err| {
         if started.elapsed() < deadline {
             return err;
         }

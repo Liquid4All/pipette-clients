@@ -8,7 +8,7 @@ publish.workspace = true
 workspace = true
 
 # Fake llama-server for the integration tests, found through
-# `env!("CARGO_BIN_EXE_fake_llama_server")` in `tests/common`.
+# `env!("CARGO_BIN_EXE_fake_llama_server")` in `tests/it/common`.
 [[bin]]
 name = "fake_llama_server"
 path = "tests/bin/fake_llama_server.rs"

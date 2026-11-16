@@ -25,8 +25,6 @@ pub(crate) const SCRIPT_FILENAME: &str = "pipette_onnx_genai_server.py";
 /// bound.
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(3600);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The server holds nothing worth flushing, so a stop kills it at once.
-pub(crate) const STOP_GRACE: Duration = Duration::ZERO;
 
 /// A temp dir holding the script, which must outlive the server run from it.
 pub(crate) fn script() -> anyhow::Result<tempfile::TempDir> {
@@ -97,7 +95,7 @@ mod tests {
     use rstest::rstest;
 
     use pipette_plan_types::OnnxExecutionProvider;
-    use pipette_subprocess::start_process;
+    use pipette_subprocess::{OnStop, start_process};
 
     use super::*;
 
@@ -118,7 +116,7 @@ mod tests {
         let mut onnx_server = start_process(
             SCRIPT_FILENAME,
             command(&install, dir.path(), script.path(), port, None)?,
-            STOP_GRACE,
+            OnStop::SIGKILL,
         )?;
         Ok(onnx_server.wait_ready(ready_timeout, ready(&url(port))?)?)
     }

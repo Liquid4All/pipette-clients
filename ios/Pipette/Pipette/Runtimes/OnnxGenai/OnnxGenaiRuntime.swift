@@ -71,12 +71,12 @@ nonisolated enum OnnxGenaiRuntime {
         }
     }
 
-    /// Release is the ObjC objects going out of scope: ORT frees its arenas with the
-    /// session, so unlike MLX there is no cache to clear. The `release` breadcrumb shows
-    /// whether that held.
-    static func withFreshModel<T>(path: String,
+    /// The load is off `observer`'s attempt clock. Release is the ObjC objects going out of
+    /// scope: ORT frees its arenas with the session, so unlike MLX there is no cache to
+    /// clear. The `release` breadcrumb shows whether that held.
+    static func withFreshModel<T>(path: String, observer: MeasurementObserver,
                                   _ body: (Loaded) async throws -> T) async throws -> T {
-        let loaded = try loadModel(path: path)
+        let loaded = try observer.outside { try loadModel(path: path) }
         defer { logMem("release") }
         return try await body(loaded)
     }

@@ -225,7 +225,9 @@ mod tests {
             | BenchmarkDefinition::VlMaxMemory(_)
             | BenchmarkDefinition::VlSpecDecode(_)
             | BenchmarkDefinition::AsrThroughput(_)
-            | BenchmarkDefinition::AsrMaxMemory(_)) => {
+            | BenchmarkDefinition::AsrMaxMemory(_)
+            | BenchmarkDefinition::DecisionLatency(_)
+            | BenchmarkDefinition::DecisionMaxMemory(_)) => {
                 return Err(anyhow::anyhow!("expected Eval, got {other:?}"));
             }
         }

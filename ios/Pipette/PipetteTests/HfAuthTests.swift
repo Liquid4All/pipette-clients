@@ -33,7 +33,8 @@ struct HfAuthTests {
     /// The host guard keeps a credential from reaching a third party, and applies to a
     /// claim's token as to a stored one.
     @Test(arguments: ["https://example.com/org/repo/resolve/main/m.gguf",
-                      "https://huggingface.co.evil.test/org/repo/m.gguf"])
+                      "https://huggingface.co.evil.test/org/repo/m.gguf",
+                      "https://evilhuggingface.co/org/repo/m.gguf"])
     func aNonHuggingFaceHostGetsNoCredential(url: String) throws {
         #expect(try header(url: url, claimToken: try AuthToken("hf_fromtheclaim")) == nil)
     }

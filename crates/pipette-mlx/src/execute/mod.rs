@@ -176,5 +176,8 @@ pub fn run(
         BenchmarkDefinition::AsrEval(_) => {
             anyhow::bail!("asr_eval is not yet supported for MLX")
         }
+        BenchmarkDefinition::DecisionLatency(_) | BenchmarkDefinition::DecisionMaxMemory(_) => {
+            anyhow::bail!("decision benchmarks run on llama-server only, not on MLX")
+        }
     }
 }

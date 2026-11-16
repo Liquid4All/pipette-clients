@@ -519,8 +519,10 @@ mod tests {
                             peak.fetch_max(now, Ordering::SeqCst);
                             std::thread::sleep(hold);
                             counter.fetch_add(1, Ordering::SeqCst);
-                            let _ = FakeChatServer::answer(stream, false);
+                            // Before the reply: a sequential client sends its next
+                            // request the moment the reply lands.
                             live.fetch_sub(1, Ordering::SeqCst);
+                            let _ = FakeChatServer::answer(stream, false);
                         });
                     });
             });

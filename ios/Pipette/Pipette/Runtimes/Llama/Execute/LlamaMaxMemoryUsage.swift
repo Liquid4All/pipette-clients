@@ -13,7 +13,7 @@ nonisolated extension LlamaExecute {
         try await BenchmarkMeasurement.maxMemory(benchmark, observer: observer, warmup: .cold,
                                                  ctx: ()) { _ in
             try await ProcessMemory.maxMemoryBracket(label: "llama") {
-                try await load.withInference(model) {
+                try await load.withInference(model, observer: observer) {
                     try maxMemoryUsage($0, prefillTokens: Int(benchmark.parameterPrefillTokens.value))
                 }
             }

@@ -734,6 +734,7 @@ nonisolated enum FailureCode: String, Codable, Sendable, Equatable {
     case attemptTimeout = "attempt_timeout"
     case runtimeError = "runtime_error"
     case deviceError = "device_error"
+    case deviceNotReady = "device_not_ready"
     case harnessError = "harness_error"
 }
 

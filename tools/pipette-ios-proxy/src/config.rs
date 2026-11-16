@@ -150,6 +150,7 @@ pub(crate) struct Config {
     pub(crate) client_releases: Option<ClientReleases>,
     pub(crate) loop_config: LoopConfig,
     pub(crate) devicectl: DevicectlConfig,
+    pub(crate) cdn_proxy: Option<String>,
     pub(crate) log: LogConfig,
     pub(crate) source: PathBuf,
     /// Whether any `[[devices]]` entry wrote its key or token INLINE, making this
@@ -498,6 +499,23 @@ impl Config {
             }),
         };
 
+        let cdn_proxy = file
+            .cdn_proxy
+            .as_ref()
+            .map(|table| -> anyhow::Result<String> {
+                let endpoint = required_text(&table.endpoint, "[cdn_proxy] endpoint", source)?;
+                pipette_http::CdnProxy::from_str(&endpoint).map_err(|message| {
+                    ConfigError::Invalid {
+                        file: source.to_path_buf(),
+                        key: "[cdn_proxy] endpoint".to_owned(),
+                        value: endpoint.clone(),
+                        message,
+                    }
+                })?;
+                Ok(endpoint)
+            })
+            .transpose()?;
+
         let log = LogConfig {
             level: parse_value::<LevelFilter>(
                 file.log.level.as_deref(),
@@ -526,6 +544,7 @@ impl Config {
             client_releases,
             loop_config,
             devicectl,
+            cdn_proxy,
             log,
             source: source.to_path_buf(),
             holds_a_key,
@@ -929,6 +948,7 @@ struct FileConfig {
     loop_table: LoopTable,
     #[serde(default)]
     devicectl: DevicectlTable,
+    cdn_proxy: Option<CdnProxyTable>,
     #[serde(default)]
     log: LogTable,
 }
@@ -1000,6 +1020,12 @@ struct DevicectlTable {
     run_timeout_secs: Option<u64>,
     first_line_timeout_secs: Option<u64>,
     pymobiledevice3: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CdnProxyTable {
+    endpoint: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2007,6 +2033,54 @@ dir = "./builds"
             error.to_string().contains("has no [signing] table"),
             "{error:#}"
         );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::absent("", None)]
+    #[case::ipv4(
+        "[cdn_proxy]\nendpoint = \"192.168.1.20:8090\"\n",
+        Some("192.168.1.20:8090")
+    )]
+    #[case::ipv6("[cdn_proxy]\nendpoint = \"[::1]:8090\"\n", Some("[::1]:8090"))]
+    fn the_cdn_proxy_endpoint_is_kept_as_written(
+        #[case] table: &str,
+        #[case] expected: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let config = Config::parse_str(&format!("{MINIMAL}\n{table}"), source())?;
+        assert_eq!(config.cdn_proxy.as_deref(), expected);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::with_scheme("http://x:1")]
+    #[case::host_only("x")]
+    #[case::port_zero("x:0")]
+    #[case::empty("")]
+    fn a_bad_cdn_proxy_endpoint_is_refused_naming_the_key(
+        #[case] endpoint: &str,
+    ) -> anyhow::Result<()> {
+        let text = format!("{MINIMAL}\n[cdn_proxy]\nendpoint = \"{endpoint}\"\n");
+        let error = Config::parse_str(&text, source())
+            .err()
+            .context("the endpoint must be refused")?;
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("[cdn_proxy] endpoint"),
+            "the message must name [cdn_proxy] endpoint: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_key_inside_cdn_proxy_is_refused() -> anyhow::Result<()> {
+        let text =
+            format!("{MINIMAL}\n[cdn_proxy]\nendpoint = \"192.168.1.20:8090\"\nhost = \"x\"\n");
+        let error = Config::parse_str(&text, source())
+            .err()
+            .context("an unknown key must be refused")?;
+        let message = format!("{error:#}");
+        assert!(message.contains("host"), "{message}");
         Ok(())
     }
 

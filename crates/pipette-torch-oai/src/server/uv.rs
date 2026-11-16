@@ -76,7 +76,9 @@ pub fn launch(
         transport: Transport::Uv(pipette_subprocess::start_process(
             kind.name(),
             command,
-            super::STOP_GRACE,
+            pipette_subprocess::OnStop::Sigterm {
+                cleanup: super::TORCH_CLEANUP,
+            },
         )?),
     })
 }

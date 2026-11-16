@@ -25,8 +25,7 @@ pub enum RuntimeStoreError {
     /// The manifest parses but is invalid: bad version or placement drift.
     #[error("installed runtime is corrupt: {0}")]
     Corrupt(String),
-    /// A bundled runtime from an older client has different embedded sources or pins.
-    #[error("runtime entry at {0} belongs to a different bundled build")]
+    #[error("runtime entry at {0} is not under its runtime's current key")]
     Obsolete(PathBuf),
     #[error(transparent)]
     Quota(#[from] QuotaError),
@@ -293,8 +292,8 @@ impl RuntimeArtifactStore {
                 Err(RuntimeStoreError::Obsolete(path)) => {
                     tracing::warn!(
                         path = %path.display(),
-                        "skipping a runtime entry from another bundled build; \
-                         run `runtimes pull` to build this client's runtime"
+                        "skipping a runtime entry this client no longer keys; \
+                         run `runtimes pull` to fetch or build its current form"
                     );
                     false
                 }
@@ -350,18 +349,13 @@ pub(crate) fn read_manifest(entry: &Path) -> Result<RuntimeManifest, RuntimeStor
             crate::runtime::manifest::MANIFEST_VERSION
         )));
     }
-    let key = RuntimeStorageKey::of(&m.declared);
-    if matches!(&m.declared, Runtime::AppleCoreAiMacosPipette(_)) {
-        // Core AI includes this client's embedded sources in its key. An entry
-        // from another build must not advertise the currently bundled runtime.
-        let current = key
-            .as_ref()
-            .is_ok_and(|key| entry.file_name().is_some_and(|name| name == key.as_str()));
-        if !current {
-            return Err(RuntimeStoreError::Obsolete(entry.to_path_buf()));
-        }
+    // A key that changed (another build's Core AI sources, a llama.cpp build that
+    // now fetches its CUDA runtime) leaves the old entry where no lookup reaches.
+    let current = RuntimeStorageKey::of(&m.declared)
+        .is_ok_and(|key| entry.file_name().is_some_and(|name| name == key.as_str()));
+    if !current {
+        return Err(RuntimeStoreError::Obsolete(entry.to_path_buf()));
     }
-    key?;
     let expected = to_stored(&m.declared).map_err(|e| RuntimeStoreError::Corrupt(e.to_string()))?;
     if m.stored != expected {
         return Err(RuntimeStoreError::Corrupt(
@@ -484,6 +478,24 @@ mod tests {
         assert!(store.find(&runtime)?.is_some());
         store.ensure(&runtime, &mut install)?;
         assert_eq!(calls.get(), 1);
+        Ok(())
+    }
+
+    /// An entry outside its current key, as a Windows CUDA build installed before `__cudart` would be.
+    #[test]
+    fn an_entry_under_an_old_key_is_obsolete() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let store = RuntimeArtifactStore::new(tmp.path().to_path_buf());
+        let runtime = declared()?;
+        let manifest = store.ensure(&runtime, install_stub)?;
+        let old_entry = tmp.path().join("llama-cpp__old-key");
+        fs::rename(manifest.entry_dir(tmp.path())?, &old_entry)?;
+        assert!(matches!(
+            read_manifest(&old_entry),
+            Err(RuntimeStoreError::Obsolete(_))
+        ));
+        assert!(store.list()?.is_empty());
+        assert!(store.find(&runtime)?.is_none());
         Ok(())
     }
 

@@ -25,8 +25,8 @@ Run them all before pushing:
 - `pr-body.py`: the Problem / Solution / Testing structure required of a pull
   request description.
 - `install-tool.sh`: installs a pinned release tarball after verifying its
-  SHA-256, and holds the pins. The `security` workflow's three tools
-  (cargo-deny, cargo-machete, gitleaks) go through it, as does the cargo-deny
+  SHA-256, and holds the pins. The `security` workflow's two tools
+  (cargo-deny, gitleaks) go through it, as does the cargo-deny
   that `build.yml` checks licenses with, so the pins exist once. Dependabot
   cannot see these pins: bump one by hand, and change the URL and its SHA-256
   (`shasum -a 256` of the new asset) together. The other Pipette repositories

@@ -3,7 +3,6 @@
 //! that compiles into a cache (a GPU driver's kernels) is measured on a filled one.
 
 use std::path::Path;
-use std::time::Duration;
 
 use pipette_memprobe::Sampler;
 use pipette_ops::measurement::{
@@ -15,7 +14,7 @@ use pipette_plan_types::{
     MaxMemoryUsageBenchmark, MaxMemoryUsageLlamacppCliStockToolsGgufText, MemoryObservation,
     RunResponse, RuntimeFlags,
 };
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::bench;
 use crate::memory;
@@ -63,7 +62,7 @@ pub fn run(
             // A run an earlier attempt left has exited; the observation covers both.
             let earlier = ran.take().map(|(_, memory)| memory).unwrap_or_default();
             let command = launch.build();
-            let mut llama_bench = start_process("llama-bench", command, Duration::ZERO)
+            let mut llama_bench = start_process("llama-bench", command, OnStop::SIGTERM)
                 .map_err(anyhow::Error::from)?;
             let sampler = Sampler::start(llama_bench.pid(), watch).map_err(anyhow::Error::from)?;
             let (memory, peak) = llama_bench
@@ -152,6 +151,9 @@ fn bench_launch(
         .raw(raw)
         .envs(envs)
         .client_config(client_config.cloned())
+        // The cell's dropped first run is the warm-up; the tool's own pass sizes
+        // the same buffers, so it adds time and no peak.
+        .no_warmup(true)
 }
 
 #[cfg(test)]
@@ -201,7 +203,7 @@ mod tests {
                 &runtime_flags(),
             )
             .join(" "),
-            "--flash-attn on --load-mode dio --n-gpu-layers 7 --poll 0 --repetitions 1 --threads 3 --n-prompt 0 --n-gen 0 -pg 512,1"
+            "--flash-attn on --load-mode dio --n-gpu-layers 7 --no-warmup --poll 0 --repetitions 1 --threads 3 --n-prompt 0 --n-gen 0 -pg 512,1"
         );
         Ok(())
     }

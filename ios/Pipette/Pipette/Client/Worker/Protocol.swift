@@ -48,7 +48,9 @@ nonisolated func deviceTimeMs(_ deviceTime: Duration) -> UInt64 {
 }
 
 /// Whether a run error is retriable: the crate's `classify_run_error`, and the one place
-/// every failure path asks.
+/// every failure path asks. Unlike the crate, a readiness timeout, an engine failure and
+/// running out of memory stay retriable here; on the farm, `pipette-ios-proxy` files them as
+/// terminal.
 ///
 /// The terminal list stays narrow on purpose: a wrongly-non-retriable job is discarded for
 /// the whole fleet on one device's say-so, where a wrongly-retriable one is bounded by its
@@ -68,8 +70,9 @@ nonisolated func classifyRunError(_ error: Error) -> Bool {
     return true
 }
 
-/// mgmt's grouping of a run error: the crate's `failure_code`. `nil` where the error does
-/// not say, which mgmt records as `unspecified`.
+/// mgmt's grouping of a run error: the crate's `failure_code`, except that a readiness
+/// timeout is `device_error` here, not `device_not_ready`. `nil` where the error does not say,
+/// which mgmt records as `unspecified`.
 nonisolated func failureCode(_ error: Error) -> FailureCode? {
     let error = (error as? ModelLoadFailure)?.cause ?? error
     switch error {
