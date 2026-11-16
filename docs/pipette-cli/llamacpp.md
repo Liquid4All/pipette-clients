@@ -169,9 +169,12 @@ The full workflow (init, register, seed local benchmarks, sync, submit) is in
   - A `llama-bench` or `llama-batched-bench` rep is one attempt, its model load
     included. Each such process also has a 1-hour deadline of its own, which
     fires first only under a limit above 3600 s.
+  - A `llama-server` start, its model load included, does not count against
+    the limit.
   - On `max_memory_usage` the warm-up run and the measured run are an attempt
     each. On `vl_max_memory` and `asr_max_memory` each server, the warm-up
-    server included, is one attempt from launch to the peak read.
+    server included, is one attempt from its ready to the peak read; its start
+    has as long again, off the clock.
   - The image and audio token calibration does not count against the limit; its
     helper has a 600 s bound of its own.
   - `vl_spec_decode` has no default, because the corpus sets the length of a

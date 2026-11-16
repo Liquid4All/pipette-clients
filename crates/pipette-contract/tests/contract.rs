@@ -371,7 +371,9 @@ fn benchmark_name(definition: &BenchmarkDefinition, name: &mut Name) -> anyhow::
         | BenchmarkDefinition::VlThroughput(_)
         | BenchmarkDefinition::VlMaxMemory(_)
         | BenchmarkDefinition::AsrThroughput(_)
-        | BenchmarkDefinition::AsrMaxMemory(_) => Ok(()),
+        | BenchmarkDefinition::AsrMaxMemory(_)
+        | BenchmarkDefinition::DecisionLatency(_)
+        | BenchmarkDefinition::DecisionMaxMemory(_) => Ok(()),
     }
 }
 

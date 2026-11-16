@@ -50,16 +50,20 @@ extension Inference {
     }
 }
 
-/// Loads, runs `body`, and frees on exit; the `LlamaModel` never escapes. Takes a path:
-/// resolving the model is `ResolvedGgufTextModel`'s job, as the crate splits `models.rs`.
+/// Loads off `observer`'s attempt clock, runs `body`, and frees on exit; the `LlamaModel`
+/// never escapes. Takes a path: resolving the model is `ResolvedGgufTextModel`'s job, as the
+/// crate splits `models.rs`.
 nonisolated func withInference<T>(path: String, nGpuLayers: UInt32,
                                   contextSize: UInt32, nUbatch: UInt32, threads: UInt32,
                                   swaFull: Bool,
                                   loadMode: LlamacppLoadMode,
+                                  observer: MeasurementObserver,
                                   _ body: (Inference) async throws -> T) async throws -> T {
-    let m = try LlamaCpp.load(path: path, nGpuLayers: nGpuLayers,
-                              contextSize: contextSize, nUbatch: nUbatch, threads: threads,
-                              swaFull: swaFull, loadMode: loadMode)
+    let m = try observer.outside {
+        try LlamaCpp.load(path: path, nGpuLayers: nGpuLayers,
+                          contextSize: contextSize, nUbatch: nUbatch, threads: threads,
+                          swaFull: swaFull, loadMode: loadMode)
+    }
     defer { m.free() }
     return try await body(.live(m))
 }

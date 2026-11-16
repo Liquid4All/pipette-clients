@@ -4,7 +4,6 @@
 //! (`timings.image_n`), the figure llama.cpp's calibration helper prints.
 
 use std::num::NonZeroUsize;
-use std::time::Duration;
 
 use base64::Engine;
 
@@ -20,7 +19,7 @@ use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     BenchmarkFlagRef, PositiveCount, RunResponse, RuntimeFlags, VlThroughputBenchmark,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::engines;
 use crate::server::{self, Launch, READY_TIMEOUT};
@@ -50,9 +49,9 @@ pub fn run(
     let port = pipette_subprocess::pick_server_port()?;
     let url = llama_server::url(port);
     let ready = llama_server::health(&url, timeout)?;
-    let mut server = start_process("trt-edgellm-server", launch.serve(port), Duration::ZERO)?;
+    let mut server = start_process("trt-edgellm-server", launch.serve(port), OnStop::SIGKILL)?;
     let sampler = Sampler::start(server.pid(), SupportedWatch::OBSERVE)?;
-    server.wait_ready(READY_TIMEOUT, ready)?;
+    observer.outside(|| server.wait_ready(READY_TIMEOUT, ready))?;
     let worked = (|| {
         let stack = server::engine_stack(&http, &url)?;
         let text = llama_server::message_filler(&http, &url, text_tokens)?;

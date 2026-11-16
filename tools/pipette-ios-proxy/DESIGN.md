@@ -80,7 +80,8 @@ section holds the rules a config is refused by.
   - any key-holding file (key file, or the config when a key is inline) with a
     mode beyond `0600`;
   - not exactly one of `[builds]` and `[signing]`, and `[signing]` without
-    `[client_releases]` (section 9).
+    `[client_releases]` (section 9);
+  - a `[cdn_proxy] endpoint` that the CLI's `--cdn-proxy` would refuse.
 - **Keys are never persisted or logged.** A config that does not parse is
   reported by line and message, never by quoting the line, which may hold a key.
 - **`[client_releases]`** is optional; without it the `builds` verbs refuse in
@@ -289,6 +290,11 @@ flowchart TD
   it refuses by name a flag that no iOS cell carries. An entry with only its axes sends no `benchmark-flags=`,
   and the app keeps its own readiness default. The readiness wait runs inside
   `run_timeout_secs`.
+- **`cdn-proxy=`:** with `[cdn_proxy]`, a run carries it only on a build known to read
+  it, version `2026.11.11-1a87cd9` or one dated later; any other run, every pool-mode
+  run included since a pool build's version is not known, launches without it and
+  downloads directly, as an app that does not read it refuses the launch, and a log
+  line per run says which.
 - **Benchmark:** before anything else, the proxy asks the server for the claim's
   benchmark (`GET /benchmarks/{id}`, signed as the phone's client). A `404` is
   `unknown_benchmark`, terminal, as `pipette-cli`'s worker makes it; the app could only
@@ -311,8 +317,8 @@ flowchart TD
   and a bare `BENCH_DONE` means 0. It is trusted over the exit code (identical
   refused launches exited 2, 2, 2, 2, 2, 0).
 - With no sentinel, the exit code stands in. Status 2 (malformed arguments) is
-  terminal; any other failure is retriable, except a kill by iOS or an engine
-  failure.
+  terminal; any other failure is retriable, except a kill by iOS, an engine
+  failure or a readiness wait that ran out.
 - **Killed by iOS:** a run with no sentinel whose last stdout line is devicectl's
   `App terminated due to signal 9.` (devicectl 642.16) is `killed_by_ios`,
   terminal. Nothing sends `SIGKILL` to a run the proxy has not been told to stop:
@@ -335,10 +341,18 @@ flowchart TD
   rest of a multi-line error (llama.cpp's log tail) on the lines below, and the
   reason quotes them, joined with ` | `. Only the engine's own wording counts
   (`Engine error:`, `Engine backend failed:`, and the out-of-memory message),
-  and only after `[HEADLESS] info jobRun dispatch:`. A download, a readiness
-  wait, the power-state refusal, the Apple foundation model not ready on the
-  phone, and a load that failed on the file (missing, not a GGUF, cut short),
-  which a fresh download repairs, stay `run_failed`, retriable.
+  and only after `[HEADLESS] info jobRun dispatch:`. A download, the
+  power-state refusal, the Apple foundation model not ready on the phone, and
+  a load that failed on the file (missing, not a GGUF, cut short), which a
+  fresh download repairs, stay `run_failed`, retriable.
+- A readiness wait that ran out fails the cell: the phone stayed too hot or
+  busy to measure it, and the app logs
+  `[HEADLESS] info jobRun readiness: … → timed out after <n>s` on stderr. It is
+  `readiness_timed_out`, terminal and `device_not_ready`, as `pipette-cli`'s
+  worker files it: retried, a cell that keeps every phone hot goes round the
+  whole fleet. It is not an infrastructure failure (`infra=no`, section 7). It
+  is checked where an engine failure is, after either ending, and an engine
+  failure outranks it. The reason quotes the line.
 - The deadline (`run_timeout_secs`) is `engine_timed_out`, terminal, once the
   app's engine had the cell for half the window or more; under half, or before
   `[HEADLESS] info jobRun dispatch:`, it is `run_timed_out`, retriable, since the
@@ -398,6 +412,7 @@ signal):
 | deadline with the engine under half the window | `run_timed_out` | yes | `harness_error` |
 | deadline with the engine half the window or more | `engine_timed_out` | no | `runtime_error` |
 | the app stopped an attempt past `attempt_timeout_seconds` | `attempt_timed_out` | no | `attempt_timeout` |
+| the app's readiness wait timed out, the phone too hot or busy to measure | `readiness_timed_out` | no | `device_not_ready` |
 | no line from the app on the launch or its relaunch | `launch_silent` | yes | `device_error` |
 | the app's engine failed on the cell | `engine_failed` | no | `runtime_error` |
 | the app's engine failed on the cell, out of memory | `engine_out_of_memory` | no | `out_of_memory` |

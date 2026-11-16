@@ -188,6 +188,10 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
               let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { return .failure(.notHeadless) }
         let verbs = comps.path.split(separator: "/").map(String.init)
+        // Any app can open a link, and the proxy receives the downloads' tokens.
+        if comps.queryItems?.contains(where: { $0.name == "cdn-proxy" }) == true {
+            return .failure(.rejected(key: "cdn-proxy", reason: "a link cannot name a proxy"))
+        }
         // `queryItems` percent-decodes, and the argv parser splits on the first `=`, so a
         // JSON or URI value survives intact.
         let params = (comps.queryItems ?? []).map { "\($0.name)=\($0.value ?? "")" }
@@ -217,8 +221,15 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
     /// `headlessrun` marker is ignored.
     static func parse(_ args: [String]) -> Result<HeadlessCommand, HeadlessUsageError> {
         guard let marker = args.firstIndex(of: "headlessrun") else { return .failure(.notHeadless) }
-        // A global switch (`HeadlessRunner.isVerbose`), not any verb's parameter.
-        let raw = Array(args[(marker + 1)...]).filter { $0 != "-v" && $0 != "--verbose" }
+        let tail = Array(args[(marker + 1)...])
+        if let value = CdnProxy.value(in: tail), CdnProxy(value) == nil {
+            return .failure(.invalidValue(key: "cdn-proxy", value: value))
+        }
+        // Global switches (`HeadlessRunner.isVerbose`, `CdnProxy.launch`), not any verb's
+        // parameters.
+        let raw = tail.filter {
+            $0 != "-v" && $0 != "--verbose" && !$0.hasPrefix(CdnProxy.argument)
+        }
         let (verbs, options) = HeadlessTokens.split(raw)
 
         let leaf: any HeadlessLeaf

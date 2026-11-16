@@ -68,6 +68,9 @@ final class DownloadCoordinator: NSObject {
         /// Checked here because the Hub's CDN answers a stale `If-Range` with `206` and
         /// URLSession appends every `206`, which would join two versions of a file.
         var resumeETag: String?
+        /// The `cdn-proxy=` base URL the saved resume data was fetched through, nil when
+        /// direct. The data replays its own request, so a launch routed otherwise starts over.
+        var resumeProxy: String?
 
         /// Per transfer, not the storage key: a vision model is two transfers in one entry.
         var key: String {
@@ -144,11 +147,13 @@ final class DownloadCoordinator: NSObject {
 
     nonisolated private static let sessionIdentifier = "ai.liquid.pipette.downloads"
 
-    /// Whether `arguments` name a headless run that completes in one go, the only case a
-    /// foreground session suits. `settings run` starts the resident worker, which can be
-    /// suspended between claims; a deep link carries no `headlessrun`, and its user may
+    /// Whether `arguments` name a headless run that completes in one go, or a proxy, the
+    /// cases a foreground session suits. `settings run` starts the resident worker, which can
+    /// be suspended between claims; a deep link carries no `headlessrun`, and its user may
     /// background the app.
     nonisolated static func usesForegroundSession(_ arguments: [String]) -> Bool {
+        // Only a foreground session asks before a redirect, which a proxied transfer refuses.
+        if CdnProxy.value(in: arguments) != nil { return true }
         guard let marker = arguments.firstIndex(of: "headlessrun") else { return false }
         let verbs = arguments[arguments.index(after: marker)...]
         return !(verbs.first == "settings" && verbs.dropFirst().first == "run")
@@ -345,7 +350,7 @@ final class DownloadCoordinator: NSObject {
         var request = URLRequest(url: url)
         attachHfAuth(&request, claimToken: dl.source?.repo?.authToken, model: dl.source)
 
-        let task = session.downloadTask(with: request)
+        let task = session.downloadTask(with: CdnProxy.launch?.route(request) ?? request)
         task.taskDescription = key
         task.resume()
 
@@ -364,7 +369,8 @@ final class DownloadCoordinator: NSObject {
             familyId: dl.familyId,
             source: dl.source,
             sha256: dl.sha256,
-            etag: dl.resumeETag
+            etag: dl.resumeETag,
+            proxy: dl.resumeProxy
         ))
     }
 
@@ -1044,24 +1050,26 @@ final class DownloadCoordinator: NSObject {
         guard var dl = downloads[key], let url = dl.url else { return }
 
         let task: URLSessionDownloadTask
-        if dl.resumeETag != nil, let resumeData = downloadStore.loadResumeData(for: key) {
+        if dl.resumeETag != nil, dl.resumeProxy == CdnProxy.launch?.baseURL,
+           let resumeData = downloadStore.loadResumeData(for: key) {
             task = session.downloadTask(withResumeData: resumeData)
             downloadStore.clearResumeData(for: key)
         } else {
             if downloadStore.hasResumeData(for: key) {
                 AppLog.storage.info(
-                    "resume data dropped: no ETag to check the resume against, "
-                    + "starting from zero key=\(key)")
+                    "resume data dropped: no ETag to check the resume against, or fetched "
+                    + "through another cdn-proxy=, starting from zero key=\(key)")
                 downloadStore.clearResumeData(for: key)
             }
-            if dl.resumeETag != nil {
+            if dl.resumeETag != nil || dl.resumeProxy != nil {
                 dl.resumeETag = nil
+                dl.resumeProxy = nil
                 saveRecord(for: dl)
             }
             dl.bytesDownloaded = 0
             var request = URLRequest(url: url)
             attachHfAuth(&request, claimToken: dl.source?.repo?.authToken, model: dl.source)
-            task = session.downloadTask(with: request)
+            task = session.downloadTask(with: CdnProxy.launch?.route(request) ?? request)
         }
         task.taskDescription = key
         task.resume()
@@ -1397,7 +1405,8 @@ final class DownloadCoordinator: NSObject {
                 sha256: record.sha256,
                 // Only GGUF rows persist, and their quant re-derives from `source`.
                 catalogQuant: nil,
-                resumeETag: record.etag
+                resumeETag: record.etag,
+                resumeProxy: record.proxy
             )
         }
 
@@ -1634,6 +1643,7 @@ final class DownloadCoordinator: NSObject {
         if let data, !changed {
             downloadStore.saveResumeData(data, for: key)
             dl.resumeETag = Self.strongEtag(of: response)
+            dl.resumeProxy = CdnProxy.launch?.baseURL
         } else {
             if data != nil {
                 AppLog.storage.info(
@@ -1642,6 +1652,7 @@ final class DownloadCoordinator: NSObject {
             }
             downloadStore.clearResumeData(for: key)
             dl.resumeETag = nil
+            dl.resumeProxy = nil
         }
         downloads[key] = dl
         saveRecord(for: dl)
@@ -1904,5 +1915,15 @@ extension DownloadCoordinator: URLSessionDownloadDelegate {
         MainActor.assumeIsolated {
             self.callBackgroundCompletion()
         }
+    }
+
+    /// Through the proxy a redirect fails the transfer, as the CLI's does: URLSession keeps
+    /// the `Host` it was given on the next hop, which can be another site. A background
+    /// session never asks, so a proxied launch takes a foreground one.
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
+                                willPerformHTTPRedirection response: HTTPURLResponse,
+                                newRequest request: URLRequest,
+                                completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(CdnProxy.launch == nil ? request : nil)
     }
 }

@@ -338,9 +338,9 @@ In order:
    that is 100 gates.
 
 `attempt_timeout_seconds` has no default here, since the corpus sets how long a
-traversal runs. Set on a cell, it bounds the launch, the model load and the
-warm-up as one attempt, then each sample with all its turns. Neither the corpus
-download nor a gate's wait counts
+traversal runs. Set on a cell, it bounds the warm-up as one attempt, then each
+sample with all its turns. Neither the corpus download, the model load nor a
+gate's wait counts
 ([the attempt limit](../pipette-cli/usage.md#5c-the-attempt-limit)).
 The iOS cells refuse it.
 
@@ -545,8 +545,8 @@ through `turn::run`. Both hand the row back as a `RunResponseBuilder`
 (`pipette_ops::run_response`). The engine records its server's output on it,
 and on a failed traversal adds the end of that output to the error. The model
 load is not a turn: `llama-server`'s readiness wait keeps the 120 s times the
-slots every llama.cpp cell gives it. Under `attempt_timeout_seconds` the load
-and the warm-up are the first attempt.
+slots every llama.cpp cell gives it. Under `attempt_timeout_seconds` the
+warm-up is the first attempt, and the load is off the clock.
 Each engine contributes only its own observations: how its server is
 launched and waited for, its HTTP client, the request extras merged into the
 shared body, whose clocks the stream reader trusts (`TimingsSource`), and the

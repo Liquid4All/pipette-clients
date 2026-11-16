@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 
 use pipette_plan_types::RuntimeOutput;
-use pipette_subprocess::{NotReadyError, Stream, start_process};
+use pipette_subprocess::{NotReadyError, OnStop, Stream, start_process};
 
 mod common;
 
@@ -56,7 +56,7 @@ fn an_exit_reports_its_status_and_what_it_printed() -> anyhow::Result<()> {
     let mut process = start_process(
         "powershell",
         powershell("[Console]::Out.WriteLine('out'); [Console]::Error.WriteLine('err'); exit 3"),
-        Duration::ZERO,
+        OnStop::SIGKILL,
     )?;
     let status = process.wait(LONG)?.context("still running")?;
     assert_eq!(status.code(), Some(3));
@@ -70,7 +70,7 @@ fn an_exit_reports_its_status_and_what_it_printed() -> anyhow::Result<()> {
 
 #[test]
 fn a_wait_that_runs_out_leaves_it_running() -> anyhow::Result<()> {
-    let mut process = start_process("powershell", powershell("Start-Sleep 600"), Duration::ZERO)?;
+    let mut process = start_process("powershell", powershell("Start-Sleep 600"), OnStop::SIGKILL)?;
     assert_eq!(process.wait(Duration::from_millis(200))?, None);
     assert!(process.is_running());
     process.stop();
@@ -80,7 +80,7 @@ fn a_wait_that_runs_out_leaves_it_running() -> anyhow::Result<()> {
 
 #[test]
 fn a_run_past_its_timeout_is_stopped() -> anyhow::Result<()> {
-    let mut process = start_process("powershell", powershell("Start-Sleep 600"), Duration::ZERO)?;
+    let mut process = start_process("powershell", powershell("Start-Sleep 600"), OnStop::SIGKILL)?;
     let Err(err) = process.wait_success(Duration::from_secs(3)) else {
         anyhow::bail!("expected the wait to fail");
     };
@@ -99,9 +99,9 @@ fn stop_kills_what_it_started() -> anyhow::Result<()> {
         "powershell",
         powershell(
             "$p = Start-Process -PassThru -NoNewWindow ping -ArgumentList '-n','600','127.0.0.1'; \
-             [Console]::Out.WriteLine($p.Id); Start-Sleep 600",
+     [Console]::Out.WriteLine($p.Id); Start-Sleep 600",
         ),
-        Duration::ZERO,
+        OnStop::SIGKILL,
     )?;
     let pid_of = |text: &str| {
         text.lines()
@@ -118,7 +118,7 @@ fn stop_kills_what_it_started() -> anyhow::Result<()> {
 
 #[test]
 fn dropping_it_stops_it() -> anyhow::Result<()> {
-    let process = start_process("powershell", powershell("Start-Sleep 600"), Duration::ZERO)?;
+    let process = start_process("powershell", powershell("Start-Sleep 600"), OnStop::SIGKILL)?;
     let pid = process.pid();
     drop(process);
     assert!(gone(pid)?, "{pid} outlived the drop");
@@ -130,7 +130,7 @@ fn its_stdin_is_empty() -> anyhow::Result<()> {
     let mut process = start_process(
         "powershell",
         powershell("[Console]::Out.WriteLine($null -eq [Console]::In.ReadLine())"),
-        Duration::ZERO,
+        OnStop::SIGKILL,
     )?;
     process.wait(LONG)?.context("waited on stdin")?;
     assert_eq!(process.output().runtime_stdout.as_deref(), Some("True\n"));
@@ -142,7 +142,7 @@ fn a_missing_program_is_named_in_the_error() -> anyhow::Result<()> {
     let Err(err) = start_process(
         "no-such-server",
         Command::new(r"C:\nonexistent\pipette-no-such-program.exe"),
-        Duration::ZERO,
+        OnStop::SIGKILL,
     ) else {
         anyhow::bail!("expected the spawn to fail");
     };
@@ -163,7 +163,7 @@ fn wait_ready_returns_once_it_is_ready() -> anyhow::Result<()> {
         anyhow::ensure!(asked.get() == 3, "asked {} times", asked.get());
         Ok(())
     };
-    let mut service = start_process("powershell", powershell("Start-Sleep 600"), Duration::ZERO)?;
+    let mut service = start_process("powershell", powershell("Start-Sleep 600"), OnStop::SIGKILL)?;
     service.wait_ready(LONG, |_| ask().map_err(NotReadyError::yet))?;
     assert_eq!(asked.get(), 3);
     assert!(service.is_running());
@@ -177,7 +177,7 @@ fn a_service_that_exits_before_it_is_ready_fails_with_its_output() -> anyhow::Re
     let mut service = start_process(
         "powershell",
         powershell("[Console]::Error.WriteLine('loading failed'); exit 4"),
-        Duration::ZERO,
+        OnStop::SIGKILL,
     )?;
     let Err(err) = service.wait_ready(LONG, not_yet) else {
         anyhow::bail!("expected the wait to fail");
@@ -190,7 +190,7 @@ fn a_service_that_exits_before_it_is_ready_fails_with_its_output() -> anyhow::Re
 
 #[test]
 fn a_service_never_ready_is_stopped_at_the_timeout() -> anyhow::Result<()> {
-    let mut service = start_process("powershell", powershell("Start-Sleep 600"), Duration::ZERO)?;
+    let mut service = start_process("powershell", powershell("Start-Sleep 600"), OnStop::SIGKILL)?;
     let Err(err) = service.wait_ready(Duration::from_secs(3), not_yet) else {
         anyhow::bail!("expected the wait to fail");
     };
@@ -238,7 +238,11 @@ fn a_hard_kill_takes_what_the_run_started_with_it() -> anyhow::Result<()> {
 /// Windows has no SIGTERM, so a stop grace is not waited out.
 #[test]
 fn a_service_is_killed_at_once_whatever_its_grace() -> anyhow::Result<()> {
-    let mut service = start_process("powershell", powershell("Start-Sleep 600"), LONG)?;
+    let mut service = start_process(
+        "powershell",
+        powershell("Start-Sleep 600"),
+        OnStop::Sigterm { cleanup: LONG },
+    )?;
     let started = Instant::now();
     service.stop();
     assert!(started.elapsed() < LONG, "waited out the grace");
@@ -248,7 +252,7 @@ fn a_service_is_killed_at_once_whatever_its_grace() -> anyhow::Result<()> {
 
 #[test]
 fn one_that_died_is_started_again() -> anyhow::Result<()> {
-    let start = || start_process("powershell", powershell("Start-Sleep 600"), Duration::ZERO);
+    let start = || start_process("powershell", powershell("Start-Sleep 600"), OnStop::SIGKILL);
     let mut process = start()?;
     let first = process.pid();
     let killed = Command::new("taskkill")

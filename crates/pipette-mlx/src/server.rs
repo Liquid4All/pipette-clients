@@ -17,8 +17,6 @@ pub(crate) const VISION_SERVER_MODULE: &str = "mlx_vlm.server";
 pub(crate) const TEXT_TRUSTS_REMOTE_CODE: bool = true;
 pub(crate) const VISION_TRUSTS_REMOTE_CODE: bool = false;
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(3600);
-/// The server holds nothing worth flushing, so a stop kills it at once.
-pub(crate) const STOP_GRACE: Duration = Duration::ZERO;
 
 const PYTHON_UNBUFFERED_ENV: &str = "PYTHONUNBUFFERED";
 /// `mlx_vlm.server`'s prefix cache switch. A launch setting only: the server
@@ -166,7 +164,7 @@ mod tests {
     use rstest::rstest;
     use serde_json::json;
 
-    use pipette_subprocess::start_process;
+    use pipette_subprocess::{OnStop, start_process};
 
     use super::*;
 
@@ -239,7 +237,7 @@ mod tests {
             when.method("GET").path("/health");
             then.status(200).json_body(json!({"status": "ok"}));
         });
-        let mut mlx_server = start_process("sh", sh("exec sleep 60"), STOP_GRACE)?;
+        let mut mlx_server = start_process("sh", sh("exec sleep 60"), OnStop::SIGKILL)?;
         mlx_server.wait_ready(READY_TIMEOUT, ready(&stub.base_url())?)?;
         health.assert();
         Ok(())
@@ -263,7 +261,7 @@ mod tests {
         #[case] printed: &str,
     ) -> anyhow::Result<()> {
         let url = url(pipette_subprocess::pick_server_port()?);
-        let mut mlx_server = start_process(TEXT_SERVER_MODULE, sh(script), STOP_GRACE)?;
+        let mut mlx_server = start_process(TEXT_SERVER_MODULE, sh(script), OnStop::SIGKILL)?;
         let Err(err) = mlx_server.wait_ready(READY_TIMEOUT, ready(&url)?) else {
             anyhow::bail!("a server that never got ready was ready");
         };

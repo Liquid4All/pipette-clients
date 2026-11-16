@@ -1,0 +1,12 @@
+{
+  "benchmark_type": "decision_latency",
+  "model_type": "gguf_text",
+  "parallel": 3,
+  "raw": [
+    "-b",
+    "4096",
+    "-ub",
+    "4096"
+  ],
+  "runtime_type": "llamacpp_cli_stock_tools"
+}

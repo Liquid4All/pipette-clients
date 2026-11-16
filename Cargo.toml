@@ -83,6 +83,10 @@ private_intra_doc_links = "allow"
 
 # A reachable failure returns a typed `Result`, in tests too (`-> anyhow::Result<()>`
 # with `?`). An unreachable case is made unrepresentable in the types, not asserted.
+[workspace.lints.cargo]
+unused_dependencies = "deny"
+unused_workspace_dependencies = "deny"
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
@@ -191,7 +195,7 @@ pipette-openvino = { path = "crates/pipette-openvino" }
 pipette-ops = { path = "crates/pipette-ops" }
 pipette-ovms = { path = "crates/pipette-ovms" }
 # Owned by the management server, pipette-mgmt.
-pipette-plan-types = { git = "https://github.com/Liquid4All/pipette-mgmt.git", rev = "b74d06c514b6df8963338118885e9aa99d8982dc" }
+pipette-plan-types = { git = "https://github.com/Liquid4All/pipette-mgmt.git", rev = "06471959ae5f5c5730d7b1d2e7b1e0e0a408e858" }
 pipette-programs = { path = "crates/pipette-programs" }
 pipette-readiness = { path = "crates/pipette-readiness" }
 pipette-ssh = { path = "crates/pipette-ssh" }
@@ -207,7 +211,6 @@ android_logger = "0.15"
 anyhow = "1"
 base64 = "0.23"
 cc = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive", "env", "string"] }
 core-foundation = "0.10"
 crc32fast = "1"
@@ -215,7 +218,6 @@ ctrlc = { version = "3", features = ["termination"] }
 ed25519-dalek = { version = "3" }
 fastrand = "2"
 flate2 = "1"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hex = "0.4"
 hmac = "0.13"
@@ -228,7 +230,6 @@ nutype = { version = "0.8", features = ["serde", "regex"] }
 plist = "1"
 # `serialize`: S3 answers in XML, read through serde. `plist` already links it.
 quick-xml = { version = "0.42", features = ["serialize"] }
-regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rstest = { version = "0.28.0", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -244,7 +245,6 @@ tar = "0.4"
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known"] }
-tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 toml = "1"

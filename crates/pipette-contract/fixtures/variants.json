@@ -11,6 +11,12 @@
     "asr_throughput": [
       "benchmark/asr_throughput.json"
     ],
+    "decision_latency": [
+      "benchmark/decision_latency.json"
+    ],
+    "decision_max_memory": [
+      "benchmark/decision_max_memory.json"
+    ],
     "decode_throughput": [
       "benchmark/decode_throughput.json"
     ],
@@ -82,6 +88,18 @@
     ],
     "asr_throughput_llamacpp_ios_pipette_gguf_vision": [
       "benchmark_flags/asr_throughput.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "decision_latency_llamacpp_cli_stock_tools_gguf_text": [
+      "benchmark_flags/decision_latency.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "decision_latency_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/decision_latency.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "decision_max_memory_llamacpp_cli_stock_tools_gguf_text": [
+      "benchmark_flags/decision_max_memory.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "decision_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
+      "benchmark_flags/decision_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
     ],
     "decode_throughput_apple_core_ai_macos_pipette_apple_core_ai": [
       "benchmark_flags/decode_throughput.core_ai_macos_pipette.core_ai.json"
@@ -350,6 +368,12 @@
     "asr_throughput": [
       "benchmark_params/asr_throughput.json"
     ],
+    "decision_latency": [
+      "benchmark_params/decision_latency.json"
+    ],
+    "decision_max_memory": [
+      "benchmark_params/decision_max_memory.json"
+    ],
     "decode_throughput": [
       "benchmark_params/decode_throughput.json"
     ],
@@ -463,6 +487,9 @@
     ],
     "device_error": [
       "failure_code/device_error.json"
+    ],
+    "device_not_ready": [
+      "failure_code/device_not_ready.json"
     ],
     "harness_error": [
       "failure_code/harness_error.json"
@@ -847,6 +874,18 @@
     ],
     "asr_throughput_llamacpp_ios_pipette_gguf_vision": [
       "runtime_flags/asr_throughput.llamacpp_ios_pipette.gguf_vision.json"
+    ],
+    "decision_latency_llamacpp_cli_stock_tools_gguf_text": [
+      "runtime_flags/decision_latency.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "decision_latency_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/decision_latency.llamacpp_cli_stock_tools.gguf_vision.json"
+    ],
+    "decision_max_memory_llamacpp_cli_stock_tools_gguf_text": [
+      "runtime_flags/decision_max_memory.llamacpp_cli_stock_tools.gguf_text.json"
+    ],
+    "decision_max_memory_llamacpp_cli_stock_tools_gguf_vision": [
+      "runtime_flags/decision_max_memory.llamacpp_cli_stock_tools.gguf_vision.json"
     ],
     "decode_throughput_docker_sglang_torch": [
       "runtime_flags/decode_throughput.docker_sglang.torch.host.json"

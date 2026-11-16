@@ -154,6 +154,7 @@ pub fn run(
             decode_throughput::run(
                 benchmark,
                 req.runtime_flags_ref()?.try_into()?,
+                runtimes::flavor(&req.runtime.bound)?,
                 &ResolvedLlamaBench::try_from(&req.runtime.bound)?,
                 &ResolvedGgufTextModel::try_from(&req.model.bound)?,
                 readiness_gate,
@@ -308,6 +309,9 @@ pub fn run(
                 observer,
                 client_config,
             )
+        }
+        BenchmarkDefinition::DecisionLatency(_) | BenchmarkDefinition::DecisionMaxMemory(_) => {
+            anyhow::bail!("decision benchmarks are not yet supported for llama.cpp")
         }
     }
 }

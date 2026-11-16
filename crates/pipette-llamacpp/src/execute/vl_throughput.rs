@@ -1,6 +1,5 @@
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::time::Duration;
 
 use base64::Engine;
 
@@ -16,7 +15,7 @@ use pipette_plan_types::{
     BenchmarkFlagRef, BenchmarkResultData, LlamacppCliStockToolsExtraRuntimeConfiguration,
     RunResponse, RuntimeFlags, VlThroughputBenchmark, VlThroughputLlamacppCliStockToolsGgufVision,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::models::ResolvedGgufVisionModel;
 use crate::mtmd::{self, CtxInputs, MtmdCommandBuilder};
@@ -97,9 +96,9 @@ pub fn run(
     let ready = server::health(&url, timeout)?;
     let command = launch.build(port)?;
 
-    let mut llama_server = start_process("llama-server", command, Duration::ZERO)?;
+    let mut llama_server = start_process("llama-server", command, OnStop::SIGTERM)?;
     let sampler = Sampler::start(llama_server.pid(), SupportedWatch::OBSERVE)?;
-    llama_server.wait_ready(timeout, ready)?;
+    observer.outside(|| llama_server.wait_ready(timeout, ready))?;
     let worked = (|| {
         let text = server::message_filler(&http, &url, inputs.text_tokens)?;
         let image = base64::engine::general_purpose::STANDARD

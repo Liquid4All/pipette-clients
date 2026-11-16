@@ -28,6 +28,9 @@ use jni::refs::Global;
 use jni::strings::JNIString;
 use jni::sys::{jint, jlong, jstring};
 use jni::{Env, EnvUnowned, JValue, JavaVM, jni_sig, jni_str};
+// Linked only for its `log` feature, which nothing names in code.
+#[cfg(target_os = "android")]
+use tracing as _;
 
 use pipette_plan_types::{AndroidTemperatureSensor, AndroidThermalStatus};
 

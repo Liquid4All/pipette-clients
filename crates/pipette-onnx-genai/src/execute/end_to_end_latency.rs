@@ -17,7 +17,7 @@ use pipette_plan_types::{
     BenchmarkResultData, EndToEndLatencyBenchmark, RunResponse,
     UvOnnxGenaiExtraRuntimeConfiguration,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::completions;
 use crate::models::ResolvedOnnxGenaiModel;
@@ -41,10 +41,11 @@ pub(super) fn run(
     let mut onnx_server = start_process(
         server::SCRIPT_FILENAME,
         server::command(install, model, script.path(), port, client_config)?,
-        server::STOP_GRACE,
+        OnStop::SIGKILL,
     )?;
     let sampler = Sampler::start(onnx_server.pid(), SupportedWatch::OBSERVE)?;
-    onnx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| onnx_server.wait_ready(server::READY_TIMEOUT, ready))?;
     let result = measure(benchmark, &url, timeout, readiness_gate, observer);
     let (memory, _) = sampler.stop();
     let result_data = result.map_err(|err| err.context(onnx_server.stop_with_tail()))?;

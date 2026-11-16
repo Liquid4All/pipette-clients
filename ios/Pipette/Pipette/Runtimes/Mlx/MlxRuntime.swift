@@ -63,8 +63,10 @@ nonisolated enum MlxRuntime {
         MLX.Memory.clearCache()
     }
 
-    static func withFreshModel<T>(path: String, _ body: (any LanguageModel) async throws -> T) async throws -> T {
-        let model = try await loadModel(path: path)
+    /// The load is off `observer`'s attempt clock.
+    static func withFreshModel<T>(path: String, observer: MeasurementObserver,
+                                  _ body: (any LanguageModel) async throws -> T) async throws -> T {
+        let model = try await observer.outside { try await loadModel(path: path) }
         defer { releaseModel() }
         return try await body(model)
     }

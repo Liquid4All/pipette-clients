@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 use tabled::{Tabled, settings::Style};
 use tracing::level_filters::LevelFilter;
 
-use pipette_http::HttpClient;
+use pipette_http::{CdnProxy, HttpClient};
 use pipette_ops::EvalShard;
 use pipette_programs::{ExternalProgram, ExternalPrograms};
 use pipette_workspace::{InitResult, resolve_work_dir};
@@ -139,6 +139,18 @@ pub struct Cli {
     /// Log lines as text, or one JSON object per line (for a journal).
     #[arg(long, global = true, value_name = "FORMAT", default_value = "text")]
     pub log_format: LogFormat,
+
+    /// The caching proxy to fetch models through, as HOST:PORT (`[::1]:8090`
+    /// for IPv6): each model download goes there as the request it would send
+    /// to the site, with `Host` naming the site. Plain HTTP, so a token crosses
+    /// the network in clear, and a failing proxy fails the fetch.
+    #[arg(
+        long,
+        global = true,
+        env = "PIPETTE_CDN_PROXY",
+        value_name = "HOST:PORT"
+    )]
+    pub cdn_proxy: Option<CdnProxy>,
 
     /// The `uv` to provision venv-backed runtimes with: the binary, or a
     /// directory holding it. Default: the first `uv` on PATH.
@@ -336,8 +348,9 @@ fn dispatch(cli: Cli, console: &mut dyn Console) -> anyhow::Result<()> {
             workspace::require_workspace(&work_dir, work_dir_arg.as_deref())?;
             // `open` resolves the quota override against
             // `identity/settings.json` and carries the result.
-            let ws =
-                PipetteWorkspace::open(&work_dir, quota_override)?.with_eval_shard(cli.eval_shard);
+            let ws = PipetteWorkspace::open(&work_dir, quota_override)?
+                .with_eval_shard(cli.eval_shard)
+                .with_cdn_proxy(cli.cdn_proxy);
             match command {
                 RootCommand::Init => anyhow::bail!("init is handled before workspace open"),
                 RootCommand::Check(_) => {
@@ -419,6 +432,48 @@ mod tests {
             cli.docker_path.as_deref(),
             Some(Path::new("/opt/bin/docker"))
         );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::before(["pipette", "--cdn-proxy", "127.0.0.1:8090", "worker"])]
+    #[case::after(["pipette", "worker", "--cdn-proxy", "127.0.0.1:8090"])]
+    fn the_cdn_proxy_is_a_global_arg(#[case] argv: [&str; 4]) -> anyhow::Result<()> {
+        let cli = Cli::try_parse_from(argv)?;
+        assert_eq!(
+            cli.cdn_proxy.as_ref().map(CdnProxy::base_url),
+            Some("http://127.0.0.1:8090")
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::ipv6("[::1]:8090", Ok("http://[::1]:8090"))]
+    #[case::name("cdn-cache.lan:8090", Ok("http://cdn-cache.lan:8090"))]
+    #[case::scheme("http://x:1", Err("without a scheme"))]
+    #[case::path("x:1/models", Err("1 to 65535"))]
+    #[case::no_host(":8090", Err("the host"))]
+    #[case::no_port("x", Err("no port"))]
+    #[case::port_zero("x:0", Err("1 to 65535"))]
+    #[case::port_too_big("x:65536", Err("1 to 65535"))]
+    #[case::bare_ipv6("::1:8090", Err("the host"))]
+    fn a_cdn_proxy_is_a_host_and_a_port(
+        #[case] given: &str,
+        #[case] expected: Result<&str, &str>,
+    ) -> anyhow::Result<()> {
+        match (
+            Cli::try_parse_from(["pipette", "--cdn-proxy", given, "worker"]),
+            expected,
+        ) {
+            (Ok(cli), Ok(base_url)) => {
+                assert_eq!(
+                    cli.cdn_proxy.as_ref().map(CdnProxy::base_url),
+                    Some(base_url)
+                )
+            }
+            (Err(err), Err(reason)) => assert!(err.to_string().contains(reason), "{err}"),
+            (parsed, expected) => anyhow::bail!("{given}: {parsed:?}, expected {expected:?}"),
+        }
         Ok(())
     }
 
@@ -771,6 +826,31 @@ mod tests {
             format!("{err:#}").contains("--sync has nothing to send"),
             "got {err:#}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_pull_fetches_through_the_cdn_proxy() -> anyhow::Result<()> {
+        const SHA_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let proxy = httpmock::MockServer::start();
+        let file = proxy.mock(|when, then| {
+            when.path("/org/repo/resolve/main/m.gguf")
+                .header("host", "huggingface.co")
+                .header("x-expected-sha256", SHA_ABC);
+            then.status(200).body("abc");
+        });
+        let dir = WorkDir::new("cdn-proxy")?;
+        dir.dispatch(&["init"])?;
+        let address = proxy.address().to_string();
+        dir.dispatch(&[
+            "--cdn-proxy",
+            &address,
+            "models",
+            "pull",
+            "--model",
+            &format!("gguf-text://repo=org/repo&path=m.gguf&sha256={SHA_ABC}"),
+        ])?;
+        assert!(file.calls() > 0, "the pull did not reach the proxy");
         Ok(())
     }
 }

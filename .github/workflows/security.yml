@@ -52,23 +52,6 @@ jobs:
         # can only be set here.
         run: cargo deny check -D advisory-not-detected -D unnecessary-skip -D unmatched-skip advisories bans sources
 
-  unused-deps:
-    name: unused deps (cargo-machete)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install cargo-machete (pinned, checksum-verified)
-        run: ci/install-tool.sh cargo-machete
-
-      - name: Scan for unused dependencies
-        # The bare binary needs no toolchain. False positives (macro-only or
-        # `#[path]` uses) are suppressed in `[package.metadata.cargo-machete]`.
-        run: cargo-machete
-
   secrets:
     # A PR scans only `base..HEAD`, since a full-history scan would red every PR
     # over a string one branch carries. Push and cron scan HEAD's full history,
@@ -124,7 +107,7 @@ jobs:
   security-complete:
     # The one required context, so renaming a job's `name:` (its context) needs
     # no ruleset edit.
-    needs: [cargo-deny, unused-deps, secrets]
+    needs: [cargo-deny, secrets]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

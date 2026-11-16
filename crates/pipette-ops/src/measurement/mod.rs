@@ -115,7 +115,7 @@ pub enum MeasurementWarmup {
     /// stays out of rep 1.
     Once,
     /// Each attempt is a fresh process that warms itself at the cell's shape
-    /// (a `llama-bench` prefill, `llama-batched-bench`).
+    /// (`llama-batched-bench`), or has nothing to warm (a CPU-only build).
     Inline,
 }
 

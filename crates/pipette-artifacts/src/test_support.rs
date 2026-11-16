@@ -7,6 +7,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::progress::{FetchProgress, ProgressSink};
+
 /// What the log subscriber writes, for reading an event back.
 #[derive(Clone, Default)]
 struct Written(Arc<Mutex<Vec<u8>>>);
@@ -42,6 +44,20 @@ pub(crate) fn logged_text<R>(f: impl FnOnce() -> R) -> anyhow::Result<(R, String
         .finish();
     let result = tracing::subscriber::with_default(subscriber, f);
     Ok((result, written.text()?))
+}
+
+/// The `(done_bytes, total_bytes)` of each report a [`recording_sink`] got.
+pub(crate) type Recorded = Arc<Mutex<Vec<(u64, Option<u64>)>>>;
+
+pub(crate) fn recording_sink() -> (ProgressSink, Recorded) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&seen);
+    let sink: ProgressSink = Arc::new(move |p: FetchProgress<'_>| {
+        if let Ok(mut seen) = captured.lock() {
+            seen.push((p.done_bytes, p.total_bytes));
+        }
+    });
+    (sink, seen)
 }
 
 /// `declared` with every vault source under a `custom_label`, found by the tag

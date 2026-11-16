@@ -181,7 +181,9 @@ fn run_with(
         | BenchmarkDefinition::VlMaxMemory(_)
         | BenchmarkDefinition::VlSpecDecode(_)
         | BenchmarkDefinition::AsrThroughput(_)
-        | BenchmarkDefinition::AsrMaxMemory(_) => cell_flags::is_docker(&req.runtime.bound)
+        | BenchmarkDefinition::AsrMaxMemory(_)
+        | BenchmarkDefinition::DecisionLatency(_)
+        | BenchmarkDefinition::DecisionMaxMemory(_) => cell_flags::is_docker(&req.runtime.bound)
             .then_some(tree)
             .and_then(|tree| {
                 tree.inspect_err(|err| {
@@ -213,7 +215,7 @@ fn run_with(
         })
         .transpose()
         .context("could not start the memory probe's thread")?;
-    server.wait_ready(server::READY_TIMEOUT)?;
+    observer.outside(|| server.wait_ready(server::READY_TIMEOUT))?;
     tracing::info!(
         benchmark_id = %req.benchmark.benchmark_id(),
         "running benchmark"
@@ -347,7 +349,9 @@ fn dispatch(
         BenchmarkDefinition::VlThroughput(_)
         | BenchmarkDefinition::VlMaxMemory(_)
         | BenchmarkDefinition::AsrThroughput(_)
-        | BenchmarkDefinition::AsrMaxMemory(_) => Err(not_implemented(kind)),
+        | BenchmarkDefinition::AsrMaxMemory(_)
+        | BenchmarkDefinition::DecisionLatency(_)
+        | BenchmarkDefinition::DecisionMaxMemory(_) => Err(not_implemented(kind)),
     }
 }
 
@@ -670,7 +674,9 @@ mod batch_tests {
             | BenchmarkDefinition::AsrEval(_)
             | BenchmarkDefinition::VlSpecDecode(_)
             | BenchmarkDefinition::AsrThroughput(_)
-            | BenchmarkDefinition::AsrMaxMemory(_)) => {
+            | BenchmarkDefinition::AsrMaxMemory(_)
+            | BenchmarkDefinition::DecisionLatency(_)
+            | BenchmarkDefinition::DecisionMaxMemory(_)) => {
                 anyhow::bail!("not a timing benchmark: {}", other.benchmark_type())
             }
         }?;
@@ -725,7 +731,8 @@ mod batch_tests {
             | BenchmarkResultData::Eval { .. }
             | BenchmarkResultData::VlThroughput { .. }
             | BenchmarkResultData::AsrThroughput { .. }
-            | BenchmarkResultData::VlSpecDecode { .. }) => {
+            | BenchmarkResultData::VlSpecDecode { .. }
+            | BenchmarkResultData::DecisionLatency { .. }) => {
                 anyhow::bail!("unexpected result data {other:?}")
             }
         };

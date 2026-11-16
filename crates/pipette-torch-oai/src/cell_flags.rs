@@ -203,7 +203,9 @@ pub(crate) fn batch_argv(runtime: &Runtime, benchmark: &BenchmarkDefinition) -> 
         | BenchmarkDefinition::VlMaxMemory(_)
         | BenchmarkDefinition::VlSpecDecode(_)
         | BenchmarkDefinition::AsrThroughput(_)
-        | BenchmarkDefinition::AsrMaxMemory(_) => return Vec::new(),
+        | BenchmarkDefinition::AsrMaxMemory(_)
+        | BenchmarkDefinition::DecisionLatency(_)
+        | BenchmarkDefinition::DecisionMaxMemory(_) => return Vec::new(),
     };
     if batch_size == BatchSize::one() {
         return Vec::new();
@@ -399,7 +401,9 @@ pub(crate) fn default_vllm_max_model_len(benchmark: &BenchmarkDefinition) -> Opt
         BenchmarkDefinition::VlMaxMemory(_)
         | BenchmarkDefinition::VlSpecDecode(_)
         | BenchmarkDefinition::AsrThroughput(_)
-        | BenchmarkDefinition::AsrMaxMemory(_) => 4096,
+        | BenchmarkDefinition::AsrMaxMemory(_)
+        | BenchmarkDefinition::DecisionLatency(_)
+        | BenchmarkDefinition::DecisionMaxMemory(_) => 4096,
     })
 }
 
@@ -764,7 +768,9 @@ mod tests {
             | BenchmarkDefinition::VlMaxMemory(_)
             | BenchmarkDefinition::VlSpecDecode(_)
             | BenchmarkDefinition::AsrThroughput(_)
-            | BenchmarkDefinition::AsrMaxMemory(_)) => other,
+            | BenchmarkDefinition::AsrMaxMemory(_)
+            | BenchmarkDefinition::DecisionLatency(_)
+            | BenchmarkDefinition::DecisionMaxMemory(_)) => other,
         }
     }
 

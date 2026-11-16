@@ -61,6 +61,11 @@ Which runtimes load each model type is [below](#model--runtime-compatibility).
 `apple_foundation_text` exists as a JSON type but has no URI and is not
 pullable: the weights ship with the OS.
 
+A model's files, from a Hugging Face repo or a `url` on any host, come through
+the proxy that `--cdn-proxy` names when one is set
+([usage.md](usage.md#downloading-through-a-cdn-proxy)). The model's identity is
+the same either way.
+
 ### Keys
 
 `gguf-text` takes exactly one of `repo` or `url`:

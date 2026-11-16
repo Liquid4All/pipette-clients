@@ -32,6 +32,8 @@
 //!   beams, and the reply generates `min(max_tokens, room)` tokens with
 //!   `finish_reason: "length"` and a usage count.
 //! - `FAKE_LLAMA_CHAT_DELAY_MS`: holds every `/v1/chat/completions` reply.
+//! - `FAKE_LLAMA_START_DELAY_MS`: listens only after this long, as a model
+//!   load keeps the real one from answering `/health`.
 //! - `FAKE_LLAMA_CHAT_REPLY`: an unstreamed chat reply, which otherwise stops
 //!   at the limit with `max_tokens` decoded, ends with `finish_reason: stop`
 //!   (`early_stop`) or one completion token short (`short`).
@@ -293,6 +295,12 @@ fn main() -> anyhow::Result<()> {
         process::id()
     );
 
+    if let Some(delay) = env::var("FAKE_LLAMA_START_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        thread::sleep(Duration::from_millis(delay));
+    }
     let listener = TcpListener::bind(("127.0.0.1", port)).context("bind failed")?;
     for stream in listener.incoming().flatten() {
         let triggers = triggers.clone();
@@ -383,8 +391,8 @@ fn handle_connection(mut stream: TcpStream, triggers: Triggers) {
         "/completion" => {
             log_call(&triggers, body_s);
             enter_generation(&triggers);
-            handle_completion(&mut stream, body_s, &triggers);
             INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+            handle_completion(&mut stream, body_s, &triggers);
         }
         "/v1/chat/completions" => {
             if let Some(path) = triggers.body_file.as_deref()
@@ -395,8 +403,8 @@ fn handle_connection(mut stream: TcpStream, triggers: Triggers) {
             }
             log_call(&triggers, body_s);
             enter_generation(&triggers);
-            handle_chat(&mut stream, body_s, &triggers);
             INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+            handle_chat(&mut stream, body_s, &triggers);
         }
         "/tokenize" => {
             // llama.cpp's native body is {"content": "..."}, not the chat
@@ -513,7 +521,8 @@ fn log_call(triggers: &Triggers, body: &str) {
 
 /// Count this generation request as in flight, record the high-water mark, and
 /// park until the rendezvous. Returns with the request still counted; the
-/// caller decrements when it is done.
+/// caller decrements before it replies, since a client can send its next
+/// request the moment the reply lands and would be counted alongside this one.
 fn enter_generation(triggers: &Triggers) {
     let inflight = INFLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
     PEAK_INFLIGHT.fetch_max(inflight, Ordering::SeqCst);

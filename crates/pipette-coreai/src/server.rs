@@ -7,15 +7,13 @@ use anyhow::Context;
 
 use pipette_http::HttpClient;
 use pipette_plan_types::{RunRequest, RuntimeOutput};
-use pipette_subprocess::{NotReadyError, Process, start_process};
+use pipette_subprocess::{NotReadyError, OnStop, Process, start_process};
 
 use crate::models::require_coreai_model_dir;
 
 const SIDECAR_NAME: &str = "pipette-coreai-sidecar";
 /// First-load specialization runs before the ready marker and can take long.
 const READY_TIMEOUT: Duration = Duration::from_secs(3600);
-/// The sidecar keeps no state worth a graceful stop.
-const STOP_GRACE: Duration = Duration::ZERO;
 /// Client-side request timeout for Core AI timing/memory HTTP cells.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(3600);
 const READY_MARKER: &str = "PIPETTE_COREAI_READY";
@@ -49,7 +47,7 @@ pub fn start_server(req: &RunRequest, sidecar: PathBuf) -> anyhow::Result<Server
         .arg("--seed")
         .arg("42");
     pipette_subprocess::echo_info(&command);
-    let mut process = start_process(SIDECAR_NAME, command, STOP_GRACE)?;
+    let mut process = start_process(SIDECAR_NAME, command, OnStop::SIGKILL)?;
     process.wait_ready(READY_TIMEOUT, ready)?;
     let base_url = format!("http://127.0.0.1:{port}");
     tracing::info!(pid = process.pid(), %base_url, "Core AI sidecar ready");
@@ -88,7 +86,7 @@ mod tests {
     #[test]
     fn a_start_waits_for_the_ready_marker() -> anyhow::Result<()> {
         let script = "sleep 1; echo 'PIPETTE_COREAI_READY port=1 model=m specialization_cache=hit' >&2; exec sleep 60";
-        let mut process = start_process(SIDECAR_NAME, sh(script), STOP_GRACE)?;
+        let mut process = start_process(SIDECAR_NAME, sh(script), OnStop::SIGKILL)?;
         process.wait_ready(READY_TIMEOUT, ready)?;
         Ok(())
     }
@@ -109,7 +107,7 @@ mod tests {
         #[case] why: &str,
         #[case] printed: &str,
     ) -> anyhow::Result<()> {
-        let mut process = start_process(SIDECAR_NAME, sh(script), STOP_GRACE)?;
+        let mut process = start_process(SIDECAR_NAME, sh(script), OnStop::SIGKILL)?;
         let Err(err) = process.wait_ready(READY_TIMEOUT, ready) else {
             anyhow::bail!("a sidecar that never got ready was ready");
         };

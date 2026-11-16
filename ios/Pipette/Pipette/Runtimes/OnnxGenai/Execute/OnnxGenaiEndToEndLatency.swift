@@ -14,7 +14,7 @@ nonisolated extension OnnxGenaiExecute {
         let decodeTokens = Int(benchmark.parameterDecodeTokens.value)
         // Before the load, which would warm the device the gate waited to cool.
         try readinessGate()
-        return try await OnnxGenaiRuntime.withFreshModel(path: model.dir) { loaded in
+        return try await OnnxGenaiRuntime.withFreshModel(path: model.dir, observer: observer) { loaded in
             let ids = try await OnnxGenaiRuntime.promptIds(
                 targetTokens: Int(benchmark.parameterPrefillTokens.value), tokenizer: loaded.tokenizer)
             return try await BenchmarkMeasurement.endToEnd(

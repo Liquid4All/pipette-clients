@@ -104,6 +104,9 @@ pub fn run(
         BenchmarkDefinition::AsrThroughput(_) | BenchmarkDefinition::AsrMaxMemory(_) => {
             anyhow::bail!("ASR benchmarks are not yet supported for ONNX GenAI")
         }
+        BenchmarkDefinition::DecisionLatency(_) | BenchmarkDefinition::DecisionMaxMemory(_) => {
+            anyhow::bail!("decision benchmarks run on llama-server only, not on ONNX GenAI")
+        }
     }
 }
 

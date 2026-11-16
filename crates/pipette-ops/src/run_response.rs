@@ -130,7 +130,7 @@ mod tests {
 
     use anyhow::Context;
 
-    use pipette_subprocess::{Stream, start_process};
+    use pipette_subprocess::{OnStop, Stream, start_process};
 
     use super::*;
 
@@ -144,7 +144,7 @@ mod tests {
     fn ran(script: &str) -> anyhow::Result<Process> {
         let mut command = Command::new("sh");
         command.args(["-c", script]);
-        let mut process = start_process("sh", command, Duration::ZERO)?;
+        let mut process = start_process("sh", command, OnStop::SIGKILL)?;
         process.wait(Duration::from_secs(10))?;
         Ok(process)
     }
@@ -154,7 +154,7 @@ mod tests {
         let script = "echo printed >&2; exec sleep 30";
         let mut command = Command::new("sh");
         command.args(["-c", script]);
-        let mut process = start_process("sh", command, Duration::ZERO)?;
+        let mut process = start_process("sh", command, OnStop::SIGKILL)?;
         process
             .wait_for_output(Stream::Stderr, Duration::from_secs(10), |text| {
                 text.contains("printed")

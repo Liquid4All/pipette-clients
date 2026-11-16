@@ -10,7 +10,7 @@ Why it exists and what it measurably does on the EVO-X2 is in [GMKtec GPU idle r
 
 ## Install
 
-Download `pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi` from the release, then from an elevated shell:
+Download `pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi` from the release (`pipette-gpu-keepalive-aarch64-pc-windows-msvc.msi` on Windows on ARM; CI builds it but cannot install it), then from an elevated shell:
 
 ```powershell
 msiexec /i pipette-gpu-keepalive-x86_64-pc-windows-msvc.msi /qn /l*v C:\Windows\Temp\gk-install.log

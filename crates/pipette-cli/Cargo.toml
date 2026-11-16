@@ -23,6 +23,7 @@ pipette-artifacts.workspace = true
 pipette-artifacts-catalog.workspace = true
 pipette-device.workspace = true
 pipette-llamacpp.workspace = true
+pipette-memprobe.workspace = true
 pipette-torch-oai.workspace = true
 pipette-http.workspace = true
 pipette-mgmt-client.workspace = true
@@ -31,8 +32,6 @@ pipette-readiness.workspace = true
 pipette-subprocess.workspace = true
 pipette-programs.workspace = true
 pipette-wait.workspace = true
-pipette-mlx.workspace = true
-pipette-coreai.workspace = true
 pipette-onnx-genai.workspace = true
 pipette-openvino.workspace = true
 pipette-ovms.workspace = true
@@ -49,6 +48,10 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pipette-coreai.workspace = true
+pipette-mlx.workspace = true
 
 [dev-dependencies]
 pipette-programs = { workspace = true, features = ["test-support"] }

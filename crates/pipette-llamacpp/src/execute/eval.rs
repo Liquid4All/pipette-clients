@@ -537,7 +537,7 @@ mod tests {
         BenchmarkId, LlamacppFlashAttention, LlamacppLoadMode, PositiveCount, PositiveSeconds,
         RunRequest,
     };
-    use pipette_subprocess::start_process;
+    use pipette_subprocess::{OnStop, start_process};
 
     use super::*;
     use crate::eval_pool::{
@@ -988,7 +988,7 @@ mod tests {
         } else {
             ["-c", "exit 0"]
         });
-        let mut exited = start_process("llama-server", command, Duration::ZERO)?;
+        let mut exited = start_process("llama-server", command, OnStop::SIGKILL)?;
         exited.wait(Duration::from_secs(10))?;
         let slot = Mutex::new(ServerSlot {
             server: Server::Down(exited),

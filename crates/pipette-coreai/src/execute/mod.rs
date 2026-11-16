@@ -69,5 +69,8 @@ pub fn run(
         | BenchmarkDefinition::AsrMaxMemory(_) => {
             anyhow::bail!("this benchmark is not yet supported for Core AI")
         }
+        BenchmarkDefinition::DecisionLatency(_) | BenchmarkDefinition::DecisionMaxMemory(_) => {
+            anyhow::bail!("decision benchmarks run on llama-server only, not on Core AI")
+        }
     }
 }

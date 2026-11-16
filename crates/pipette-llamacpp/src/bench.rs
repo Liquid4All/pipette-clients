@@ -41,6 +41,7 @@ pub struct BenchCommandBuilder {
     raw: Vec<String>,
     envs: Vec<EnvForward>,
     client_config: Option<LlamacppCliStockToolsExtraRuntimeConfiguration>,
+    no_warmup: bool,
 }
 
 impl BenchCommandBuilder {
@@ -61,7 +62,14 @@ impl BenchCommandBuilder {
             raw: Vec::new(),
             envs: Vec::new(),
             client_config: None,
+            no_warmup: false,
         }
+    }
+
+    /// Skips the tool's own untimed pass, for a run whose warm-up came before.
+    pub fn no_warmup(mut self, no_warmup: bool) -> Self {
+        self.no_warmup = no_warmup;
+        self
     }
 
     pub fn threads(mut self, threads: Option<u32>) -> Self {
@@ -134,6 +142,9 @@ impl BenchCommandBuilder {
             (None, None) => {}
         }
         tokens.extend(knobs.raw.iter().cloned());
+        if self.no_warmup {
+            tokens.push("--no-warmup".to_owned());
+        }
         // One rep per invoke; the reps are the typed entry's. `raw` cannot carry one:
         // every bench cell reserves `--repetitions`.
         tokens.extend(["--repetitions".to_owned(), "1".to_owned()]);
@@ -312,6 +323,7 @@ mod tests {
         launch().threads(Some(8)).mmap(Some(false)).raw(vec!["--poll".to_owned(), "0".to_owned()]),
         &["--mmap", "0", "--poll", "0", "--repetitions", "1", "--threads", "8"]
     )]
+    #[case::no_warmup(launch().no_warmup(true), &["--no-warmup", "--repetitions", "1"])]
     #[case::load_mode_alone(
         launch().load_mode(Some(LlamacppLoadMode::MmapMlock)),
         &["--load-mode", "mmap+mlock", "--repetitions", "1"]

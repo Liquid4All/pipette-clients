@@ -9,7 +9,8 @@ use anyhow::Context;
 use pipette_http::HttpClient;
 use pipette_http::retry::{Disposition, RetryPolicy, retrying};
 use pipette_plan_types::{
-    LlamacppCliStockTools, LlamacppCliStockToolsRelease, LlamacppCliStockToolsSource, Runtime,
+    CudartAssetError, LlamacppCliStockTools, LlamacppCliStockToolsRelease,
+    LlamacppCliStockToolsSource, Runtime,
 };
 
 use crate::archive::{extract_archive, infer_archive_kind};
@@ -33,6 +34,8 @@ pub enum LlamacppInstallError {
          release file in `asset`, or install from an archive URL instead"
     )]
     NoReleaseAsset { flavor: String, version: String },
+    #[error("{0}; install from an archive URL instead")]
+    CudartAsset(#[from] CudartAssetError),
     #[error("downloading runtime archive from {url} failed")]
     Http {
         url: String,
@@ -56,7 +59,9 @@ impl LlamacppInstallError {
         match self {
             Self::Http { source, .. } => source.disposition(),
             Self::Io { .. } => Disposition::TRANSIENT,
-            Self::NotInstallable(_) | Self::NoReleaseAsset { .. } => Disposition::Permanent,
+            Self::NotInstallable(_) | Self::NoReleaseAsset { .. } | Self::CudartAsset(_) => {
+                Disposition::Permanent
+            }
         }
     }
 }
@@ -92,17 +97,9 @@ fn install_llamacpp(
     blobs_dir: &Path,
     reporter: &mut Reporter,
 ) -> anyhow::Result<()> {
-    let (url, kind) = match &rt.source {
-        LlamacppCliStockToolsSource::GithubRelease(release) => {
-            let url = release_url(rt, release)?;
-            let kind = infer_archive_kind(&url);
-            (url, kind)
-        }
-        LlamacppCliStockToolsSource::RemoteArchive { url } => {
-            let download = url.as_ref().to_owned();
-            let kind = infer_archive_kind(&download);
-            (download, kind)
-        }
+    let urls = match &rt.source {
+        LlamacppCliStockToolsSource::GithubRelease(release) => release_urls(rt, release)?,
+        LlamacppCliStockToolsSource::RemoteArchive { url } => vec![url.as_ref().to_owned()],
         // Verified against its record and unpacked in place; the kind is read
         // off the bytes, since the path names no file.
         LlamacppCliStockToolsSource::VaultRemoteArchive { url, .. } => {
@@ -123,24 +120,68 @@ fn install_llamacpp(
         }
     };
 
-    let start = reporter.mark();
-    let bytes = retrying(
-        retry,
-        &url,
-        |_| {
-            reporter.rewind(start);
-            read_archive(http, &url, reporter)
-        },
-        LlamacppInstallError::disposition,
-    )?;
-    extract_archive(Cursor::new(&bytes), kind, blobs_dir)?;
-    check_binaries(blobs_dir)
+    fetch_and_unpack(http, retry, &urls, blobs_dir, reporter)?;
+    check_binaries(blobs_dir)?;
+    if matches!(rt.source, LlamacppCliStockToolsSource::GithubRelease(_))
+        && rt.cudart_asset()?.is_some()
+    {
+        check_cuda_runtime(blobs_dir)?;
+    }
+    Ok(())
 }
 
-fn release_url(
+/// ggml-cuda.dll loads the CUDA runtime from its own directory; without it
+/// there llama.cpp silently runs on the CPU.
+fn check_cuda_runtime(blobs_dir: &Path) -> anyhow::Result<()> {
+    let server = find_binary(blobs_dir, &binary_name("llama-server"))?;
+    let dir = server
+        .parent()
+        .with_context(|| format!("{} has no parent directory", server.display()))?;
+    let names = std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        names.iter().any(|name| name
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .starts_with("cudart64_")),
+        "the CUDA runtime archive left no `cudart64_*` beside {}",
+        server.display()
+    );
+    Ok(())
+}
+
+/// Each archive is unpacked into `blobs_dir` before the next is fetched, so
+/// only one is held in memory.
+fn fetch_and_unpack(
+    http: &HttpClient,
+    retry: &RetryPolicy,
+    urls: &[String],
+    blobs_dir: &Path,
+    reporter: &mut Reporter,
+) -> anyhow::Result<()> {
+    urls.iter().try_for_each(|url| {
+        let start = reporter.mark();
+        let bytes = retrying(
+            retry,
+            url,
+            |_| {
+                reporter.rewind(start);
+                read_archive(http, url, urls.len() == 1, reporter)
+            },
+            LlamacppInstallError::disposition,
+        )?;
+        extract_archive(Cursor::new(&bytes), infer_archive_kind(url), blobs_dir)
+    })
+}
+
+/// The build archive, then for a Windows CUDA build its CUDA runtime DLLs,
+/// which upstream ships as a separate asset; without them llama.cpp runs on the CPU.
+fn release_urls(
     rt: &LlamacppCliStockTools,
     release: &LlamacppCliStockToolsRelease,
-) -> Result<String, LlamacppInstallError> {
+) -> Result<Vec<String>, LlamacppInstallError> {
     let version = release.repository_version.as_ref();
     let asset = rt
         .release_asset()
@@ -148,10 +189,16 @@ fn release_url(
             flavor: rt.flavor.to_string(),
             version: version.to_owned(),
         })?;
-    Ok(format!(
-        "https://{}/releases/download/{version}/{asset}",
-        release.repository_url
-    ))
+    let url = |asset: &str| {
+        format!(
+            "https://{}/releases/download/{version}/{asset}",
+            release.repository_url
+        )
+    };
+    Ok(std::iter::once(asset)
+        .chain(rt.cudart_asset()?)
+        .map(|asset| url(&asset))
+        .collect())
 }
 
 /// An upstream llama.cpp release at `version`, naming `asset` when given.
@@ -181,6 +228,7 @@ fn check_binaries(blobs_dir: &Path) -> anyhow::Result<()> {
 fn read_archive(
     http: &HttpClient,
     url: &str,
+    sole_part: bool,
     reporter: &mut Reporter,
 ) -> Result<Vec<u8>, LlamacppInstallError> {
     let mut response = pipette_http::send(http.client().get(url)).map_err(|source| {
@@ -189,9 +237,11 @@ fn read_archive(
             source,
         }
     })?;
-    // An archive has no listing to size it beforehand; its one file's length is
-    // the artifact's.
-    reporter.set_total_if_unknown(response.content_length());
+    // An archive has no listing to size it beforehand; only a sole archive's
+    // length is the artifact's, else the bar would sit at 100% on the next one.
+    if sole_part {
+        reporter.set_total_if_unknown(response.content_length());
+    }
     // Buffered whole for `extract_archive`: an archive is tens of MB, so
     // streaming would only add a temp file. `content-length` is capped because
     // a remote claiming terabytes would abort the process on the reserve.
@@ -285,43 +335,75 @@ mod tests {
     }
 
     /// The flavor names the file unless the release does, which is also how
-    /// a flavor upstream stopped building is still reached.
+    /// a flavor upstream stopped building is still reached. A Windows CUDA
+    /// build also fetches its CUDA runtime archive; no other flavor does.
     #[rstest]
     #[case::flavor_names_it(
         LlamaCppFlavor::LinuxX64Rocm,
         None,
-        Some("llama-b11399-bin-ubuntu-rocm-10.0-x64.tar.gz")
+        Ok(&["llama-b11399-bin-ubuntu-rocm-10.0-x64.tar.gz"][..])
     )]
     #[case::declared_wins(
         LlamaCppFlavor::LinuxX64Rocm,
         Some("llama-b11399-bin-ubuntu-vulkan-x64.tar.gz"),
-        Some("llama-b11399-bin-ubuntu-vulkan-x64.tar.gz")
+        Ok(&["llama-b11399-bin-ubuntu-vulkan-x64.tar.gz"][..])
+    )]
+    #[case::windows_cuda(
+        LlamaCppFlavor::WindowsArm64Cuda13,
+        None,
+        Ok(&[
+            "llama-b11399-bin-win-cuda-13.4-arm64.zip",
+            "cudart-llama-bin-win-cuda-13.4-arm64.zip",
+        ][..])
     )]
     #[case::past_the_flavor(
         LlamaCppFlavor::WindowsX64Cuda131,
         Some("llama-b11399-bin-win-cuda-13.4-x64.zip"),
-        Some("llama-b11399-bin-win-cuda-13.4-x64.zip")
+        Ok(&[
+            "llama-b11399-bin-win-cuda-13.4-x64.zip",
+            "cudart-llama-bin-win-cuda-13.4-x64.zip",
+        ][..])
     )]
-    #[case::nothing_names_it(LlamaCppFlavor::WindowsX64Cuda131, None, None)]
-    fn release_url_takes_the_declared_asset(
+    #[case::windows_vulkan(
+        LlamaCppFlavor::WindowsArm64Vulkan,
+        None,
+        Ok(&["llama-b11399-bin-win-vulkan-arm64.zip"][..])
+    )]
+    #[case::linux_cuda(
+        LlamaCppFlavor::LinuxArm64Cuda13,
+        None,
+        Ok(&["llama-b11399-bin-ubuntu-cuda-13.4-arm64.tar.gz"][..])
+    )]
+    #[case::nothing_names_it(LlamaCppFlavor::WindowsX64Cuda131, None, Err("`asset`"))]
+    #[case::unnamed_companion(
+        LlamaCppFlavor::WindowsArm64Cuda13,
+        Some("acme-llama-win-cuda.zip"),
+        Err("CUDA runtime")
+    )]
+    fn release_urls_take_the_declared_asset(
         #[case] flavor: LlamaCppFlavor,
         #[case] asset: Option<&str>,
-        #[case] file: Option<&str>,
+        #[case] want: Result<&[&str], &str>,
     ) -> anyhow::Result<()> {
         let release = upstream_release("b11399", asset)?;
         let rt = LlamacppCliStockTools {
             source: LlamacppCliStockToolsSource::GithubRelease(release.clone()),
             flavor,
         };
-        match (release_url(&rt, &release), file) {
-            (Ok(url), Some(file)) => assert_eq!(
-                url,
-                format!("https://github.com/ggml-org/llama.cpp/releases/download/b11399/{file}")
+        match (release_urls(&rt, &release), want) {
+            (Ok(urls), Ok(files)) => assert_eq!(
+                urls,
+                files
+                    .iter()
+                    .map(|file| format!(
+                        "https://github.com/ggml-org/llama.cpp/releases/download/b11399/{file}"
+                    ))
+                    .collect::<Vec<_>>()
             ),
-            (Err(err), None) => {
+            (Err(err), Err(needle)) => {
                 let message = err.to_string();
-                assert!(message.contains("`b11399`"), "{message}");
-                assert!(message.contains("`asset`"), "{message}");
+                assert!(message.contains("b11399"), "{message}");
+                assert!(message.contains(needle), "{message}");
             }
             (got, want) => anyhow::bail!("got {got:?}, want {want:?}"),
         }
@@ -420,6 +502,26 @@ mod tests {
         Ok((tmp, result))
     }
 
+    /// Unpack a Windows CUDA build, then the CUDA runtime archive `cudart`
+    /// answers with, into one directory.
+    fn fetch_win_cuda(
+        cudart: Reply,
+        reporter: &mut Reporter,
+    ) -> anyhow::Result<(tempfile::TempDir, ScriptedServer, anyhow::Result<()>)> {
+        let (build, _) = win_cuda_archives()?;
+        let server = ScriptedServer::start(vec![Reply::ok(&build), cudart])?;
+        let urls = [server.url("/build.zip"), server.url("/cudart.zip")];
+        let tmp = tempfile::tempdir()?;
+        let result = fetch_and_unpack(
+            &HttpClient::new("pipette-test")?,
+            &RetryPolicy::IMMEDIATE,
+            &urls,
+            tmp.path(),
+            reporter,
+        );
+        Ok((tmp, server, result))
+    }
+
     #[rstest]
     #[case::dropped_connections(vec![Reply::Drop, Reply::Drop])]
     #[case::unavailable(vec![Reply::status(503), Reply::status(503), Reply::status(503)])]
@@ -445,6 +547,84 @@ mod tests {
         let err = result.err().context("a 404 should fail the install")?;
         assert!(format!("{err:#}").contains("HTTP 404"), "{err:#}");
         assert_eq!(server.requests().len(), 1);
+        Ok(())
+    }
+
+    fn flat_zip(files: &[&str]) -> anyhow::Result<Vec<u8>> {
+        use std::io::Write;
+
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        files.iter().try_for_each(|file| {
+            zip.start_file(*file, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(b"MZ")
+        })?;
+        Ok(zip.finish()?.into_inner())
+    }
+
+    /// A Windows CUDA build and its CUDA runtime archive, as upstream ships
+    /// them: both flat, unpacked into one directory.
+    fn win_cuda_archives() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        let (bench, server) = (binary_name("llama-bench"), binary_name("llama-server"));
+        let build = flat_zip(&[&bench, &server, "ggml-cuda.dll"])?;
+        let cudart = flat_zip(&["cudart64_13.dll", "cublas64_13.dll", "cublasLt64_13.dll"])?;
+        Ok((build, cudart))
+    }
+
+    /// Also leaves the total unset, since the build zip's length is not the
+    /// two archives' together.
+    #[test]
+    fn the_cuda_runtime_lands_beside_the_build() -> anyhow::Result<()> {
+        let (_, cudart) = win_cuda_archives()?;
+        let (sink, seen) = crate::test_support::recording_sink();
+        let (tmp, server, result) = fetch_win_cuda(
+            Reply::ok(&cudart),
+            &mut Reporter::new(Some(sink), "llama".to_owned(), None),
+        )?;
+        result?;
+        let seen = seen.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|(_, total)| total.is_none()), "{seen:?}");
+        check_binaries(tmp.path())?;
+        check_cuda_runtime(tmp.path())?;
+        assert!(tmp.path().join("ggml-cuda.dll").is_file());
+        let requests = server.requests();
+        assert!(
+            requests
+                .first()
+                .is_some_and(|r| r.starts_with("GET /build.zip "))
+        );
+        assert!(
+            requests
+                .get(1)
+                .is_some_and(|r| r.starts_with("GET /cudart.zip "))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_cuda_runtime_fails_the_install() -> anyhow::Result<()> {
+        let (_tmp, _server, result) = fetch_win_cuda(Reply::status(404), &mut Reporter::silent())?;
+        let err = result
+            .err()
+            .context("a missing CUDA runtime archive should fail the install")?;
+        assert!(format!("{err:#}").contains("cudart.zip"), "{err:#}");
+        assert!(format!("{err:#}").contains("HTTP 404"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_cuda_runtime_in_a_subfolder_fails_the_install() -> anyhow::Result<()> {
+        let cudart = flat_zip(&[
+            "bin/cudart64_13.dll",
+            "bin/cublas64_13.dll",
+            "bin/cublasLt64_13.dll",
+        ])?;
+        let (tmp, _server, result) = fetch_win_cuda(Reply::ok(&cudart), &mut Reporter::silent())?;
+        result?;
+        let err = check_cuda_runtime(tmp.path())
+            .err()
+            .context("a CUDA runtime away from llama-server should fail the install")?;
+        assert!(err.to_string().contains("cudart64_"), "{err:#}");
         Ok(())
     }
 

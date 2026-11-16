@@ -1,0 +1,10 @@
+{
+  "benchmark_id": "decision_max_memory_384x384_text0_img1_q1",
+  "benchmark_type": "decision_max_memory",
+  "parameter_batch_size": 1,
+  "parameter_image_height": 384,
+  "parameter_image_width": 384,
+  "parameter_num_images": 1,
+  "parameter_questions": 1,
+  "parameter_text_tokens": 0
+}

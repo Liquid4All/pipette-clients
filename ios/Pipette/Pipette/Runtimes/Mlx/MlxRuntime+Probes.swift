@@ -35,7 +35,9 @@ extension MlxRuntime {
     /// llama and the reference.
     nonisolated static func coherence(modelPath: String, promptIds: [Int32], gen: Int,
                                       prefillChunk: Int = Int(defaultPrefillChunk)) async throws -> (top5: [Int], ids: [Int]) {
-        try await withFreshModel(path: modelPath) { model in
+        try await withFreshModel(path: modelPath,
+                                observer: MeasurementObserver(onBeforeRepStart: {},
+                                                              onAfterRepEnd: {})) { model in
             let cache = try model.newCache(parameters: nil)
             let last = prefill(model, MLXArray(promptIds).reshaped(1, -1), cache: cache,
                                chunk: prefillChunk)

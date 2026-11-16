@@ -65,13 +65,14 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clap::{Args, ValueEnum};
 
+use pipette_artifacts::quota;
 use pipette_http::HttpClient;
 use pipette_http::retry::{exponential_backoff, jittered};
 use pipette_mgmt_client::ConditionalResponse;
 use pipette_mgmt_client::types::{ClaimedJob, IfNoneMatch};
 use pipette_mgmt_client::{ClientIdentity, ClientStatus, ServerUrl, client_api};
 use pipette_ops::eval_completions::EvalRunDigest;
-use pipette_plan_types::FailureCode;
+use pipette_plan_types::{ClaimRequest, FailureCode};
 use pipette_programs::{ExternalProgram, ExternalPrograms};
 
 use crate::client::claim::{redacted_spec, run_spec_from_claim};
@@ -349,9 +350,11 @@ impl WorkerArgs {
                 tracing::info!(completed, "stop requested; leaving claim loop");
                 return Ok(());
             }
+            let request = cached_claim_request(ws);
             tracing::debug!(completed, idle_rounds, "polling claim");
-            let Some(poll) = claim_with_retry(server, http, auth, |d| sleep_interruptible(d, stop))
-            else {
+            let Some(poll) = claim_with_retry(server, http, auth, request.as_ref(), |d| {
+                sleep_interruptible(d, stop)
+            }) else {
                 tracing::info!("stop requested during claim backoff; leaving claim loop");
                 return Ok(());
             };
@@ -601,6 +604,25 @@ fn reboot_failure_reason(old_boot_id: &str, new_boot_id: &str) -> String {
     reason
 }
 
+fn cached_claim_request(ws: &PipetteWorkspace) -> Option<ClaimRequest> {
+    match quota::list_cached_artifacts(ws.models().models_dir(), ws.runtimes().runtimes_dir()) {
+        Ok(cached) => {
+            tracing::debug!(
+                cached_models = cached.models.len(),
+                cached_runtimes = cached.runtimes.len(),
+                "claim cache inventory"
+            );
+            Some(ClaimRequest {
+                cached: Some(cached),
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, "listing cached artifacts failed; claiming without a body");
+            None
+        }
+    }
+}
+
 /// Claim until the server answers something the loop can act on, absorbing
 /// transients at [`exponential_backoff`] from a second to a minute: a worker is
 /// a daemon, and a server that is down now will be up later. `None` means
@@ -610,6 +632,7 @@ fn claim_with_retry(
     server: &ServerUrl,
     http: &HttpClient,
     auth: &ClientIdentity,
+    request: Option<&ClaimRequest>,
     mut sleep: impl FnMut(Duration) -> ControlFlow<()>,
 ) -> Option<ClaimPoll> {
     const BACKOFF_FIRST: Duration = Duration::from_secs(1);
@@ -618,7 +641,7 @@ fn claim_with_retry(
     loop {
         attempt += 1;
         tracing::debug!(attempt, "claim attempt");
-        match poll_claim(server, http, auth) {
+        match poll_claim(server, http, auth, request) {
             ClaimPoll::Transient(e) => {
                 let backoff = exponential_backoff(attempt, BACKOFF_FIRST, BACKOFF_CAP);
                 tracing::warn!(
@@ -1463,6 +1486,70 @@ mod tests {
 
     // --- the claim retry schedule ---
 
+    #[rstest::rstest]
+    #[case::models(true)]
+    #[case::runtimes(false)]
+    fn a_failed_cache_listing_warns_and_claims_without_a_body(
+        #[case] fail_models: bool,
+    ) -> anyhow::Result<()> {
+        let temp = TempWorkspace::new("worker-cache-listing-error")?;
+        let root = if fail_models {
+            temp.ws.models().models_dir().to_path_buf()
+        } else {
+            temp.ws.runtimes().runtimes_dir().to_path_buf()
+        };
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        if let Some(parent) = root.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&root, b"not a directory")?;
+        let server = MockServer::start();
+        let claim = server.mock(|when, then| {
+            when.method(POST).path("/plans/claim").body("");
+            then.status(204);
+        });
+        let (poll, log) = logged_text(|| {
+            let request = cached_claim_request(&temp.ws);
+            Ok::<_, anyhow::Error>(claim_with_retry(
+                &server_url(&server)?,
+                &test_http()?,
+                &test_auth()?,
+                request.as_ref(),
+                |_| ControlFlow::Break(()),
+            ))
+        })?;
+        assert!(matches!(poll?, Some(ClaimPoll::Idle)));
+        claim.assert_calls(1);
+        assert!(log.contains("WARN"), "{log}");
+        assert!(log.contains("listing cached artifacts failed"), "{log}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_cache_listing_claims_with_empty_lists() -> anyhow::Result<()> {
+        let temp = TempWorkspace::new("worker-cache-listing-empty")?;
+        let server = MockServer::start();
+        let claim = server.mock(|when, then| {
+            when.method(POST).path("/plans/claim").json_body(json!({
+                "cached": { "models": [], "runtimes": [] }
+            }));
+            then.status(204);
+        });
+        let request = cached_claim_request(&temp.ws);
+        let poll = claim_with_retry(
+            &server_url(&server)?,
+            &test_http()?,
+            &test_auth()?,
+            request.as_ref(),
+            |_| ControlFlow::Break(()),
+        );
+        assert!(matches!(poll, Some(ClaimPoll::Idle)));
+        claim.assert_calls(1);
+        Ok(())
+    }
+
     /// The loop sees only the answer that followed the transients, and the
     /// waits are the claim's schedule: one second, doubling, capped at a minute.
     #[test]
@@ -1474,21 +1561,27 @@ mod tests {
         });
 
         let mut sleeps = Vec::new();
-        let poll = claim_with_retry(&server_url(&server)?, &test_http()?, &test_auth()?, |d| {
-            sleeps.push(d);
-            // Eight transients, then the answer. httpmock has no response
-            // sequencing and its matchers take no captured state, so the
-            // server is re-pointed from inside the wait the loop is already
-            // taking.
-            if sleeps.len() == 8 {
-                down.delete();
-                server.mock(|when, then| {
-                    when.method(POST).path("/plans/claim");
-                    then.status(204);
-                });
-            }
-            ControlFlow::Continue(())
-        });
+        let poll = claim_with_retry(
+            &server_url(&server)?,
+            &test_http()?,
+            &test_auth()?,
+            None,
+            |d| {
+                sleeps.push(d);
+                // Eight transients, then the answer. httpmock has no response
+                // sequencing and its matchers take no captured state, so the
+                // server is re-pointed from inside the wait the loop is already
+                // taking.
+                if sleeps.len() == 8 {
+                    down.delete();
+                    server.mock(|when, then| {
+                        when.method(POST).path("/plans/claim");
+                        then.status(204);
+                    });
+                }
+                ControlFlow::Continue(())
+            },
+        );
 
         assert!(matches!(poll, Some(ClaimPoll::Idle)), "got {poll:?}");
         assert_eq!(
@@ -1516,10 +1609,16 @@ mod tests {
             then.status(status).body(body);
         });
         let mut sleeps = Vec::new();
-        let poll = claim_with_retry(&server_url(&server)?, &test_http()?, &test_auth()?, |d| {
-            sleeps.push(d);
-            ControlFlow::Continue(())
-        });
+        let poll = claim_with_retry(
+            &server_url(&server)?,
+            &test_http()?,
+            &test_auth()?,
+            None,
+            |d| {
+                sleeps.push(d);
+                ControlFlow::Continue(())
+            },
+        );
         match status {
             403 => assert!(matches!(poll, Some(ClaimPoll::Refused(_))), "got {poll:?}"),
             _ => assert!(matches!(poll, Some(ClaimPoll::Fatal(_))), "got {poll:?}"),
@@ -1538,9 +1637,13 @@ mod tests {
             then.status(503).body("down");
         });
 
-        let poll = claim_with_retry(&server_url(&server)?, &test_http()?, &test_auth()?, |_| {
-            ControlFlow::Break(())
-        });
+        let poll = claim_with_retry(
+            &server_url(&server)?,
+            &test_http()?,
+            &test_auth()?,
+            None,
+            |_| ControlFlow::Break(()),
+        );
 
         assert!(poll.is_none(), "got {poll:?}");
         assert_eq!(down.calls(), 1, "no attempt after the stop");
@@ -1844,8 +1947,14 @@ mod tests {
     /// past; asserted on the wire.
     #[rstest::rstest]
     #[case::a_local_failure_is_retriable(
-        anyhow::anyhow!("out of memory").context("loading the model"),
+        anyhow::Error::from(pipette_readiness::ReadinessError::Unavailable("no thermal zones"))
+            .context("readiness gate before rep 1"),
         true,
+        "device_error"
+    )]
+    #[case::running_out_of_memory_is_terminal(
+        anyhow::anyhow!("out of memory").context("loading the model"),
+        false,
         "out_of_memory"
     )]
     #[case::an_unreadable_claim_is_terminal(

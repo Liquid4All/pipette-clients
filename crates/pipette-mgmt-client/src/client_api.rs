@@ -7,13 +7,14 @@
 //! a request signed by it.
 
 use pipette_http::HttpClient;
-use pipette_plan_types::{BatchSubmitted, JobAccepted, VaultResourceId};
+use pipette_plan_types::{BatchSubmitted, ClaimRequest, JobAccepted, VaultResourceId};
 
 use crate::{
     auth::ClientIdentity,
     call::{
         ByteStream, ConditionalResponse, ResumeFrom, decode_success, get_json,
-        get_json_conditional, get_stream, send, send_empty, send_json, status_error,
+        get_json_conditional, get_stream, send, send_empty, send_json, send_optional_json,
+        status_error,
     },
     error::Result,
     transport::HttpMethod,
@@ -237,13 +238,24 @@ pub fn get_job(
 }
 
 /// `POST /plans/claim`: lease the next eligible job, or `None` on `204`.
+///
+/// `request` is the JSON body, which carries the artifacts the device holds.
+/// With `None`, the request has no body, and the server assumes that the device
+/// holds the model and runtime of its last job unless that job failed.
 pub fn claim(
     server: &ServerUrl,
     http: &HttpClient,
     auth: &ClientIdentity,
+    request: Option<&ClaimRequest>,
 ) -> Result<Option<ClaimedJob>> {
-    let (response, url, method_name) =
-        send(server, http, HttpMethod::Post, "/plans/claim", Some(auth))?;
+    let (response, url, method_name) = send_optional_json(
+        server,
+        http,
+        HttpMethod::Post,
+        "/plans/claim",
+        Some(auth),
+        request,
+    )?;
     match response.status {
         204 => Ok(None),
         _ => decode_success(response, url, method_name).map(Some),
@@ -439,13 +451,14 @@ mod tests {
             then.status(200).body(body);
         });
         let http = http_ctx()?;
-        let job =
-            claim(&server_url(&server)?, &http, &auth()?)?.ok_or_else(|| Error::HttpStatus {
+        let job = claim(&server_url(&server)?, &http, &auth()?, None)?.ok_or_else(|| {
+            Error::HttpStatus {
                 method: "POST".into(),
                 url: "x".into(),
                 status: 500,
                 body: "missing job".into(),
-            })?;
+            }
+        })?;
         assert_eq!(job.job_id, "job-1");
         assert_eq!(job.time_window, "PT5M");
         assert_eq!(
@@ -456,15 +469,37 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn claim_204_returns_none() -> Result<()> {
+    fn advertised() -> serde_json::Value {
+        serde_json::json!({
+            "cached": {
+                "models": [{"type": "fixture", "name": "A"}],
+                "runtimes": [],
+            }
+        })
+    }
+
+    /// The body is the request as given, compared as JSON; without a request,
+    /// there is no body.
+    #[rstest::rstest]
+    #[case::advertised(Some(advertised()))]
+    #[case::no_request(None)]
+    fn claim_sends_the_request_as_its_body(
+        #[case] expected: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let request: Option<ClaimRequest> =
+            expected.clone().map(serde_json::from_value).transpose()?;
         let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/plans/claim");
+        let mock = server.mock(|when, then| {
+            let when = when.method(POST).path("/plans/claim");
+            match expected {
+                Some(body) => when.json_body(body),
+                None => when.body(""),
+            };
             then.status(204);
         });
         let http = http_ctx()?;
-        assert!(claim(&server_url(&server)?, &http, &auth()?)?.is_none());
+        assert!(claim(&server_url(&server)?, &http, &auth()?, request.as_ref())?.is_none());
+        mock.assert();
         Ok(())
     }
 
@@ -480,7 +515,7 @@ mod tests {
             then.status(200).body("{}");
         });
         let http = http_ctx()?;
-        let err = claim(&server_url(&server)?, &http, &auth()?)
+        let err = claim(&server_url(&server)?, &http, &auth()?, None)
             .err()
             .ok_or_else(|| Error::BuildClient("expected error".into()))?;
         assert_eq!(err.http_status(), Some(308));
@@ -497,7 +532,7 @@ mod tests {
             then.status(403).body("pending");
         });
         let http = http_ctx()?;
-        let err = claim(&server_url(&server)?, &http, &auth()?)
+        let err = claim(&server_url(&server)?, &http, &auth()?, None)
             .err()
             .ok_or_else(|| Error::BuildClient("expected error".into()))?;
         assert_eq!(err.http_status(), Some(403));

@@ -1,15 +1,15 @@
 import Foundation
 
 /// The clock `attempt_timeout_seconds` runs on, one per run (`RunCell.dispatchRun`): the
-/// crate's `pipette-cli/src/attempt_watchdog.rs`. An attempt is the model load and warm-up,
-/// one measured rep, the work after a rep, or one peak-memory attempt, each timed on its own;
-/// the clock stops while a readiness gate waits or a calibration runs.
+/// crate's `pipette-cli/src/attempt_watchdog.rs`. An attempt is the warm-up, one measured rep,
+/// the work after a rep, or one peak-memory attempt, each timed on its own; the clock stops
+/// while a model loads, a readiness gate waits or a calibration runs.
 ///
 /// The run marks it and the watchdog's thread reads it, so every field is under `lock`.
 nonisolated final class AttemptClock: @unchecked Sendable {
     private let limit: Duration
     private let lock = NSLock()
-    private var what = Attempt.loadAndWarmUp
+    private var what = Attempt.warmUp
     /// `nil` while held.
     private var started: ContinuousClock.Instant?
     /// The measured reps begun, which name theirs.
@@ -18,7 +18,7 @@ nonisolated final class AttemptClock: @unchecked Sendable {
     /// boundary: a `begin` restarts the attempt that ran over.
     private var caught: (overrun: Attempt.Overrun, started: ContinuousClock.Instant)?
 
-    /// The first attempt, `Attempt.loadAndWarmUp`, starts at `now`.
+    /// The first attempt, `Attempt.warmUp`, starts at `now`.
     init(limit: Duration, at now: ContinuousClock.Instant = .now) {
         self.limit = limit
         started = now

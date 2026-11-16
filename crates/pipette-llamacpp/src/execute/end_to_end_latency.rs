@@ -5,7 +5,7 @@
 use std::io::{BufRead, BufReader};
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context;
 use reqwest::blocking::Client;
@@ -28,7 +28,7 @@ use pipette_plan_types::{
     BenchmarkFlagRef, EndToEndLatencyBenchmark, EndToEndLatencyLlamacppCliStockToolsGgufText,
     LlamacppCliStockToolsExtraRuntimeConfiguration, RunResponse, RuntimeFlags,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::models::ResolvedGgufTextModel;
 use crate::runtimes::{self, ResolvedLlamaServer};
@@ -75,9 +75,9 @@ pub fn run(
     let ready = server::health(&url, timeout)?;
     let command = launch.build(port)?;
 
-    let mut llama_server = start_process("llama-server", command, Duration::ZERO)?;
+    let mut llama_server = start_process("llama-server", command, OnStop::SIGTERM)?;
     let sampler = Sampler::start(llama_server.pid(), SupportedWatch::OBSERVE)?;
-    llama_server.wait_ready(timeout, ready)?;
+    observer.outside(|| llama_server.wait_ready(timeout, ready))?;
     let worked = (|| {
         let prompts = benchmark.parameter_batch_size.in_flight()?.get();
         let prompt = prompt_seed::build_prompt_text(
@@ -383,7 +383,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         move || {
             calls.set(calls.get() + 1);
-            start + Duration::from_millis(calls.get())
+            start + std::time::Duration::from_millis(calls.get())
         }
     }
 

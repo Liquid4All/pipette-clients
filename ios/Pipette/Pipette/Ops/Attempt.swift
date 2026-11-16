@@ -7,8 +7,9 @@ nonisolated enum Attempt {
     /// The limit on a cell whose flags set none, on the kinds that take a default.
     static let defaultLimit: Duration = .seconds(300)
 
-    /// What a run's clock names the first attempt: the model load counts against it.
-    static let loadAndWarmUp = "the model load and warm-up"
+    /// What a run's clock names the first attempt. No model load counts against any attempt:
+    /// each engine holds the clock while it loads.
+    static let warmUp = "the warm-up"
 
     /// The cell's limit: its flags' `attempt_timeout_seconds`, else the default for its
     /// kind. `nil` leaves it unbounded.

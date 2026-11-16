@@ -52,7 +52,7 @@ You only need what the runtime(s) you use call for.
 | Runtime | Where it runs | Prerequisites |
 |---------|---------------|---------------|
 | llama.cpp | Cross-platform | None: `pipette` downloads matching upstream release binaries |
-| llama.cpp CUDA (every `*-cuda-*` flavor, for example `linux-cuda-12-8`, `linux-x64-cuda-13`, `windows-x64-cuda-13`) | Linux or Windows with an NVIDIA GPU | An NVIDIA driver for the build's CUDA version. Also that CUDA's runtime libraries (`libcudart`, `libcublas`) on the loader path. Upstream ships them as a separate `cudart-` file, and `pipette` does not fetch it |
+| llama.cpp CUDA (every `*-cuda-*` flavor, for example `linux-cuda-12-8`, `linux-x64-cuda-13`, `windows-x64-cuda-13`) | Linux or Windows with an NVIDIA GPU | An NVIDIA driver for the build's CUDA version. On Linux, also that CUDA's runtime libraries (`libcudart`, `libcublas`) on the loader path. On Windows, a GitHub release install fetches them from upstream's separate `cudart-` file and unpacks it beside the build |
 | MLX | Apple Silicon Mac | [`uv`](https://docs.astral.sh/uv/) (`brew install uv`) |
 | Core AI | Apple Silicon Mac with macOS 27 or later | A Swift toolchain (Xcode or the Command Line Tools) to build the sidecar. See [Core AI](coreai.md) |
 | torch-oai (vLLM / SGLang) | Linux host | Docker Engine for `docker-vllm://` / `docker-sglang://`, **or** `uv` for `uv-vllm://` / `uv-sglang://`; `nvidia-container-toolkit` for NVIDIA GPUs under Docker |
@@ -520,6 +520,41 @@ carries none, and leaves it out of the submitted descriptor and the digest, so
 a token never changes a model's identity. Filing a plan for a gated model is
 covered in [job-generation.md](../pipette-ctl/job-generation.md#gated-models).
 
+### Downloading through a CDN proxy
+
+`--cdn-proxy HOST:PORT` (or `PIPETTE_CDN_PROXY`) sends every model download to
+a caching proxy on the local network: the Hugging Face repo listing, the size
+check before the fetch, each file, and a `url` source on any host. Each request
+is the one the client would send to the site, its path and query string
+unchanged, sent to `HOST:PORT` over plain HTTP with `Host` naming the site:
+
+```text
+GET /LiquidAI/LFM2-350M/resolve/main/config.json HTTP/1.1
+Host: huggingface.co
+```
+
+The proxy fetches the site over HTTPS. It is not a forward proxy like
+`HTTPS_PROXY`. Vault sources, runtime downloads and every other request go
+direct. The value is a host and a port only: `192.168.1.20:8090`, or
+`[::1]:8090` for IPv6.
+
+A file whose sha256 the fetch knows beforehand (a `sha256`, `model_sha256`,
+`mmproj_sha256` or `draft_sha256` key, or the repo listing's digest of an LFS
+file) is requested with `X-Expected-Sha256: <sha256>`. From a site other than
+Hugging Face, the proxy caches a file only when that header comes with it, so a
+`url` source without a digest streams through uncached. The header goes to the
+proxy only.
+
+The proxy is plain HTTP, so a `PIPETTE_HF_TOKEN`, when one is used, crosses
+the network in clear: a repo's requests carry it, because the proxy checks
+access with it. A `url` source is fetched without a token, as it is directly.
+A proxy that is down or refuses a request fails the fetch like any other HTTP
+failure; nothing falls back to the origin. The proxy follows the site's
+redirects itself, and a redirect it passes back fails the fetch, because the
+next request would name the first site in `Host`. The model's identity does not
+change, so a model pulled through the proxy is the same store entry as one
+pulled directly.
+
 ## 5b. The readiness gate
 
 Timing benchmarks refuse to measure a machine that is too warm or too busy,
@@ -530,6 +565,27 @@ the measurement the client polls the host and waits for both a **thermal** and a
 ```text
 readiness wait timed out after 420s: last seen thermal=pressure:0(nominal) die:52C(hot) cpu=busy:1.8cores(busy)
 ```
+
+A worker submits a readiness timeout as permanent (`retriable: false`) with
+`failure_code: "device_not_ready"`: retried, a cell that keeps every device hot
+would go round the whole fleet. A probe that cannot read the host and the
+battery and GPU checks before a run are that host's fault, so they stay
+retriable with `failure_code: "device_error"`.
+
+Three more failures of the cell itself are permanent: a runtime that crashed
+(`llama-bench`, `llama-server` or another runtime aborted, was killed or exited
+with an error, or a request to its server failed or overran) with
+`runtime_error`, one that ran out of memory with
+`out_of_memory`, and a llama.cpp peak-memory cell whose flavor's devices this
+OS has no reader for with `harness_error`. The management server records the
+failure instead of handing the job to the next device. A campaign group's
+`failed` policy re-runs the failure codes it lists (the mgmt repo's
+`docs/api/campaign-groups.md` has the defaults); a code it does not list needs
+`pipette-ctl campaigns rerun`. A fault of the device stays
+retriable: a failed download or vault transfer, a server load or a probe that
+overran, a lost exit status, the memory reader or the disk giving out during a
+run, a Hexagon DSP failure other than a refused op, a FastRPC buffer that
+would not map, and a result the server refused.
 
 The gate applies to prefill, decode, end-to-end-latency, `vl_throughput`,
 `asr_throughput` and `vl_spec_decode`. `eval` and the three peak-memory
@@ -577,7 +633,8 @@ provisional: no contact rate has been measured.
 - `off` disables touch detection. The gate does not read `/proc/interrupts` or
   `dumpsys input`; its thermal and CPU checks still apply.
 - `wait` (the default) holds the gate until the touch clears or the deadline
-  passes, as for a busy CPU.
+  passes, as for a busy CPU. A touch held to the deadline is filed like any
+  readiness timeout: permanent, with `failure_code: "device_not_ready"`.
 - `fail` fails the cell after three consecutive polls detect the touch. This
   takes about 9 seconds. A `pipette worker` does not submit that run, so the cell
   keeps its attempts. The worker then stops with an error.
@@ -607,41 +664,42 @@ the programs that compete for the CPU, or use a different host for measurement.
 ## 5c. The attempt limit
 
 `attempt_timeout_seconds` is the wall-clock limit on each attempt of a cell, so
-a hung driver or server fails the cell instead of holding the device. The
-error names the attempt that ran over:
+a hung driver or server fails the cell instead of holding the device. A
+server's start, its model load included, does not count against it. The error
+names the attempt that ran over:
 
-- `the model load and warm-up`: from the end of the downloads up to the first
-  rep, sample or peak-memory run, so on a timing cell the server's start, its
-  model load and the warm-up count against it, except where the first server's
-  start is off the clock (below). A `llama-bench` or `llama-batched-bench` rep
-  loads the model itself, so there the load counts against each rep.
-- `rep N`: one measured rep. `the work after rep N` is what follows it, up to
-  the next rep or the end of the run.
+- `the warm-up`: from the end of the downloads up to the first rep, sample or
+  peak-memory run, a server's start left out (below).
+- `rep N`: one measured rep. A `llama-bench` or `llama-batched-bench` rep loads
+  the model itself, so there the load counts against each rep. `the work after
+  rep N` is what follows it, up to the next rep or the end of the run.
 - `the peak-memory warm-up` and `the measured peak-memory attempt`: each run of
-  a peak-memory cell, from the launch of its own process or server.
+  a peak-memory cell, from the launch of its own `llama-bench` process, or from
+  the moment its own server is ready.
 - `vl_spec_decode (speculation on), sample N` (or `speculation off`): one
   sample of the corpus with all its turns.
 
 Each attempt starts with the whole limit, so the limit bounds attempts, not the
-cell: a warm-up and 5 reps are 11 attempts, the load and warm-up, each rep and
-the work after each rep. The clock stops while:
+cell: a warm-up and 5 reps are 11 attempts, the warm-up, each rep and the work
+after each rep. The clock stops while:
 
+- a server starts, from its launch until it is ready, the model load included.
+  On a cold cache the first server of a Core AI, OpenVINO or OVMS cell also
+  compiles the model then (Core AI specializes it). `mlx_lm.server` answers
+  its ready check while its model still loads, so an MLX text cell's load
+  counts against its warm-up, or against each peak-memory run;
 - a readiness gate waits, since the gate has its own deadline
   ([§5b](#5b-the-readiness-gate));
 - a llama.cpp cell calibrates its image or audio token count;
-- the first server of a Core AI, OpenVINO or OVMS cell starts, from its launch
-  until it is ready: on a cold cache that start compiles the model (Core AI
-  specializes it), and the compile cannot be told apart from the load, so the
-  load is off the clock too, on a warm cache as well. The servers after it load
-  what it compiled, and their starts count;
 - a torch-oai cell pulls a Docker image that the daemon lacks;
 - a `vl_spec_decode` cell downloads its corpus.
 
-A compile's length depends on what the host's caches hold and a download's on
-the network, and either can use the whole 300 s default by itself. After each
-of these steps the attempt goes on with the whole limit again. A first server
-that hangs in its start is bounded by its own ready timeout of 3600 s instead,
-and fails as a load timeout, which a worker reports as retriable.
+A load's length depends on the model and the device's storage, a compile's on
+what the host's caches hold and a download's on the network, and any of them
+can use the whole 300 s default by itself. After each of these steps the
+attempt goes on with the whole limit again. A server that hangs in its start is
+bounded by its own ready timeout instead, and fails as a load timeout, which a
+worker reports as retriable.
 
 A Core AI cell on a cold specialization cache under a 3 s limit, from its log
 on an M3 Max: the first sidecar start took 3.50 s, longer than the limit, and
@@ -697,7 +755,8 @@ When the engine then failed on the stopped programs, its error follows, after
 (`retriable: false`), since every client runs the cell under the same limit,
 with `failure_code: "attempt_timeout"`. Every worker failure carries the
 `failure_code` its error shows (`out_of_memory`, `runtime_error`,
-`device_error` or `harness_error`), or none when the error does not say.
+`device_error`, `device_not_ready` or `harness_error`), or none when the error
+does not say.
 
 A result records `attempt_timeout_seconds` in its `benchmark_flags` only when
 the cell set it; a run under the default records none. The retired

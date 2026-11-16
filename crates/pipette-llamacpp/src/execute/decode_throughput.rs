@@ -4,7 +4,6 @@
 
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::Context;
 
@@ -16,19 +15,24 @@ use pipette_ops::measurement::{
 use pipette_ops::readiness::ReadinessGate;
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
-    DecodeThroughputBenchmark, DecodeThroughputLlamacppCliStockToolsGgufText,
+    DecodeThroughputBenchmark, DecodeThroughputLlamacppCliStockToolsGgufText, LlamaCppFlavor,
     LlamacppCliStockToolsExtraRuntimeConfiguration, PositiveCount, PositiveMillis, RunResponse,
     RuntimeFlags,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::models::ResolvedGgufTextModel;
 use crate::runtimes::{self, ResolvedLlamaBatchedBench, ResolvedLlamaBench};
 use crate::{batched_bench, bench};
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub fn run(
     benchmark: &DecodeThroughputBenchmark,
     runtime_flags: DecodeThroughputLlamacppCliStockToolsGgufText,
+    flavor: &LlamaCppFlavor,
     program: &ResolvedLlamaBench,
     model: &ResolvedGgufTextModel,
     readiness_gate: ReadinessGate,
@@ -46,13 +50,11 @@ pub fn run(
         NonZeroUsize::try_from(measurement::REPS)?,
         readiness_gate,
         observer,
-        // llama-bench warms up on one token at depth 0, so a machine's first run
-        // of a deep shape builds its attention kernel cold inside the timed decode.
-        MeasurementWarmup::Once,
+        warmup(flavor),
         &mut runs,
         |runs| {
             let command = launch.build();
-            let mut llama_bench = start_process("llama-bench", command, Duration::ZERO)
+            let mut llama_bench = start_process("llama-bench", command, OnStop::SIGTERM)
                 .map_err(anyhow::Error::from)?;
             let sampler = Sampler::start(llama_bench.pid(), SupportedWatch::OBSERVE)
                 .map_err(anyhow::Error::from)?;
@@ -82,6 +84,52 @@ pub fn run(
             response.process(run).memory(*memory)
         })
         .build())
+}
+
+/// llama-bench warms up on one token at depth 0, so a machine's first run of a
+/// deep shape builds its attention kernel cold inside the timed decode; one
+/// untimed run first takes that out. A CPU-only build compiles no kernels, so
+/// there the run would only cost time. A GPU build stays `Once` even at
+/// `--n-gpu-layers 0`, since a backend can still take large batches.
+fn warmup(flavor: &LlamaCppFlavor) -> MeasurementWarmup {
+    match flavor {
+        LlamaCppFlavor::LinuxArm64Cpu
+        | LlamaCppFlavor::LinuxX64Cpu
+        | LlamaCppFlavor::LinuxS390xCpu
+        | LlamaCppFlavor::AndroidArm64Cpu
+        | LlamaCppFlavor::WindowsX64Cpu
+        | LlamaCppFlavor::WindowsArm64Cpu => MeasurementWarmup::Inline,
+        LlamaCppFlavor::MacosX64
+        | LlamaCppFlavor::MacosArm64
+        | LlamaCppFlavor::MacosArm64Kleidiai
+        | LlamaCppFlavor::LinuxX64Openvino
+        | LlamaCppFlavor::LinuxX64Rocm
+        | LlamaCppFlavor::LinuxX64SyclFp16
+        | LlamaCppFlavor::LinuxX64SyclFp32
+        | LlamaCppFlavor::LinuxX64Vulkan
+        | LlamaCppFlavor::LinuxX64Cuda128
+        | LlamaCppFlavor::LinuxX64Cuda13
+        | LlamaCppFlavor::LinuxArm64Cuda13
+        | LlamaCppFlavor::LinuxArm64Vulkan
+        | LlamaCppFlavor::LinuxArm64Snapdragon
+        | LlamaCppFlavor::LinuxOpenEulerAarch64Ascend310p
+        | LlamaCppFlavor::LinuxOpenEulerX86Ascend310p
+        | LlamaCppFlavor::LinuxOpenEulerAarch64Ascend910bAclgraph
+        | LlamaCppFlavor::LinuxOpenEulerX86Ascend910bAclgraph
+        | LlamaCppFlavor::WindowsArm64OpenclAdreno
+        | LlamaCppFlavor::WindowsX64Cuda124
+        | LlamaCppFlavor::WindowsX64Cuda131
+        | LlamaCppFlavor::WindowsX64Cuda13
+        | LlamaCppFlavor::WindowsArm64Cuda13
+        | LlamaCppFlavor::WindowsX64Openvino
+        | LlamaCppFlavor::WindowsX64Vulkan
+        | LlamaCppFlavor::WindowsArm64Vulkan
+        | LlamaCppFlavor::WindowsX64Sycl
+        | LlamaCppFlavor::WindowsX64Hip
+        | LlamaCppFlavor::AndroidArm64Snapdragon
+        // An operator's build may hold any device.
+        | LlamaCppFlavor::Custom(_) => MeasurementWarmup::Once,
+    }
 }
 
 /// A batch: `llama-batched-bench` generating on `parameter_batch_size`
@@ -121,7 +169,7 @@ pub fn run_batched(
         |runs| {
             let command = launch.build();
             let mut llama_batched_bench =
-                start_process("llama-batched-bench", command, Duration::ZERO)
+                start_process("llama-batched-bench", command, OnStop::SIGTERM)
                     .map_err(anyhow::Error::from)?;
             let sampler = Sampler::start(llama_batched_bench.pid(), SupportedWatch::OBSERVE)
                 .map_err(anyhow::Error::from)?;

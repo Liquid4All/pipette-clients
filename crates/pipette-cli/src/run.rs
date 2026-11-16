@@ -525,6 +525,7 @@ fn resolved_flags(
         | BenchmarkType::EndToEndLatency
         | BenchmarkType::VlThroughput
         | BenchmarkType::AsrThroughput
+        | BenchmarkType::DecisionLatency
         // Gates before the traversal and before every reference-batch sample.
         | BenchmarkType::VlSpecDecode => true,
         // vl_max_memory drives a server but takes one ungated measurement — a
@@ -532,7 +533,8 @@ fn resolved_flags(
         BenchmarkType::Eval
         | BenchmarkType::MaxMemoryUsage
         | BenchmarkType::VlMaxMemory
-        | BenchmarkType::AsrMaxMemory => false,
+        | BenchmarkType::AsrMaxMemory
+        | BenchmarkType::DecisionMaxMemory => false,
     };
     if gates {
         r.readiness = Some(ReadinessOverrides {
@@ -654,8 +656,8 @@ fn dispatch_run(
     // The whole object, so a new field is logged too; `AuthToken` redacts
     // itself. Debug level: an eval's request carries its whole dataset.
     tracing::debug!(request = ?req, "dispatch");
-    // After the downloads, so the first attempt starts with the model on disk.
-    clock.begin(pipette_ops::attempt::LOAD_AND_WARM_UP);
+    // After the downloads; each engine holds the clock while a server starts.
+    clock.begin(pipette_ops::attempt::WARM_UP);
     let engine = || match (&req.runtime.declared, &req.benchmark) {
         (Runtime::LlamacppCliStockTools(_), _) => pipette_llamacpp::run(
             req,

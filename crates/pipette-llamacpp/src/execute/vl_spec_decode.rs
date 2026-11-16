@@ -28,7 +28,7 @@ use pipette_plan_types::{
     RunResponse, RuntimeFlags, SamplingTemperature, VlSpecDecodeBenchmark,
     VlSpecDecodeLlamacppCliStockTools,
 };
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 use pipette_vl_spec_decode_corpus::{VlSpecDecodeCorpus, turn};
 
 use crate::models::{ResolvedGgufVisionModel, ResolvedGgufVisionSpeculativeModel};
@@ -163,10 +163,10 @@ pub fn run(
     let ready = server::health(&url, timeout)?;
     let command = launch.build(port)?;
 
-    let mut llama_server = start_process("llama-server", command, Duration::ZERO)?;
+    let mut llama_server = start_process("llama-server", command, OnStop::SIGTERM)?;
     let sampler = Sampler::start(llama_server.pid(), SupportedWatch::OBSERVE)?;
-    llama_server
-        .wait_ready(timeout, ready)
+    observer
+        .outside(|| llama_server.wait_ready(timeout, ready))
         .context(speculation.label())?;
     let worked = (|| {
         if speculation == Speculation::On {
@@ -289,7 +289,7 @@ fn server_help(llama_server: &Path) -> anyhow::Result<String> {
     runtimes::apply_dylib_search_env(&mut command, llama_server);
     let failed = || format!("failed to run {} --help", llama_server.display());
     let mut process =
-        start_process("llama-server", command, Duration::ZERO).with_context(failed)?;
+        start_process("llama-server", command, OnStop::SIGTERM).with_context(failed)?;
     // A build that dies here would otherwise pass its error on as the help,
     // and the cell would fail saying the build lacks the draft flags.
     process.wait_success(HELP_TIMEOUT).with_context(failed)?;
@@ -633,7 +633,7 @@ mod tests {
         command.arg("-c").arg(format!(
             "sleep 0.3; printf '{DRAFTER_BANNER}' >&2; exec sleep 30"
         ));
-        let llama_server = start_process("sh", command, Duration::ZERO)?;
+        let llama_server = start_process("sh", command, OnStop::SIGKILL)?;
         assert_eq!(drafter_block_size(&llama_server), Some(9));
         Ok(())
     }

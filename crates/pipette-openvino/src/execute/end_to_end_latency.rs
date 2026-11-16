@@ -18,7 +18,7 @@ use pipette_plan_types::{
     BenchmarkResultData, EndToEndLatencyBenchmark, EndToEndLatencyUvOpenvinoOpenvino, RunResponse,
     RuntimeFlags, UvOpenvinoExtraRuntimeConfiguration,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::completions;
 use crate::models::ResolvedOpenvinoModel;
@@ -57,7 +57,7 @@ pub(super) fn run(
             port,
             client_config,
         )?,
-        server::STOP_GRACE,
+        OnStop::SIGKILL,
     )?;
     let sampler = Sampler::start(openvino_server.pid(), SupportedWatch::OBSERVE)?;
     let ready = server::ready(&url)?;

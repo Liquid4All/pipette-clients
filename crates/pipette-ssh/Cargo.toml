@@ -17,13 +17,16 @@ test-support = ["dep:anyhow", "dep:ed25519-dalek", "dep:tempfile"]
 # third-party crate on the path every authenticated management call signs
 # through.
 [dependencies]
-anyhow = { workspace = true, optional = true }
 base64.workspace = true
-ed25519-dalek = { workspace = true, optional = true }
 hex.workspace = true
 sha2.workspace = true
-tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
+
+# The fake agent serves a Unix socket, so it exists on Unix only.
+[target.'cfg(unix)'.dependencies]
+anyhow = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true

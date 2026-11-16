@@ -430,6 +430,8 @@ struct DownloadCoordinatorTests {
             ["Pipette", "headlessrun", "bench", "benchmarks=decode_throughput_256"],
             ["Pipette", "headlessrun", "models", "pull", "model={}"],
             ["Pipette", "headlessrun", "sync"],
+            // Only a foreground session lets a proxied transfer refuse a redirect.
+            ["Pipette", "headlessrun", "settings", "run", "cdn-proxy=127.0.0.1:8090"],
         ])
         func oneShotUsesForeground(_ argv: [String]) {
             #expect(DownloadCoordinator.usesForegroundSession(argv))
@@ -810,7 +812,7 @@ struct DownloadCoordinatorTests {
         /// On its own the record restores as `.connecting`, which the reconcile sweep drops.
         private func seedRecord(
             _ ws: PipetteWorkspace, repo: String, filename: String, source: Model,
-            etag: String? = nil
+            etag: String? = nil, proxy: String? = nil
         ) {
             DownloadStore(dir: ws.downloadsDir).saveRecord(DownloadRecord(
                 filename: filename,
@@ -818,7 +820,8 @@ struct DownloadCoordinatorTests {
                 repo: repo,
                 familyId: nil,
                 source: source,
-                etag: etag
+                etag: etag,
+                proxy: proxy
             ))
         }
 
@@ -826,10 +829,11 @@ struct DownloadCoordinatorTests {
         /// exists, so a placeholder serves. The ETag lets `performResume` spend the blob rather
         /// than start from zero.
         private func seedPausedTransfer(
-            _ ws: PipetteWorkspace, repo: String, filename: String, source: Model
+            _ ws: PipetteWorkspace, repo: String, filename: String, source: Model,
+            proxy: String? = nil
         ) {
             seedRecord(ws, repo: repo, filename: filename, source: source,
-                       etag: "\"seeded\"")
+                       etag: "\"seeded\"", proxy: proxy)
             DownloadStore(dir: ws.downloadsDir).saveResumeData(
                 Data("placeholder resume data".utf8),
                 for: LocalStorage.modelRelativePath(repo: repo, filename: filename))
@@ -876,6 +880,25 @@ struct DownloadCoordinatorTests {
             #expect(!coordinator.isPaused(spec))
             // Resumed, not discarded, so the fetch has something to wait on.
             #expect(coordinator.hasTransfer(for: spec))
+        }
+
+        /// Resume data replays the request that saved it, so a partial fetched through another
+        /// `cdn-proxy=` than this launch's (the test runner names none) starts over instead.
+        @Test(arguments: [(nil, "\"seeded\""), ("http://192.0.2.1:8090", nil)] as [(String?, String?)])
+        func aPartialResumesOnlyWhereItWasFetched(savedThrough: String?, etagAfter: String?) async throws {
+            let ws = makeTemporaryWorkspace()
+            defer { removeWorkspace(ws) }
+            let spec = try ggufTextSpec("org/a-GGUF", "a-Q4_0.gguf")
+            seedPausedTransfer(ws, repo: "org/a-GGUF", filename: "a-Q4_0.gguf", source: spec,
+                               proxy: savedThrough)
+            // A fresh start must not reach the network.
+            let coordinator = makeCoordinator(ws, sessionConfiguration: HangingURLProtocol.configuration)
+
+            await coordinator.resumePaused(for: spec)
+
+            let record = try #require(DownloadStore(dir: ws.downloadsDir).allRecords().first)
+            #expect(record.etag == etagAfter)
+            #expect(record.proxy == nil)
         }
 
         /// A transfer conjured for a model never enqueued is one a waiting fetch would poll.

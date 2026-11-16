@@ -1,0 +1,7 @@
+{
+  "batch_size": 4,
+  "benchmark_type": "decision_latency",
+  "num_images": 0,
+  "questions": 3,
+  "text_tokens": 64
+}

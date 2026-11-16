@@ -102,12 +102,13 @@ pub enum TreeError {
     OwnHasChildren { path: PathBuf },
 }
 
-/// Why a [`Sampler`] has no [`Peak`]. `E` is why its `locate` named no
-/// cgroup.
+/// Why a [`Sampler`] has no [`Peak`]. `locate`'s error is boxed: its type is a
+/// runtime crate's, which exports only `run`, so pipette-cli could not name a
+/// `PeakError` that carried it.
 #[derive(Debug, thiserror::Error)]
-pub enum PeakError<E> {
+pub enum PeakError {
     #[error("the cgroup to read was never found, so its memory is unknown")]
-    Unlocated(#[source] E),
+    Unlocated(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(
         "could not read {path}: the tree pipette reads does not hold the cgroup (pipette runs in \
          a container of its own), or the cgroup counts no memory"
@@ -705,17 +706,17 @@ pub enum Unlocated<E> {
 /// A cgroup's memory, read on a thread of its own. Dropped without
 /// [`Self::stop`], it still stops and joins its thread, once a `locate` in
 /// progress returns.
-pub struct Sampler<E> {
+pub struct Sampler {
     stop: Sender<()>,
-    seen: Receiver<Result<Seen, PeakError<E>>>,
+    seen: Receiver<Result<Seen, PeakError>>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl<E: Send + 'static> Sampler<E> {
+impl Sampler {
     /// From the server's launch, so the load counts: `locate` is asked every
     /// tick until it names the server's cgroup, which is then read every tick
     /// for the `members` that are the server.
-    pub fn start(
+    pub fn start<E: std::error::Error + Send + Sync + 'static>(
         tree: Tree,
         watch: Watch,
         members: Members,
@@ -741,14 +742,14 @@ impl<E: Send + 'static> Sampler<E> {
     }
 
     /// Call while the server runs: the last read is taken here.
-    pub fn stop(self) -> Result<Peak, PeakError<E>> {
+    pub fn stop(self) -> Result<Peak, PeakError> {
         // Fails only once the thread has ended, which `recv` reports.
         let _ = self.stop.send(());
         self.seen.recv().map_err(|_| PeakError::Panicked)??.peak()
     }
 }
 
-impl<E> Drop for Sampler<E> {
+impl Drop for Sampler {
     fn drop(&mut self) {
         let _ = self.stop.send(());
         if let Some(thread) = self.thread.take() {
@@ -770,13 +771,13 @@ enum Gpu {
 
 /// Reads once `locate` names the cgroup, every tick, and once more at the
 /// stop.
-fn sample<E>(
+fn sample<E: std::error::Error + Send + Sync + 'static>(
     tree: &Tree,
     watch: Watch,
     split: Option<Split>,
     locate: &mut impl FnMut(&Tree) -> Result<Cgroup, Unlocated<E>>,
     stopped: &Receiver<()>,
-) -> Result<Seen, PeakError<E>> {
+) -> Result<Seen, PeakError> {
     let (gpu, tick) = match watch {
         Watch::Observe => (Gpu::Unread, OBSERVE_TICK),
         Watch::Peak => (Gpu::Unread, PEAK_TICK),
@@ -789,10 +790,10 @@ fn sample<E>(
     let cgroup = loop {
         match locate(tree) {
             Ok(cgroup) => break cgroup,
-            Err(Unlocated::Failed(err)) => return Err(PeakError::Unlocated(err)),
+            Err(Unlocated::Failed(err)) => return Err(PeakError::Unlocated(err.into())),
             Err(Unlocated::Yet(err)) => {
                 if stop_came(stopped, tick) {
-                    return Err(PeakError::Unlocated(err));
+                    return Err(PeakError::Unlocated(err.into()));
                 }
             }
         }
@@ -900,12 +901,7 @@ impl Seen {
         not(target_os = "linux"),
         expect(unused_variables, reason = "only the Linux GPU reads `cgroup`")
     )]
-    fn read<E>(
-        &mut self,
-        tree: &Tree,
-        dir: &Path,
-        cgroup: &Cgroup,
-    ) -> Result<String, PeakError<E>> {
+    fn read(&mut self, tree: &Tree, dir: &Path, cgroup: &Cgroup) -> Result<String, PeakError> {
         let before = self
             .shared
             .as_mut()
@@ -952,7 +948,7 @@ impl Seen {
         Ok(raw)
     }
 
-    fn peak<E>(self) -> Result<Peak, PeakError<E>> {
+    fn peak(self) -> Result<Peak, PeakError> {
         let gpu = match self.gpu {
             Gpu::Unread => None,
             #[cfg(target_os = "linux")]
@@ -1043,10 +1039,10 @@ mod tests {
     struct NotStartedError;
 
     /// A sampler of [`SCOPE`] in `tree`, which `locate` names at once.
-    fn sampler(tree: Tree, watch: Watch) -> anyhow::Result<Sampler<NotStartedError>> {
+    fn sampler(tree: Tree, watch: Watch) -> anyhow::Result<Sampler> {
         let scope = scope()?;
         Ok(Sampler::start(tree, watch, Members::All, move |_| {
-            Ok(scope.clone())
+            Ok::<_, Unlocated<NotStartedError>>(scope.clone())
         })?)
     }
 
@@ -1949,7 +1945,7 @@ shmem 0
 
         /// A sampler on a stand-in GPU, and a signal for each of its reads.
         struct Running {
-            sampler: Sampler<NotStartedError>,
+            sampler: Sampler,
             reads: Receiver<()>,
         }
 

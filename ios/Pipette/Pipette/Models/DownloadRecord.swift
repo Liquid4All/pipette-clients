@@ -17,4 +17,6 @@ struct DownloadRecord: Codable {
     /// See `DownloadCoordinator.Download.resumeETag`; persisted so a resume after relaunch
     /// is checked the same way.
     var etag: String?
+    /// See `DownloadCoordinator.Download.resumeProxy`.
+    var proxy: String?
 }

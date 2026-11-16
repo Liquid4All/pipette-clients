@@ -1,7 +1,7 @@
 //! Host context for filling the artifact stores.
 
-use pipette_http::HttpClient;
 use pipette_http::retry::RetryPolicy;
+use pipette_http::{CdnProxy, HttpClient};
 use pipette_programs::ExternalPrograms;
 
 use crate::progress::ProgressSink;
@@ -35,6 +35,9 @@ pub struct ArtifactsContext {
     /// The device identity a `vault_*` source is fetched as. `None` for a
     /// workspace with no registration, where such a fetch is refused by name.
     pub vault: Option<VaultAccess>,
+    /// Where every model download goes instead of its origin. `None` (the
+    /// default) fetches from the origin.
+    pub cdn_proxy: Option<CdnProxy>,
 }
 
 impl ArtifactsContext {
@@ -46,11 +49,17 @@ impl ArtifactsContext {
             storage: None,
             progress: None,
             vault: None,
+            cdn_proxy: None,
         }
     }
 
     pub fn with_download_retry(mut self, policy: RetryPolicy) -> Self {
         self.download_retry = policy;
+        self
+    }
+
+    pub fn with_cdn_proxy(mut self, proxy: Option<CdnProxy>) -> Self {
+        self.cdn_proxy = proxy;
         self
     }
 

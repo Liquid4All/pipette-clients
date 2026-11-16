@@ -9,21 +9,23 @@ use std::process::Command;
 use std::time::Instant;
 
 use pipette_memprobe::{Sampler, SupportedWatch, metal};
+use pipette_ops::measurement::MeasurementObserver;
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{BenchmarkResultData, MemoryObservation, RunResponse};
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::server;
 
-/// One server from its launch through `measure`, left in `served` for the
-/// entry to check its reading and the cell to record or quote it. One an
-/// earlier attempt left there stops first; the observation covers both.
-/// Returns the server's peak host bytes.
+/// One server from its launch, its load off the attempt clock, through
+/// `measure`, left in `served` for the entry to check its reading and the cell
+/// to record or quote it. One an earlier attempt left there stops first; the
+/// observation covers both. Returns the server's peak host bytes.
 pub(crate) fn serve(
     served: &mut Option<(Process, MemoryObservation)>,
     module: &str,
     command: impl FnOnce(u16) -> anyhow::Result<Command>,
     watch: SupportedWatch,
+    observer: MeasurementObserver<'_>,
     measure: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<u64> {
     let earlier = match served.take() {
@@ -37,10 +39,11 @@ pub(crate) fn serve(
     let url = server::url(port);
     let mut command = command(port)?;
     let probe = metal::MetalProbeChannel::attach(&mut command)?;
-    let mlx_server = start_process(module, command, server::STOP_GRACE)?;
+    let mlx_server = start_process(module, command, OnStop::SIGKILL)?;
     // Held from here, so the cell quotes it on any failure.
     let (mlx_server, memory) = served.insert((mlx_server, earlier));
-    mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| mlx_server.wait_ready(server::READY_TIMEOUT, ready))?;
     // Sampled from readiness on: the lifetime maximum still holds the load.
     let sampler = Sampler::start(mlx_server.pid(), watch)?;
     let sent = Instant::now();
@@ -120,9 +123,23 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Health).serve_forever()
     fn a_second_server_replaces_the_first_and_the_observation_spans_both() -> anyhow::Result<()> {
         let peak = Watch::Peak.supported()?;
         let mut served = None;
-        let first = serve(&mut served, "stub", stub(WARM_UP_MIB), peak, |_| Ok(()))?;
+        let first = serve(
+            &mut served,
+            "stub",
+            stub(WARM_UP_MIB),
+            peak,
+            MeasurementObserver::QUIET,
+            |_| Ok(()),
+        )?;
         let first_pid = served.as_ref().context("no first server")?.0.pid();
-        let second = serve(&mut served, "stub", stub(0), peak, |_| Ok(()))?;
+        let second = serve(
+            &mut served,
+            "stub",
+            stub(0),
+            peak,
+            MeasurementObserver::QUIET,
+            |_| Ok(()),
+        )?;
 
         assert!(first >= WARM_UP_MIB << 20, "{first}");
         assert!(second < WARM_UP_MIB << 20, "{second}");
@@ -143,9 +160,14 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Health).serve_forever()
     fn a_failed_request_keeps_its_server_for_the_cell() -> anyhow::Result<()> {
         let peak = Watch::Peak.supported()?;
         let mut served = None;
-        let Err(err) = serve(&mut served, "stub", stub(0), peak, |url| {
-            anyhow::bail!("no reply from {url}")
-        }) else {
+        let Err(err) = serve(
+            &mut served,
+            "stub",
+            stub(0),
+            peak,
+            MeasurementObserver::QUIET,
+            |url| anyhow::bail!("no reply from {url}"),
+        ) else {
             anyhow::bail!("a failed request was measured");
         };
         let message = format!("{err:#}");

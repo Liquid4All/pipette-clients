@@ -136,6 +136,7 @@ private func contractFailureCode(_ value: FailureCode) {
     switch value {
     case .attemptTimeout: break
     case .deviceError: break
+    case .deviceNotReady: break
     case .harnessError: break
     case .outOfMemory: break
     case .runtimeError: break

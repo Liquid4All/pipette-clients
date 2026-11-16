@@ -1,5 +1,5 @@
 //! A short command run to its exit with both streams kept, such as a program
-//! check or a `docker` call; a server is [`crate::start_process`]'s.
+//! check or a `docker` call; a server is a [`crate::Process`].
 
 use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};

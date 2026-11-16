@@ -18,7 +18,7 @@ use pipette_plan_types::{
     BenchmarkResultData, EndToEndLatencyBenchmark, EndToEndLatencyOvmsOpenvino,
     OvmsExtraRuntimeConfiguration, PositiveSeconds, RunResponse, RuntimeFlags,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::completions;
 use crate::models::ResolvedOpenvinoModel;
@@ -77,10 +77,11 @@ pub(super) fn run(
             port,
             client_config,
         )?,
-        server::STOP_GRACE,
+        OnStop::SIGKILL,
     )?;
     let sampler = Sampler::start(ovms.pid(), SupportedWatch::OBSERVE)?;
-    ovms.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| ovms.wait_ready(server::READY_TIMEOUT, ready))?;
     let result = measure(benchmark, readiness_gate, observer, &http, &url, &prompt);
     let (memory, _) = sampler.stop();
     let result_data = result.map_err(|err| err.context(ovms.stop_with_tail()))?;

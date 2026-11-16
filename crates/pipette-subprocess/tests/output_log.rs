@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::Context;
 use serde_json::{Value, json};
 
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 /// Collects what the subscriber writes.
 #[derive(Clone)]
@@ -66,7 +66,7 @@ fn each_line_is_logged_inside_the_processs_span() -> anyhow::Result<()> {
     let mut process = start_process(
         "echo-server",
         prints_to_stderr("hello-from-the-child"),
-        Duration::ZERO,
+        OnStop::SIGKILL,
     )?;
     process
         .wait(Duration::from_secs(30))?

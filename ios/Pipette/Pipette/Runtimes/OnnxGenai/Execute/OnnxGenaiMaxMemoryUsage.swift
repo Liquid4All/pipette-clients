@@ -16,7 +16,7 @@ nonisolated extension OnnxGenaiExecute {
             try await ProcessMemory.maxMemoryBracket(
                 label: "onnx", counter: OnnxGenaiRuntime.footprintWithMappedWeights
             ) {
-                try await OnnxGenaiRuntime.withFreshModel(path: model.dir) { loaded in
+                try await OnnxGenaiRuntime.withFreshModel(path: model.dir, observer: observer) { loaded in
                     let ids = try await OnnxGenaiRuntime.promptIds(
                         targetTokens: Int(benchmark.parameterPrefillTokens.value),
                         tokenizer: loaded.tokenizer)

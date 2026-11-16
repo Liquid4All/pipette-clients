@@ -353,6 +353,64 @@ impl StreamClient {
     }
 }
 
+/// A caching proxy on the local network (`--cdn-proxy`). A model download goes to
+/// it as the request a direct fetch would send, `http://HOST:PORT<path>?<query>`
+/// with `Host` naming the site, over plain HTTP and with a repo's token, and
+/// nothing falls back to the site.
+#[derive(Debug, Clone)]
+pub struct CdnProxy {
+    base_url: String,
+}
+
+impl CdnProxy {
+    /// `http://HOST:PORT`.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+}
+
+/// No scheme or path: the proxy is always plain HTTP, and each request brings
+/// its own path.
+impl std::str::FromStr for CdnProxy {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s.contains("://") {
+            return Err(
+                "give HOST:PORT without a scheme: the proxy is always plain HTTP".to_owned(),
+            );
+        }
+        let (host, port) = s
+            .rsplit_once(':')
+            .ok_or_else(|| "no port: give HOST:PORT".to_owned())?;
+        let port = port
+            .parse::<u16>()
+            .ok()
+            .filter(|&n| n != 0)
+            .ok_or_else(|| {
+                "the port must be a number from 1 to 65535, with no path after it".to_owned()
+            })?;
+        let valid_host = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            Some(ip) => ip.parse::<std::net::Ipv6Addr>().is_ok(),
+            None => {
+                !host.is_empty()
+                    && host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            }
+        };
+        if !valid_host {
+            return Err(
+                "the host must be a name, an IPv4 address or an IPv6 address in brackets"
+                    .to_owned(),
+            );
+        }
+        Ok(Self {
+            base_url: format!("http://{host}:{port}"),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 enum TlsMode {
     PreconfiguredWebpki,

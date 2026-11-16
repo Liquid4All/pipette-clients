@@ -9,7 +9,7 @@ use pipette_artifacts_catalog::runtime::ovms::layout::OvmsInstall;
 use pipette_http::HttpClient;
 use pipette_ops::measurement::MeasurementObserver;
 use pipette_plan_types::{BatchSize, OvmsExtraRuntimeConfiguration, RuntimeFlags, RuntimeOutput};
-use pipette_subprocess::{NotReadyError, start_process};
+use pipette_subprocess::{NotReadyError, OnStop, start_process};
 
 use crate::completions;
 
@@ -17,8 +17,6 @@ pub(crate) const PROGRAM: &str = "ovms";
 pub(crate) const MODEL_NAME: &str = "pipette";
 /// A cold NPU compile of a large model takes minutes; a warm GPU load ~1 s.
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(3600);
-/// The server holds nothing worth flushing, so a stop kills it at once.
-pub(crate) const STOP_GRACE: Duration = Duration::ZERO;
 
 /// Creates the compile cache, and puts the release's libraries first on the
 /// loader path.
@@ -112,10 +110,8 @@ pub(crate) fn size_prompt(
     tokens: u32,
     observer: MeasurementObserver<'_>,
 ) -> anyhow::Result<String> {
-    let mut ovms = start_process(PROGRAM, command, STOP_GRACE)?;
+    let mut ovms = start_process(PROGRAM, command, OnStop::SIGKILL)?;
     let ready = ready(url)?;
-    // Off the clock: the cell's first server compiles a cold cache, which the
-    // servers after it load.
     observer.outside(|| ovms.wait_ready(READY_TIMEOUT, ready))?;
     completions::prompt_text(http, url, tokens).map_err(|err| err.context(ovms.stop_with_tail()))
 }
@@ -185,7 +181,7 @@ mod tests {
                 mock.port(),
                 None,
             )?,
-            STOP_GRACE,
+            OnStop::SIGKILL,
         )?;
         ovms.wait_ready(ready_timeout, ready(&mock.base_url())?)?;
         Ok(ovms)

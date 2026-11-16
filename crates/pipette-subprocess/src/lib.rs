@@ -59,6 +59,6 @@ pub use inherited_fds::close_inherited_fds;
 pub use orphans::{owner, owner_of, owner_runs, reap_orphans};
 pub use output::{OutputError, output_within};
 pub use port::{NoFreePortError, pick_server_port};
-pub use process::{ChildTeardown, Process, spawn_piped, start_process};
+pub use process::{ChildTeardown, OnStop, Process, spawn_piped, start_process};
 pub use sigpipe::{no_sigpipe_on, reset_sigpipe};
 pub use spawned::{Stream, log_line};

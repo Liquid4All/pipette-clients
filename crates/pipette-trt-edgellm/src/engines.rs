@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::server::Launch;
 
@@ -26,7 +26,7 @@ pub fn build(launch: &Launch) -> anyhow::Result<()> {
     let mut builder = start_process(
         "trt-edgellm-server --build-only",
         launch.build_only(),
-        Duration::ZERO,
+        OnStop::SIGKILL,
     )?;
     builder
         .wait_success(BUILD_TIMEOUT)

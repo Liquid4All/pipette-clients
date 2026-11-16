@@ -4,7 +4,7 @@
 //! ```ignore
 //! let watch = Watch::Peak.supported()?;         // before anything spawns
 //! let probe = metal::MetalProbeChannel::attach(&mut cmd)?;
-//! let mut process = start_process("llama-bench", cmd, Duration::ZERO)?;
+//! let mut process = start_process("llama-bench", cmd, OnStop::SIGKILL)?;
 //! let sampler = Sampler::start(process.pid(), watch)?;
 //! let (memory, peak) = process.wait_success_before_reap(timeout, || sampler.stop())?;
 //! let max_host_bytes = peak?.host_bytes;      // reported

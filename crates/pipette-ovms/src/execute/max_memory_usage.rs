@@ -24,7 +24,7 @@ use pipette_plan_types::{
     BatchSize, MaxMemoryUsageBenchmark, MaxMemoryUsageOvmsOpenvino, MemoryObservation,
     OpenvinoDevice, OvmsExtraRuntimeConfiguration, PositiveSeconds, RunResponse, RuntimeFlags,
 };
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::completions;
 use crate::models::ResolvedOpenvinoModel;
@@ -99,6 +99,7 @@ pub(super) fn run(
                 &http,
                 &prompt,
                 prefill_tokens,
+                observer,
             )?)
         },
     );
@@ -116,10 +117,10 @@ pub(super) fn run(
         .build())
 }
 
-/// One server from its launch through one request at the cell's shape, left
-/// in `served` for the entry to check its reading and the cell to record or
-/// quote it. One an earlier attempt left there stops first; the observation
-/// covers both.
+/// One server from its launch, its load off the attempt clock, through one
+/// request at the cell's shape, left in `served` for the entry to check its
+/// reading and the cell to record or quote it. One an earlier attempt left
+/// there stops first; the observation covers both.
 fn serve(
     served: &mut Option<(Process, MemoryObservation)>,
     command: impl Fn(u16) -> anyhow::Result<Command>,
@@ -127,6 +128,7 @@ fn serve(
     http: &HttpClient,
     prompt: &str,
     prefill_tokens: u32,
+    observer: MeasurementObserver<'_>,
 ) -> anyhow::Result<MaxMemoryMeasurementReading> {
     let earlier = match served.take() {
         Some((mut ovms, memory)) => {
@@ -137,11 +139,12 @@ fn serve(
     };
     let port = pipette_subprocess::pick_server_port()?;
     let url = server::url(port);
-    let mut ovms = start_process(server::PROGRAM, command(port)?, server::STOP_GRACE)?;
+    let mut ovms = start_process(server::PROGRAM, command(port)?, OnStop::SIGKILL)?;
     // From the launch, as on the timing cells, so the Linux swap term covers the
     // load too.
     let sampler = Sampler::start(ovms.pid(), watch)?;
-    ovms.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| ovms.wait_ready(server::READY_TIMEOUT, ready))?;
     let measured = measure(http, &url, prompt, prefill_tokens);
     // While the server lives: Linux reads its `/proc` entry.
     let (observed, peak) = sampler.stop();

@@ -174,7 +174,9 @@ behind these choices are in
 
 `pipette-llamacpp` runs one `llama-bench` process per measured sample with
 `--repetitions 1`. Before the five it runs the same command once more,
-ungated; its row is checked and dropped. The run must print exactly one JSON
+ungated; its row is checked and dropped. A CPU-only build (`linux-x64-cpu`,
+`linux-arm64-cpu`, `linux-s390x-cpu`, `android-arm64-v8a`, `windows-x64-cpu`,
+`windows-arm64-cpu`) skips that run. The run must print exactly one JSON
 row (`n_prompt == 0`), with `n_gen == parameter_decode_tokens` and
 `n_depth == parameter_prefill_tokens`. `n_depth` runs a prompt pass before the
 timed block (none at depth zero), the timed block generates `n_gen` tokens, and
@@ -199,8 +201,9 @@ before, reduced without the extra run (runs 1 to 5) and with it (runs 2 to 6):
 
 With the default `f16` cache the first build cost 35 to 58 ms (Qwen3.5-0.8B,
 gemma-4-E4B). Run again, the same shapes showed no first-run cost, and neither
-did a CPU-only build, which compiles nothing: there the extra run only costs
-time.
+did a CPU-only build, which compiles nothing, so those builds skip the extra
+run. A GPU build keeps it even at `--n-gpu-layers 0`, since a backend can
+still take the untimed prompt pass's large batches.
 
 The cached build still happens inside each sample. Taking it out would need a
 second decode in the same process, which reads slower for a reason of its own:

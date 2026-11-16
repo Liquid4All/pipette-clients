@@ -9,16 +9,19 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use pipette_artifacts::VaultFetchError;
 use pipette_artifacts::model::ModelStoreError;
 use pipette_artifacts::runtime::RuntimeStoreError;
+use pipette_artifacts::{VaultFetchError, names_the_host};
 use pipette_http::HttpClient;
+use pipette_memprobe::{OsBoundWatchError, PeakError, WatchError, cgroup};
 use pipette_mgmt_client::{
     ClientIdentity, ServerUrl, client_api,
     types::{ClaimedJob, FailureSubmission},
 };
 use pipette_ops::attempt::AttemptTimeoutError;
-use pipette_plan_types::{EvalContextError, ExtraRuntimeConfigurationError, FailureCode};
+use pipette_plan_types::{
+    ClaimRequest, EvalContextError, ExtraRuntimeConfigurationError, FailureCode,
+};
 use pipette_readiness::ReadinessError;
 use pipette_subprocess::{ExitError, ReadyError, StartError, Stopped};
 
@@ -75,14 +78,6 @@ pub fn device_time_ms(device_time: Duration) -> u64 {
 /// says more about the host than the cell.
 const MEASURING_PROGRAMS: [&str; 2] = ["llama-bench", "llama-batched-bench"];
 
-/// llama.cpp's words (`llama-bench`, `llama_model_load`, `llama-server`) for a
-/// model it would not load. Matched lower-cased.
-const MODEL_LOAD_FAILED: [&str; 3] = [
-    "failed to load model",
-    "error loading model",
-    "exiting due to model loading error",
-];
-
 /// A load failure that is not the model's: a missing, non-GGUF or truncated
 /// file, which a fresh download repairs.
 const LOAD_FAILED_ON_FILE: [&str; 3] = [
@@ -91,8 +86,7 @@ const LOAD_FAILED_ON_FILE: [&str; 3] = [
     "corrupted or incomplete",
 ];
 
-/// A load failure on memory another process may hold (a cancelled job's GPU
-/// allocation outlives it), in llama.cpp's, `ENOMEM`'s, Windows' and Vulkan's
+/// An allocation failure, in llama.cpp's, `ENOMEM`'s, Windows' and Vulkan's
 /// words.
 const OUT_OF_MEMORY: [&str; 8] = [
     "unable to allocate",
@@ -105,6 +99,10 @@ const OUT_OF_MEMORY: [&str; 8] = [
     "outofhostmemory",
 ];
 
+/// llama.cpp's line for pinned memory a backend could not get, after which it
+/// falls back to an ordinary buffer: a warning, not an allocation failure.
+const PINNED_FALLBACK: &str = "pinned memory";
+
 /// llama.cpp's abort when the Hexagon DSP refuses an op (`HTP_STATUS_NO_SUPPORT`).
 /// The model, the build and the chip decide it, not DSP memory other processes
 /// hold. The cost: a refused cell fails for every phone, even one whose chip
@@ -114,38 +112,52 @@ const DSP_REFUSED_OP: &str = "dsp-error no-support";
 /// Any Hexagon DSP failure llama.cpp aborts on.
 const DSP_ERROR: &str = "dsp-error";
 
-/// A measuring program or a request to the engine's server overran. The server's
-/// case is told from a download by the [`Stopped`] context only an engine
-/// attaches, and from the model-load wait, which stays retriable, by the absence
-/// of [`ReadyError`].
-fn measurement_timed_out(err: &anyhow::Error) -> bool {
-    let measuring = err.chain().any(|cause| {
-        matches!(cause.downcast_ref::<ExitError>(),
-            Some(ExitError::TimedOut { name, .. }) if MEASURING_PROGRAMS.contains(&name.as_str()))
-    });
-    measuring
-        || (err.downcast_ref::<Stopped>().is_some()
-            && !err.chain().any(|cause| cause.is::<ReadyError>())
-            && err.chain().any(pipette_http::is_timeout))
+/// llama.cpp's abort on a buffer FastRPC would not map: a fault of the device,
+/// which the IQ-9075 hit across models.
+const FASTRPC_MAP_FAILED: &str = "fastrpc_mmap failed";
+
+/// The readiness wait ran out, whatever held the gate. A failed probe or a
+/// refused host check is that host's fault, so another device may run the cell.
+fn readiness_timed_out(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| matches!(cause.downcast_ref(), Some(ReadinessError::TimedOut { .. })))
 }
 
-/// Judged from the output tail the runtime's exit error quotes.
-fn model_failed_to_load(err: &anyhow::Error) -> bool {
+/// No host of the OS the flavor is built for reads its devices. An unreadable
+/// device tree (`WatchError::DeviceTree`) is this host's fault and stays retriable.
+fn watch_unsupported(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
-        let tail = match (
-            cause.downcast_ref::<ExitError>(),
-            cause.downcast_ref::<ReadyError>(),
-        ) {
-            (Some(ExitError::Failed { tail, .. }), _)
-            | (_, Some(ReadyError::Exited { tail, .. })) => tail.to_ascii_lowercase(),
-            _ => return false,
-        };
-        MODEL_LOAD_FAILED.iter().any(|m| tail.contains(m))
-            && !LOAD_FAILED_ON_FILE
-                .iter()
-                .chain(&OUT_OF_MEMORY)
-                .any(|m| tail.contains(m))
+        matches!(
+            cause.downcast_ref(),
+            Some(OsBoundWatchError(WatchError::Unsupported(_)))
+        )
     })
+}
+
+/// The runtime did not fail on its own: the client stopped a program that does
+/// not measure or lost a program's status, the memory reader gave out, an io
+/// error named this host (disk, permission, memory; `names_the_host`), or the
+/// Hexagon DSP failed other than by refusing an op.
+fn host_failed(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    (text.contains(DSP_ERROR) && !text.contains(DSP_REFUSED_OP))
+        || text.contains(FASTRPC_MAP_FAILED)
+        || err.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<ExitError>(),
+                Some(ExitError::TimedOut { name, .. })
+                    if !MEASURING_PROGRAMS.contains(&name.as_str())
+            ) || matches!(cause.downcast_ref(), Some(ExitError::Status(_)))
+                || matches!(
+                    cause.downcast_ref(),
+                    Some(ReadyError::TimedOut { .. } | ReadyError::Status(_))
+                )
+                || cause.is::<PeakError>()
+                || cause.is::<cgroup::PeakError>()
+                || cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(names_the_host)
+        })
 }
 
 /// Wording for a benchmark no client of this build runs.
@@ -160,6 +172,8 @@ pub fn failure_code(err: &anyhow::Error) -> Option<FailureCode> {
     let says = |words: &[&str]| words.iter().any(|w| text.contains(w));
     if any(&|c| c.is::<AttemptTimeoutError>()) {
         Some(FailureCode::AttemptTimeout)
+    } else if readiness_timed_out(err) {
+        Some(FailureCode::DeviceNotReady)
     } else if any(&|c| c.is::<ReadinessError>() || c.is::<HostNotReadyError>()) {
         Some(FailureCode::DeviceError)
     } else if any(&|c| {
@@ -174,11 +188,16 @@ pub fn failure_code(err: &anyhow::Error) -> Option<FailureCode> {
             || matches!(c.downcast_ref(), Some(StartError::Spawn { .. }))
     }) {
         Some(FailureCode::HarnessError)
-    } else if says(&OUT_OF_MEMORY) {
+    } else if text
+        .lines()
+        .filter(|line| !line.contains(PINNED_FALLBACK))
+        .any(|line| OUT_OF_MEMORY.iter().any(|w| line.contains(w)))
+    {
         Some(FailureCode::OutOfMemory)
     } else if any(&|c| matches!(c.downcast_ref(), Some(ReadyError::TimedOut { .. })))
         || says(&LOAD_FAILED_ON_FILE)
         || says(&UNRUNNABLE_HERE)
+        || watch_unsupported(err)
     {
         Some(FailureCode::HarnessError)
     } else if err.downcast_ref::<Stopped>().is_some()
@@ -191,17 +210,33 @@ pub fn failure_code(err: &anyhow::Error) -> Option<FailureCode> {
     }
 }
 
-/// Whether a run error is retriable. Defaults to retriable; only jobs no client
-/// is expected to run are not (the mgmt repo's `docs/client-integration.md`,
-/// "Retriable vs. non-retriable failures"), which includes a cell whose
-/// measurement ran out of time or whose model the runtime would not load: any
-/// client meets the same limit or refusal.
+/// Whether a run error is retriable (the mgmt repo's
+/// `docs/client-integration.md`, "Retriable vs. non-retriable failures"). The
+/// job's own failures are final: a claim no client can run, a cell past its
+/// time limit, a readiness wait that ran out, a flavor whose devices no host
+/// reads, and any `runtime_error` or `out_of_memory`, which includes every
+/// failure while a runtime's server is up, unless `host_failed` names this
+/// host. Everything else is retriable.
 pub fn classify_run_error(err: &anyhow::Error) -> bool {
     if err.chain().any(|cause| cause.is::<UnrunnableClaimError>()) {
         return false;
     }
+    if readiness_timed_out(err) {
+        return false;
+    }
     // Every client runs the cell under the same attempt limit.
     if err.chain().any(|cause| cause.is::<AttemptTimeoutError>()) {
+        return false;
+    }
+    if watch_unsupported(err) {
+        return false;
+    }
+    // The group's `failed` policy decides whether these run again.
+    if matches!(
+        failure_code(err),
+        Some(FailureCode::RuntimeError | FailureCode::OutOfMemory)
+    ) && !host_failed(err)
+    {
         return false;
     }
     // A vault refusal every device with this owner would meet identically
@@ -214,17 +249,9 @@ pub fn classify_run_error(err: &anyhow::Error) -> bool {
     }) {
         return false;
     }
-    // Only the engine raises these, after `prepare`'s downloads and digests.
-    if measurement_timed_out(err) || model_failed_to_load(err) {
-        return false;
-    }
     let msg = format!("{err:#}").to_ascii_lowercase();
     // Matching on wording fails the job for every client, so the list stays narrow.
-    let looks_permanent = UNRUNNABLE_HERE
-        .iter()
-        .chain(&[DSP_REFUSED_OP])
-        .any(|m| msg.contains(m));
-    !looks_permanent
+    !UNRUNNABLE_HERE.iter().any(|m| msg.contains(m))
 }
 
 /// Cap on the detail a failure carries. A llama-server failure can quote 64 KiB
@@ -278,9 +305,15 @@ pub enum ClaimPoll {
     Fatal(pipette_mgmt_client::Error),
 }
 
-/// Classify a single claim attempt (no retry loop).
-pub fn poll_claim(server: &ServerUrl, http: &HttpClient, auth: &ClientIdentity) -> ClaimPoll {
-    match client_api::claim(server, http, auth) {
+/// Classify a single claim attempt (no retry loop). `request` is the claim
+/// body; see [`client_api::claim`].
+pub fn poll_claim(
+    server: &ServerUrl,
+    http: &HttpClient,
+    auth: &ClientIdentity,
+    request: Option<&ClaimRequest>,
+) -> ClaimPoll {
+    match client_api::claim(server, http, auth, request) {
         Ok(Some(job)) => ClaimPoll::Job(Box::new(job)),
         Ok(None) => ClaimPoll::Idle,
         Err(e) if e.http_status() == Some(403) => ClaimPoll::Refused(e),
@@ -586,8 +619,8 @@ pub(crate) mod tests {
 
     #[test]
     fn classify_run_error_defaults_retriable() {
-        assert!(classify_run_error(&anyhow::anyhow!("out of memory")));
         assert!(classify_run_error(&anyhow::anyhow!("connection reset")));
+        assert!(!classify_run_error(&anyhow::anyhow!("out of memory")));
         assert!(!classify_run_error(&anyhow::anyhow!(
             "benchmark 'x' is not a known, valid definition: missing field"
         )));
@@ -652,10 +685,10 @@ pub(crate) mod tests {
         .context("decode_throughput_4096_100")
     }
 
-    fn readiness_ran_out() -> anyhow::Error {
+    fn readiness_ran_out(observed: &str) -> anyhow::Error {
         anyhow::Error::from(ReadinessError::TimedOut {
             max_wait: Duration::from_secs(420),
-            observed: "cpu busy 2.1 cores".to_owned(),
+            observed: observed.to_owned(),
         })
         .context("readiness gate before rep 1")
     }
@@ -678,7 +711,29 @@ pub(crate) mod tests {
         .context("starting llama-server")
     }
 
-    /// The tails are llama.cpp's own lines.
+    fn download_failed() -> anyhow::Error {
+        anyhow::Error::from(ModelStoreError::Fetch {
+            model: "ibm-granite/granite-4.2-8b-GGUF@93f3f6a8:granite-4.2-8b-Q5_K_M.gguf".into(),
+            source: anyhow::anyhow!(
+                "HTTP request to https://huggingface.co/ibm-granite/granite-4.2-8b-GGUF/resolve/\
+                 93f3f6a8/granite-4.2-8b-Q5_K_M.gguf failed: client error (Connect): dns error: \
+                 failed to lookup address information: No address associated with hostname"
+            ),
+        })
+    }
+
+    /// The IQ-9075's abort.
+    const FASTRPC_ABORT: &str = "ggml-hex: HTP0 buffer mapping failed : domain_id 3 size \
+         281452544 fd 18 error 0x00000001\n\
+         terminate called after throwing an instance of 'std::runtime_error'\n  \
+         what():  ggml-hex: fastrpc_mmap failed (see log for details)";
+
+    /// A Jetson Orin's start, which is all a killed run's tail holds.
+    const ORIN_START: &str = "ggml_cuda_init: found 1 CUDA devices (Total VRAM: 7485 MiB):\n  \
+         Device 0: Orin, compute capability 8.7, VMM: yes, VRAM: 7485 MiB";
+
+    /// The tails are llama.cpp's own lines, the IQ-9075 and Orin ones as the
+    /// fleet reported them.
     #[rstest::rstest]
     #[case::an_attempt_overran(attempt_overran(), false, Some(FailureCode::AttemptTimeout))]
     #[case::bench_overran(overran("llama-bench"), false, Some(FailureCode::RuntimeError))]
@@ -732,7 +787,7 @@ pub(crate) mod tests {
             "llama_model_load: error loading model: unable to allocate Vulkan0 buffer\n\
              main: exiting due to model loading error"
         ),
-        true,
+        false,
         Some(FailureCode::OutOfMemory)
     )]
     #[case::mmap_out_of_memory(
@@ -740,11 +795,72 @@ pub(crate) mod tests {
             "llama_model_load: error loading model: mmap failed: Cannot allocate memory\n\
              main: error: failed to load model '/m/q.gguf'"
         ),
-        true,
+        false,
         Some(FailureCode::OutOfMemory)
+    )]
+    #[case::a_context_that_would_not_fit(
+        bench_exited(
+            "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 279.26 MiB on device 0: \
+             cudaMalloc failed: out of memory\n\
+             llama_bench: error: failed to create context with model '/m/q.gguf'"
+        ),
+        false,
+        Some(FailureCode::OutOfMemory)
+    )]
+    #[case::a_kill_short_of_memory(
+        bench_exited(&format!("{ORIN_START}\nCUDA error: out of memory")),
+        false,
+        Some(FailureCode::OutOfMemory)
+    )]
+    #[case::a_kill_without_memory_words(
+        bench_exited(ORIN_START),
+        false,
+        Some(FailureCode::RuntimeError)
     )]
     #[case::a_crash(
         bench_exited("Segmentation fault"),
+        false,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_crash_after_a_pinned_memory_fallback(
+        bench_exited("ggml_vulkan: Failed to allocate pinned memory\nSegmentation fault"),
+        false,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_server_that_died_printing_nothing(
+        anyhow::Error::from(ReadyError::Exited {
+            name: "llama-server".to_owned(),
+            status: exit_one(),
+            tail: String::new(),
+        }),
+        false,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_lost_exit_status(
+        anyhow::Error::from(ExitError::Status(pipette_subprocess::StatusError::Lost {
+            name: "llama-bench".to_owned(),
+        })),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_fastrpc_mapping_in_the_bench(
+        bench_exited(FASTRPC_ABORT),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_fastrpc_mapping_at_load(
+        server_exited(FASTRPC_ABORT),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_fastrpc_mapping_the_load_caught(
+        server_exited(
+            "ggml-hex: HTP0 buffer mapping failed : domain_id 3 size 281452544 fd 18 error \
+             0x00000001\n\
+             llama_model_load: error loading model: ggml-hex: fastrpc_mmap failed (see log for \
+             details)\n\
+             llama_model_load_from_file_impl: failed to load model"
+        ),
         true,
         Some(FailureCode::RuntimeError)
     )]
@@ -768,8 +884,62 @@ pub(crate) mod tests {
         true,
         Some(FailureCode::HarnessError)
     )]
-    #[case::the_readiness_wait_ran_out(readiness_ran_out(), true, Some(FailureCode::DeviceError))]
+    #[case::the_load_wait_overran_short_of_memory(
+        anyhow::Error::from(ReadyError::TimedOut {
+            name: "llama-server".to_owned(),
+            timeout: Duration::from_secs(120),
+            tail: "\nstderr tail:\nggml_vulkan: Device memory allocation of size 4294967296 \
+                   failed.\nggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory"
+                .to_owned(),
+            source: "HTTP 503 Service Unavailable: loading model".into(),
+        }),
+        true,
+        Some(FailureCode::OutOfMemory)
+    )]
+    #[case::the_flavors_devices_cannot_be_read(
+        anyhow::Error::from(OsBoundWatchError(
+            pipette_memprobe::UnsupportedError {
+                watch: pipette_memprobe::Watch::PeakWithAccelerators,
+            }
+            .into()
+        ))
+        .context("flavor linux-arm64-snapdragon's devices cannot be read here"),
+        false,
+        Some(FailureCode::HarnessError)
+    )]
+    #[case::an_openvino_device_cannot_be_read(
+        anyhow::Error::from(WatchError::from(pipette_memprobe::UnsupportedError {
+            watch: pipette_memprobe::Watch::PeakWithNpu,
+        }))
+        .context("the NPU device's memory cannot be read on this OS; run this memory cell on cpu"),
+        true,
+        None
+    )]
+    #[case::a_download_failed(download_failed(), true, Some(FailureCode::HarnessError))]
+    #[case::the_readiness_wait_ran_out(
+        readiness_ran_out("cpu busy 2.1 cores"),
+        false,
+        Some(FailureCode::DeviceNotReady)
+    )]
+    #[case::a_touch_held_the_wait_to_its_end(
+        readiness_ran_out(
+            "thermal=status:0(nominal),hottest:33°C(ok),skin:unavailable(off) cpu=busy:5%(ok) \
+             touch=irq:212/s,pointers:1(held)"
+        ),
+        false,
+        Some(FailureCode::DeviceNotReady)
+    )]
+    #[case::a_probe_could_not_read(
+        anyhow::Error::from(ReadinessError::Unavailable("no thermal zones")),
+        true,
+        Some(FailureCode::DeviceError)
+    )]
     #[case::the_gpu_preflight_failed(gpu_preflight_failed(), true, Some(FailureCode::DeviceError))]
+    #[case::the_gate_was_cancelled(
+        anyhow::Error::from(ReadinessError::Cancelled),
+        true,
+        Some(FailureCode::DeviceError)
+    )]
     #[case::a_spawn_ran_out_of_memory(
         spawn_ran_out_of_memory(),
         true,
@@ -788,6 +958,18 @@ pub(crate) mod tests {
     ) {
         assert_eq!(classify_run_error(&err), retriable, "{err:#}");
         assert_eq!(failure_code(&err), code, "{err:#}");
+    }
+
+    /// Unlike a missing reader, a device tree this host could not read is its own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unreadable_device_tree_stays_retriable() {
+        let err = anyhow::Error::from(OsBoundWatchError(WatchError::DeviceTree {
+            kind: std::io::ErrorKind::PermissionDenied,
+        }))
+        .context("flavor linux-arm64-cuda-13's devices cannot be read here");
+        assert!(classify_run_error(&err), "{err:#}");
+        assert_eq!(failure_code(&err), None, "{err:#}");
     }
 
     /// A download's stall and the load wait's last check are the same timeout error.
@@ -822,8 +1004,11 @@ pub(crate) mod tests {
         } else {
             let mut command = std::process::Command::new("sh");
             command.args(["-c", "exec sleep 30"]);
-            let mut llama_server =
-                pipette_subprocess::start_process("llama-server", command, Duration::ZERO)?;
+            let mut llama_server = pipette_subprocess::start_process(
+                "llama-server",
+                command,
+                pipette_subprocess::OnStop::SIGKILL,
+            )?;
             let failed = if stage == "load wait" {
                 anyhow::Error::from(ReadyError::TimedOut {
                     name: "llama-server".to_owned(),
@@ -839,6 +1024,70 @@ pub(crate) mod tests {
         .context("running the cell");
         assert_eq!(classify_run_error(&err), retriable, "{err:#}");
         assert_eq!(failure_code(&err), Some(code), "{err:#}");
+        Ok(())
+    }
+
+    /// Failures under [`Stopped`], which files one with no code of its own as
+    /// `runtime_error`: the server's own failure is final, the host's is not.
+    /// The stream and readiness texts are as the fleet reported them.
+    #[cfg(unix)]
+    #[rstest::rstest]
+    #[case::a_dropped_stream(
+        anyhow::anyhow!(
+            "request or response body error: error reading a body from connection: \
+             unexpected EOF during chunk size line"
+        )
+        .context("failed to read SSE line")
+        .context("after 0 of 1 prompts ended"),
+        false,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::the_readiness_wait(
+        anyhow::Error::from(ReadinessError::TimedOut {
+            max_wait: Duration::from_secs(300),
+            observed: "thermal=status:2(moderate),hottest:77°C(hot),skin:42°C(off) \
+                       cpu=busy:54%(busy) touch=irq:0/s(ok)"
+                .to_owned(),
+        }),
+        false,
+        Some(FailureCode::DeviceNotReady)
+    )]
+    #[case::the_memory_reader(
+        anyhow::Error::from(PeakError::NotWatched),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::the_cgroup_memory_reader(
+        anyhow::Error::from(cgroup::PeakError::NoKey {
+            path: "/sys/fs/cgroup/system.slice/docker-0f1e.scope/memory.stat".into(),
+            key: "kernel",
+        }),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
+    #[case::a_full_disk(
+        anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull))
+            .context("failed to append a completion"),
+        true,
+        Some(FailureCode::RuntimeError)
+    )]
+    fn a_failure_under_the_server(
+        #[case] err: anyhow::Error,
+        #[case] retriable: bool,
+        #[case] code: Option<FailureCode>,
+    ) -> anyhow::Result<()> {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exec sleep 30"]);
+        let mut llama_server = pipette_subprocess::start_process(
+            "llama-server",
+            command,
+            pipette_subprocess::OnStop::SIGKILL,
+        )?;
+        let err = err
+            .context("end_to_end_latency_1024_256 rep 1/5")
+            .context(llama_server.stop_with_tail());
+        assert_eq!(classify_run_error(&err), retriable, "{err:#}");
+        assert_eq!(failure_code(&err), code, "{err:#}");
         Ok(())
     }
 
@@ -893,7 +1142,7 @@ pub(crate) mod tests {
         let server_url = server_url(&server)?;
         let http = test_http()?;
         let auth = test_auth()?;
-        match poll_claim(&server_url, &http, &auth) {
+        match poll_claim(&server_url, &http, &auth, None) {
             ClaimPoll::Job(job) => {
                 assert_eq!(job.job_id, "job-abc");
                 assert_eq!(job.time_window, "PT10M");

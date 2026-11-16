@@ -441,6 +441,23 @@ pub(crate) fn send(
     dispatch(server, http, method, path, auth, None, None)
 }
 
+/// [`send`] with an optional JSON body, for a call whose body is optional on
+/// the wire: `None` sends no body.
+pub(crate) fn send_optional_json<B: serde::Serialize>(
+    server: &ServerUrl,
+    http: &HttpClient,
+    method: HttpMethod,
+    path: &str,
+    auth: Option<&dyn SignsRequest>,
+    body: Option<&B>,
+) -> Result<(HttpResponse, String, String)> {
+    let body = body
+        .map(|body| serde_json::to_vec(body).map(Payload::json))
+        .transpose()
+        .map_err(Error::EncodeJson)?;
+    dispatch(server, http, method, path, auth, None, body)
+}
+
 /// A response body left on the wire, for an artifact rather than a record: a
 /// vault object is gigabytes, and [`HttpResponse`] would hold it all in
 /// memory. Dropping it mid-way closes the connection.

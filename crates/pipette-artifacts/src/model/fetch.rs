@@ -7,13 +7,13 @@
 use std::fs;
 use std::path::Path;
 
-use reqwest::StatusCode;
-use reqwest::blocking::Response;
-use reqwest::header::{IF_RANGE, RANGE};
+use reqwest::blocking::{RequestBuilder, Response};
+use reqwest::header::{HOST, IF_RANGE, RANGE};
+use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 
-use pipette_http::HttpClient;
 use pipette_http::retry::{Disposition, RetryPolicy, retrying};
+use pipette_http::{CdnProxy, HttpClient};
 use pipette_mgmt_client::EntityTag;
 use pipette_plan_types::{
     AbsolutePath, AuthToken, GgufTextSource, GgufVisionAbsoluteFiles, GgufVisionHfFiles,
@@ -534,8 +534,13 @@ fn hf_resolve_url(
     revision: &str,
     path: &str,
 ) -> Result<ResourceUrl, ModelFetchError> {
-    let url = format!("https://huggingface.co/{repo}/resolve/{revision}/{path}");
-    ResourceUrl::try_new(url.clone()).map_err(|_| ModelFetchError::InvalidUrl(url))
+    let url = format!("{HF_ENDPOINT}/{repo}/resolve/{revision}/{path}");
+    // Parsed as a direct fetch parses it, so a listed `%2e%2e` is resolved in the
+    // URL planned, which is then the one requested, directly or through the proxy.
+    reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|parsed| ResourceUrl::try_new(String::from(parsed)).ok())
+        .ok_or(ModelFetchError::InvalidUrl(url))
 }
 
 /// The files to pull for a directory model. A `prefix` keeps only its subtree,
@@ -615,6 +620,40 @@ struct HfLfs {
 
 const HF_ENDPOINT: &str = "https://huggingface.co";
 
+/// Lets the proxy cache a file from a site other than Hugging Face under the
+/// sha256 the fetch verifies. Sent to the proxy only.
+const EXPECTED_SHA256: &str = "x-expected-sha256";
+
+/// A request for `url`; through `proxy`, the same request sent to
+/// `http://HOST:PORT<path>?<query>` with `Host` naming the site. It follows no
+/// redirect there: the proxy follows the site's own, and reqwest would carry this
+/// `Host` to another site.
+fn model_request(
+    http: &HttpClient,
+    proxy: Option<&CdnProxy>,
+    method: Method,
+    url: &str,
+) -> Result<RequestBuilder, ModelFetchError> {
+    let Some(proxy) = proxy else {
+        return Ok(http.client().request(method, url));
+    };
+    let invalid = || ModelFetchError::InvalidUrl(url.to_owned());
+    let parsed = reqwest::Url::parse(url).map_err(|_| invalid())?;
+    let host = parsed.host_str().ok_or_else(invalid)?;
+    let site = parsed
+        .port()
+        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+    let query = parsed
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let target = format!("{}{}{query}", proxy.base_url(), parsed.path());
+    Ok(http
+        .client_no_redirects()
+        .request(method, target)
+        .header(HOST, site))
+}
+
 /// Materialize `declared` at the paths in `into`. A failure may leave a partial
 /// file; the store stages into a dir it discards on error.
 ///
@@ -624,19 +663,7 @@ pub(crate) fn fetch_model(
     http: &HttpClient,
     retry: &RetryPolicy,
     vault: Option<&VaultAccess>,
-    declared: &Model,
-    into: &Model,
-    reporter: &mut Reporter,
-) -> Result<(), ModelFetchError> {
-    fetch_model_with_hf_endpoint(http, retry, vault, HF_ENDPOINT, declared, into, reporter)
-}
-
-/// [`fetch_model`] with the HF listing at `hf_endpoint`, for mock servers.
-fn fetch_model_with_hf_endpoint(
-    http: &HttpClient,
-    retry: &RetryPolicy,
-    vault: Option<&VaultAccess>,
-    hf_endpoint: &str,
+    cdn_proxy: Option<&CdnProxy>,
     declared: &Model,
     into: &Model,
     reporter: &mut Reporter,
@@ -647,9 +674,15 @@ fn fetch_model_with_hf_endpoint(
     let listings = parts
         .iter()
         .map(|part| match part {
-            Part::HfSnapshot { repo, prefix, dest } => {
-                snapshot_downloads(http, retry, hf_endpoint, repo, prefix.as_ref(), dest)
-            }
+            Part::HfSnapshot { repo, prefix, dest } => snapshot_downloads(
+                http,
+                retry,
+                cdn_proxy,
+                HF_ENDPOINT,
+                repo,
+                prefix.as_ref(),
+                dest,
+            ),
             Part::File(_) | Part::VaultArchive { .. } | Part::LocalDir { .. } => Ok(Vec::new()),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -657,10 +690,10 @@ fn fetch_model_with_hf_endpoint(
         .iter()
         .zip(listings)
         .try_for_each(|(part, listing)| match part {
-            Part::File(download) => fetch_file(http, retry, vault, download, reporter),
-            Part::HfSnapshot { .. } => listing
-                .iter()
-                .try_for_each(|download| fetch_file(http, retry, vault, download, reporter)),
+            Part::File(download) => fetch_file(http, retry, vault, cdn_proxy, download, reporter),
+            Part::HfSnapshot { .. } => listing.iter().try_for_each(|download| {
+                fetch_file(http, retry, vault, cdn_proxy, download, reporter)
+            }),
             Part::VaultArchive { path, sha256, dest } => {
                 vault::fetch_and_unpack(
                     vault,
@@ -682,12 +715,13 @@ fn fetch_model_with_hf_endpoint(
 fn snapshot_downloads(
     http: &HttpClient,
     retry: &RetryPolicy,
+    cdn_proxy: Option<&CdnProxy>,
     hf_endpoint: &str,
     repo: &HfRepo,
     prefix: Option<&RepoSubpath>,
     dest: &AbsolutePath,
 ) -> Result<Vec<Download>, ModelFetchError> {
-    let info = repo_info(http, retry, hf_endpoint, repo)?;
+    let info = repo_info(http, retry, cdn_proxy, hf_endpoint, repo)?;
     let requested_revision = repo.revision.as_ref().map_or("main", AsRef::as_ref);
     tracing::info!(
         %repo,
@@ -705,6 +739,7 @@ fn snapshot_downloads(
 fn repo_info(
     http: &HttpClient,
     retry: &RetryPolicy,
+    cdn_proxy: Option<&CdnProxy>,
     hf_endpoint: &str,
     repo: &HfRepo,
 ) -> Result<HfModelInfo, ModelFetchError> {
@@ -714,7 +749,7 @@ fn repo_info(
         retry,
         &url,
         |_| {
-            let mut request = http.client().get(&url);
+            let mut request = model_request(http, cdn_proxy, Method::GET, &url)?;
             if let Some(token) = &repo.auth_token {
                 request = request.bearer_auth(token.as_ref());
             }
@@ -735,23 +770,31 @@ fn repo_info(
 /// some servers refuse HEAD and serve the GET anyway.
 pub(crate) fn content_length(
     http: &HttpClient,
+    cdn_proxy: Option<&CdnProxy>,
     url: &str,
     auth: Option<&AuthToken>,
+    expected_sha256: Option<&Sha256>,
 ) -> Option<u64> {
-    let mut request = http.client().head(url);
+    let warn_unsized = |error: &dyn std::fmt::Display| {
+        tracing::warn!(
+            %url,
+            %error,
+            "sizing failed; the storage quota cannot be checked before the fetch"
+        );
+    };
+    let mut request = model_request(http, cdn_proxy, Method::HEAD, url)
+        .inspect_err(|error| warn_unsized(error))
+        .ok()?;
     if let Some(token) = auth {
         request = request.bearer_auth(token.as_ref());
+    }
+    if let Some(sha256) = expected_sha256 {
+        request = request.header(EXPECTED_SHA256, sha256.as_ref());
     }
     // Read the header rather than `Response::content_length()`: a HEAD reply has
     // no body, so the body-length hint is always 0.
     pipette_http::send(request)
-        .inspect_err(|source| {
-            tracing::warn!(
-                %url,
-                error = %source,
-                "sizing failed; the storage quota cannot be checked before the fetch"
-            );
-        })
+        .inspect_err(|error| warn_unsized(error))
         .ok()?
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)?
@@ -769,6 +812,7 @@ pub(crate) fn declared_size_bytes(
     http: &HttpClient,
     retry: &RetryPolicy,
     vault: Option<&VaultAccess>,
+    cdn_proxy: Option<&CdnProxy>,
     declared: &Model,
 ) -> Result<Option<u64>, ModelFetchError> {
     let into = to_stored(declared, Path::new(QUOTA_PROBE_BASE))?;
@@ -777,7 +821,7 @@ pub(crate) fn declared_size_bytes(
     parts(declared, &into)?
         .iter()
         .try_fold(Some(0u64), |total, part| {
-            let size = part_size_bytes(http, retry, vault, part)?;
+            let size = part_size_bytes(http, retry, vault, cdn_proxy, part)?;
             Ok(total
                 .zip(size)
                 .map(|(total, size)| total.saturating_add(size)))
@@ -788,13 +832,21 @@ fn part_size_bytes(
     http: &HttpClient,
     retry: &RetryPolicy,
     vault: Option<&VaultAccess>,
+    cdn_proxy: Option<&CdnProxy>,
     part: &Part,
 ) -> Result<Option<u64>, ModelFetchError> {
     Ok(match part {
         Part::File(Download {
             origin: Origin::Public { url, auth },
+            sha256,
             ..
-        }) => content_length(http, url.as_ref(), auth.as_ref()),
+        }) => content_length(
+            http,
+            cdn_proxy,
+            url.as_ref(),
+            auth.as_ref(),
+            cdn_proxy.and(sha256.as_ref()),
+        ),
         Part::File(Download {
             origin: Origin::Vault { path },
             sha256,
@@ -808,7 +860,7 @@ fn part_size_bytes(
             Some(crate::entry::entry_size_bytes(Path::new(src.as_ref())))
         }
         Part::HfSnapshot { repo, prefix, .. } => {
-            hf_dir_size_bytes(http, retry, HF_ENDPOINT, repo, prefix.as_ref())
+            hf_dir_size_bytes(http, retry, cdn_proxy, HF_ENDPOINT, repo, prefix.as_ref())
         }
         // The record sizes the packed archive, an undercount of the unpacked tree.
         // It is still read, so a refusal surfaces here as the fetch's would.
@@ -831,6 +883,7 @@ const QUOTA_PROBE_BASE: &str = "/quota-probe";
 fn hf_dir_size_bytes(
     http: &HttpClient,
     retry: &RetryPolicy,
+    cdn_proxy: Option<&CdnProxy>,
     hf_endpoint: &str,
     repo: &HfRepo,
     prefix: Option<&RepoSubpath>,
@@ -838,7 +891,7 @@ fn hf_dir_size_bytes(
     let prefix_slash = prefix.map(|p| format!("{}/", p.as_ref()));
     // Not fatal, for the same reason a failed HEAD isn't: the fetch makes its
     // own listing request and will report the failure itself if it persists.
-    let info = repo_info(http, retry, hf_endpoint, repo)
+    let info = repo_info(http, retry, cdn_proxy, hf_endpoint, repo)
         .inspect_err(|source| {
             tracing::warn!(
                 %repo,
@@ -869,12 +922,13 @@ fn fetch_file(
     http: &HttpClient,
     retry: &RetryPolicy,
     vault: Option<&VaultAccess>,
+    cdn_proxy: Option<&CdnProxy>,
     download: &Download,
     reporter: &mut Reporter,
 ) -> Result<(), ModelFetchError> {
     let dest = Path::new(download.dest.as_ref());
     let (url, auth) = match &download.origin {
-        Origin::Public { url, auth } => (url, auth),
+        Origin::Public { url, auth } => (url.as_ref(), auth),
         Origin::Vault { path } => {
             vault::fetch_to_file(
                 vault,
@@ -889,30 +943,30 @@ fn fetch_file(
         }
         Origin::Local { path } => return copy_file(Path::new(path.as_ref()), dest),
     };
+    let source = PublicFile {
+        http,
+        proxy: cdn_proxy,
+        url,
+        auth: auth.as_ref(),
+        expected_sha256: cdn_proxy.and(download.sha256.as_ref()),
+        dest,
+    };
     let start = reporter.mark();
     let mut partial = None;
     retrying(
         retry,
-        url.as_ref(),
-        |_| {
-            fetch_public_file(
-                http,
-                url,
-                auth.as_ref(),
-                download,
-                &mut partial,
-                start,
-                reporter,
-            )
-        },
+        url,
+        |_| fetch_public_file(&source, download, &mut partial, start, reporter),
         ModelFetchError::disposition,
     )
 }
 
 struct PublicFile<'a> {
     http: &'a HttpClient,
-    url: &'a ResourceUrl,
+    proxy: Option<&'a CdnProxy>,
+    url: &'a str,
     auth: Option<&'a AuthToken>,
+    expected_sha256: Option<&'a Sha256>,
     dest: &'a Path,
 }
 
@@ -921,9 +975,12 @@ impl Source for PublicFile<'_> {
     type Error = ModelFetchError;
 
     fn get(&self, resume: Option<&ResumePoint>) -> Result<Response, ModelFetchError> {
-        let mut request = self.http.client().get(self.url.as_ref());
+        let mut request = model_request(self.http, self.proxy, Method::GET, self.url)?;
         if let Some(token) = self.auth {
             request = request.bearer_auth(token.as_ref());
+        }
+        if let Some(sha256) = self.expected_sha256 {
+            request = request.header(EXPECTED_SHA256, sha256.as_ref());
         }
         if let Some(point) = resume {
             request = request
@@ -931,7 +988,7 @@ impl Source for PublicFile<'_> {
                 .header(IF_RANGE, point.etag.as_str());
         }
         pipette_http::send(request).map_err(|source| ModelFetchError::Http {
-            url: self.url.to_string(),
+            url: self.url.to_owned(),
             source,
         })
     }
@@ -960,27 +1017,18 @@ impl Source for PublicFile<'_> {
     }
 }
 
-/// One attempt to stream `url` into the download's destination and verify it.
-/// It continues `partial` when the server agrees the file is the same.
+/// One attempt to stream `source` into the download's destination and verify
+/// it. It continues `partial` when the server agrees the file is the same.
 /// `start` is the progress count a restart rewinds to.
 fn fetch_public_file(
-    http: &HttpClient,
-    url: &ResourceUrl,
-    auth: Option<&AuthToken>,
+    source: &PublicFile<'_>,
     download: &Download,
     partial: &mut Option<Partial>,
     start: u64,
     reporter: &mut Reporter,
 ) -> Result<(), ModelFetchError> {
-    let _span = tracing::info_span!("public download", %url).entered();
-    let dest = Path::new(download.dest.as_ref());
-    let source = PublicFile {
-        http,
-        url,
-        auth,
-        dest,
-    };
-    let file = resume::attempt(&source, dest, partial, start, reporter)?;
+    let _span = tracing::info_span!("public download", url = %source.url).entered();
+    let file = resume::attempt(source, source.dest, partial, start, reporter)?;
 
     // The body read makes a file from one response as long as its
     // `Content-Length`. A joined file can be shorter or longer than the total.
@@ -1314,7 +1362,13 @@ mod tests {
         let declared = Model::AppleFoundationText;
         assert!(parts(&declared, &declared)?.is_empty());
         assert_eq!(
-            declared_size_bytes(&test_http()?, &RetryPolicy::IMMEDIATE, None, &declared)?,
+            declared_size_bytes(
+                &test_http()?,
+                &RetryPolicy::IMMEDIATE,
+                None,
+                None,
+                &declared
+            )?,
             Some(0)
         );
         Ok(())
@@ -1412,6 +1466,7 @@ mod tests {
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
             None,
+            None,
             &declared,
             &into,
             &mut Reporter::silent(),
@@ -1447,6 +1502,7 @@ mod tests {
         fetch_model(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             None,
             &declared,
             &into,
@@ -1487,6 +1543,7 @@ mod tests {
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
             None,
+            None,
             &declared,
             &to_stored(&declared, &blobs)?,
             &mut Reporter::silent(),
@@ -1518,6 +1575,7 @@ mod tests {
         match fetch_model(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             None,
             &declared,
             &into,
@@ -1561,6 +1619,7 @@ mod tests {
         fetch_model(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             None,
             &declared,
             &into,
@@ -1613,6 +1672,7 @@ mod tests {
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
             Some(&access(&server)?),
+            None,
             &declared,
             &to_stored(&declared, &blobs)?,
             &mut Reporter::silent(),
@@ -1635,7 +1695,8 @@ mod tests {
         let server = MockServer::start();
         let listing = server.mock(|when, then| {
             when.method(GET)
-                .path("/api/models/meta/llama/revision/main");
+                .path("/api/models/meta/llama/revision/main")
+                .header("host", "huggingface.co");
             then.status(404);
         });
         let tmp = tempfile::tempdir()?;
@@ -1653,11 +1714,11 @@ mod tests {
         });
         let blobs = tmp.path().join("store/blobs");
 
-        let err = fetch_model_with_hf_endpoint(
+        let err = fetch_model(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
             None,
-            &server.base_url(),
+            Some(&proxy_at(server.address())?),
             &declared,
             &to_stored(&declared, &blobs)?,
             &mut Reporter::silent(),
@@ -1805,6 +1866,10 @@ mod tests {
         Ok(HttpClient::new("pipette-test")?)
     }
 
+    fn proxy_at(address: impl std::fmt::Display) -> anyhow::Result<CdnProxy> {
+        address.to_string().parse().map_err(anyhow::Error::msg)
+    }
+
     /// `(declared, into)` for a `Url` source, which needs no endpoint override.
     fn url_text_model(
         url: &str,
@@ -1840,6 +1905,7 @@ mod tests {
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
             None,
+            None,
             &declared,
             &into,
             &mut Reporter::silent(),
@@ -1864,6 +1930,7 @@ mod tests {
         match fetch_model(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             None,
             &declared,
             &into,
@@ -1891,6 +1958,7 @@ mod tests {
         match fetch_model(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             None,
             &declared,
             &into,
@@ -1956,6 +2024,7 @@ mod tests {
         fetch_model(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             None,
             &declared,
             &into,
@@ -2325,12 +2394,265 @@ mod tests {
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
             None,
+            None,
             &declared,
             &into,
             &mut Reporter::silent(),
         )?;
 
         hit.assert();
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::snapshot(
+        Model::Mlx(Mlx {
+            source: ModelSource::HuggingFace {
+                repo: hf_repo(None, None)?,
+                prefix: None,
+            },
+        }),
+        "huggingface.co",
+        format!("/meta/llama/resolve/{HF_COMMIT_A}/config.json"),
+        "config.json"
+    )]
+    #[case::repo_file(
+        hf_text(None, None)?,
+        "huggingface.co",
+        "/meta/llama/resolve/main/Q4.gguf".to_owned(),
+        "Q4.gguf"
+    )]
+    #[case::url_on_another_host(
+        url_text_model("https://ex.com/w.gguf", None, base())?.0,
+        "ex.com",
+        "/w.gguf".to_owned(),
+        "w.gguf"
+    )]
+    fn a_proxy_takes_every_model_download(
+        #[case] declared: Model,
+        #[case] site: &str,
+        #[case] file: String,
+        #[case] stored: &str,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let listing = server.mock(|when, then| {
+            when.method(GET)
+                .path("/api/models/meta/llama/revision/main")
+                .query_param("blobs", "true")
+                .header("host", "huggingface.co");
+            then.status(200).json_body(serde_json::json!({
+                "sha": HF_COMMIT_A,
+                "siblings": [{ "rfilename": "config.json", "size": 3 }]
+            }));
+        });
+        // Any method: sizing a file sends a HEAD.
+        let served = server.mock(|when, then| {
+            when.path(file.as_str()).header("host", site);
+            then.status(200).body("abc");
+        });
+        let http = test_http()?;
+        let proxy = proxy_at(server.address())?;
+        let tmp = tempfile::tempdir()?;
+
+        declared_size_bytes(
+            &http,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            Some(&proxy),
+            &declared,
+        )?;
+        assert_eq!(
+            listing.calls() + served.calls(),
+            1,
+            "sizing skipped the proxy"
+        );
+        fetch_model(
+            &http,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            Some(&proxy),
+            &declared,
+            &to_stored(&declared, tmp.path())?,
+            &mut Reporter::silent(),
+        )?;
+        assert_eq!(fs::read(tmp.path().join(stored))?, b"abc");
+        Ok(())
+    }
+
+    /// The request heads of sizing `declared`, then fetching it.
+    fn sized_and_fetched(
+        declared: &Model,
+        proxy: Option<&CdnProxy>,
+        server: &ScriptedServer,
+    ) -> anyhow::Result<Vec<String>> {
+        let http = test_http()?;
+        let tmp = tempfile::tempdir()?;
+        declared_size_bytes(&http, &RetryPolicy::IMMEDIATE, None, proxy, declared)?;
+        fetch_model(
+            &http,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            proxy,
+            declared,
+            &to_stored(declared, tmp.path())?,
+            &mut Reporter::silent(),
+        )?;
+        Ok(server.requests())
+    }
+
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().skip(1).find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+
+    /// The request a direct fetch would send, byte for byte, so a signed query or
+    /// an escaped segment reaches the site unchanged.
+    #[rstest]
+    #[case::repo_file(
+        hf_text(None, Some("hf_tok"))?,
+        "huggingface.co",
+        "/meta/llama/resolve/main/Q4.gguf",
+        Some("Bearer hf_tok"),
+        Some(SHA_A)
+    )]
+    #[case::url_with_a_query_and_an_escaped_segment(
+        url_text_model("https://ex.com/a%2Fb/w.gguf?sig=x%3D1", Some(SHA_A), base())?.0,
+        "ex.com",
+        "/a%2Fb/w.gguf?sig=x%3D1",
+        None,
+        Some(SHA_A)
+    )]
+    #[case::url_on_a_port(
+        url_text_model("https://ex.com:8443/w.gguf", None, base())?.0,
+        "ex.com:8443",
+        "/w.gguf",
+        None,
+        None
+    )]
+    fn a_proxy_gets_the_sites_request_a_repo_token_and_the_declared_sha256(
+        #[case] declared: Model,
+        #[case] site: &str,
+        #[case] target: &str,
+        #[case] auth: Option<&str>,
+        #[case] sha256: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let server = ScriptedServer::start(vec![Reply::status(200), Reply::ok(b"abc")])?;
+        let heads = sized_and_fetched(&declared, Some(&proxy_at(server.address())?), &server)?;
+        assert_eq!(heads.len(), 2, "{heads:?}");
+        heads
+            .iter()
+            .zip(["HEAD", "GET"])
+            .for_each(|(head, method)| {
+                assert_eq!(
+                    head.lines().next(),
+                    Some(format!("{method} {target} HTTP/1.1").as_str())
+                );
+                assert_eq!(header(head, "host"), Some(site), "{head}");
+                assert_eq!(header(head, "authorization"), auth, "{head}");
+                assert_eq!(header(head, EXPECTED_SHA256), sha256, "{head}");
+            });
+        Ok(())
+    }
+
+    /// reqwest would send the `Host` it was given to the redirect's site too.
+    #[test]
+    fn a_redirect_through_the_proxy_is_not_followed() -> anyhow::Result<()> {
+        let elsewhere = ScriptedServer::start(vec![Reply::ok(b"abc")])?;
+        let proxy = ScriptedServer::start(vec![Reply::Full {
+            status: 302,
+            headers: vec![("location", elsewhere.url("/w.gguf"))],
+            body: Vec::new(),
+        }])?;
+        let tmp = tempfile::tempdir()?;
+        let (declared, into) =
+            url_text_model("https://ex.com/w.gguf", None, &tmp.path().join("w.gguf"))?;
+        let fetched = fetch_model(
+            &test_http()?,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            Some(&proxy_at(proxy.address())?),
+            &declared,
+            &into,
+            &mut Reporter::silent(),
+        );
+        assert!(
+            matches!(
+                &fetched,
+                Err(ModelFetchError::Http {
+                    source: pipette_http::Error::Status { status, .. },
+                    ..
+                }) if *status == StatusCode::FOUND
+            ),
+            "{fetched:?}"
+        );
+        assert_eq!(elsewhere.requests(), Vec::<String>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn a_direct_fetch_sends_no_expected_sha256() -> anyhow::Result<()> {
+        let server = ScriptedServer::start(vec![Reply::status(200), Reply::ok(b"abc")])?;
+        let declared = url_text_model(&server.url("/w.gguf"), Some(SHA_A), base())?.0;
+        let heads = sized_and_fetched(&declared, None, &server)?;
+        assert_eq!(heads.len(), 2, "{heads:?}");
+        assert!(
+            heads
+                .iter()
+                .all(|head| header(head, EXPECTED_SHA256).is_none()),
+            "{heads:?}"
+        );
+        Ok(())
+    }
+
+    /// The repo owner picks the listed names; the repo's token must stay on the Hub,
+    /// and the path is the one a direct fetch would resolve.
+    #[test]
+    fn a_listed_dot_segment_keeps_a_proxied_fetch_on_the_hub() -> anyhow::Result<()> {
+        let listing = serde_json::json!({
+            "sha": HF_COMMIT_A,
+            "siblings": [{ "rfilename": "%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/evil.example/x" }]
+        });
+        let server = ScriptedServer::start(vec![
+            Reply::Full {
+                status: 200,
+                headers: Vec::new(),
+                body: serde_json::to_vec(&listing)?,
+            },
+            Reply::ok(b"abc"),
+        ])?;
+        let declared = Model::Mlx(Mlx {
+            source: ModelSource::HuggingFace {
+                repo: hf_repo(None, Some("hf_tok"))?,
+                prefix: None,
+            },
+        });
+        let tmp = tempfile::tempdir()?;
+        fetch_model(
+            &test_http()?,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            Some(&proxy_at(server.address())?),
+            &declared,
+            &to_stored(&declared, tmp.path())?,
+            &mut Reporter::silent(),
+        )?;
+        let heads = server.requests();
+        assert_eq!(
+            heads
+                .iter()
+                .map(|head| (head.lines().next(), header(head, "host")))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    Some("GET /api/models/meta/llama/revision/main?blobs=true HTTP/1.1"),
+                    Some("huggingface.co")
+                ),
+                (Some("GET /evil.example/x HTTP/1.1"), Some("huggingface.co")),
+            ],
+            "{heads:?}"
+        );
         Ok(())
     }
 
@@ -2362,6 +2684,7 @@ mod tests {
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
             Some(&access(&server)?),
+            None,
             &declared,
             &into,
             &mut Reporter::silent(),
@@ -2458,7 +2781,13 @@ mod tests {
         let http = test_http()?;
         let device = access(&server)?;
         assert_eq!(
-            declared_size_bytes(&http, &RetryPolicy::IMMEDIATE, Some(&device), &declared)?,
+            declared_size_bytes(
+                &http,
+                &RetryPolicy::IMMEDIATE,
+                Some(&device),
+                None,
+                &declared
+            )?,
             None
         );
 
@@ -2468,6 +2797,7 @@ mod tests {
             &http,
             &RetryPolicy::IMMEDIATE,
             Some(&device),
+            None,
             &declared,
             &into,
             &mut Reporter::silent(),
@@ -2485,6 +2815,7 @@ mod tests {
             &http,
             &RetryPolicy::IMMEDIATE,
             Some(&access(&refusing)?),
+            None,
             &declared,
             &into,
             &mut Reporter::silent(),
@@ -2519,6 +2850,7 @@ mod tests {
                 &test_http()?,
                 &RetryPolicy::IMMEDIATE,
                 Some(&access(&server)?),
+                None,
                 &declared
             )?,
             Some(3)
@@ -2551,6 +2883,7 @@ mod tests {
         let downloads = snapshot_downloads(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             &server.base_url(),
             &hf_repo(revision, None)?,
             None,
@@ -2592,6 +2925,7 @@ mod tests {
         let result = snapshot_downloads(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             &server.base_url(),
             &hf_repo(None, None)?,
             None,
@@ -2622,6 +2956,7 @@ mod tests {
         let info = repo_info(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             &server.url(""),
             &hf_repo(None, None)?,
         );
@@ -2651,6 +2986,7 @@ mod tests {
         let info = repo_info(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             &server.base_url(),
             &hf_repo(None, Some("hf_tok"))?,
         )?;
@@ -2673,7 +3009,13 @@ mod tests {
             },
         });
 
-        let size = declared_size_bytes(&test_http()?, &RetryPolicy::IMMEDIATE, None, &declared)?;
+        let size = declared_size_bytes(
+            &test_http()?,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            None,
+            &declared,
+        )?;
 
         assert!(size.is_some_and(|bytes| bytes >= 9000), "{size:?}");
         Ok(())
@@ -2730,7 +3072,13 @@ mod tests {
         });
 
         assert_eq!(
-            declared_size_bytes(&test_http()?, &RetryPolicy::IMMEDIATE, None, &declared)?,
+            declared_size_bytes(
+                &test_http()?,
+                &RetryPolicy::IMMEDIATE,
+                None,
+                None,
+                &declared
+            )?,
             Some(1400)
         );
         Ok(())
@@ -2748,7 +3096,13 @@ mod tests {
 
         // Not a planning failure: the fetch itself will surface the 404.
         assert_eq!(
-            declared_size_bytes(&test_http()?, &RetryPolicy::IMMEDIATE, None, &declared)?,
+            declared_size_bytes(
+                &test_http()?,
+                &RetryPolicy::IMMEDIATE,
+                None,
+                None,
+                &declared
+            )?,
             None
         );
         Ok(())
@@ -2765,9 +3119,15 @@ mod tests {
             },
         });
 
-        let err = declared_size_bytes(&test_http()?, &RetryPolicy::IMMEDIATE, None, &declared)
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("an unplannable fetch must not size as unknown"))?;
+        let err = declared_size_bytes(
+            &test_http()?,
+            &RetryPolicy::IMMEDIATE,
+            None,
+            None,
+            &declared,
+        )
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("an unplannable fetch must not size as unknown"))?;
 
         assert!(
             matches!(err, ModelFetchError::UnresolvedDestination(_)),
@@ -2796,6 +3156,7 @@ mod tests {
         let size = hf_dir_size_bytes(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             &server.base_url(),
             &hf_repo(None, None)?,
             Some(&RepoSubpath::try_new("4bit")?),
@@ -2824,6 +3185,7 @@ mod tests {
             hf_dir_size_bytes(
                 &test_http()?,
                 &RetryPolicy::IMMEDIATE,
+                None,
                 &server.base_url(),
                 &hf_repo(None, None)?,
                 None
@@ -2848,6 +3210,7 @@ mod tests {
         let size = hf_dir_size_bytes(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             &server.base_url(),
             &hf_repo(None, None)?,
             None,
@@ -2870,6 +3233,7 @@ mod tests {
         match repo_info(
             &test_http()?,
             &RetryPolicy::IMMEDIATE,
+            None,
             &server.base_url(),
             &hf_repo(None, None)?,
         ) {

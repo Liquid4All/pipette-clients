@@ -44,7 +44,7 @@ this repo.
 | `build_prompt_text` | `crates/pipette-ops/src/prompt_seed.rs` |
 | `EvalCompletionsStore`, `run_request_digest` | `crates/pipette-ops/src/eval_completions.rs` |
 | `MeasurementObserver` | `crates/pipette-ops/src/measurement/mod.rs` |
-| `attempt` (`limit`, `LOAD_AND_WARM_UP`, `Overrun`; Swift: `Attempt`), `AttemptTimeoutError` | `crates/pipette-ops/src/attempt.rs` |
+| `attempt` (`limit`, `WARM_UP`, `Overrun`; Swift: `Attempt`), `AttemptTimeoutError` | `crates/pipette-ops/src/attempt.rs` |
 | `Clock`, `watched` (Swift: `AttemptClock`, `AttemptWatchdog`) | `crates/pipette-cli/src/attempt_watchdog.rs` |
 
 ## The cell

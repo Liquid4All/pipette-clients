@@ -69,14 +69,16 @@ nonisolated extension LlamaExecute {
             maxTokens: benchmark.parameterMaxTokens.value.magnitude,
             readinessGate: readinessGate, observer: observer, isCancelled: isCancelled, progress: progress
         ) {
-            try openVisionChat(
-                path: vision.backbone, mmprojPath: vision.mmproj, drafter: drafter,
-                draftLength: benchmark.parameterDraftLength.value.magnitude,
-                maxTokens: Int(benchmark.parameterMaxTokens.value),
-                temperature: benchmark.parameterTemperature,
-                nGpuLayers: load.numberGpuLayers, contextSize: load.ctxSize,
-                nUbatch: load.nUbatch, threads: load.threads, swaFull: load.swaFull,
-                loadMode: load.loadMode)
+            try observer.outside {
+                try openVisionChat(
+                    path: vision.backbone, mmprojPath: vision.mmproj, drafter: drafter,
+                    draftLength: benchmark.parameterDraftLength.value.magnitude,
+                    maxTokens: Int(benchmark.parameterMaxTokens.value),
+                    temperature: benchmark.parameterTemperature,
+                    nGpuLayers: load.numberGpuLayers, contextSize: load.ctxSize,
+                    nUbatch: load.nUbatch, threads: load.threads, swaFull: load.swaFull,
+                    loadMode: load.loadMode)
+            }
         }
         var response = RunResponse(resultData: data, runtimeOutput: RuntimeOutput())
         response.datasetDigest = corpus.digest.value

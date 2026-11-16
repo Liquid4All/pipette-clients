@@ -40,9 +40,9 @@ server-driven engine; the methodology pages define each figure.
 
 The readiness wait for the server covers the compile, so the compile is outside
 every measured *time*, and
-[`attempt_timeout_seconds`](pipette-cli/usage.md#5c-the-attempt-limit) does
-not count the first server's wait, the load in it included. A peak-memory
-cell's measured server loads what its warm-up compiled, and its wait counts.
+[`attempt_timeout_seconds`](pipette-cli/usage.md#5c-the-attempt-limit) counts
+no server's wait, the load in it included. A peak-memory cell's measured server
+loads what its warm-up compiled.
 Each server process compiles one pipeline, so no
 process compiles twice (the constraint that [openvino-ir.md](openvino-ir.md#npu-constraints)
 records). Sequential processes are safe on the NPU: five sequential compiles

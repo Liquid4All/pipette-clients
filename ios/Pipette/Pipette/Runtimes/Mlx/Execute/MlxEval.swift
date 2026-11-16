@@ -13,6 +13,7 @@ nonisolated extension MlxExecute {
         checkpoint: EvalCompletionSession,
         model: ResolvedMlxModel,
         chunk: Int,
+        observer: MeasurementObserver,
         isCancelled: @escaping () -> Bool,
         progress: @escaping (BenchmarkProgress) -> Void
     ) async throws -> BenchmarkResultData {
@@ -23,7 +24,7 @@ nonisolated extension MlxExecute {
         // Every id that ends a generation for this bundle, not the tokenizer's alone.
         let eosIds = MlxModels.eosTokenIds(bundle: model.dir, tokenizerEos: tokenizer.eosTokenId)
 
-        return try await MlxRuntime.withFreshModel(path: model.dir) { lm in
+        return try await MlxRuntime.withFreshModel(path: model.dir, observer: observer) { lm in
             MlxRuntime.logMem("eval.loaded samples=\(benchmark.samples?.count ?? 0) "
                 + "maxTokens=\(maxTokens)")
             // `mlx_lm.server` serves one request at a time, and so does the model here.

@@ -32,7 +32,7 @@ its tree and GPU readers before the launch is its check.
 use pipette_memprobe::{Sampler, Watch};
 
 let watch = Watch::Peak.supported()?;
-let mut process = start_process("llama-bench", command, Duration::ZERO)?;
+let mut process = start_process("llama-bench", command, OnStop::SIGKILL)?;
 let sampler = Sampler::start(process.pid(), watch)?;
 let (memory, peak) = process.wait_success_before_reap(timeout, || sampler.stop())?;
 let max_host_bytes = peak?.host_bytes;

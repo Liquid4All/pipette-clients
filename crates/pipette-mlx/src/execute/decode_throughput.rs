@@ -17,7 +17,7 @@ use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
     DecodeThroughputBenchmark, MlxMacosPipetteExtraRuntimeConfiguration, RunResponse,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::models::ResolvedMlxModel;
 use crate::runtimes::ResolvedMlxPython;
@@ -65,10 +65,11 @@ pub(super) fn run(
     let mut mlx_server = start_process(
         server::TEXT_SERVER_MODULE,
         server::text_command(venv_python, model_dir, port, client_config)?,
-        server::STOP_GRACE,
+        OnStop::SIGKILL,
     )?;
     let sampler = Sampler::start(mlx_server.pid(), SupportedWatch::OBSERVE)?;
-    mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| mlx_server.wait_ready(server::READY_TIMEOUT, ready))?;
     let result = measurement::decode(
         benchmark,
         NonZeroUsize::try_from(measurement::REPS)?,

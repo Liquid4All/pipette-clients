@@ -350,7 +350,7 @@ torch-oai validate the OpenAI-compatible `usage.prompt_tokens` and
 ### The llama-bench shape
 
 The CLI's llama.cpp `max_memory_usage` cell runs
-`llama-bench --output json --model <gguf> --repetitions 1 --n-prompt 0 --n-gen 0 -pg <N>,1`.
+`llama-bench --output json --model <gguf> --no-warmup --repetitions 1 --n-prompt 0 --n-gen 0 -pg <N>,1`.
 `-pg <N>,1` is one test: the prompt, then one token decoded on its KV cache,
 in a context of `<N> + 1` tokens, which llama.cpp rounds up to a multiple of
 256. The zeros turn off the `pp512` and `tg128` tests `llama-bench` adds when
@@ -359,6 +359,13 @@ stderr for audit. The submitted metric comes from the memory counters. The row
 in the JSON output is checked for its token counts, and its timing is audit
 context only. The same command runs once before, its reading dropped
 ([compile caches](#compile-caches)).
+
+`--no-warmup` drops `llama-bench`'s own untimed pass, which would read the
+prompt a second time in every process. llama.cpp sizes the KV cache and compute
+buffers when it creates the context, so that pass sets no higher peak: at
+`<N>` = 4096 on an M3 Ultra (b12328, LFM2.5-1.2B and gemma-3-1b Q8_0, CPU and
+Metal), peak RSS matched within 16 MiB with and without it, and a CPU run took
+2.7 to 3.6 s instead of 4.7 to 6.0 s.
 
 `--n-prompt <N> --n-gen 1` would instead run two tests, the token in a fresh
 context of its own, so the decode would not see the prompt's KV cache. The

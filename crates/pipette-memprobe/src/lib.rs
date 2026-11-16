@@ -48,7 +48,7 @@ mod windows;
 
 #[cfg(target_os = "linux")]
 pub use error::{NvmlError, NvmlReadError};
-pub use error::{PeakError, StartError, UnsupportedError, WatchError};
+pub use error::{OsBoundWatchError, PeakError, StartError, UnsupportedError, WatchError};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use linux::Reads;
 #[cfg(any(target_os = "linux", target_os = "android"))]

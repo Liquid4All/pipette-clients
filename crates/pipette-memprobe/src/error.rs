@@ -30,6 +30,12 @@ pub enum WatchError {
     DeviceTree { kind: io::ErrorKind },
 }
 
+/// A [`WatchError`] for a build that runs on this OS alone, such as a llama.cpp
+/// flavor: refused as `Unsupported`, it is refused on every host the build runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(transparent)]
+pub struct OsBoundWatchError(#[from] pub WatchError);
+
 /// Why [`Sampler::start`](crate::Sampler::start) failed. Empty where starting
 /// cannot fail.
 #[derive(Debug, thiserror::Error)]

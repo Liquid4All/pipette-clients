@@ -13,9 +13,10 @@ use pipette_ops::eval_completions::EvalRunDigest;
 use pipette_plan_types::{
     AsrDecoding, AsrEvalBenchmark, AudioChannels, AudioDurationMillis, AudioSampleRate, BatchSize,
     BenchmarkDefinition, BenchmarkFlagRef, BenchmarkFlags, BenchmarkId, BenchmarkResultData,
-    BenchmarkSubmissionPayload, BenchmarkType, ClientRunSpec, EvalBenchmark, Model, ModelFlagRef,
-    ModelFlags, ModelType, NonNegativeCount, PositiveCount, PositiveSeconds, ReadinessOverrides,
-    Runtime, RuntimeFlags, RuntimeType, SamplingTemperature, SeedRule, SkinCelsius,
+    BenchmarkSubmissionPayload, BenchmarkType, ClientRunSpec, DecisionBenchmark, EvalBenchmark,
+    Model, ModelFlagRef, ModelFlags, ModelType, NonNegativeCount, PositiveCount, PositiveSeconds,
+    ReadinessOverrides, Runtime, RuntimeFlags, RuntimeType, SamplingTemperature, SeedRule,
+    SkinCelsius,
 };
 use pipette_programs::ExternalPrograms;
 
@@ -255,6 +256,9 @@ fn write_benchmark(
             write_temperature(out, b.parameter_temperature, None)?;
             write_corpus(out, &b.dataset)?;
         }
+        BenchmarkDefinition::DecisionLatency(b) | BenchmarkDefinition::DecisionMaxMemory(b) => {
+            write_decision_shape(out, b)?;
+        }
     }
     Ok(())
 }
@@ -473,6 +477,18 @@ fn write_asr_clip(
     Ok(())
 }
 
+/// Both decision types; the image line only when there are images.
+fn write_decision_shape(out: &mut dyn Write, b: &DecisionBenchmark) -> anyhow::Result<()> {
+    if let (Some(width), Some(height)) = (b.parameter_image_width, b.parameter_image_height) {
+        writeln!(out, "image:   {width}×{height}")?;
+    }
+    writeln!(out, "text:    {} tokens", b.parameter_text_tokens)?;
+    writeln!(out, "images:  {}", b.parameter_num_images)?;
+    writeln!(out, "asks:    {} question(s)", b.parameter_questions)?;
+    write_batch_size(out, b.parameter_batch_size)?;
+    Ok(())
+}
+
 const RUN_LONG_ABOUT: &str = "\
 Execute one benchmark and store the result locally.
 
@@ -666,12 +682,12 @@ pub struct BenchmarkRunArgs {
     pub attempt_timeout_seconds: Option<u64>,
     /// Override the readiness wait ceiling (seconds) before the measurement.
     /// Valid only on the timing benchmarks that gate on device readiness
-    /// (prefill / decode / end-to-end-latency / vl / asr-throughput); on eval or
-    /// a peak-memory cell the `(benchmark, runtime, model)` cell carries no
-    /// readiness knob, so it is rejected. Set `PIPETTE_READINESS_MAX_WAIT_SECS`
-    /// directly for an ungated override: it is read by the readiness gate
-    /// itself, so unlike this flag it stays harmless on the cells that carry no
-    /// readiness setting.
+    /// (prefill / decode / end-to-end-latency / vl / asr-throughput /
+    /// decision-latency); on eval or a peak-memory cell the `(benchmark,
+    /// runtime, model)` cell carries no readiness setting, so it is rejected. Set
+    /// `PIPETTE_READINESS_MAX_WAIT_SECS` directly for an ungated override: it is
+    /// read by the readiness gate itself, so unlike this flag it stays harmless
+    /// on the cells that carry no readiness setting.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub readiness_max_wait_secs: Option<u64>,
     /// Waive the *thermal* readiness criterion for this cell, keeping the load
@@ -1200,6 +1216,23 @@ fn run_summary_lines(
             }
             if let Some(stddev) = total_time_ms_stddev {
                 lines.push(format!("total_time_ms_stddev: {stddev:.3}"));
+            }
+        }
+        BenchmarkResultData::DecisionLatency {
+            decision_latency_request_ms,
+            decision_latency_request_ms_stddev,
+            decision_latency_batch_ms,
+            decision_latency_batch_ms_stddev,
+        } => {
+            lines.push(format!("request_ms: {decision_latency_request_ms:.3}"));
+            if let Some(stddev) = decision_latency_request_ms_stddev {
+                lines.push(format!("request_ms_stddev: {stddev:.3}"));
+            }
+            if let Some(batch_ms) = decision_latency_batch_ms {
+                lines.push(format!("batch_ms: {batch_ms:.3}"));
+            }
+            if let Some(stddev) = decision_latency_batch_ms_stddev {
+                lines.push(format!("batch_ms_stddev: {stddev:.3}"));
             }
         }
         // Derived for the terminal only; the server derives the row's metrics
@@ -1847,6 +1880,9 @@ mod tests {
                     BenchmarkType::AsrEval => &[],
                     BenchmarkType::AsrThroughput => &["audio:", "text:", "decode:"],
                     BenchmarkType::AsrMaxMemory => &["audio:", "text:", "decode:"],
+                    BenchmarkType::DecisionLatency | BenchmarkType::DecisionMaxMemory => {
+                        &["text:", "images:", "asks:", "batch:"]
+                    }
                 };
                 let keys: Vec<&str> = lines[3..]
                     .iter()

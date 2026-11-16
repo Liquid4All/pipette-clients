@@ -16,7 +16,7 @@ nonisolated extension MlxExecute {
         try await BenchmarkMeasurement.maxMemory(benchmark, observer: observer, warmup: .cold,
                                                  ctx: ()) { _ in
             try await ProcessMemory.maxMemoryBracket(label: "mlx") {
-                try await MlxRuntime.withFreshModel(path: model.dir) { lm in
+                try await MlxRuntime.withFreshModel(path: model.dir, observer: observer) { lm in
                     try MlxRuntime.generate(lm, prefill: Int(benchmark.parameterPrefillTokens.value),
                                             decode: decodeTokens, chunk: chunk)
                 }

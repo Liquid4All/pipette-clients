@@ -24,6 +24,24 @@
       "default": 0
     }
   },
+  "benchmark/decision_latency.json": {
+    "/parameter_batch_size": {
+      "default": 1
+    },
+    "/parameter_num_images": {
+      "default": 0
+    }
+  },
+  "benchmark/decision_max_memory.json": {
+    "/parameter_batch_size": {
+      "default": 1
+    },
+    "/parameter_image_height": "absent",
+    "/parameter_image_width": "absent",
+    "/parameter_num_images": {
+      "default": 0
+    }
+  },
   "benchmark/decode_throughput.json": {
     "/parameter_batch_size": {
       "default": 1
@@ -126,6 +144,10 @@
     "/beam_length_penalty": "absent",
     "/beam_repetition_penalty": "absent",
     "/num_beams": "absent"
+  },
+  "benchmark_params/decision_max_memory.json": {
+    "/image_height": "absent",
+    "/image_width": "absent"
   },
   "benchmark_params/vl_max_memory.decode256.json": {
     "/decode_tokens": "absent"
@@ -460,6 +482,10 @@
   },
   "runtime_flags/asr_eval.uv_vllm.torch.json": {
     "/max_model_len": "absent",
+    "/parallel": "absent",
+    "/raw": "absent"
+  },
+  "runtime_flags/decision_latency.llamacpp_cli_stock_tools.gguf_text.json": {
     "/parallel": "absent",
     "/raw": "absent"
   },

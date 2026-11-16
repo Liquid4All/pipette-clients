@@ -6,6 +6,9 @@ nonisolated struct StubResponse {
     let status: Int
     let body: Data
     let headers: [String: String]
+    /// ``RoutedURLProtocol`` only: the body stops after this many bytes, and the connection
+    /// is then reported lost.
+    var cutAfter: Int?
 }
 
 /// A lock rather than an actor, and `nonisolated` against the project's MainActor default:

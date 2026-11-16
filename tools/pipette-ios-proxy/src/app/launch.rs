@@ -6,6 +6,7 @@ use pipette_mgmt_client::types::ClaimedJob;
 use pipette_plan_types::{BenchmarkType, Runtime};
 
 use super::{CLAIM_KEY, HEADLESS_TOKEN, SUBMIT_ON};
+use crate::pool::bundle::INTERNAL_SUFFIX;
 
 /// The `spec` keys this proxy turns into app arguments. The set is
 /// `ClientRunSpec`'s; the argv order is `ios_headless_args`', plus
@@ -28,6 +29,9 @@ const FLAGS_AXIS_KEYS: [&str; 3] = ["runtime_type", "model_type", "benchmark_typ
 /// The one runtime that takes no `model=`: AFM is supplied by the OS.
 const RUNTIME_TYPE_APPLE_FOUNDATION: &str = "apple_foundation";
 
+/// The day and commit of the first release whose app reads `cdn-proxy=`.
+const CDN_PROXY_SINCE: (&str, &str) = ("2026.11.11", "1a87cd9");
+
 #[derive(Debug, Clone)]
 pub(crate) struct LaunchPlan {
     /// Beginning with [`HEADLESS_TOKEN`] and ending with [`SUBMIT_ON`] and the
@@ -37,6 +41,40 @@ pub(crate) struct LaunchPlan {
     /// The same descriptor, typed, for choosing which build to install. Kept
     /// BESIDE the JSON, which is forwarded byte for byte; this copy is never sent.
     pub(crate) runtime: Runtime,
+}
+
+impl LaunchPlan {
+    /// This launch sending the app's model downloads to the CDN proxy at `endpoint`, or
+    /// `None` when the build of `version` may not read `cdn-proxy=`: such an app refuses
+    /// the launch over the unknown key.
+    pub(crate) fn with_cdn_proxy(&self, endpoint: &str, version: Option<&str>) -> Option<Self> {
+        if !version.is_some_and(reads_cdn_proxy) {
+            return None;
+        }
+        let mut plan = self.clone();
+        // Ahead of the `submit=1 claim=<job id>` that end every plan.
+        let at = plan.app_args.len().saturating_sub(2);
+        plan.app_args.insert(at, format!("cdn-proxy={endpoint}"));
+        Some(plan)
+    }
+}
+
+/// Whether `version`, `<YYYY.MM.DD>-<commit>` with or without the flavour suffix, was
+/// built on a later day than [`CDN_PROXY_SINCE`] or from its commit. A same-day build of
+/// another commit may predate it, and a version of any other form says nothing.
+fn reads_cdn_proxy(version: &str) -> bool {
+    let (since_day, since_commit) = CDN_PROXY_SINCE;
+    let release = version.strip_suffix(INTERNAL_SUFFIX).unwrap_or(version);
+    let Some((day, commit)) = release.split_once('-') else {
+        return false;
+    };
+    // Zero-padded, so days order as strings.
+    let is_day = day.split('.').map(str::len).eq([4, 2, 2])
+        && day.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    let is_commit =
+        commit.len() >= since_commit.len() && commit.bytes().all(|b| b.is_ascii_hexdigit());
+    let at_or_after = day > since_day || (day == since_day && commit.starts_with(since_commit));
+    is_day && is_commit && at_or_after
 }
 
 /// A claim this proxy cannot turn into a launch. Every variant is TERMINAL:
@@ -285,6 +323,39 @@ mod tests {
             ]
         );
         assert_eq!(plan.runtime_json, RUNTIME_WIRE);
+        Ok(())
+    }
+
+    /// Only a build known to read `cdn-proxy=` gets it, ahead of `submit=1`: an older
+    /// app refuses the launch over the unknown key.
+    #[rstest]
+    #[case::the_first_release_that_reads_it(Some("2026.11.11-1a87cd9-internal"), true)]
+    #[case::its_version_without_the_flavour(Some("2026.11.11-1a87cd9"), true)]
+    #[case::a_later_day(Some("2026.11.12-0abcdef-internal"), true)]
+    #[case::the_release_before(Some("2026.11.10-1926799-internal"), false)]
+    #[case::another_commit_that_day(Some("2026.11.11-1926799-internal"), false)]
+    #[case::a_local_build(Some("0.1.0 (1, a1b2c3d)"), false)]
+    #[case::sorts_after_but_names_no_day(Some("9.9-1a87cd9"), false)]
+    #[case::a_later_day_but_no_commit(Some("2026.11.12-feature-x"), false)]
+    #[case::an_unknown_version(None, false)]
+    fn only_a_build_that_reads_it_gets_the_cdn_proxy(
+        #[case] version: Option<&str>,
+        #[case] passed: bool,
+    ) -> anyhow::Result<()> {
+        let plan = launch_plan_from_claim(&claim(spec()))?;
+        let expected = passed.then(|| {
+            vec![
+                HEADLESS_TOKEN.to_string(),
+                format!("runtime={RUNTIME_WIRE}"),
+                format!("model={MODEL_WIRE}"),
+                "benchmarks=decode_throughput_256".to_string(),
+                "cdn-proxy=cdn-cache:8090".to_string(),
+                SUBMIT_ON.to_string(),
+                "claim=job-1".to_string(),
+            ]
+        });
+        let proxied = plan.with_cdn_proxy("cdn-cache:8090", version);
+        assert_eq!(proxied.map(|plan| plan.app_args), expected);
         Ok(())
     }
 

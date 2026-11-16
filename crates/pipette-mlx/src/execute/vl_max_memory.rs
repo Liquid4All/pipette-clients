@@ -86,6 +86,7 @@ pub(super) fn run(
                 server::VISION_SERVER_MODULE,
                 vision_command,
                 watch,
+                observer,
                 stream,
             )?;
             Ok(VlMaxMemoryMeasurementReading {

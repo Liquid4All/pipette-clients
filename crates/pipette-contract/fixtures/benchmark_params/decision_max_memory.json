@@ -1,0 +1,9 @@
+{
+  "batch_size": 1,
+  "benchmark_type": "decision_max_memory",
+  "image_height": 384,
+  "image_width": 384,
+  "num_images": 1,
+  "questions": 1,
+  "text_tokens": 0
+}

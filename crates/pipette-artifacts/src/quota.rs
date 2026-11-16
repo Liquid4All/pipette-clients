@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 
-use pipette_plan_types::{Model, Runtime};
+use pipette_plan_types::{CachedArtifacts, Model, Runtime};
 
 use crate::entry::{
     BLOBS_DIR_NAME, LOCK_SUFFIX, LOCKS_DIR_NAME, MANIFEST_NAME, STAGING_DIR_NAME, USE_SUFFIX,
@@ -55,6 +55,9 @@ pub enum EntryKind {
     Garbage { reason: String },
     Model {
         key: ModelStorageKey,
+        /// The manifest's `declared` field contains the model descriptor from
+        /// the plan without authentication tokens.
+        declared: Model,
         last_used_at: OffsetDateTime,
         fetched_at: OffsetDateTime,
     },
@@ -62,6 +65,8 @@ pub enum EntryKind {
     /// entry measures ~0 and dropping it frees nothing.
     Runtime {
         key: RuntimeStorageKey,
+        /// The manifest's `declared`: the runtime as the plan carried it.
+        declared: Runtime,
         last_used_at: OffsetDateTime,
         fetched_at: OffsetDateTime,
         evictable: bool,
@@ -141,6 +146,123 @@ impl StorageSurvey {
             used_bytes,
         }
     }
+
+    /// The live entries as a claim advertises them: each store's `declared`
+    /// descriptors, most recently used first, at most
+    /// [`CachedArtifacts::MAX_ENTRIES`] per list. Garbage has no descriptor, so
+    /// it is not listed.
+    pub fn cached_artifacts(&self) -> CachedArtifacts {
+        let models = self
+            .entries
+            .iter()
+            .rev()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Model { declared, .. } => Some(serde_json::to_value(declared)),
+                EntryKind::Garbage { .. } | EntryKind::Runtime { .. } => None,
+            });
+        let runtimes = self
+            .entries
+            .iter()
+            .rev()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Runtime { declared, .. } => Some(serde_json::to_value(declared)),
+                EntryKind::Garbage { .. } | EntryKind::Model { .. } => None,
+            });
+        CachedArtifacts {
+            models: json_objects(models),
+            runtimes: json_objects(runtimes),
+        }
+    }
+}
+
+/// The first [`CachedArtifacts::MAX_ENTRIES`] values that encode as JSON
+/// objects. `Model` and `Runtime` are internally tagged enums, so each encodes
+/// as an object.
+fn json_objects(
+    values: impl Iterator<Item = serde_json::Result<serde_json::Value>>,
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    values
+        .filter_map(|value| match value {
+            Ok(serde_json::Value::Object(object)) => Some(object),
+            _ => None,
+        })
+        .take(CachedArtifacts::MAX_ENTRIES)
+        .collect()
+}
+
+/// List readable live manifests for claim affinity without measuring payloads.
+/// Missing roots are empty stores. Other directory or manifest I/O failures
+/// fail the whole listing so callers can use the server's fallback instead of
+/// advertising an incomplete cache. Invalid and obsolete manifests are skipped.
+pub fn list_cached_artifacts(
+    models_dir: &Path,
+    runtimes_dir: &Path,
+) -> io::Result<CachedArtifacts> {
+    use crate::model::store::ModelStoreError;
+    use crate::runtime::store::RuntimeStoreError;
+
+    let models = list_descriptors(models_dir, |path| {
+        match read_model_manifest(path.join(MANIFEST_NAME)) {
+            Ok(m) => {
+                for payload in m.payload_paths(models_dir) {
+                    if !payload.try_exists()? {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some((m.last_used_at, m.fetched_at, m.declared)))
+            }
+            Err(ModelStoreError::Io { source, .. }) if !missing_entry(&source) => Err(source),
+            _ => Ok(None),
+        }
+    })?;
+    let runtimes = list_descriptors(runtimes_dir, |path| match read_runtime_manifest(path) {
+        Ok(m) => Ok(Some((m.last_used_at, m.fetched_at, m.declared))),
+        Err(RuntimeStoreError::Io { source, .. }) if !missing_entry(&source) => Err(source),
+        _ => Ok(None),
+    })?;
+    Ok(CachedArtifacts { models, runtimes })
+}
+
+fn missing_entry(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
+fn list_descriptors<T: serde::Serialize>(
+    root: &Path,
+    read: impl Fn(&Path) -> io::Result<Option<(OffsetDateTime, OffsetDateTime, T)>>,
+) -> io::Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+    let children = match fs::read_dir(root) {
+        Ok(children) => children,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut entries = Vec::new();
+    for child in children {
+        let child = child?;
+        // Staging, locks and other hidden children never hold live entries.
+        if child.file_name().to_string_lossy().starts_with('.') || !child.file_type()?.is_dir() {
+            continue;
+        }
+        if let Some(entry) = read(&child.path())? {
+            entries.push(entry);
+        }
+    }
+    entries.sort_by_key(|(last_used, fetched, _)| std::cmp::Reverse((*last_used, *fetched)));
+    entries
+        .into_iter()
+        .take(CachedArtifacts::MAX_ENTRIES)
+        .map(|(_, _, declared)| {
+            let serde_json::Value::Object(object) =
+                serde_json::to_value(declared).map_err(io::Error::other)?
+            else {
+                return Err(io::Error::other("cached descriptor is not a JSON object"));
+            };
+            Ok(object)
+        })
+        .collect()
 }
 
 /// The never-evict set: the entry just fetched plus whatever the in-flight plan
@@ -570,6 +692,7 @@ fn model_entry(models_dir: &Path, path: PathBuf) -> StorageEntry {
         size_bytes: payload_bytes(&path, manifest.blobs_bytes),
         kind: EntryKind::Model {
             key,
+            declared: manifest.declared.clone(),
             last_used_at: manifest.last_used_at,
             fetched_at: manifest.fetched_at,
         },
@@ -615,6 +738,7 @@ fn runtime_entry(runtimes_dir: &Path, path: PathBuf) -> StorageEntry {
         size_bytes: payload_bytes(&path, manifest.blobs_bytes),
         kind: EntryKind::Runtime {
             key,
+            declared: manifest.declared.clone(),
             last_used_at: manifest.last_used_at,
             fetched_at: manifest.fetched_at,
             // A docker image lives in the daemon, not here: evicting the entry
@@ -769,6 +893,7 @@ mod tests {
             size_bytes,
             kind: EntryKind::Model {
                 key: ModelStorageKey::of(declared)?,
+                declared: declared.clone(),
                 last_used_at: at(last_used)?,
                 fetched_at: at(last_used)?,
             },
@@ -787,6 +912,7 @@ mod tests {
             size_bytes,
             kind: EntryKind::Runtime {
                 key: RuntimeStorageKey::of(declared)?,
+                declared: declared.clone(),
                 last_used_at: at(last_used)?,
                 fetched_at: at(last_used)?,
                 evictable,
@@ -855,6 +981,7 @@ mod tests {
         let older = StorageEntry {
             kind: EntryKind::Model {
                 key: ModelStorageKey::of(&model("older")?)?,
+                declared: model("older")?,
                 last_used_at: at("2026-05-01T00:00:00Z")?,
                 fetched_at: at("2026-01-01T00:00:00Z")?,
             },
@@ -863,6 +990,7 @@ mod tests {
         let newer = StorageEntry {
             kind: EntryKind::Model {
                 key: ModelStorageKey::of(&model("newer")?)?,
+                declared: model("newer")?,
                 last_used_at: at("2026-05-01T00:00:00Z")?,
                 fetched_at: at("2026-04-01T00:00:00Z")?,
             },
@@ -1356,5 +1484,121 @@ mod tests {
     #[case::unknown_size(None)]
     fn refuse_if_oversize_allows_what_it_cannot_refuse(#[case] declared_bytes: Option<u64>) {
         assert!(refuse_if_oversize("meta/llama", declared_bytes, 200).is_ok());
+    }
+
+    fn json_object(
+        value: &impl serde::Serialize,
+    ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+        let serde_json::Value::Object(object) = serde_json::to_value(value)? else {
+            anyhow::bail!("not a JSON object");
+        };
+        Ok(object)
+    }
+
+    #[test]
+    fn cached_artifacts_lists_live_entries_most_recently_used_first() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let models = tmp.path().join("models");
+        let runtimes = tmp.path().join("runtimes");
+        store_model(&models, &model("older")?, "2026-03-01T00:00:00Z")?;
+        store_model(&models, &model("newer")?, "2026-04-01T00:00:00Z")?;
+        store_runtime(&runtimes, &llamacpp("b9305")?, "2026-04-01T00:00:00Z")?;
+        fs::create_dir_all(models.join("no-manifest"))?;
+        fs::create_dir_all(models.join("corrupt"))?;
+        fs::write(models.join("corrupt").join(MANIFEST_NAME), b"not toml")?;
+        let older = models.join(ModelStorageKey::of(&model("older")?)?.relative_dir());
+        drop_blobs_bytes(&older)?;
+
+        let cached = list_cached_artifacts(&models, &runtimes)?;
+
+        assert_eq!(
+            cached.models,
+            vec![
+                json_object(&model("newer")?)?,
+                json_object(&model("older")?)?
+            ]
+        );
+        assert_eq!(cached.runtimes, vec![json_object(&llamacpp("b9305")?)?]);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::models(true)]
+    #[case::runtimes(false)]
+    fn cached_listing_propagates_store_errors(#[case] fail_models: bool) -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let models = tmp.path().join("models");
+        let runtimes = tmp.path().join("runtimes");
+        // A file in place of a root fails deterministically, even as root.
+        fs::write(
+            if fail_models { &models } else { &runtimes },
+            b"not a directory",
+        )?;
+        assert!(list_cached_artifacts(&models, &runtimes).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cached_listing_is_empty_for_missing_roots() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let cached =
+            list_cached_artifacts(&tmp.path().join("models"), &tmp.path().join("runtimes"))?;
+        assert!(cached.models.is_empty());
+        assert!(cached.runtimes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn cached_listing_caps_each_store_after_sorting() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let models = tmp.path().join("models");
+        let runtimes = tmp.path().join("runtimes");
+        let limit = CachedArtifacts::MAX_ENTRIES;
+        for day in 0..=limit {
+            let last_used = (at("2026-01-01T00:00:00Z")?
+                + time::Duration::days(i64::try_from(day)?))
+            .format(&Rfc3339)?;
+            store_model(&models, &model(&format!("m{day:03}"))?, &last_used)?;
+            store_runtime(&runtimes, &llamacpp(&format!("b{day:03}"))?, &last_used)?;
+        }
+        let cached = list_cached_artifacts(&models, &runtimes)?;
+        assert_eq!(cached.models.len(), limit);
+        assert_eq!(cached.runtimes.len(), limit);
+        assert_eq!(
+            cached.models[0],
+            json_object(&model(&format!("m{limit:03}"))?)?
+        );
+        assert_eq!(cached.models[limit - 1], json_object(&model("m001")?)?);
+        assert_eq!(
+            cached.runtimes[0],
+            json_object(&llamacpp(&format!("b{limit:03}"))?)?
+        );
+        assert_eq!(cached.runtimes[limit - 1], json_object(&llamacpp("b001")?)?);
+        Ok(())
+    }
+
+    #[test]
+    fn cached_artifacts_keeps_the_most_recently_used_up_to_the_limit() -> anyhow::Result<()> {
+        let limit = CachedArtifacts::MAX_ENTRIES;
+        // Zero-padded names so the day order and the name order agree.
+        let entries = (0..=limit)
+            .map(|day| {
+                let last_used = (at("2026-01-01T00:00:00Z")?
+                    + time::Duration::days(i64::try_from(day)?))
+                .format(&Rfc3339)?;
+                model_entry_of(&model(&format!("m{day:03}"))?, 1, &last_used)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let cached = StorageSurvey::new(entries).cached_artifacts();
+
+        assert_eq!(cached.models.len(), limit);
+        assert_eq!(
+            cached.models[0],
+            json_object(&model(&format!("m{limit:03}"))?)?
+        );
+        assert_eq!(cached.models[limit - 1], json_object(&model("m001")?)?);
+        assert!(cached.runtimes.is_empty());
+        Ok(())
     }
 }

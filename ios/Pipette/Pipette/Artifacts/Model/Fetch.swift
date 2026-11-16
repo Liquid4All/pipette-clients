@@ -474,8 +474,9 @@ enum ModelFetch {
         return total
     }
 
-    /// The crate's `content_length`. `http.client` follows the resolve URL's redirect to
-    /// the CDN, so this is the blob's length, not the redirect's.
+    /// The crate's `content_length`. `http.client`, or the proxy for a proxied request,
+    /// follows the resolve URL's redirect to the CDN, so this is the blob's length, not the
+    /// redirect's.
     private static func contentLength(_ url: URL, of declared: Model, http: HttpClient) async -> Int64? {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
@@ -533,7 +534,10 @@ enum ModelFetch {
                              http: HttpClient) async -> (Data, HTTPURLResponse)? {
         let reason: String
         do {
-            let (data, response) = try await http.client.data(for: request)
+            // A proxied request follows no redirect: the next hop would keep its `Host`.
+            let (session, sent) = CdnProxy.launch.map { (http.clientNoRedirects, $0.route(request)) }
+                ?? (http.client, request)
+            let (data, response) = try await session.data(for: sent)
             if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
                 return (data, http)
             }
@@ -559,12 +563,12 @@ enum ModelFetch {
     private static let pathComponentAllowed = CharacterSet.urlPathAllowed
         .subtracting(CharacterSet(charactersIn: "/"))
 
-    private nonisolated struct HfModelInfo: Decodable {
+    nonisolated struct HfModelInfo: Decodable {
         let siblings: [HfSibling]
     }
 
     /// `size` is absent without `blobs=true`, and on a file the Hub has not sized.
-    private nonisolated struct HfSibling: Decodable {
+    nonisolated struct HfSibling: Decodable {
         let rfilename: String
         let size: Int64?
     }

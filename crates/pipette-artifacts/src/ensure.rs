@@ -61,6 +61,7 @@ pub fn ensure_model(
                 http,
                 &ctx.download_retry,
                 ctx.vault.as_ref(),
+                ctx.cdn_proxy.as_ref(),
                 d,
                 into,
                 &mut reporter,
@@ -177,6 +178,7 @@ fn pre_fetch_size(
         &ctx.download_http_client,
         &ctx.download_retry,
         ctx.vault.as_ref(),
+        ctx.cdn_proxy.as_ref(),
         declared,
     )
     .map_err(|source| ModelStoreError::Fetch {
@@ -392,6 +394,7 @@ mod tests {
             &ctx.download_http_client,
             &ctx.download_retry,
             ctx.vault.as_ref(),
+            ctx.cdn_proxy.as_ref(),
             model,
         )
         .ok()

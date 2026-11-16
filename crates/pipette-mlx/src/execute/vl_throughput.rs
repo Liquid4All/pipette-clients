@@ -25,7 +25,7 @@ use pipette_plan_types::{
     BenchmarkFlags, MlxMacosPipetteExtraRuntimeConfiguration, PositiveCount, RunResponse,
     VlThroughputBenchmark,
 };
-use pipette_subprocess::start_process;
+use pipette_subprocess::{OnStop, start_process};
 
 use crate::image_tokens;
 use crate::models::ResolvedMlxModel;
@@ -103,10 +103,11 @@ pub(super) fn run(
             NonZeroUsize::MIN,
             client_config,
         )?,
-        server::STOP_GRACE,
+        OnStop::SIGKILL,
     )?;
     let sampler = Sampler::start(mlx_server.pid(), SupportedWatch::OBSERVE)?;
-    mlx_server.wait_ready(server::READY_TIMEOUT, server::ready(&url)?)?;
+    let ready = server::ready(&url)?;
+    observer.outside(|| mlx_server.wait_ready(server::READY_TIMEOUT, ready))?;
     let client = HttpClient::loopback("pipette", http_timeout)?;
     let chat = |text: &str, image_url: &str, images: u32, max_tokens: u32| {
         let body = chat::body(model_dir, text, image_url, images, max_tokens, &eos_bias)?;

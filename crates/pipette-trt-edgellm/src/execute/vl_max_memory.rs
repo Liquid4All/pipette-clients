@@ -20,7 +20,7 @@ use pipette_plan_types::{
     BenchmarkFlagRef, MemoryObservation, PositiveSeconds, RunResponse, RuntimeFlags,
     VlMaxMemoryBenchmark,
 };
-use pipette_subprocess::{Process, start_process};
+use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::engines;
 use crate::server::{self, Launch};
@@ -56,7 +56,7 @@ pub fn run(
     observer.outside(|| engines::build(launch))?;
 
     let timeout = measurement::http_timeout_for(benchmark_flags.http_timeout_seconds, 1);
-    // One server from spawn through its workload is one attempt.
+    // One server from the end of its load through its workload is one attempt.
     let deadline = benchmark_flags.attempt_timeout_seconds.map_or(
         pipette_ops::attempt::DEFAULT_LIMIT,
         |secs: PositiveSeconds| Duration::from_secs(secs.into_inner()),
@@ -69,7 +69,7 @@ pub fn run(
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {
-            let (peak, stack) = serve(served, launch, watch, &inputs, timeout, deadline)?;
+            let (peak, stack) = serve(served, launch, watch, &inputs, observer, timeout, deadline)?;
             extras = stack;
             #[cfg(any(target_os = "linux", target_os = "android"))]
             let peak = {
@@ -100,14 +100,16 @@ pub fn run(
     Ok(response.build())
 }
 
-/// One server from its launch through the workload, within `deadline`, left in
-/// `served`, with the engine stack it reports. One an earlier attempt left
-/// there stops first; the observation covers both.
+/// One server from its launch through the workload, left in `served`, with the
+/// engine stack it reports: its start off the attempt clock within `deadline`,
+/// then the workload within `deadline` again. One an earlier attempt left there
+/// stops first; the observation covers both.
 fn serve(
     served: &mut Option<(Process, MemoryObservation)>,
     launch: &Launch,
     watch: SupportedWatch,
     inputs: &Inputs,
+    observer: MeasurementObserver<'_>,
     timeout: Duration,
     deadline: Duration,
 ) -> anyhow::Result<(Peak, serde_json::Map<String, serde_json::Value>)> {
@@ -121,12 +123,11 @@ fn serve(
     let port = pipette_subprocess::pick_server_port()?;
     let url = llama_server::url(port);
     let ready = llama_server::health(&url, timeout)?;
-    let started = Instant::now();
-    let mut server = start_process("trt-edgellm-server", launch.serve(port), Duration::ZERO)?;
+    let mut server = start_process("trt-edgellm-server", launch.serve(port), OnStop::SIGKILL)?;
     let sampler = Sampler::start(server.pid(), watch)?;
-    server.wait_ready(deadline, ready)?;
-    let left = deadline.saturating_sub(started.elapsed());
-    let worked = drive(&url, inputs, timeout.min(left)).map_err(|err| {
+    observer.outside(|| server.wait_ready(deadline, ready))?;
+    let started = Instant::now();
+    let worked = drive(&url, inputs, timeout.min(deadline)).map_err(|err| {
         if started.elapsed() < deadline {
             return err;
         }

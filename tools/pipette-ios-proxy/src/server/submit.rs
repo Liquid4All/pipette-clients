@@ -24,10 +24,11 @@ pub(crate) fn client_version() -> String {
 }
 
 /// Why a job failed, and with it whether the server should hand it to someone
-/// else. Terminal means the job can never run anywhere, or the cell met its end
-/// in the app's engine: iOS killed the app, the engine failed, or the engine
-/// ran past the deadline or an attempt's limit. The snake_case slug is what the
-/// log carries; the table test pins every one.
+/// else. Terminal means the job can never run anywhere, the cell met its end
+/// in the app's engine (iOS killed the app, the engine failed, or the engine
+/// ran past the deadline or an attempt's limit), or the phone was unfit to
+/// measure it. The snake_case slug is what the log carries; the table test pins
+/// every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum FailureCause {
@@ -46,6 +47,9 @@ pub(crate) enum FailureCause {
     /// The app stopped an attempt past the plan's `attempt_timeout_seconds`
     /// ([`crate::app::attempt_timed_out`]).
     AttemptTimedOut,
+    /// The app's readiness wait ran out ([`crate::app::readiness_timeout`]).
+    /// Retried, a cell that keeps every phone hot goes round the whole fleet.
+    ReadinessTimedOut,
     /// See [`crate::app::KILLED_BY_IOS`].
     KilledByIos,
     /// The app printed nothing by the first-line deadline, on the launch and on
@@ -84,10 +88,10 @@ pub(crate) enum FailureCause {
 impl FailureCause {
     /// The classification tables (DESIGN sections 4 and 9). In version mode every failure
     /// that depends on the build is retriable: the proxy, not the job, picked it. A runtime
-    /// no build in the bucket carries is the plan's mistake. The cell's end in the engine
-    /// (a kill by iOS, an engine failure, the deadline) is the exception: it is terminal
-    /// in version mode too, so the cell fails instead of waiting out its deadline, and a
-    /// build that fixes it needs `campaigns rerun`.
+    /// no build in the bucket carries is the plan's mistake. The cell's end in the app (a
+    /// kill by iOS, an engine failure, the deadline, a readiness wait that ran out) is the
+    /// exception: it is terminal in version mode too, so the cell fails instead of waiting
+    /// out its deadline, and a build that fixes it needs `campaigns rerun`.
     pub(crate) fn retriable(self) -> bool {
         match self {
             Self::DeviceUnreachable
@@ -106,6 +110,7 @@ impl FailureCause {
             | Self::EngineOutOfMemory
             | Self::EngineTimedOut
             | Self::AttemptTimedOut
+            | Self::ReadinessTimedOut
             | Self::MalformedInvocation
             | Self::InstallFailed
             | Self::UninterpretableSpec
@@ -117,7 +122,7 @@ impl FailureCause {
     /// A failure of the phone, the Mac or the release pipeline, which an
     /// operator fixes, rather than of the job, its plan or the app. A replaced
     /// identity is the phone's, and a pool build the phone cannot take is the
-    /// pool's or the phone's.
+    /// pool's or the phone's. A phone too hot or busy to measure needs no operator.
     pub(crate) fn infrastructure(self) -> bool {
         match self {
             Self::DeviceUnreachable
@@ -131,6 +136,7 @@ impl FailureCause {
             | Self::RunTimedOut
             | Self::EngineTimedOut
             | Self::AttemptTimedOut
+            | Self::ReadinessTimedOut
             | Self::KilledByIos
             | Self::EngineFailed
             | Self::EngineOutOfMemory
@@ -157,6 +163,7 @@ impl FailureCause {
             | Self::DevicectlFailure
             | Self::IdentityReplaced
             | Self::LaunchSilent => Some(FailureCode::DeviceError),
+            Self::ReadinessTimedOut => Some(FailureCode::DeviceNotReady),
             // RunTimedOut: under half the window in the engine, so a download or a
             // wait ran out.
             Self::RunTimedOut
@@ -429,6 +436,12 @@ mod tests {
     )]
     #[case::engine_timed_out(FailureCause::EngineTimedOut, false, false, "engine_timed_out")]
     #[case::attempt_timed_out(FailureCause::AttemptTimedOut, false, false, "attempt_timed_out")]
+    #[case::readiness_timed_out(
+        FailureCause::ReadinessTimedOut,
+        false,
+        false,
+        "readiness_timed_out"
+    )]
     #[case::refused_by_build(FailureCause::RefusedByBuild, true, false, "refused_by_build")]
     #[case::build_not_ready(FailureCause::BuildNotReady, true, true, "build_not_ready")]
     #[case::build_unusable(FailureCause::BuildUnusable, true, true, "build_unusable")]
@@ -452,6 +465,7 @@ mod tests {
     #[case::engine_failed(FailureCause::EngineFailed, "runtime_error")]
     #[case::engine_deadline(FailureCause::EngineTimedOut, "runtime_error")]
     #[case::run_deadline(FailureCause::RunTimedOut, "harness_error")]
+    #[case::readiness(FailureCause::ReadinessTimedOut, "device_not_ready")]
     #[case::devicectl(FailureCause::DevicectlFailure, "device_error")]
     #[case::launch_silent(FailureCause::LaunchSilent, "device_error")]
     fn a_failure_body_carries_its_code(
