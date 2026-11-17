@@ -37,10 +37,14 @@ class UnsubmittedResultCountTest {
     val notRun = cell("cell-4").apply { runStatus = CellRunStatus.PENDING }
     writePayload("job-1", "cell-4")
 
-    // Not saved: [LocalStorage.unsubmittedResultCount] counts the manifest it is handed, not the store. Only the device-wide total below reads disk.
-    val manifest = manifest("job-1", listOf(synced, pending, payloadless, notRun))
+    // Run on the ONNX Runtime GenAI engine: completed, payload on disk, and nowhere to send it, so it is not waiting to be sent.
+    val onnx = cell("cell-5").copy(modelRef = Model.OnnxGenai(HfOnnxGenai(HfRepo.parseSlug("org/genai-package"))))
+    writePayload("job-1", "cell-5")
 
-    assertEquals(1, storage.unsubmittedResultCount(manifest))
+    // Not saved: [LocalStorage.unsubmittedResultCount] counts the manifest it is handed, not the store. Only the device-wide total below reads disk.
+    val manifest = manifest("job-1", listOf(synced, pending, payloadless, notRun, onnx))
+
+    assertEquals(1 + onnxWaiting, storage.unsubmittedResultCount(manifest))
   }
 
   @Test
@@ -52,6 +56,22 @@ class UnsubmittedResultCountTest {
     storage.saveJobManifest(second)
 
     assertEquals(3, storage.unsubmittedResultCountOnDevice())
+  }
+
+  /**
+   * What the sign-out warning quotes is what a reset destroys, and a result that cannot be submitted is destroyed with the rest: it exists nowhere
+   * else and never will. It is in the device-wide total and out of the "can still be uploaded" count.
+   */
+  @Test
+  fun theDeviceWideTotalCountsResultsThatCannotBeSubmitted() {
+    val onnx = cell("cell-1").copy(modelRef = Model.OnnxGenai(HfOnnxGenai(HfRepo.parseSlug("org/genai-package"))))
+    val manifest = manifest("job-1", listOf(onnx, cell("cell-2")))
+    writePayload("job-1", "cell-1")
+    writePayload("job-1", "cell-2")
+    storage.saveJobManifest(manifest)
+
+    assertEquals(1 + onnxWaiting, storage.unsubmittedResultCount(manifest))
+    assertEquals(2, storage.unsubmittedResultCountOnDevice())
   }
 
   @Test
@@ -78,4 +98,7 @@ class UnsubmittedResultCountTest {
     storage.ensureCellArtifactsDir(jobId, cellId)
     storage.cellPayloadFile(jobId, cellId).writeText("{}")
   }
+
+  /** An ONNX Runtime GenAI result waits to be sent only in a build whose collector takes it (`pipette.onnxGenaiSubmit`), which is not the default. */
+  private val onnxWaiting = if (BuildConfig.ONNX_GENAI_SUBMIT) 1 else 0
 }

@@ -55,6 +55,48 @@ value class GgufFilename private constructor(val value: String) {
   }
 }
 
+/**
+ * A directory inside a HuggingFace repo, as `a/b`. Mirrors plan-types `RepoSubpath` (`is_relative_repo_subpath`): segments of the repo-name alphabet,
+ * none of them empty, `.` or `..`. A subpath is joined onto a path under the models directory that is later removed, so a traversal would let a
+ * coordinate name a tree for deletion.
+ */
+@JvmInline
+value class RepoSubpath private constructor(val value: String) {
+  override fun toString(): String = value
+
+  /** The last segment: the directory's own name. */
+  val leaf: String
+    get() = value.substringAfterLast('/')
+
+  companion object {
+    private val SEGMENT = Regex("^[A-Za-z0-9._-]+$")
+
+    private fun isValid(raw: String): Boolean = raw.isNotEmpty() && raw.split("/").all { it != "." && it != ".." && SEGMENT.matches(it) }
+
+    fun parse(raw: String): RepoSubpath = if (isValid(raw)) RepoSubpath(raw) else throw PlanTypeError("invalid repo subpath: '$raw'")
+
+    fun parseOrNull(raw: String): RepoSubpath? = if (isValid(raw)) RepoSubpath(raw) else null
+  }
+}
+
+/**
+ * A HuggingFace repo revision: a tag, a branch or a commit SHA, which pins a repo to a snapshot. Mirrors plan-types `HfRevision`: only the shape is
+ * checked here, and HuggingFace resolves the rest.
+ */
+@JvmInline
+value class HfRevision private constructor(val value: String) {
+  override fun toString(): String = value
+
+  companion object {
+    // pipette-plan-types: nutype(validate(regex = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"))
+    private val REGEX = Regex("^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+    fun parse(raw: String): HfRevision = if (REGEX.matches(raw)) HfRevision(raw) else throw PlanTypeError("invalid HuggingFace revision: '$raw'")
+
+    fun parseOrNull(raw: String): HfRevision? = if (REGEX.matches(raw)) HfRevision(raw) else null
+  }
+}
+
 /** `org/repo_name` coordinate. Mirrors plan-types `HfRepo`. */
 data class HfRepo(
   val org: HfOrg,
@@ -143,12 +185,44 @@ data class HfGgufText(val repo: HfRepo, val filename: GgufFilename, val modelFla
 data class HfGgufVision(val repo: HfRepo, val filename: GgufFilename, val mmprojFilename: GgufFilename, val modelFlags: ModelFlags = ModelFlags())
 
 /**
- * A model deployment. Mirrors plan-types `Model`, restricted to the GGUF variants the Android (llama.cpp) client runs — the `hf_mlx`/`hf_torch`
- * variants are desktop-only and intentionally omitted.
+ * An ONNX Runtime GenAI package: the directory of a repo, or its [prefix] subdirectory, that holds a `genai_config.json` with the graph, weights and
+ * tokenizer it names. Mirrors plan-types `OnnxGenai` with its `ModelSource::HuggingFace` source, the only source this client resolves.
+ */
+data class HfOnnxGenai(
+  val repo: HfRepo,
+  val prefix: RepoSubpath? = null,
+  /**
+   * The snapshot the package is pinned to, or null for whatever `main` is when it is fetched. plan-types carries this on `HfRepo`; here it sits on
+   * the one model kind that honours it, since a GGUF coordinate's pin is refused ([ModelUri]). It is not part of where the package sits on disk.
+   */
+  val revision: HfRevision? = null,
+  val modelFlags: ModelFlags = ModelFlags(),
+) {
+  /** Where the package sits under the models directory: `org/repo_name[/prefix]`, the layout a repo's files have on HuggingFace. */
+  val relativeDir: String
+    get() = if (prefix == null) repo.toString() else "$repo/$prefix"
+
+  /** The package's own name: its directory's, which for a repo holding several is the one that tells them apart. */
+  val name: String
+    get() = prefix?.leaf ?: repo.repoName.value
+}
+
+/**
+ * A model deployment. Mirrors plan-types `Model`, restricted to the variants the Android client runs: the GGUF ones on llama.cpp and the ONNX Runtime
+ * GenAI package. The `hf_mlx`/`hf_torch` variants are desktop-only and intentionally omitted.
  */
 sealed class Model {
   abstract val modelFlags: ModelFlags
   abstract val requiresAuth: Boolean
+
+  /** A directory model. Its files are fetched together and it loads as one path, so it has no projector half. */
+  data class OnnxGenai(val model: HfOnnxGenai) : Model() {
+    override val modelFlags: ModelFlags
+      get() = model.modelFlags
+
+    override val requiresAuth: Boolean
+      get() = model.repo.requiresAuth
+  }
 
   data class GgufText(val model: HfGgufText) : Model() {
     override val modelFlags: ModelFlags
@@ -190,6 +264,12 @@ sealed class Model {
           put("filename", model.filename.toString())
           put("mmproj_filename", model.mmprojFilename.toString())
         }
+        is OnnxGenai -> {
+          put("type", WIRE_ONNX_GENAI)
+          put("repo", model.repo.toString())
+          model.prefix?.let { put("prefix", it.toString()) }
+          model.revision?.let { put("revision", it.toString()) }
+        }
       }
       if (requiresAuth) put("requires_auth", true)
       modelFlags.enableThinking?.let { put("enable_thinking", it) }
@@ -199,6 +279,7 @@ sealed class Model {
   companion object {
     private const val WIRE_GGUF_TEXT = "hf_gguf_text"
     private const val WIRE_GGUF_VISION = "hf_gguf_vision"
+    private const val WIRE_ONNX_GENAI = "hf_onnx_genai"
 
     /**
      * Read back what [toJson] wrote, or null for anything this build cannot turn into a fetchable coordinate.
@@ -211,13 +292,20 @@ sealed class Model {
     fun fromJsonOrNull(json: JSONObject?): Model? {
       if (json == null) return null
       val repo = HfRepo.parseSlugOrNull(json.optString("repo")) ?: return null
-      val filename = GgufFilename.parseOrNull(json.optString("filename")) ?: return null
       val authed = repo.copy(requiresAuth = json.optBoolean("requires_auth", false))
       val flags =
         ModelFlags(
           enableThinking = if (json.has("enable_thinking")) json.optBoolean("enable_thinking") else null,
           reasoningEffort = ReasoningEffort.fromWire(json.optString("reasoning_effort")),
         )
+      if (json.optString("type") == WIRE_ONNX_GENAI) {
+        // A prefix that is present but no longer parses is a malformed entry, not a package at the repo's root.
+        val prefix = if (json.has("prefix")) RepoSubpath.parseOrNull(json.optString("prefix")) ?: return null else null
+        // The same for a pin: read as absent, the cell would run whatever `main` has become.
+        val revision = if (json.has("revision")) HfRevision.parseOrNull(json.optString("revision")) ?: return null else null
+        return OnnxGenai(HfOnnxGenai(authed, prefix, revision, flags))
+      }
+      val filename = GgufFilename.parseOrNull(json.optString("filename")) ?: return null
       return when (json.optString("type")) {
         WIRE_GGUF_TEXT -> GgufText(HfGgufText(authed, filename, flags))
         WIRE_GGUF_VISION -> {

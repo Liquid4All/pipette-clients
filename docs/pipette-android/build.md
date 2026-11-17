@@ -362,6 +362,11 @@ Both native build scripts honor these environment overrides:
 - `ANDROID_NDK_HOME` / `ANDROID_NDK`: use a specific NDK instead of the newest
   under `$SDK/ndk`.
 - `ANDROID_API_LEVEL`: override the native min API level (default `31`).
+- `PIPETTE_ENABLE_ONNX_GENAI=0` leaves out the ONNX Runtime GenAI engine. On by
+  default: `build-native-android.sh` first runs `build-onnx-genai-android.sh`,
+  which builds `vendor/onnxruntime` and `vendor/onnxruntime-genai` (about 13.5
+  minutes cold, nothing when they are unchanged) and needs `uv` for onnxruntime's
+  build scripts. See [onnx-genai-runtime.md](onnx-genai-runtime.md#build-pipeline).
 - `PIPETTE_ENABLE_KLEIDIAI=1` opts into the KleidiAI CPU kernels. Off by
   default, and measured *slower* than off on every SoC tested so far. See
   [KleidiAI](#kleidiai-opt-in) below before enabling it.

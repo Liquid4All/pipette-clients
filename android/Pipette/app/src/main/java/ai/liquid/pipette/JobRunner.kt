@@ -2,6 +2,7 @@ package ai.liquid.pipette
 
 import ai.liquid.pipette.compose.RunProgress
 import java.io.File
+import java.util.concurrent.CancellationException
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -172,7 +173,7 @@ private fun submitFinishedCells(
  * caller can skip a submit that would do nothing, which after the per-cell uploads is the normal case at the end of a run.
  */
 internal fun hasUnsentResults(manifest: JobManifest): Boolean =
-  manifest.cells.any { it.runStatus == CellRunStatus.COMPLETED && it.serverJobId == null }
+  manifest.cells.any { it.runStatus == CellRunStatus.COMPLETED && it.serverJobId == null && it.isSubmittable }
 
 /**
  * Should the end-of-run sweep upload anything? The job has to have completed, it has to have opted into contributing, there has to be a registration
@@ -436,6 +437,12 @@ constructor(
     }
   }
 
+  /** A fetch's progress line, or the cancel that stops it: thrown here because the status callback is the one hook a blocking fetch offers. */
+  private fun reportFetch(flag: CancelFlag, manifest: JobManifest, cell: JobCell, status: String) {
+    if (flag.isCancelled) throw CancellationException("cancelled while fetching")
+    publishCell(manifest, cell, status, 0.0)
+  }
+
   private fun execute(jobId: String, flag: CancelFlag) {
     var manifest = storage.loadJobManifest(jobId) ?: return
     val benchmarkMap = resolveBenchmarks(manifest)
@@ -512,11 +519,34 @@ constructor(
       // The fetch's own reason for failing, kept in a local rather than written onto the cell: `cell.errorMessage` can still hold the message
       // from a previous attempt at this point (it is cleared a few lines below, once the cell is known to be runnable), so reading it back to decide
       // what to report would let a stale reason survive as this attempt's.
+      // A kind the ONNX Runtime GenAI engine does not run is refused here, before its package is fetched or loaded: the engine would say the
+      // same, after a multi-gigabyte load that also warms the device ahead of the next timed cell.
+      val unsupported = (cell.modelRef as? Model.OnnxGenai)?.let { OnnxGenaiCells.unsupportedReason(cellType.wire) }
+      if (unsupported != null) {
+        cell.runStatus = CellRunStatus.FAILED
+        cell.errorMessage = "Benchmark '${cell.benchmarkId}' is unsupported: $unsupported"
+        saveManifest()
+        publishCell(manifest, cell, cell.errorMessage ?: unsupported, 0.0)
+        continue
+      }
+
       var fetchError: String? = null
       val fetch = { attempt: Result<String>? -> attempt?.onFailure { fetchError = it.message }?.getOrNull() }
+      // Thrown from the status callback, which a transfer calls as it goes: the one hook a blocking fetch gives a cancel. The provisioner's
+      // own waits report through it too, so a cancelled run stops waiting on a download it no longer wants.
+      val onFetchStatus = { status: String -> reportFetch(flag, manifest, cell, status) }
+      val ensure = { ref: Model -> runCatching { provisioner?.ensureWeights(ref, onFetchStatus) }.getOrElse { Result.failure(it) } }
+      // A package is asked of the provisioner even when its directory is there. The path alone says nothing of which snapshot it holds or
+      // whether it is whole, and a cell that names a pinned one would otherwise run, and record, whatever had since replaced it.
+      val packageRef = cell.modelRef as? Model.OnnxGenai
       val resolvedModelPath =
-        storage.resolveModelPath(cell.modelPath)
-          ?: cell.modelRef?.let { ref -> fetch(provisioner?.ensureWeights(ref) { s -> publishCell(manifest, cell, s, 0.0) }) }
+        if (packageRef != null && provisioner != null) {
+          fetch(ensure(packageRef))
+        } else {
+          storage.resolveModelPath(cell.modelPath) ?: cell.modelRef?.let { ref -> fetch(ensure(ref)) }
+        }
+      // A cancel that stopped the fetch leaves the cell as it was, for the run that resumes it, and not failed for a reason that is not one.
+      if (resolvedModelPath == null && flag.isCancelled) break
       if (resolvedModelPath == null) {
         cell.runStatus = CellRunStatus.FAILED
         cell.errorMessage = fetchError ?: "Model file not found: ${File(cell.modelPath).name}. Re-download it from the Models tab."
@@ -673,6 +703,7 @@ constructor(
           runtimeFlags = resolvedFlags,
           runtimeVersion = engine.llamaCppCommit(),
           runtimeCpuBackend = engine.cpuBackendDescriptor(),
+          modelRef = cell.modelRef,
           // The type resolved once at the top of the iteration, rather than the
           // same fallback spelled out a second time here. #1011 added this site
           // while this fix was in review, and two copies of the rule is the

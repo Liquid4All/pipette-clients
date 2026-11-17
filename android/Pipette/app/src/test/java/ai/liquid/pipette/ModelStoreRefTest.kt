@@ -84,4 +84,62 @@ class ModelStoreRefTest {
     assertTrue("the downloaded row won the collision", onDisk.path.endsWith("LFM2.5-230M-Q4_0.gguf"))
     assertTrue("and kept a coordinate", onDisk.modelRef != null)
   }
+
+  private fun putPackage(relative: String): File =
+    File(temp.root, relative).apply {
+      mkdirs()
+      File(this, OnnxGenaiPackage.CONFIG_FILE).writeText("{}")
+      File(this, "model.onnx.data").writeText("weights")
+    }
+
+  /** A package is one model: its directory, the files' size, and the coordinate its place under the models directory spells. */
+  @Test
+  fun `an ONNX package is listed as one model with its coordinate`() {
+    val dir = putPackage("microsoft/Phi-3-mini-4k-instruct-onnx/cpu_and_mobile/cpu-int4-rtn-block-32")
+
+    val model = store().availableModels().single()
+    val onnx = (model.modelRef as? Model.OnnxGenai)?.model
+
+    assertEquals("cpu-int4-rtn-block-32", model.name)
+    assertEquals(dir.absolutePath, model.path)
+    assertEquals("microsoft/Phi-3-mini-4k-instruct-onnx", model.hfRepo)
+    assertEquals("{}weights".length.toLong(), model.sizeBytes)
+
+    // The fetcher's record of the commit is not part of the package: the size stays the package's own, and the coordinate gains the pin.
+    File(dir, OnnxPackageFetcher.REVISION_FILE).writeText("5f5f794c1c23c9d5ee142af85df02a6cc52d6945")
+    val recorded = ModelStore(temp.root).availableModels().single()
+    assertEquals("{}weights".length.toLong(), recorded.sizeBytes)
+    assertEquals("5f5f794c1c23c9d5ee142af85df02a6cc52d6945", (recorded.modelRef as Model.OnnxGenai).model.revision.toString())
+    assertEquals("microsoft/Phi-3-mini-4k-instruct-onnx", onnx?.repo?.toString())
+    assertEquals("cpu_and_mobile/cpu-int4-rtn-block-32", onnx?.prefix?.toString())
+    assertTrue(model.onDisk)
+  }
+
+  /** A package at the root of its repo has no prefix, and two of one repo are two models. */
+  @Test
+  fun `packages are told apart by their directories`() {
+    putPackage("org/root-package")
+    putPackage("org/many/int4")
+    putPackage("org/many/fp16")
+
+    val refs = store().availableModels().map { (it.modelRef as Model.OnnxGenai).model.relativeDir }.toSet()
+
+    assertEquals(setOf("org/root-package", "org/many/int4", "org/many/fp16"), refs)
+  }
+
+  /** A package still being fetched holds a `genai_config.json` too, and is not a model until it is renamed into place. */
+  @Test
+  fun `a staging directory is not listed`() {
+    putPackage("org/repo/.int4.5f5f794c1c23${OnnxPackageFetcher.STAGING_SUFFIX}")
+
+    assertTrue(store().availableModels().isEmpty())
+  }
+
+  /** A package outside the repo layout has no repo to go back to, so it is not offered as something a run can name. */
+  @Test
+  fun `a package with no repo in its path is not listed`() {
+    putPackage("loose-package")
+
+    assertTrue(store().availableModels().isEmpty())
+  }
 }

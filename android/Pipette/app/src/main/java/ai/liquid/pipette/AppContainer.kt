@@ -169,6 +169,14 @@ class AppContainer(
             },
           records = { DownloadStore.records(appContext) },
           isOnline = NetworkReachability.checker(appContext),
+          // Directory models, fetched whole by their own path: the download layer above names a transfer by one `.gguf` file. None in a build
+          // without the engine that loads them, so such a model is refused before a byte of it is fetched rather than after all of them.
+          packages =
+            if (BuildConfig.ONNX_GENAI_ENGINE) {
+              OnnxPackageFetcher(storage.modelsDir, HuggingFaceHttp { Secrets(appContext).loadHfToken() }, onPublished = storage::modelsChanged)
+            } else {
+              null
+            },
         ),
     )
 

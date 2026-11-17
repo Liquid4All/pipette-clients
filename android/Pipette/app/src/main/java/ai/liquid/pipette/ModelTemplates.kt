@@ -87,6 +87,29 @@ data class PresetModel(val id: String, val name: String, val detail: String, val
     }
 }
 
+/**
+ * An ONNX Runtime GenAI package the catalog offers: a repo, the directory of it that holds the package, and the commit it is pinned to, so a resumed
+ * multi-gigabyte pull cannot meet a tree that moved on `main`. The counterpart of iOS's `CatalogEntry.onnxGenai`, and one row per row there:
+ * `ci/checks/model-catalog-parity.py` compares the two on `(repo, prefix, revision)`.
+ *
+ * A type of its own, apart from the GGUF presets above, because those are what the Models tab downloads, and its download layer names a transfer by
+ * one `.gguf` file. A package is fetched by the run that names it ([OnnxPackageFetcher]).
+ */
+data class OnnxPreset(val name: String, val repo: String, val prefix: String, val revision: String, val bytes: Long) {
+  /** The typed coordinate, or null for a row that does not parse: a bad row costs that row and nothing else. */
+  val model: Model.OnnxGenai?
+    get() {
+      val hfRepo = HfRepo.parseSlugOrNull(repo) ?: return null
+      val subpath = RepoSubpath.parseOrNull(prefix) ?: return null
+      val pin = HfRevision.parseOrNull(revision) ?: return null
+      return Model.OnnxGenai(HfOnnxGenai(hfRepo, subpath, pin))
+    }
+
+  /** This row as something a run can be started against: the offer form, with the declared size until the package is on disk. */
+  fun asOffer(): ModelFile? =
+    model?.let { ModelCatalog.packageFile(it, path = it.model.relativeDir, sizeBytes = bytes, onDisk = false).copy(displayName = name) }
+}
+
 data class ModelVariant(val quant: String, val repo: String, val sizeLabel: String)
 
 data class ModelFamily(val id: String, val displayName: String, val variants: List<ModelVariant>)
@@ -112,6 +135,21 @@ object ModelTemplateCatalog {
   }
 
   val byFamilyId: Map<String, ModelFamily> by lazy { families.associateBy { it.id } }
+
+  /**
+   * The ONNX Runtime GenAI rows, as iOS's `onnxDefaults`. No `LiquidAI/` row for the reason iOS gives: those `-ONNX` repos are transformers.js
+   * exports with no `genai_config.json`, which the engine refuses. The size is the selected directory's bytes, not the whole repo's.
+   */
+  val onnxDefaults: List<OnnxPreset> =
+    listOf(
+      OnnxPreset(
+        "Phi 3 Mini 4K Instruct",
+        "microsoft/Phi-3-mini-4k-instruct-onnx",
+        prefix = "cpu_and_mobile/cpu-int4-rtn-block-32",
+        revision = "5f5f794c1c23c9d5ee142af85df02a6cc52d6945",
+        bytes = 2_725_538_838,
+      )
+    )
 
   val defaults: List<PresetModel> =
     listOf(

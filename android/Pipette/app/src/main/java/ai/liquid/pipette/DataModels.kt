@@ -69,6 +69,18 @@ data class JobCell(
   val isRerunnable: Boolean
     get() = runStatus.isRerunnable
 
+  /**
+   * Whether this cell's result is submitted at all. One run on the ONNX Runtime GenAI engine is only where the build says so
+   * (`BuildConfig.ONNX_GENAI_SUBMIT`): its descriptor is `onnx_genai_apk_pipette`, which plan-types does not define yet. A collector stores the
+   * descriptor as it comes and would take the result, under a runtime nothing there can name. Elsewhere such a cell keeps its result on the device,
+   * where the results screen and the CSV export read it. See docs/pipette-android/onnx-genai-runtime.md.
+   */
+  val isSubmittable: Boolean
+    get() = isSubmittable(BuildConfig.ONNX_GENAI_SUBMIT)
+
+  /** [isSubmittable] for a build that does, or does not, submit the ONNX Runtime GenAI engine's results. */
+  fun isSubmittable(onnxGenaiSubmit: Boolean): Boolean = modelRef !is Model.OnnxGenai || onnxGenaiSubmit
+
   fun toJson(): JSONObject =
     JSONObject()
       .put("cellId", cellId)

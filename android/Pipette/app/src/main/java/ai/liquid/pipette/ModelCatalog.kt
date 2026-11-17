@@ -25,12 +25,21 @@ object ModelCatalog {
    * Collision is judged on the model's coordinate, not on the whole [ModelFile]: the two forms disagree about size and about whether the path exists
    * yet, so comparing values would list the same model twice. iOS keys `offerable` the same way and for the same reason.
    */
-  fun offerable(downloaded: List<ModelFile>, presets: List<PresetModel> = ModelTemplateCatalog.defaults): List<ModelFile> {
+  fun offerable(
+    downloaded: List<ModelFile>,
+    presets: List<PresetModel> = ModelTemplateCatalog.defaults,
+    packages: List<OnnxPreset> = ModelTemplateCatalog.onnxDefaults,
+    // Whether this build has the engine that runs an ONNX package. Without it none is offered, from the catalog or from disk: each would be a
+    // run that fails at its first cell.
+    onnxEngine: Boolean = BuildConfig.ONNX_GENAI_ENGINE,
+  ): List<ModelFile> {
     val byCoordinate = linkedMapOf<String, ModelFile>()
     presets.forEach { preset -> preset.asOffer()?.let { byCoordinate[it.path] = it } }
+    if (onnxEngine) packages.forEach { preset -> preset.asOffer()?.let { byCoordinate[it.path] = it } }
     // Second, so it overwrites the offer for a model already present. Keyed on the same relative path the offer used, which is what
     // `LocalStorage.modelRelativePath` produces for both.
-    downloaded.forEach { model -> byCoordinate[coordinateKey(model)] = model }
+    // A package on disk is offered only where an engine loads it: it is still listed and can be deleted, but not started.
+    downloaded.filter { onnxEngine || it.modelRef !is Model.OnnxGenai }.forEach { model -> byCoordinate[coordinateKey(model)] = model }
     return byCoordinate.values.toList()
   }
 
@@ -40,7 +49,9 @@ object ModelCatalog {
    * A downloaded file's [ModelFile.path] may be absolute, so it is recomposed from the repo and name rather than used directly. An import with no
    * repo keys on its filename alone, which is also what its download path would have been.
    */
-  private fun coordinateKey(model: ModelFile): String = LocalStorage.modelRelativePath(model.hfRepo, model.name)
+  private fun coordinateKey(model: ModelFile): String =
+    // A package's key is its directory, not its name: the name is the directory's last segment alone.
+    (model.modelRef as? Model.OnnxGenai)?.model?.relativeDir ?: LocalStorage.modelRelativePath(model.hfRepo, model.name)
 
   /**
    * One file of a coordinate as something a run can be planned against, preferring the downloaded row when there is one.
@@ -87,7 +98,41 @@ object ModelCatalog {
       is Model.GgufText -> ResolvedCoordinate(resolve(ref.model.repo, ref.model.filename, downloaded), null)
       is Model.GgufVision ->
         ResolvedCoordinate(resolve(ref.model.repo, ref.model.filename, downloaded), resolve(ref.model.repo, ref.model.mmprojFilename, downloaded))
+      is Model.OnnxGenai -> ResolvedCoordinate(resolvePackage(ref, downloaded), null)
     }
+
+  /**
+   * An ONNX Runtime GenAI package as something a run can be planned against, preferring the downloaded row when there is one, as [resolve] does.
+   *
+   * Matched on the coordinate itself: a package's name is its directory's last segment, which two packages of one repo can share with nothing but the
+   * directories above it to tell them apart. The offer form's path is the directory the package will have under the models directory, which the
+   * runner resolves through [ModelProvisioning.ensureWeights].
+   */
+  fun resolvePackage(ref: Model.OnnxGenai, downloaded: List<ModelFile>): ModelFile {
+    val onDisk = downloaded.firstOrNull { (it.modelRef as? Model.OnnxGenai)?.model?.relativeDir == ref.model.relativeDir }
+    val pin = ref.model.revision
+    // The listed row carries the commit the fetcher recorded for it ([ModelStore]). A pinned coordinate takes the row only when that is the
+    // commit it names; for another, for a tag or a branch, or for a package with no record, it keeps the offer form, and the fetcher, which
+    // can resolve a name and refuses a mismatch, answers when the cell runs.
+    val satisfied = pin == null || (onDisk?.modelRef as? Model.OnnxGenai)?.model?.revision == pin
+    return onDisk?.takeIf { satisfied }?.copy(modelRef = ref) ?: packageFile(ref, path = ref.model.relativeDir, sizeBytes = 0L, onDisk = false)
+  }
+
+  /** A package as a [ModelFile]: one model whose path is its directory. Shared by the offer above and [ModelStore]'s scan, so both name it alike. */
+  fun packageFile(ref: Model.OnnxGenai, path: String, sizeBytes: Long, onDisk: Boolean): ModelFile =
+    ModelFile(
+      name = ref.model.name,
+      path = path,
+      sizeBytes = sizeBytes,
+      hfRepo = ref.model.repo.toString(),
+      // The repo's name with the directory's, since a repo holding several packages gives each the same first half.
+      displayName =
+        ModelTemplateCatalog.repoToName[ref.model.repo.toString()]
+          ?: listOfNotNull(ref.model.repo.repoName.value, ref.model.prefix?.leaf).joinToString(" "),
+      familyId = ref.model.relativeDir.lowercase(),
+      modelRef = ref,
+      onDisk = onDisk,
+    )
 
   fun groups(from: List<ModelFile>): List<ModelGroup> {
     val keys = mutableListOf<String>()

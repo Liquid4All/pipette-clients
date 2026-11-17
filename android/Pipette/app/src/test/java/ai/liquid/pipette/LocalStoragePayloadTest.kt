@@ -31,6 +31,7 @@ class LocalStoragePayloadTest {
     mmprojPath: String?,
     benchmarkType: BenchmarkType = BenchmarkType.DECODE_THROUGHPUT,
     readinessPolicy: ReadinessPolicy = ReadinessPolicy(maxWaitSecs = 180L, skipThermal = false),
+    modelRef: Model? = null,
   ): JSONObject {
     val jobId = "job-1"
     val cellId = "cell-1"
@@ -46,6 +47,7 @@ class LocalStoragePayloadTest {
       runtimeCpuBackend = "dotprod,neon",
       benchmarkType = benchmarkType,
       readinessPolicy = readinessPolicy,
+      modelRef = modelRef,
     )
     return JSONObject(File(storage.ensureCellArtifactsDir(jobId, cellId), "payload.json").readText())
   }
@@ -166,5 +168,46 @@ class LocalStoragePayloadTest {
       )
 
     assertFalse("benchmark_flags must be elided for a cell the schema models none for", payload.has("benchmark_flags"))
+  }
+
+  /**
+   * A cell the ONNX Runtime GenAI engine ran says so, with its own descriptor, and says nothing of llama.cpp: not its commit, its load knobs or its
+   * CPU variant, all of which the runner still passes because it has them for every cell. The model is the package's own coordinate, pin included.
+   */
+  @Test
+  fun anOnnxCellNamesItsOwnEngineAndNothingOfLlamaCpp() {
+    val phi3 =
+      Model.OnnxGenai(
+        HfOnnxGenai(
+          HfRepo.parseSlug("microsoft/Phi-3-mini-4k-instruct-onnx"),
+          RepoSubpath.parse("cpu_and_mobile/cpu-int4-rtn-block-32"),
+          HfRevision.parse("5f5f794c1c23c9d5ee142af85df02a6cc52d6945"),
+        )
+      )
+    val payload =
+      writeAndRead(
+        modelName = "microsoft/Phi-3-mini-4k-instruct-onnx",
+        modelPath = "/models/microsoft/Phi-3-mini-4k-instruct-onnx/cpu_and_mobile/cpu-int4-rtn-block-32",
+        mmprojPath = null,
+        modelRef = phi3,
+      )
+
+    assertEquals(SubmissionRef.model(phi3), payload.getString("model_descriptor"))
+    assertEquals("cpu-int4-rtn-block-32", payload.getString("model_quant"))
+    assertEquals("onnx_genai_apk_pipette", payload.getString("runtime_name"))
+    assertEquals("onnxruntime-${BuildConfig.ONNXRUNTIME_VERSION}+genai-${BuildConfig.ONNXRUNTIME_GENAI_COMMIT}", payload.getString("runtime_version"))
+    // plan-types' `onnx_genai_apk_pipette`: both source trees, each by its stamp, and the flavor llama.cpp's descriptor carries.
+    assertEquals(
+      """{"flavor":"android-arm64-v8","packages":{"onnxruntime":{"repository_url":"github.com/microsoft/onnxruntime",""" +
+        """"repository_version":"${BuildConfig.ONNXRUNTIME_VERSION}"},"onnxruntime_genai":{"repository_url":""" +
+        """"github.com/microsoft/onnxruntime-genai","repository_version":"${BuildConfig.ONNXRUNTIME_GENAI_COMMIT}"}},""" +
+        """"type":"onnx_genai_apk_pipette"}""",
+      payload.getString("runtime_descriptor"),
+    )
+    for (llamaOnly in listOf("runtime_flags", "runtime_cpu_variant")) {
+      assertFalse("$llamaOnly describes llama.cpp", payload.has(llamaOnly))
+    }
+    // What the harness ran under is the same harness's to report.
+    assertTrue(payload.has("benchmark_flags"))
   }
 }

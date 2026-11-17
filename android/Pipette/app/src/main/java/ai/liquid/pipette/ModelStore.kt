@@ -6,6 +6,10 @@ import java.io.File
  * Filesystem-backed model catalog. Like the desktop/ops clients (whose `ModelStore` trait is just a directory), Android keeps no model database: the
  * catalog is a scan of [modelsDir] with metadata derived from the repo-bucketed path, the filename, and the bundled model templates. (Replaces the
  * former Room-backed cache.)
+ *
+ * Two kinds of entry: a `.gguf` file, and an ONNX Runtime GenAI package, which is a directory ([OnnxGenaiPackage.isPackage]) listed as one model
+ * whose path is the directory and whose size is its files' (the fetcher's own record of the commit aside). A package still being fetched is not
+ * listed: [OnnxPackageFetcher] stages it in a sibling directory and only a whole one is renamed into place.
  */
 class ModelStore(private val modelsDir: File) {
 
@@ -18,12 +22,31 @@ class ModelStore(private val modelsDir: File) {
 
   private fun scan(): List<ModelFile> {
     modelsDir.mkdirs()
-    return modelsDir
-      .walkTopDown()
-      .filter { it.isFile && it.extension.equals("gguf", ignoreCase = true) }
-      .sortedBy { it.name.lowercase() }
-      .map { modelFileFor(it) }
-      .toList()
+    val entries = modelsDir.walkTopDown().onEnter { !it.name.endsWith(OnnxPackageFetcher.STAGING_SUFFIX) }.toList()
+    val files = entries.filter { it.isFile && it.extension.equals("gguf", ignoreCase = true) }.map { modelFileFor(it) }
+    val packages = entries.filter { it.isDirectory && it != modelsDir && OnnxGenaiPackage.isPackage(it.path) }.mapNotNull { packageFor(it) }
+    return (files + packages).sortedBy { it.name.lowercase() }
+  }
+
+  /**
+   * A package's directory as a model, or null when its place under [modelsDir] names no repo to go back to. The layout is a repo's own,
+   * `org/repo_name[/prefix]`, which is where [OnnxPackageFetcher] publishes and the only place a coordinate can be read back from.
+   */
+  @Suppress("ReturnCount") // one guard per part of the path that can fail to name a coordinate
+  private fun packageFor(dir: File): ModelFile? {
+    val parts = relativePath(dir).split("/")
+    if (parts.size < REPO_SEGMENTS) return null
+    val repo = HfRepo.parseSlugOrNull(parts.take(REPO_SEGMENTS).joinToString("/")) ?: return null
+    val prefix = parts.drop(REPO_SEGMENTS).takeIf { it.isNotEmpty() }?.let { RepoSubpath.parseOrNull(it.joinToString("/")) ?: return null }
+    // The commit the fetcher recorded, when it fetched this one: what makes the listed coordinate name these bytes and not `main`'s.
+    val revision = File(dir, OnnxPackageFetcher.REVISION_FILE).takeIf { it.isFile }?.readText()?.trim()?.let { HfRevision.parseOrNull(it) }
+    val ref = Model.OnnxGenai(HfOnnxGenai(repo, prefix, revision))
+    return ModelCatalog.packageFile(
+      ref,
+      path = dir.absolutePath,
+      sizeBytes = dir.walkTopDown().filter { it.isFile && it.name != OnnxPackageFetcher.REVISION_FILE }.sumOf { it.length() },
+      onDisk = true,
+    )
   }
 
   /** Drop the cached scan so the next [availableModels] re-reads the directory. */
@@ -82,6 +105,11 @@ class ModelStore(private val modelsDir: File) {
   }
 
   private fun relativePath(file: File): String = file.relativeTo(modelsDir).invariantSeparatorsPath
+
+  private companion object {
+    /** `org` and `repo_name`: what of a package's path is its repo. */
+    const val REPO_SEGMENTS = 2
+  }
 
   private fun repoFromBucketPath(file: File): String? {
     val parts = relativePath(file).split("/")

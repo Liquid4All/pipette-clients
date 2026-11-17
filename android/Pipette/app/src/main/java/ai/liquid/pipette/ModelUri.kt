@@ -15,11 +15,13 @@ package ai.liquid.pipette
  * pair   ::= key "=" value                ; first "=" splits; value may contain "="
  * ```
  *
- * Android mirrors the repo-backed GGUF arms only, which is exactly what [Model] can express. Everything else in the vocabulary is refused **by name**
- * rather than left to fail later:
+ * Android mirrors the repo-backed GGUF arms and the ONNX Runtime GenAI directory arm (`onnx-genai://repo=org/name[&prefix=a/b][&rev=ref]`, the
+ * crate's `parse_dir_source`), which is exactly what [Model] can express. Everything else in the vocabulary is refused **by name** rather than left
+ * to fail later:
  * - `url=` has no counterpart, because `Model` has no absolute-URL arm.
- * - `mlx`, `torch`, `openvino` and `onnx-genai` name engines this build does not link.
- * - `rev` and `sha256` pin something this client cannot honour.
+ * - `mlx`, `torch` and `openvino` name engines this build does not link.
+ * - `rev` on a GGUF coordinate, and `sha256` on any, pin something this client cannot honour. A directory model's `rev` it does honour: the package
+ *   is fetched at that revision, and one on disk from another is refused ([OnnxPackageFetcher]).
  *
  * That last one is the important refusal. To accept a pinned digest and ignore it would run bytes the caller did not pin, and then submit the row as
  * though it had. That is worse than a refused invocation.
@@ -68,9 +70,13 @@ object ModelUri {
 
   private const val SCHEME_GGUF_TEXT = "gguf-text"
   private const val SCHEME_GGUF_VISION = "gguf-vision"
+  private const val SCHEME_ONNX_GENAI = "onnx-genai"
+
+  /** The schemes this client turns into a [Model]. */
+  private val LINKED_SCHEMES = setOf(SCHEME_GGUF_TEXT, SCHEME_GGUF_VISION, SCHEME_ONNX_GENAI)
 
   /** Engines the crate's vocabulary defines that this build does not link. Named so they are refused as unsupported rather than as unknown. */
-  private val UNLINKED_SCHEMES = setOf("mlx", "torch", "openvino", "onnx-genai")
+  private val UNLINKED_SCHEMES = setOf("mlx", "torch", "openvino")
 
   /** Sources that are real but not importable. The crate gives these their own error rather than calling them unknown schemes. */
   private val NON_IMPORTABLE_SCHEMES = setOf("apple-foundation", "local", "file")
@@ -122,7 +128,9 @@ object ModelUri {
         return Result.Error(Failure.UnknownKey(it))
       }
     // Before the required-key check, so a caller who pinned a digest hears about the pin rather than about a key they did present.
+    // `prefix` and `rev` are the two such keys a scheme honours: a directory model's subdirectory and its snapshot.
     keys.keys
+      .filterNot { scheme == SCHEME_ONNX_GENAI && (it == KEY_PREFIX || it == KEY_REV) }
       .mapNotNull { key -> UNREPRESENTABLE_KEYS[key]?.let { key to it } }
       .minByOrNull { it.first }
       ?.let {
@@ -131,13 +139,14 @@ object ModelUri {
 
     return when (scheme) {
       SCHEME_GGUF_TEXT -> text(keys)
+      SCHEME_ONNX_GENAI -> directory(keys)
       else -> vision(keys)
     }
   }
 
   private fun schemeFailure(scheme: String): Failure? =
     when {
-      scheme == SCHEME_GGUF_TEXT || scheme == SCHEME_GGUF_VISION -> null
+      scheme in LINKED_SCHEMES -> null
       scheme in UNLINKED_SCHEMES -> Failure.UnsupportedScheme(scheme)
       scheme in NON_IMPORTABLE_SCHEMES -> Failure.NotImportable(scheme)
       else -> Failure.UnknownScheme(scheme)
@@ -161,6 +170,31 @@ object ModelUri {
     val weights = GgufFilename.parseOrNull(rawModel) ?: return Result.Error(badFilename(KEY_MODEL, rawModel))
     val projector = GgufFilename.parseOrNull(rawMmproj) ?: return Result.Error(badFilename(KEY_MMPROJ, rawMmproj))
     return Result.Ok(Model.GgufVision(HfGgufVision(repo, weights, projector)))
+  }
+
+  /**
+   * A directory model: a repo, and optionally the subdirectory of it that holds the package. The crate's `parse_dir_source`. A GGUF key here is
+   * refused rather than ignored, as the crate's `finish` refuses it.
+   */
+  @Suppress("ReturnCount") // one guard per key that can be absent, unparseable or out of place
+  private fun directory(keys: Map<String, String>): Result {
+    keys.keys
+      .firstOrNull { it != KEY_REPO && it != KEY_PREFIX && it != KEY_REV }
+      ?.let {
+        return Result.Error(Failure.UnknownKey(it))
+      }
+    val rawRepo = keys[KEY_REPO] ?: return Result.Error(Failure.MissingKey(KEY_REPO))
+    val repo = HfRepo.parseSlugOrNull(rawRepo) ?: return Result.Error(badRepo(rawRepo))
+    val rawPrefix = keys[KEY_PREFIX]
+    val prefix =
+      rawPrefix?.let {
+        RepoSubpath.parseOrNull(it) ?: return Result.Error(Failure.InvalidValue(KEY_PREFIX, it, "expected a relative directory such as `a/b`"))
+      }
+    val revision =
+      keys[KEY_REV]?.let {
+        HfRevision.parseOrNull(it) ?: return Result.Error(Failure.InvalidValue(KEY_REV, it, "expected a tag, a branch or a commit"))
+      }
+    return Result.Ok(Model.OnnxGenai(HfOnnxGenai(repo, prefix, revision)))
   }
 
   private fun badRepo(raw: String) = Failure.InvalidValue(KEY_REPO, raw, "expected `org/repo_name`")

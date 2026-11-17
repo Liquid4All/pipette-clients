@@ -184,6 +184,22 @@ jobs:
           key: android-app-v1
           cache-bin: false
 
+      # As in CI's android-app job: build-onnx-genai-android.sh, which the native build
+      # runs, needs uv, and reuses the libraries a run at the same pins already built.
+      - name: Read the ONNX submodule pins
+        id: onnx-pins
+        run: |
+          echo "sha=$(git -C vendor/onnxruntime rev-parse HEAD)-$(git -C vendor/onnxruntime-genai rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the ONNX Runtime GenAI build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: target/onnx-genai-android-arm64-v8a/out
+          key: onnx-genai-out-android-ndk-27.2.12479018-${{ runner.os }}-${{ steps.onnx-pins.outputs.sha }}-${{ hashFiles('android/Pipette/build-onnx-genai-android.sh') }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
       - name: Licenses (shipping dependencies)
         # Repeated from CI: a release can be dispatched from a ref whose path-filtered
         # android-app job never ran. Kept before the keystore decode so a license

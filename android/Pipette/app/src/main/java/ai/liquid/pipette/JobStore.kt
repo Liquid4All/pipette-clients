@@ -35,6 +35,11 @@ interface JobStore {
     benchmarkType: BenchmarkType,
     readinessPolicy: ReadinessPolicy,
     benchmarkCpuAffinity: CpuAffinitySnapshot? = null,
+    /**
+     * The cell's own coordinate, when it has one. A GGUF cell's identity is rebuilt from [modelName] and [modelPath]; a directory model's cannot be,
+     * and which engine ran the cell follows from it, so the payload reads both off this.
+     */
+    modelRef: Model? = null,
   )
 
   fun loadRegistration(): RegistrationData?

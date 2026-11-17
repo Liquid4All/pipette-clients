@@ -471,4 +471,19 @@ class HeadlessCommandTest {
       is HeadlessCommand.Parsed.Inspect -> parsed.query
       else -> error("expected a query, got $parsed")
     }
+
+  /**
+   * An ONNX Runtime GenAI coordinate is a model only in a build that has the engine. Elsewhere it is refused at the command line, by name: left to
+   * the run, the package would be fetched whole before the engine that cannot load it said so.
+   */
+  @Test
+  fun `an onnx-genai coordinate is refused where there is no engine`() {
+    val coordinate = mapOf("model" to "onnx-genai://repo=microsoft/Phi-3-mini-4k-instruct-onnx&prefix=cpu_and_mobile/cpu-int4-rtn-block-32")
+
+    if (ai.liquid.pipette.BuildConfig.ONNX_GENAI_ENGINE) {
+      assertTrue(ok(coordinate).modelUri is ai.liquid.pipette.Model.OnnxGenai)
+    } else {
+      assertTrue(usageError(coordinate).contains("no ONNX Runtime GenAI engine"))
+    }
+  }
 }

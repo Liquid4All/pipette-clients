@@ -52,7 +52,10 @@ endif()
 if(PIPETTE_ENGINE_BACKEND STREQUAL "cpp")
   add_library(pipette_android SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/jni.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/jni_crash_reporter.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/jni_crash_reporter.cpp"
+    # The ONNX Runtime GenAI engine's JNI. Always compiled, so the Kotlin
+    # declarations link; it refuses every call unless the engine is built in below.
+    "${CMAKE_CURRENT_SOURCE_DIR}/onnx_genai_jni.cpp")
 
   set_target_properties(pipette_android PROPERTIES
     CXX_STANDARD 20
@@ -110,6 +113,47 @@ if(PIPETTE_ENGINE_BACKEND STREQUAL "cpp")
     -Wl,-z,max-page-size=16384
     -Wl,-z,common-page-size=16384
     -Wl,--build-id=sha1)
+
+  # ONNX Runtime GenAI, prebuilt by android/Pipette/build-onnx-genai-android.sh
+  # from vendor/onnxruntime and vendor/onnxruntime-genai. Imported rather than
+  # added as a subdirectory: the two trees have their own build scripts, and
+  # onnxruntime's alone compiles for longer than everything else here.
+  # libonnxruntime.so is not linked: genai loads it by name at run time, so it only
+  # has to be staged beside the engine (cmake/stage_android_jnilibs.cmake).
+  if(PIPETTE_ONNX_GENAI_DIR)
+    foreach(_onnx_file lib/libonnxruntime-genai.so lib/libonnxruntime.so include/ort_genai_c.h)
+      if(NOT EXISTS "${PIPETTE_ONNX_GENAI_DIR}/${_onnx_file}")
+        message(FATAL_ERROR
+          "PIPETTE_ONNX_GENAI_DIR is set but ${PIPETTE_ONNX_GENAI_DIR}/${_onnx_file} "
+          "is missing. Run android/Pipette/build-onnx-genai-android.sh.")
+      endif()
+    endforeach()
+
+    add_library(onnxruntime_genai SHARED IMPORTED)
+    set_target_properties(onnxruntime_genai PROPERTIES
+      IMPORTED_LOCATION "${PIPETTE_ONNX_GENAI_DIR}/lib/libonnxruntime-genai.so")
+    target_include_directories(onnxruntime_genai INTERFACE "${PIPETTE_ONNX_GENAI_DIR}/include")
+    target_link_libraries(pipette_android PRIVATE onnxruntime_genai)
+
+    # Both pins, as the main process reads them (app/build.gradle.kts): from the
+    # committed stamp iOS generates from the same two submodules, a release tag
+    # where the pin is one, else the short commit. build-onnx-genai-android.sh
+    # fails when the stamp does not match the trees it built from.
+    file(READ "${CMAKE_SOURCE_DIR}/ios/Pipette/Pipette/Generated/OnnxGenai/OnnxGenaiBuildInfo.json" _onnx_build_info)
+    foreach(_tree onnxruntime onnxruntime_genai)
+      string(JSON _pin ERROR_VARIABLE _no_tag GET "${_onnx_build_info}" ${_tree} tag)
+      if(_no_tag OR NOT _pin)
+        string(JSON _pin GET "${_onnx_build_info}" ${_tree} commit)
+      endif()
+      set(_onnx_pin_${_tree} "${_pin}")
+    endforeach()
+    set(ONNXRUNTIME_VERSION "${_onnx_pin_onnxruntime}")
+    set(ONNXRUNTIME_GENAI_COMMIT "${_onnx_pin_onnxruntime_genai}")
+    target_compile_definitions(pipette_android PRIVATE
+      PIPETTE_ONNX_GENAI_ENABLED
+      ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION}"
+      ONNXRUNTIME_GENAI_COMMIT="${ONNXRUNTIME_GENAI_COMMIT}")
+  endif()
 endif()
 
 # === Link-config marker =======================================================
