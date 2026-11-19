@@ -15,7 +15,7 @@ use anyhow::Context;
 
 use pipette_completions::TimingRequest;
 use pipette_http::HttpClient;
-use pipette_memprobe::{Sampler, SupportedWatch, Watch};
+use pipette_memprobe::{Peak, Sampler, SupportedWatch, Watch};
 use pipette_ops::measurement::{
     self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
 };
@@ -84,6 +84,9 @@ pub(super) fn run(
     )?;
 
     let mut served = None;
+    // The `/proc` terms behind the swap-aware peak, for the row.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let mut extras = serde_json::Map::new();
     // Sizing sends no completion, so a GPU's prompt-shape kernels compile in
     // the warm-up.
     let result = measurement::max_memory(
@@ -92,7 +95,7 @@ pub(super) fn run(
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {
-            Ok(serve(
+            let peak = serve(
                 served,
                 command,
                 watch,
@@ -100,26 +103,39 @@ pub(super) fn run(
                 &prompt,
                 prefill_tokens,
                 observer,
-            )?)
+            )?;
+            // The peak counts swap: swap can hold part of the model mid-run.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let peak = {
+                extras = peak.footprint.extras();
+                peak.counting_swap()
+            };
+            Ok(MaxMemoryMeasurementReading {
+                max_host_bytes: peak.host_bytes,
+                max_gpu_bytes: peak.gpu_bytes,
+                max_npu_bytes: peak.npu_bytes,
+            })
         },
     );
     let result_data = result.map_err(|err| match &mut served {
         Some((ovms, _)) => err.context(ovms.stop_with_tail()),
         None => err,
     })?;
-    Ok(served
+    let response = served
         .iter_mut()
         .fold(
             RunResponseBuilder::new(result_data),
             |response, (ovms, memory)| response.process(ovms).memory(*memory),
         )
-        .runtime_flags(flags)
-        .build())
+        .runtime_flags(flags);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let response = response.client_extras(extras);
+    Ok(response.build())
 }
 
 /// One server from its launch, its load off the attempt clock, through one
 /// request at the cell's shape, left in `served` for the entry to check its
-/// reading and the cell to record or quote it. One an earlier attempt left
+/// peak and the cell to record or quote it. One an earlier attempt left
 /// there stops first; the observation covers both.
 fn serve(
     served: &mut Option<(Process, MemoryObservation)>,
@@ -129,7 +145,7 @@ fn serve(
     prompt: &str,
     prefill_tokens: u32,
     observer: MeasurementObserver<'_>,
-) -> anyhow::Result<MaxMemoryMeasurementReading> {
+) -> anyhow::Result<Peak> {
     let earlier = match served.take() {
         Some((mut ovms, memory)) => {
             ovms.stop();
@@ -151,12 +167,7 @@ fn serve(
     // Before the checks, so the cell quotes it on any failure from here.
     *served = Some((ovms, earlier.merge_max(observed)));
     measured?;
-    let peak = peak?;
-    Ok(MaxMemoryMeasurementReading {
-        max_host_bytes: peak.host_bytes,
-        max_gpu_bytes: peak.gpu_bytes,
-        max_npu_bytes: peak.npu_bytes,
-    })
+    Ok(peak?)
 }
 
 /// One request at the cell's shape, with `prompt` sized elsewhere.

@@ -47,8 +47,9 @@ that swaps shows in `max_swap_kib` and `major_faults` rather than in a
 lower peak. Like the text cell, it has no model-file floor
 ([why](peak-memory-android.md#no-model-file-floor)).
 
-**Workload.** One (or `num_images`) synthetic solid-gray image(s) go through the
-vision tower with `parameter_text_tokens` of text, to a reply of
+**Workload.** One (or `num_images`, at least one)
+synthetic solid-gray image(s) go through the vision tower with
+`parameter_text_tokens` of text, to a reply of
 `parameter_decode_tokens` tokens (`max_tokens: N`, `ignore_eos`,
 `cache_prompt: false`), as `vl_throughput` sends it. The parameter is optional:
 unset, the reply is one token, and the row's `benchmark_params` carry no
@@ -70,10 +71,16 @@ vision encoder's precision changes its resident size.
 ## Server flags
 
 Beyond the [reserved flags](#deviations-from-the-peak-memory-methodology-and-why),
-the client adds no server flags for this cell: a plan chooses them through the
-cell's `no_cache` and `raw`, so each row's `runtime_flags` records what its
-server ran. For a server that holds what `llama-bench` holds for the text cell
-(one sequence, no context checkpoints, no fit pass), a plan sets:
+the client adds one server flag for this cell: `--load-mode none` when the cell
+sets neither `mmap` nor `load_mode`. The weights are then read into memory
+rather than mapped from the file, so the peak counts all of them, as in the
+text cell ([peak memory: Linux](peak-memory-linux.md#llamacpp-workload)). The
+client also derives the context size unless the cell sets `ctx_size`. A plan
+chooses the rest through the cell's typed knobs (`threads`,
+`number_gpu_layers`, `flash_attention`, `ctx_size`, `mmap` or `load_mode`),
+`no_cache` and `raw`, so each row's `runtime_flags` records what its server ran.
+For a server that holds what `llama-bench` holds for the text cell (one
+sequence, no context checkpoints, no fit pass), a plan sets:
 
 ```toml
 no_cache = true
@@ -158,9 +165,11 @@ except the following, which are forced by the multimodal workload:
 | Platform coverage | macOS, Linux, Windows, Android, iOS | see [Platform status](#platform-status) | iOS has no `llama-server` and runs the workload in process; MLX drives its own server. |
 
 Without the calibration helper, the context comes from the patch-grid estimate
-([Fallback & safety](vl-calibration.md#fallback--safety)). That estimate is
-often 5× or more above the real count, so `max_host_bytes` then carries a
-bounded KV over-allocation.
+([Fallback & safety](vl-calibration.md#fallback--safety)). How far that
+estimate sits above the real count depends on the model and the size: about
+level with it for InternVL3.5 at 512², 3.2× for LFM2-VL-3B at 1280² (below),
+5× or more for Qwen. `max_host_bytes` then carries a bounded KV
+over-allocation.
 
 Everything else is identical: one unrepeated run with no warmup request inside
 the measured server, a server before it whose reading is dropped (below),
@@ -257,7 +266,11 @@ so only flavors with a matching probe run:
 - **Linux GPU**: the same host figure, plus the server's DRM clients' resident
   bytes from its fdinfo and, on an NVIDIA GPU, NVML's bytes for it, as
   `max_gpu_bytes` ([peak memory: Linux](peak-memory-linux.md#llamacpp-linux)).
-  A GPU showing none fails the run.
+  A GPU showing none fails the run. A Jetson (a device tree that names
+  `nvidia,tegra`) is the exception: its iGPU allocates into the server's
+  resident set, so the watch reads the swap-aware host figure alone,
+  `max_gpu_bytes` is null, and the run does not fail for it
+  ([peak memory: Linux](peak-memory-linux.md#llamacpp-gpu-counter)).
 - **Windows**: PSAPI `PeakWorkingSetSize` (host), plus on GPU flavors the PDH
   per-process GPU-committed counter. A probe failure or a zero GPU reading fails
   the run rather than reporting a mislabeled number.
@@ -381,7 +394,7 @@ it picks the flavor's probe in
 Linux and Android swap-aware figure from the probe's
 [`Peak::counting_swap`](../../crates/pipette-memprobe/src/lib.rs) and the
 `client_extras` from
-[`swap_aware`](../../crates/pipette-llamacpp/src/swap_aware.rs), and sizes the
+[`Footprint::extras`](../../crates/pipette-memprobe/src/linux.rs), and sizes the
 context in
 [`mtmd`](../../crates/pipette-llamacpp/src/mtmd.rs), and `no_cache` renders in
 [`ServerCommandBuilder::args`](../../crates/pipette-llamacpp/src/server.rs).

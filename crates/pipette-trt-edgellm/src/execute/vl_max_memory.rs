@@ -73,7 +73,7 @@ pub fn run(
             extras = stack;
             #[cfg(any(target_os = "linux", target_os = "android"))]
             let peak = {
-                extras.extend(swap_aware_extras(&peak.footprint));
+                extras.extend(peak.footprint.extras());
                 peak.counting_swap()
             };
             Ok(VlMaxMemoryMeasurementReading {
@@ -163,20 +163,4 @@ fn drive(
     )?;
     measurement::decoded_in_full(&generation, inputs.decode_tokens)?;
     Ok(stack)
-}
-
-/// The `/proc` terms behind the swap-aware peak, under llama.cpp's keys.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn swap_aware_extras(
-    footprint: &pipette_memprobe::Footprint,
-) -> serde_json::Map<String, serde_json::Value> {
-    serde_json::Map::from_iter([
-        ("peak_rss_kib".to_owned(), footprint.peak_rss_kib.into()),
-        (
-            "peak_committed_kib".to_owned(),
-            footprint.peak_committed_kib.into(),
-        ),
-        ("max_swap_kib".to_owned(), footprint.max_swap_kib.into()),
-        ("major_faults".to_owned(), footprint.major_faults.into()),
-    ])
 }

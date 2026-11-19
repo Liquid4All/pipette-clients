@@ -56,7 +56,9 @@ every other engine uses: `VmHWM` on Linux, with the swap term beside it,
 `phys_footprint` on macOS, and PSAPI's `PeakWorkingSetSize` on Windows. Every
 successful cell records that peak as `observation_max_host_bytes`. The memory
 cell sends one request at its prompt size with one output token, then uses the
-same peak as its primary metric, and refuses a sampler that read nothing.
+same peak as its primary metric, and refuses a sampler that read nothing. On
+Linux the metric also counts what the kernel swapped out mid-run
+([server host counter](methodology/peak-memory-linux.md#server-host-counter)).
 
 The memory cell first runs the same request on a warm-up server of its own and
 drops that reading. The measured server starts after the warm-up's stops. The

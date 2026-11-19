@@ -10,11 +10,11 @@
 	url = https://github.com/getsentry/sentry-native.git
 [submodule "vendor/onnxruntime"]
 	path = vendor/onnxruntime
-	url = https://github.com/microsoft/onnxruntime.git
+	url = https://github.com/Liquid4All/onnxruntime.git
 	shallow = true
 [submodule "vendor/onnxruntime-genai"]
 	path = vendor/onnxruntime-genai
-	url = https://github.com/microsoft/onnxruntime-genai.git
+	url = https://github.com/Liquid4All/onnxruntime-genai.git
 	shallow = true
 [submodule "vendor/llamacpp-prismml"]
 	path = vendor/llamacpp-prismml

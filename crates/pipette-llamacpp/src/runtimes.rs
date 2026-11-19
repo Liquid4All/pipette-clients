@@ -111,6 +111,50 @@ pub fn flavor(runtime: &Runtime) -> anyhow::Result<&LlamaCppFlavor> {
     Ok(flavor)
 }
 
+/// Whether a build runs on the CPU alone. A GPU or NPU build sets up its
+/// device code, buffers and graphs at a process's first prompt, inside the
+/// timing unless that process warmed first; a CPU-only build has none.
+pub fn cpu_only(flavor: &LlamaCppFlavor) -> bool {
+    match flavor {
+        LlamaCppFlavor::LinuxArm64Cpu
+        | LlamaCppFlavor::LinuxX64Cpu
+        | LlamaCppFlavor::LinuxS390xCpu
+        | LlamaCppFlavor::AndroidArm64Cpu
+        | LlamaCppFlavor::WindowsX64Cpu
+        | LlamaCppFlavor::WindowsArm64Cpu => true,
+        LlamaCppFlavor::MacosX64
+        | LlamaCppFlavor::MacosArm64
+        | LlamaCppFlavor::MacosArm64Kleidiai
+        | LlamaCppFlavor::LinuxX64Openvino
+        | LlamaCppFlavor::LinuxX64Rocm
+        | LlamaCppFlavor::LinuxX64SyclFp16
+        | LlamaCppFlavor::LinuxX64SyclFp32
+        | LlamaCppFlavor::LinuxX64Vulkan
+        | LlamaCppFlavor::LinuxX64Cuda128
+        | LlamaCppFlavor::LinuxX64Cuda13
+        | LlamaCppFlavor::LinuxArm64Cuda13
+        | LlamaCppFlavor::LinuxArm64Vulkan
+        | LlamaCppFlavor::LinuxArm64Snapdragon
+        | LlamaCppFlavor::LinuxOpenEulerAarch64Ascend310p
+        | LlamaCppFlavor::LinuxOpenEulerX86Ascend310p
+        | LlamaCppFlavor::LinuxOpenEulerAarch64Ascend910bAclgraph
+        | LlamaCppFlavor::LinuxOpenEulerX86Ascend910bAclgraph
+        | LlamaCppFlavor::WindowsArm64OpenclAdreno
+        | LlamaCppFlavor::WindowsX64Cuda124
+        | LlamaCppFlavor::WindowsX64Cuda131
+        | LlamaCppFlavor::WindowsX64Cuda13
+        | LlamaCppFlavor::WindowsArm64Cuda13
+        | LlamaCppFlavor::WindowsX64Openvino
+        | LlamaCppFlavor::WindowsX64Vulkan
+        | LlamaCppFlavor::WindowsArm64Vulkan
+        | LlamaCppFlavor::WindowsX64Sycl
+        | LlamaCppFlavor::WindowsX64Hip
+        | LlamaCppFlavor::AndroidArm64Snapdragon
+        // An operator's build may hold any device.
+        | LlamaCppFlavor::Custom(_) => false,
+    }
+}
+
 /// A cell that set both `mmap` and `load_mode`: two answers to one question.
 #[derive(Debug, thiserror::Error)]
 #[error(

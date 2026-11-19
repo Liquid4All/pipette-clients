@@ -32,7 +32,6 @@ struct CatalogEntryTests {
     /// to the MLX catalog. Audited like `ggufOnlyFamilies`, so the GGUF catalog cannot
     /// quietly shed a family.
     private static let mlxOnlyFamilies: Set<String> = [
-        "Bonsai 8B",
         "Gemma 3 1B IT",
         "LFM2 700M",
         "LFM2 2.6B",
@@ -46,7 +45,7 @@ struct CatalogEntryTests {
         // llama.cpp:ios` (PIP-511): 17 families carry three quants and 10 carry `Q4_K_M`
         // alone.
         #expect(CatalogEntry.defaults.count == 61)
-        #expect(CatalogEntry.mlxDefaults.count == 23)
+        #expect(CatalogEntry.mlxDefaults.count == 22)
         #expect(authored.count == CatalogEntry.defaults.count + CatalogEntry.mlxDefaults.count)
     }
 
@@ -170,7 +169,6 @@ struct CatalogEntryTests {
             "Gemma 4 E4B IT": "4bit",
             "Llama 3.2 3B Instruct": "4bit",
             "Ministral 3 3B Instruct 2512": "4bit",
-            "Bonsai 8B": "1bit",
             "Ternary Bonsai 1.7B": "2bit",
             "Ternary Bonsai 8B": "2bit",
         ]

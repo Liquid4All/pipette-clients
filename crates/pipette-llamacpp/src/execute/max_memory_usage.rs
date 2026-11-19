@@ -20,8 +20,6 @@ use crate::bench;
 use crate::memory;
 use crate::models::ResolvedGgufTextModel;
 use crate::runtimes::{self, ResolvedLlamaBench};
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use crate::swap_aware;
 
 const DECODE_TOKENS: u32 = 1;
 
@@ -82,7 +80,7 @@ pub fn run(
             // The peak counts swap: zram or swap can hold part of the model mid-run.
             #[cfg(any(target_os = "linux", target_os = "android"))]
             let peak = {
-                extras = swap_aware::extras(&peak.footprint);
+                extras = peak.footprint.extras();
                 peak.counting_swap()
             };
             Ok(MaxMemoryMeasurementReading {

@@ -169,7 +169,7 @@ at a time. Readings are taken on the client's clock, as the
 | `prefill_throughput` | streamed, 1 token | send → first chunk |
 | `decode_throughput` | streamed, *n* tokens | (finish chunk − first chunk), scaled from *n − 1* to *n* tokens |
 | `end_to_end_latency` | streamed, *n* tokens | send → finish chunk |
-| `max_memory_usage` | not streamed, 2 tokens | the server's peak resident memory; its GPU memory too on Windows and Linux, its NPU memory on Windows |
+| `max_memory_usage` | not streamed, 2 tokens | the server's peak memory, swap included on Linux; its GPU memory too on Windows and Linux, its NPU memory on Windows |
 
 Before the reps, the entry runs one untimed warm-up at the cell's shape,
 one request per slot. The server stays up across reps, so this warms the
@@ -182,9 +182,11 @@ reading.
 
 ## `max_memory_usage`
 
-The reading is the server process's lifetime peak resident memory, read from
-the kernel after one request at the cell's prompt length: `PeakWorkingSetSize`
-on Windows, `VmHWM` on Linux. The request generates two tokens. The second
+The reading is the server process's lifetime peak memory, read from the kernel
+after one request at the cell's prompt length: `PeakWorkingSetSize` on Windows,
+and on Linux `VmHWM` or, when the server swapped, the larger `VmRSS + VmSwap`
+([server host counter](methodology/peak-memory-linux.md#server-host-counter)).
+The request generates two tokens. The second
 token runs one decode pass, so the peak includes the decode buffers. The
 `uv_openvino` memory cell generates one token, so its peak has no decode pass:
 do not compare the two runtimes' `max_memory_usage` rows as one measurement.

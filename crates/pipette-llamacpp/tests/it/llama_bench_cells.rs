@@ -26,23 +26,30 @@ use crate::common::{
 /// Invocation `n` reports `n` ms for each test it was asked for, as
 /// `llama-bench` does: one per non-zero `--n-prompt`, one per non-zero
 /// `--n-gen` and one per `-pg`. It says which invocation it was on stderr and
-/// appends its arguments to `args`.
+/// appends its arguments to `args`; with `--progress` it names each prompt
+/// pass on stderr as it starts.
 const BENCH_STUB: &str = r#"#!/bin/sh
 count="$(dirname "$0")/count"
 n=$(( $(cat "$count" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$count"
 echo "$*" >> "$(dirname "$0")/args"
-p=0; g=0; d=0; pg=""
+p=0; g=0; d=0; pg=""; progress=0; warm=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --n-prompt) p=$2; shift ;;
     --n-gen) g=$2; shift ;;
     --n-depth) d=$2; shift ;;
     -pg) pg="$pg $2"; shift ;;
+    --progress) progress=1 ;;
+    --no-warmup) warm=0 ;;
   esac
   shift
 done
 echo "invocation $n" >&2
+if [ "$progress" = 1 ] && [ "$p" -gt 0 ]; then
+  [ "$warm" = 1 ] && echo "llama-bench: benchmark 1/1: warmup prompt run" >&2
+  echo "llama-bench: benchmark 1/1: prompt run 1/1" >&2
+fi
 rows=""
 row() {
   rows="$rows${rows:+, }$(printf '{"avg_ns": %d, "n_prompt": %s, "n_gen": %s, "n_depth": %s}' $((n * 1000000)) "$1" "$2" "$d")"
@@ -152,10 +159,16 @@ fn install_stub(root: &Path, tool: &str, script: &str) -> anyhow::Result<PathBuf
 }
 
 fn prefill(batch_size: u32) -> anyhow::Result<BenchmarkDefinition> {
+    prefill_of(512, batch_size)
+}
+
+fn prefill_of(tokens: i32, batch_size: u32) -> anyhow::Result<BenchmarkDefinition> {
     Ok(BenchmarkDefinition::PrefillThroughput(
         PrefillThroughputBenchmark {
-            benchmark_id: BenchmarkId::try_new(format!("prefill_throughput_512_bs{batch_size}"))?,
-            parameter_prefill_tokens: NonNegativeCount::try_new(512)?,
+            benchmark_id: BenchmarkId::try_new(format!(
+                "prefill_throughput_{tokens}_bs{batch_size}"
+            ))?,
+            parameter_prefill_tokens: NonNegativeCount::try_new(tokens)?,
             parameter_batch_size: BatchSize::try_new(batch_size)?,
         },
     ))
@@ -221,17 +234,36 @@ const LLAMA_BATCHED_BENCH: (&str, &str) = ("llama-batched-bench", BATCHED_STUB);
 
 /// Invocation `n`'s reading is `n` times `ms`: llama-bench's one row, or a
 /// batch's second, since its first row is the warm-up and is not averaged in.
-/// A llama-bench cell first runs the same command once as its warm-up,
-/// which is neither gated nor averaged in, except a decode on a CPU-only build.
+/// A llama-bench cell first runs the same command once as its warm-up, which is
+/// neither gated nor averaged in, except a decode on a CPU-only build and a
+/// prefill on any other.
 #[rstest::rstest]
-#[case::prefill(
-    LlamaCppFlavor::MacosArm64,
+#[case::prefill_on_a_cpu_build(
+    LlamaCppFlavor::LinuxX64Cpu,
     LLAMA_BENCH,
     prefill(1),
     &["--no-warmup", "--repetitions 1", "--n-prompt 512 --n-gen 0"],
     6,
     1.0,
     "\"avg_ns\": 6000000"
+)]
+#[case::prefill_on_a_gpu_build(
+    LlamaCppFlavor::MacosArm64,
+    LLAMA_BENCH,
+    prefill(1),
+    &["--repetitions 1", "--n-prompt 512 --n-gen 0"],
+    5,
+    1.0,
+    "\"avg_ns\": 5000000"
+)]
+#[case::prefill_past_a_batch_on_a_gpu_build(
+    LlamaCppFlavor::MacosArm64,
+    LLAMA_BENCH,
+    prefill_of(4096, 1),
+    &["--repetitions 1", "--n-prompt 4096 --n-gen 0"],
+    5,
+    1.0,
+    "\"avg_ns\": 5000000"
 )]
 #[case::decode_on_a_gpu_build(
     LlamaCppFlavor::MacosArm64,
@@ -369,9 +401,11 @@ fn a_timing_cell_measures_one_invocation_per_rep(
     let output = &response.runtime_output;
     let stdout = output.runtime_stdout.as_deref().unwrap_or_default();
     assert!(stdout.contains(last_stdout), "{stdout}");
-    assert_eq!(
-        output.runtime_stderr.as_deref(),
-        Some(format!("invocation {invocations}\n").as_str())
+    // A GPU prefill's progress lines follow the last invocation's line.
+    let stderr = output.runtime_stderr.as_deref().unwrap_or_default();
+    assert!(
+        stderr.starts_with(&format!("invocation {invocations}\n")),
+        "{stderr}"
     );
     Ok(())
 }
@@ -665,6 +699,76 @@ fn the_warm_up_and_the_measured_run_each_get_the_deadline() -> anyhow::Result<()
         Some("invocation 2\n")
     );
     Ok(())
+}
+
+/// A GPU or NPU prefill rep's timed pass is an attempt of its own, started
+/// when llama-bench names it, so the load and the untimed pass before it
+/// cannot use its limit; a CPU-only build's reps read the prompt once.
+#[rstest::rstest]
+#[case::gpu(LlamaCppFlavor::MacosArm64, 5)]
+#[case::cpu(LlamaCppFlavor::LinuxX64Cpu, 0)]
+fn a_prefill_reps_timed_pass_is_an_attempt_of_its_own(
+    #[case] flavor: LlamaCppFlavor,
+    #[case] timed_passes: usize,
+) -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut req = request(root.path(), "llama-bench", prefill(1)?, BENCH_STUB)?;
+    on_flavor(&mut req, root.path(), flavor)?;
+    let (response, started) = run_naming_attempts(&req, root.path())?;
+    response?;
+    let expected: Vec<String> = (1..=timed_passes)
+        .map(|rep| format!("rep {rep}, the timed pass"))
+        .collect();
+    assert_eq!(started, expected);
+    Ok(())
+}
+
+/// A GPU prefill whose llama-bench exits before its timed pass, during the
+/// load or in the untimed pass as an out-of-memory one does, fails with that
+/// exit and starts no timed-pass attempt.
+#[rstest::rstest]
+#[case::during_the_load(FAILING_STUB)]
+#[case::in_the_untimed_pass(
+    "#!/bin/sh\necho 'llama-bench: benchmark 1/1: warmup prompt run' >&2\nexit 3\n"
+)]
+fn a_gpu_prefill_that_exits_before_its_timed_pass_fails(
+    #[case] script: &str,
+) -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut req = request(root.path(), "llama-bench", prefill(1)?, script)?;
+    on_flavor(&mut req, root.path(), LlamaCppFlavor::MacosArm64)?;
+    let (response, started) = run_naming_attempts(&req, root.path())?;
+    let Err(err) = response else {
+        anyhow::bail!("expected the cell to fail");
+    };
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("llama-bench exited with exit status: 3"),
+        "{message}"
+    );
+    assert_eq!(started, Vec::<String>::new());
+    Ok(())
+}
+
+/// Runs `req`, and names each attempt it started past the rep hooks.
+fn run_naming_attempts(
+    req: &RunRequest,
+    root: &Path,
+) -> anyhow::Result<(anyhow::Result<pipette_plan_types::RunResponse>, Vec<String>)> {
+    let started = std::sync::Mutex::new(Vec::new());
+    let observer = MeasurementObserver {
+        on_attempt_start: &|what| {
+            if let Ok(mut started) = started.lock() {
+                started.push(what.to_owned());
+            }
+        },
+        ..MeasurementObserver::QUIET
+    };
+    let response = pipette_llamacpp::run(req, &no_corpus(root), &|| Ok(()), observer, None);
+    let started = started
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("the attempt log was poisoned"))?;
+    Ok((response, started))
 }
 
 /// A failed invocation says why and quotes the end of its stderr, once. A

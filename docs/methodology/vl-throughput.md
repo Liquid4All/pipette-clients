@@ -30,8 +30,8 @@ pipette-mgmt
 [docs/benchmarks.md §2.6](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/benchmarks.md#26-vl-throughput).
 
 On `llama-server`, `ttft` is the server-reported prefill time, not a client
-wall-clock time-to-first-token; MLX and the in-process clients (Android, iOS)
-time it on their own clock (see [Runtime Details](#runtime-details)). Runtime install,
+wall-clock time-to-first-token; MLX and the in-process clients (the Android app,
+iOS) time it on their own clock (see [Runtime Details](#runtime-details)). Runtime install,
 model/projector load, server startup, warmup, readiness waits, and result sync
 are outside the timed windows.
 
@@ -64,6 +64,8 @@ request.
 
 1. Resolve the shape (`parameter_image_width`, `parameter_image_height`,
    `parameter_text_tokens`, `parameter_decode_tokens`, `parameter_num_images`).
+   `llama-server` and MLX refuse a cell of fewer than 2
+   decode tokens; the in-process clients do not (see [Decode time](#decode-time)).
 2. Require a multimodal projector (`--mmproj`); fail early if absent.
 3. Before the server starts, count the image tokens of one frame with the
    calibration helper (see [vl-calibration.md](vl-calibration.md)). The count
@@ -74,8 +76,8 @@ request.
 5. Run one warmup request and validate its shape.
 6. Run five measured requests; before each, run the platform readiness gate
    (outside the timed window).
-7. Validate each response: generated tokens equal `parameter_decode_tokens` and
-   `finish_reason == "length"`.
+7. Validate each response: generated tokens equal `parameter_decode_tokens`,
+   `finish_reason == "length"`, and `prompt_tokens` equals the warm-up's.
 8. Check the calibrated `image_tokens` against the measured `prompt_tokens`.
    The row reports no `image_tokens` if calibration is unavailable or the count
    does not fit in `prompt_tokens`.
@@ -101,12 +103,15 @@ last. The desktop clients scale each rep by
 `parameter_decode_tokens / (parameter_decode_tokens - 1)` before taking the mean
 and standard deviation, so `predicted_ms` covers every step, as llama-bench's
 decode does for the text benchmarks. A cell of fewer than 2 decode tokens has
-no step to time and is refused before the model loads. The Android and iOS
-clients time every step themselves and are not scaled.
+no step to time and is refused before the model loads. The Android app and the
+iOS client time every step themselves, are not scaled, and do not refuse such a
+cell.
 
-**In-process clients (Android, iOS)** follow the same protocol. Steps 2-4 and
-8 differ, because there is no server to start or ask. The clients call mtmd,
-llama.cpp's multimodal library, directly:
+**In-process clients (the Android app, iOS)** follow the same protocol, except
+that the Android app checks none of the counts (see
+[Result Validity and Comparability](#result-validity-and-comparability)). Steps
+2-4 and 8 differ, because there is no server to start or ask. The clients call
+mtmd, llama.cpp's multimodal library, directly:
 
 - The projector loads with `mtmd_init_from_file` against the already-loaded
   model. Its own warmup pass is off, so the benchmark's untimed warm-up rep is
@@ -119,7 +124,10 @@ llama.cpp's multimodal library, directly:
   accounting directly, so it is the same marker-free count that the desktop
   helper reports on the same llama.cpp build, frame merging included.
 
-Android runs single-image cells only and refuses `parameter_num_images > 1`.
+The Android app runs single-image cells only and refuses
+`parameter_num_images > 1`. The Android CLI is not an in-process client: it
+drives `llama-server` over adb on the path above, as the desktop clients do, so
+it runs multi-image cells, scales the decode time and times `total_time_ms`.
 
 The iOS client also times `total_time_ms` as one window from building the
 synthetic frames and tokenizing them with the prompt (`mtmd_tokenize`, which
@@ -131,9 +139,14 @@ is, with no 8192 floor (see
 [vl-calibration.md](vl-calibration.md#deriving-n_ctx)).
 
 The iOS client rebuilds the desktop request rather than approximating it, so
-`prompt_tokens` counts the same scaffolding on both paths:
+`prompt_tokens` counts the same scaffolding on both paths, though not always the
+same text:
 
-- The text is sized with specials counted, as `/tokenize` counts them.
+- The text is sized with specials counted. The desktop client counts its filler
+  without them, as a message's content, and trims it. On a vocabulary that
+  prepends a BOS (LFM2, Gemma), the iOS text is therefore one token short of
+  `parameter_text_tokens` and of the desktop's text, and its `prompt_tokens`
+  one lower.
 - The content is the text followed directly by one image marker per frame. This
   is the join that the server applies to a text part followed by image parts.
 - That single user message is rendered through the model's chat template with
@@ -144,7 +157,7 @@ A template that path does not recognize
 server's default thinking setting; a template it does recognize can still
 render slightly differently from the server's Jinja render. The projector
 is placed on the GPU regardless of `n_gpu_layers`, as `llama-server` places it
-by default. Android sends the bare marker followed by the text with no
+by default. The Android app sends the bare marker followed by the text with no
 template, sizes the text without specials, and derives the projector's
 placement from `n_gpu_layers`; its `prompt_tokens` is therefore smaller than
 the desktop's by the template's tokens for the same cell.
@@ -158,8 +171,8 @@ text benchmark's field of the same name times (see
 the arrival of the whole reply, which is not streamed. On MLX it runs from the
 send to the chunk carrying `finish_reason`. On iOS it runs from building and
 tokenizing the prompt's frames to the sample of the last token, where
-`llama-server` ends a request. Android does not time it. It is measured, not
-`prompt_ms + predicted_ms`.
+`llama-server` ends a request. The Android app does not time it. It is
+measured, not `prompt_ms + predicted_ms`.
 
 - `llama-server` reads the request and decodes and preprocesses the image on
   its HTTP thread before the slot's prefill timer starts, and sends the reply
@@ -204,7 +217,10 @@ The prompt is built to the exact requested shape:
   deterministic workload; `vl_throughput` is therefore a performance benchmark
   only, with image understanding covered by the eval benchmarks.
 - The text portion is built to exactly `parameter_text_tokens` tokens via the
-  server's `/tokenize` endpoint; `0` sends no text part.
+  server's `/tokenize` endpoint, counted on its own as a message's content;
+  `0` sends no text part. The iOS client (above) and MLX (below) count it with
+  specials instead. That count is what is guaranteed: no path checks that the
+  whole prompt grows by `parameter_text_tokens` from the same cell at text `0`.
 - **Multiple images:** `parameter_num_images` copies of the (same synthetic)
   image are attached as separate parts of the one user message, so the prompt is
   `[optional text] + N × [image]`. Each image expands into its own block of image
@@ -216,10 +232,17 @@ The prompt is built to the exact requested shape:
 
 The invariant is the generated-token count: a run is invalid if the server does
 not generate exactly `parameter_decode_tokens` tokens or does not stop at the
-length limit. The image-token count is a model-specific output of preprocessing,
-recorded rather than asserted. It is the calibrated marker-free count for the
-cell's frames on every path, and none when calibration is unavailable: a
-marker-inclusive difference would not compare with the other rows.
+length limit. Each rep's `prompt_tokens` must also equal the warm-up's. The
+image-token count is a model-specific output of preprocessing. It is the
+marker-free count for the cell's frames, and each path reads it from its own
+source: the calibration helper on `llama-server`, the model's processor on MLX, and mtmd's chunk accounting in process
+([vl-image-tokens.md](vl-image-tokens.md)). A path with no count reports none:
+a marker-inclusive difference would not compare with the other rows. A count
+that differs from the warm-up's or exceeds `prompt_tokens` fails the run, and
+the iOS client fails a prompt with no image chunk. Only `llama-server`, whose
+count comes from the helper before the server starts, reports none instead
+when its count does not fit in `prompt_tokens`. The Android app checks none of
+this.
 
 ## System Readiness Control
 
@@ -231,13 +254,14 @@ readiness before the platform deadline. The per-platform criteria are in
 ## Runtime Details
 
 `vl_throughput` runs on the **llama.cpp** backend, and on desktop **MLX**
-(below). On desktop platforms llama.cpp drives `llama-server` over its chat
-endpoint; on Android and iOS it runs in-process against `libmtmd` (mtmd chunks,
-no server, no `/tokenize`). The chat endpoint is required on desktop because
-llama.cpp's `/completion` + `multimodal_data` path does **not** run the image
-through the vision tower (prefill ignores it and `prompt_n` stays constant with
-image size); `/v1/chat/completions` encodes it, so the reported prompt length
-scales with resolution. The in-process clients call `mtmd_tokenize` +
+(below). On desktop platforms, and on Android through the CLI, llama.cpp drives
+`llama-server` over its chat endpoint; in the Android app and on iOS it runs
+in-process against `libmtmd` (mtmd chunks, no server, no `/tokenize`). The chat
+endpoint is required there because llama.cpp's `/completion` +
+`multimodal_data` path does **not** run the image through the vision tower
+(prefill ignores it and `prompt_n` stays constant with image size);
+`/v1/chat/completions` encodes it, so the reported prompt length scales with
+resolution. The in-process clients call `mtmd_tokenize` +
 `mtmd_helper_eval_chunks` directly, which always encodes.
 
 - Workload: `POST /v1/chat/completions` with one user message containing the
@@ -250,7 +274,9 @@ scales with resolution. The in-process clients call `mtmd_tokenize` +
 - Timing source: the server's `timings.prompt_ms` and `timings.predicted_ms`,
   the latter scaled to every decode step, and, for `total_time_ms`, this
   client's clock from the send to the reply.
-- Server launch: the client adds no checkpoint or slot flag
+- Server launch: the client adds no checkpoint or slot flag unless
+  `no_cache = true`, which adds
+  `--no-cache-prompt --ctx-checkpoints 0 --parallel 1`
   ([Context checkpoints](#context-checkpoints)).
 - The projector is passed with `--mmproj`; its quantization is part of the
   runtime condition and must match across compared runs.
@@ -282,7 +308,9 @@ differs from the `llama-server` path in these ways:
 - The server has no `ignore_eos`, so `logit_bias` alone keeps the EOS ids (the
   tokenizer's and the model config's) from being sampled. The text is sized
   with the same tokenizer, loaded the way the server loads it (without the
-  model repo's own code).
+  model repo's own code), with its default encode options, so specials are
+  counted. On a vocabulary that prepends a BOS (LFM2-VL), the text is
+  therefore one token short of `parameter_text_tokens`.
 - `image_tokens` comes from the model's own processor, which a helper runs on
   the cell's frames before the server starts. How it counts, and when the row
   reports none or the cell fails, is in
@@ -332,7 +360,13 @@ them fails fast instead of silently skipping:
 
 A run is invalid if the projector is missing, the server fails or times out, the
 readiness gate fails, the generated-token count differs from
-`parameter_decode_tokens`, or the response does not stop at the length limit.
+`parameter_decode_tokens`, the response does not stop at the length limit, a
+rep's `prompt_tokens` differs from the warm-up's, or the `image_tokens` checks
+fail ([Token Control](#token-control)). `llama-server` and MLX
+refuse a cell of fewer than 2 decode tokens before the model loads. The
+Android app checks none of the counts: it decodes exactly
+`parameter_decode_tokens` tokens by construction, takes `prompt_tokens` and
+`image_tokens` from the warm-up, and does not compare the reps with them.
 
 To compare `vl_throughput` results:
 
@@ -350,13 +384,26 @@ To compare `vl_throughput` results:
 - Read `end_to_end_latency` with its client's window in mind (see
   [End-to-end latency](#end-to-end-latency)), and do not compare it with an
   earlier row's `e2e_latency`, which sums its prefill and decode times.
-- Desktop rows from a `client_version` dated 2026-10-14 or earlier, and some
-  dated 2026-10-15, do not scale `predicted_ms`. Rows from every `2026.08.1`
-  public release do not scale it either. These rows read `decode_throughput`
-  high (1.6% at 64 decode tokens, 6.7% at 16). Compare desktop rows only on one
-  side of that change.
-- On the MLX `0.7.1+lfm2-vl-speculative` row LFM2-VL's images precede the text,
-  so its `prompt_tokens` can differ by a token from `0.7.4` and `llama-server`.
+- Rows from a `client_version` dated 2026-10-16 or earlier, and some dated
+  2026-10-17, send no `total_time_ms`. Rows from every `2026.08.1` public
+  release send none either.
+- Desktop and Android CLI rows from a `client_version` dated 2026-10-14 or
+  earlier, and some dated 2026-10-15, do not scale `predicted_ms`. Rows from
+  every `2026.08.1` public release do not scale it either. These rows read
+  `decode_throughput` high (1.6% at 64 decode tokens, 6.7% at 16). Compare these
+  rows only on one side of that change.
+- `llama-server` rows from a `client_version` dated 2026-10-21 or earlier, some
+  dated 2026-10-22, and every `2026.08.1` public release sized the text with
+  specials counted and did not trim it. On a vocabulary that prepends a BOS
+  (LFM2, Gemma), their text is one token short of `parameter_text_tokens` and
+  their `prompt_tokens` one lower; on a template that trims a message's content
+  (Gemma 4, Qwen3.5, MiniCPM-V) it can be a token shorter still. Later releases
+  size it as a message's content.
+- On MLX, LFM2-VL's text is one token short (see
+  [Runtime Details](#runtime-details)), so next to a `llama-server` row from a
+  later release its `prompt_tokens` carries one text token fewer. On the
+  `0.7.1+lfm2-vl-speculative` row LFM2-VL's images also precede the text, so
+  its `prompt_tokens` can differ by a further token from `0.7.4`.
 
 ## Code References
 
@@ -379,7 +426,7 @@ the `image_tokens` helper in
 [`image_tokens`](../../crates/pipette-mlx/src/image_tokens.rs).
 The in-process runners are
 [`LlamaBenchmark.runVlThroughputImpl`](../../android/Pipette/app/src/kotlinEngine/java/ai/liquid/pipette/llama/LlamaBenchmark.kt)
-on Android and
+in the Android app and
 [`LlamaExecute.vlThroughput`](../../ios/Pipette/Pipette/Runtimes/Llama/Execute/LlamaVlThroughput.swift)
 on iOS, the latter over the mtmd primitives in
 [`LlamaMtmd`](../../ios/Pipette/Pipette/Runtimes/Llama/LlamaMtmd.swift).

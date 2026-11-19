@@ -28,7 +28,8 @@ llama-mtmd-cli --model <model> --mmproj <mmproj> --prompt hi --n-predict 1 \
   [--batch-size N --ubatch-size N] --ctx-size C --jinja --verbose \
   --image <gray W×H png> [--image <the same png> ...]
 ```
-(each bracketed flag appears when the cell sets it, in the server's flag order;
+(each bracketed flag appears when the cell sets it; these flags and `--ctx-size`
+are sorted by flag name, as the server's are;
 the placement flags are `number_gpu_layers` and the `raw` offload flags listed
 below; the cell's env forwards reach the helper too; a multi-image cell repeats
 `--image` once per frame)
@@ -39,7 +40,8 @@ estimate, at most 16384, or the cell's `--image-min-tokens` with room for
 alignment if higher, plus the margins, at least 4096. A multi-image run gets the
 one-frame count times the frames, plus the margins. A `vlm_eval` candidate
 gets the same estimate without the 16384 cap, capped instead by the cell's
-`--image-max-tokens` (retried once without it if the helper fails), plus 1024,
+`--image-max-tokens` with the same room for alignment, `N + 4√N + 1` for either
+flag (retried once without the cap if the helper fails), plus 1024,
 between 4096 and the vlm_eval ceiling of 131072: a dataset's own images tile
 past 16384 (SmolVLM2 counts a 35-megapixel OCRBench page at about 16k tokens).
 Each run is bounded at 600 s and does not count against the cell's
@@ -64,9 +66,11 @@ set by the image geometry alone, so the pixel values do not matter.
   default count while the server prefills an overridden one would report wrong
   `image_tokens` and mis-size `n_ctx`. Without overrides (the common case) the
   count reflects the mmproj's shipped default min/max-pixel bounds. The cell's
-  `--batch-size` and `--ubatch-size` also reach the helper and key the cache:
-  the smaller of the two (the effective micro-batch) caps the image tokens of a
-  projector the text model attends to non-causally.
+  `--batch-size` and `--ubatch-size` (or `-b` and `-ub`) also reach the helper
+  and key the cache: on a projector the text model attends to non-causally,
+  llama.cpp caps the image-token budget at the smaller of the two (the
+  effective micro-batch), and aborts on an image larger than it
+  ([vl-image-tokens.md](vl-image-tokens.md#runtime-flags-that-change-the-count)).
 - **Placed like the server.** The helper loads the same model before the server
   starts, so it takes the cell's placement: `number_gpu_layers`, and from `raw`
   the device flags (`--device`, `--mmproj-device`, `--[no-]mmproj-offload`) and
@@ -87,6 +91,11 @@ the weights before any context exists, so it tokenizes one gray frame at the cel
 size, sums mtmd's IMAGE chunks (the marker-free count above) and sizes `n_ctx` with
 the same formula. Nothing is cached: the count costs one image preprocess per cell
 (`LlamaMtmd.perImageTokens`, `LlamaExecute.withCalibratedVision`).
+
+The Android app does not calibrate `n_ctx`. It runs at the job's context size
+and, for `vl_throughput`, refuses a context below the unfloored `(w/14)²`
+estimate plus the text and decode tokens, and refuses `num_images` above 1. The
+CLI on Android runs the `llama-server` path above and calibrates.
 
 ## The count is platform-independent
 mtmd's tiling/patch/merge math is deterministic integer geometry on
@@ -150,8 +159,9 @@ wraps the prompt in (the image count is exact and has no built-in slack): a
 **per image** (a flat margin overflowed at 80 frames; the code comment
 estimates that the LFM template adds about 2.5 tokens per image, about 200 past
 a flat 64). This is
-far tighter than the `(w/14)²` estimate, which is 5× or more above the count
-for Qwen and LFM, and it stays exact for tilers. A cell that pins `ctx_size` keeps it;
+tighter than the `(w/14)²` estimate, whose excess over the count depends on the
+model and the size (about level with it for InternVL3.5 at 512², 3.2× for
+LFM2-VL-3B at 1280², 5× or more for Qwen), and it stays exact for tilers. A cell that pins `ctx_size` keeps it;
 `vl_max_memory` then skips the calibration, since it reports no `image_tokens`.
 
 llama.cpp preallocates the KV cache to the full `n_ctx`, so a tight `n_ctx`
@@ -173,3 +183,11 @@ it never reports an estimate as a measured count:
   The estimate is raised to the cell's
   `--image-min-tokens` plus alignment room when that is higher. `vl_throughput`
   then floors the whole context at 8192; `vl_max_memory` has no floor.
+- Nothing checks a non-causal projector's batch sizes before the run
+  ([vl-image-tokens.md](vl-image-tokens.md#runtime-flags-that-change-the-count)).
+  When an image does not fit the micro-batch, the helper aborts, the runner
+  logs only `calibration helper failed; falling back`, and a server under the
+  same flags aborts on that image too. On `vlm_eval` the fallback estimate
+  ignores `--image-max-tokens`, so it can pass the 131072 ceiling, and the
+  error then suggests lowering `parallel` or pinning `--ctx-size`. For this
+  cause the fix is the batch sizes.

@@ -135,6 +135,9 @@ CMAKE_POLICY_ARG=-DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
 # ---------------------------------------------------------------------------
 # 1. onnxruntime, as a static framework for this slice.
+#
+# --no_telemetry: build.py turns on Microsoft's 1DS uploader for iOS by
+# default, same as genai's ENABLE_TELEMETRY below.
 # ---------------------------------------------------------------------------
 echo "==> Building onnxruntime ($MODE / $SDK)"
 "$PYTHON" "$VENDOR_ORT/tools/ci_build/build.py" \
@@ -143,6 +146,7 @@ echo "==> Building onnxruntime ($MODE / $SDK)"
     --parallel \
     --skip_tests \
     --no_kleidiai \
+    --no_telemetry \
     --build_apple_framework \
     --use_coreml \
     --use_xnnpack \

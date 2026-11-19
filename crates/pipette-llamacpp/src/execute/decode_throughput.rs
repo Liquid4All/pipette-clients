@@ -92,43 +92,10 @@ pub fn run(
 /// there the run would only cost time. A GPU build stays `Once` even at
 /// `--n-gpu-layers 0`, since a backend can still take large batches.
 fn warmup(flavor: &LlamaCppFlavor) -> MeasurementWarmup {
-    match flavor {
-        LlamaCppFlavor::LinuxArm64Cpu
-        | LlamaCppFlavor::LinuxX64Cpu
-        | LlamaCppFlavor::LinuxS390xCpu
-        | LlamaCppFlavor::AndroidArm64Cpu
-        | LlamaCppFlavor::WindowsX64Cpu
-        | LlamaCppFlavor::WindowsArm64Cpu => MeasurementWarmup::Inline,
-        LlamaCppFlavor::MacosX64
-        | LlamaCppFlavor::MacosArm64
-        | LlamaCppFlavor::MacosArm64Kleidiai
-        | LlamaCppFlavor::LinuxX64Openvino
-        | LlamaCppFlavor::LinuxX64Rocm
-        | LlamaCppFlavor::LinuxX64SyclFp16
-        | LlamaCppFlavor::LinuxX64SyclFp32
-        | LlamaCppFlavor::LinuxX64Vulkan
-        | LlamaCppFlavor::LinuxX64Cuda128
-        | LlamaCppFlavor::LinuxX64Cuda13
-        | LlamaCppFlavor::LinuxArm64Cuda13
-        | LlamaCppFlavor::LinuxArm64Vulkan
-        | LlamaCppFlavor::LinuxArm64Snapdragon
-        | LlamaCppFlavor::LinuxOpenEulerAarch64Ascend310p
-        | LlamaCppFlavor::LinuxOpenEulerX86Ascend310p
-        | LlamaCppFlavor::LinuxOpenEulerAarch64Ascend910bAclgraph
-        | LlamaCppFlavor::LinuxOpenEulerX86Ascend910bAclgraph
-        | LlamaCppFlavor::WindowsArm64OpenclAdreno
-        | LlamaCppFlavor::WindowsX64Cuda124
-        | LlamaCppFlavor::WindowsX64Cuda131
-        | LlamaCppFlavor::WindowsX64Cuda13
-        | LlamaCppFlavor::WindowsArm64Cuda13
-        | LlamaCppFlavor::WindowsX64Openvino
-        | LlamaCppFlavor::WindowsX64Vulkan
-        | LlamaCppFlavor::WindowsArm64Vulkan
-        | LlamaCppFlavor::WindowsX64Sycl
-        | LlamaCppFlavor::WindowsX64Hip
-        | LlamaCppFlavor::AndroidArm64Snapdragon
-        // An operator's build may hold any device.
-        | LlamaCppFlavor::Custom(_) => MeasurementWarmup::Once,
+    if runtimes::cpu_only(flavor) {
+        MeasurementWarmup::Inline
+    } else {
+        MeasurementWarmup::Once
     }
 }
 

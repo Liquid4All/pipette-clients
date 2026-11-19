@@ -286,7 +286,7 @@ under-read. These figures were sampled every 25 ms, not the shipped 10 ms.
 ## Code References
 
 - [`pipette-llamacpp max_memory_usage`](../../crates/pipette-llamacpp/src/execute/max_memory_usage.rs) (Android and Linux share it)
-- [`pipette-memprobe`'s `Peak::counting_swap`](../../crates/pipette-memprobe/src/lib.rs) (the swap-aware figure) and [`pipette-llamacpp swap_aware`](../../crates/pipette-llamacpp/src/swap_aware.rs) (its `client_extras`), for the text, VL and ASR cells
+- [`pipette-memprobe`'s `Peak::counting_swap`](../../crates/pipette-memprobe/src/lib.rs) (the swap-aware figure) and [`Footprint::extras`](../../crates/pipette-memprobe/src/linux.rs) (its `client_extras`), for the text, VL and ASR cells
 - [`pipette-memprobe`'s `/proc` sampler](../../crates/pipette-memprobe/src/linux.rs)
 - [`pipette-llamacpp memory::peak`](../../crates/pipette-llamacpp/src/memory.rs) (which flavors are sampled, and for what)
 
