@@ -427,6 +427,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app), ShellActions {
     // Pull the latest benchmark catalog from the management server once per launch (mirrors iOS's registration-time sync). Screen VMs collect
     // [BenchmarkCatalog.changes] to re-render when it lands.
     syncBenchmarkCatalog()
+    refreshDeviceProfile()
   }
 
   // --- ShellActions (called by screen VMs) ---
@@ -834,6 +835,21 @@ class ShellViewModel(app: Application) : AndroidViewModel(app), ShellActions {
     // A registration change (register/clear) may point at a new server — re-sync the catalog. ETag-conditional, so an unchanged catalog is a cheap
     // 304.
     syncBenchmarkCatalog()
+    refreshDeviceProfile()
+  }
+
+  /**
+   * Re-report the device profile and the capability set the planner matches jobs against, as the view-based launcher's `MainViewModel` did on every
+   * start: its inputs drift between runs (an OS update, an APK with another engine build), and an unchanged resubmit is a no-op on the server. A
+   * device with no registration has nothing to report. Advisory: a failure is logged and never blocks the UI.
+   */
+  fun refreshDeviceProfile() {
+    viewModelScope.launch(Dispatchers.IO) {
+      runCatching { container.profileRefreshService.refresh() }
+        // The refresh records the server's verdict on the registration, which Settings reads from the cached flow.
+        .onSuccess { profile -> if (profile != null) _registration.value = storage.loadRegistration() }
+        .onFailure { Log.w("ShellViewModel", "device profile refresh failed", it) }
+    }
   }
 
   /**
