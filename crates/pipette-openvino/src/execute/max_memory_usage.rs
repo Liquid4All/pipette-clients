@@ -22,7 +22,7 @@ use anyhow::Context;
 
 use pipette_completions::TimingRequest;
 use pipette_http::HttpClient;
-use pipette_memprobe::{Sampler, SupportedWatch, Watch};
+use pipette_memprobe::{Peak, Sampler, SupportedWatch, Watch};
 use pipette_ops::measurement::{
     self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
 };
@@ -80,39 +80,48 @@ pub(super) fn run(
     };
     let http = HttpClient::loopback("pipette", timeout)?;
     let mut served = None;
+    // The `/proc` terms behind the swap-aware peak, for the row.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let mut extras = serde_json::Map::new();
     let result = measurement::max_memory(
         &benchmark.benchmark_id,
         observer,
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {
-            Ok(serve(
-                served,
-                command,
-                watch,
-                &http,
-                prefill_tokens,
-                observer,
-            )?)
+            let peak = serve(served, command, watch, &http, prefill_tokens, observer)?;
+            // The peak counts swap: swap can hold part of the model mid-run.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let peak = {
+                extras = peak.footprint.extras();
+                peak.counting_swap()
+            };
+            Ok(MaxMemoryMeasurementReading {
+                max_host_bytes: peak.host_bytes,
+                max_gpu_bytes: peak.gpu_bytes,
+                max_npu_bytes: peak.npu_bytes,
+            })
         },
     );
     let result_data = result.map_err(|err| match &mut served {
         Some((openvino_server, _)) => err.context(openvino_server.stop_with_tail()),
         None => err,
     })?;
-    Ok(served
+    let response = served
         .iter_mut()
         .fold(
             RunResponseBuilder::new(result_data),
             |response, (openvino_server, memory)| response.process(openvino_server).memory(*memory),
         )
         .command(response::command(python))
-        .runtime_flags(flags)
-        .build())
+        .runtime_flags(flags);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let response = response.client_extras(extras);
+    Ok(response.build())
 }
 
 /// One server from its launch through one request at the cell's shape, left
-/// in `served` for the entry to check its reading and the cell to record or
+/// in `served` for the entry to check its peak and the cell to record or
 /// quote it. One an earlier attempt left there stops first; the observation
 /// covers both.
 fn serve(
@@ -122,7 +131,7 @@ fn serve(
     http: &HttpClient,
     prefill_tokens: u32,
     observer: MeasurementObserver<'_>,
-) -> anyhow::Result<MaxMemoryMeasurementReading> {
+) -> anyhow::Result<Peak> {
     let earlier = match served.take() {
         Some((mut openvino_server, memory)) => {
             openvino_server.stop();
@@ -144,12 +153,7 @@ fn serve(
     // Before the checks, so the cell quotes it on any failure from here.
     *served = Some((openvino_server, earlier.merge_max(observed)));
     measured?;
-    let peak = peak?;
-    Ok(MaxMemoryMeasurementReading {
-        max_host_bytes: peak.host_bytes,
-        max_gpu_bytes: peak.gpu_bytes,
-        max_npu_bytes: peak.npu_bytes,
-    })
+    Ok(peak?)
 }
 
 /// One request at the cell's shape.

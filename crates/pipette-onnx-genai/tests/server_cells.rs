@@ -247,11 +247,31 @@ fn a_memory_cell_runs_only_on_a_provider_the_model_declares(
                 anyhow::bail!("not a host-only memory result: {:?}", response.result_data);
             };
             assert!(max_host_bytes > 0);
-            assert!(
-                response.memory.max_host_bytes >= Some(max_host_bytes),
-                "{:?}",
-                response.memory
-            );
+            // On Linux the peak counts swap, which the observation carries
+            // beside its resident term.
+            let observed = response
+                .memory
+                .max_host_bytes
+                .unwrap_or(0)
+                .saturating_add(response.memory.max_swap_bytes.unwrap_or(0));
+            assert!(observed >= max_host_bytes, "{:?}", response.memory);
+            let mut extras = response
+                .client_extras
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            extras.sort_unstable();
+            let expected: &[&str] = if cfg!(target_os = "linux") {
+                &[
+                    "major_faults",
+                    "max_swap_kib",
+                    "peak_committed_kib",
+                    "peak_rss_kib",
+                ]
+            } else {
+                &[]
+            };
+            assert_eq!(extras, expected);
             assert_eq!(
                 response.command.get(1).map(String::as_str),
                 Some("pipette_onnx_genai_server.py")

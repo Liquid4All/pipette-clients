@@ -14,8 +14,6 @@ mod models;
 mod mtmd;
 mod runtimes;
 mod server;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-mod swap_aware;
 mod thinking_controls;
 
 pub use execute::run;

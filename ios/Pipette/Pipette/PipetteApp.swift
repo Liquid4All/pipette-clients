@@ -147,6 +147,11 @@ struct PipetteApp: App {
                         if !outcomes.isEmpty { jobStore.reload() }
                     }
                 }
+                // Not headless: a farm launch runs in Single App Mode with touch off, where
+                // nobody can answer. Internal only: the farm, `cdn-proxy=`'s one user, runs those.
+                if phase == .active, BuildFlavor.isInternal, !HeadlessRunner.isHeadless {
+                    LocalNetworkAlert.trigger()
+                }
             }
         }
         .environment(\.ws, ws)

@@ -673,6 +673,12 @@ names the attempt that ran over:
 - `rep N`: one measured rep. A `llama-bench` or `llama-batched-bench` rep loads
   the model itself, so there the load counts against each rep. `the work after
   rep N` is what follows it, up to the next rep or the end of the run.
+- `rep N, the timed pass`: a one-sequence llama.cpp prefill on a GPU or NPU
+  build reads its prompt twice in each rep, llama-bench's untimed pass and
+  then the timed one
+  ([prefill-throughput.md](../methodology/prefill-throughput.md#llamacpp)).
+  The timed pass starts an attempt of its own when llama-bench prints
+  `prompt run` on stderr, so `rep N` holds the load and the untimed pass.
 - `the peak-memory warm-up` and `the measured peak-memory attempt`: each run of
   a peak-memory cell, from the launch of its own `llama-bench` process, or from
   the moment its own server is ready.

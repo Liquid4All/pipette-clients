@@ -84,6 +84,7 @@ jobs:
             ios:
               - 'ios/**'
               - '.github/**'
+              - '.gitmodules'
               # A llama.cpp pin bump moves the gitlink and the tag, not .gitmodules.
               - 'vendor/llama.cpp'
               - 'vendor/llama.cpp.tag'
@@ -547,6 +548,41 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      # Its own key: a Release device build shares no products with ios-check's tree.
+      # Not `Build`: `xcodebuild archive` recompiles every source regardless of it.
+      # ModuleCache.noindex is what survives (explicit module builds 303 -> 19).
+      - name: Cache DerivedData (SwiftPM sources + module cache)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/DerivedData-archive/SourcePackages
+            ${{ runner.temp }}/DerivedData-archive/ModuleCache.noindex
+          key: spm-dd-archive-v2-${{ runner.os }}-${{ hashFiles('ios/Pipette/Pipette.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-dd-archive-v2-${{ runner.os }}-
+
+      # shortcut: a cold resolve stalls on CI once the vendored sources are checked out,
+      # for an unknown cause, so resolve before them, with a 5-minute watchdog per attempt.
+      - name: Resolve Swift packages
+        run: |
+          # Job control gives each attempt its own process group, so the watchdog also kills its git children.
+          set -m
+          for attempt in 1 2 3; do
+            xcodebuild -resolvePackageDependencies \
+              -project ios/Pipette/Pipette.xcodeproj \
+              -scheme Pipette \
+              -derivedDataPath "$RUNNER_TEMP/DerivedData-archive" &
+            pid=$!
+            ( sleep 300 && kill -- "-$pid" ) >/dev/null 2>&1 &
+            watchdog=$!
+            if wait "$pid"; then
+              kill "$watchdog" 2>/dev/null || true
+              exit 0
+            fi
+            echo "::warning::Swift package resolution attempt $attempt failed or stalled"
+          done
+          exit 1
+
       - name: Check out the vendored sources
         run: |
           git -c protocol.version=2 submodule update --init --depth=1 --recursive \
@@ -567,19 +603,6 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
         with:
           version: ${{ env.SCCACHE_VERSION }}
-
-      # Its own key: a Release device build shares no products with ios-check's tree.
-      # Not `Build`: `xcodebuild archive` recompiles every source regardless of it.
-      # ModuleCache.noindex is what survives (explicit module builds 303 -> 19).
-      - name: Cache DerivedData (SwiftPM sources + module cache)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            ${{ runner.temp }}/DerivedData-archive/SourcePackages
-            ${{ runner.temp }}/DerivedData-archive/ModuleCache.noindex
-          key: spm-dd-archive-v2-${{ runner.os }}-${{ hashFiles('ios/Pipette/Pipette.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: |
-            spm-dd-archive-v2-${{ runner.os }}-
 
       # `device`: the archive's "Embed llama.cpp" phase takes each pin from
       # ios/.build-llama/frameworks/iphoneos. Only main's build writes the headers
@@ -643,6 +666,7 @@ jobs:
       #   Store. THERMAL needs both the GCC define (ObjC) and the Swift condition.
       # PIPETTE_LLAMA_PINS: every pin built above; unset, the app carries main's alone.
       - name: Archive iOS app (Release, unsigned, internal)
+        timeout-minutes: 30
         env:
           PIPETTE_SKIP_BUILD_LLAMA: "1"
           PIPETTE_SKIP_BUILD_ONNX_GENAI: "1"

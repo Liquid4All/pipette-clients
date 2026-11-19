@@ -36,7 +36,7 @@ server-driven engine; the methodology pages define each figure.
 | `prefill_throughput` | client-clock time to the first streamed token (`max_tokens = 1`) | n/a | no |
 | `decode_throughput` | client-clock first-to-last-token interval, scaled from `n − 1` to `n` | **no** | no |
 | `end_to_end_latency` | client-clock time of one streamed completion, send to finish chunk | **yes** | no |
-| `max_memory_usage` | peak resident memory of the server process after one request; its GPU memory too on Windows and Linux, its NPU memory on Windows | n/a | no (see below) |
+| `max_memory_usage` | peak memory of the server process after one request, swap included on Linux; its GPU memory too on Windows and Linux, its NPU memory on Windows | n/a | no (see below) |
 
 The readiness wait for the server covers the compile, so the compile is outside
 every measured *time*, and
@@ -72,9 +72,10 @@ attention are prefix-cache hits: each rep ran its warm-up on the same seed ids
 in the same process before the measured generate. LFM2 rows are not affected,
 since LFM2 already runs on SDPA.
 
-`max_memory_usage` is the server process's peak resident memory, read from the
-parent by the per-OS sampler that every engine uses, and watched from the
-launch. It therefore covers the blob load as well as the request. A warm-up
+`max_memory_usage` is the server process's peak memory, read from the parent by
+the per-OS sampler that every engine uses, and watched from the launch. On
+Linux it counts what the kernel swapped out mid-run
+([server host counter](methodology/peak-memory-linux.md#server-host-counter)). It therefore covers the blob load as well as the request. A warm-up
 server runs the same request first, so the measured server loads from the
 cache; see [the memory cell and the cache](#the-memory-cell-and-the-cache).
 

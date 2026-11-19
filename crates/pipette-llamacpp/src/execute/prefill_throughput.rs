@@ -3,6 +3,7 @@
 
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
@@ -14,19 +15,82 @@ use pipette_ops::measurement::{
 use pipette_ops::readiness::ReadinessGate;
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
-    LlamacppCliStockToolsExtraRuntimeConfiguration, PositiveCount, PositiveMillis,
+    LlamaCppFlavor, LlamacppCliStockToolsExtraRuntimeConfiguration, PositiveCount, PositiveMillis,
     PrefillThroughputBenchmark, PrefillThroughputLlamacppCliStockToolsGgufText, RunResponse,
     RuntimeFlags,
 };
-use pipette_subprocess::{OnStop, start_process};
+use pipette_subprocess::{OnStop, Process, Stream, start_process};
 
 use crate::models::ResolvedGgufTextModel;
 use crate::runtimes::{self, ResolvedLlamaBatchedBench, ResolvedLlamaBench};
 use crate::{batched_bench, bench};
 
+/// Where a prefill rep's warm-up runs. Each rep is its own llama-bench process.
+/// A GPU or NPU build sets up its device at the process's first batch, so each
+/// process warms itself with llama-bench's own pass over the prompt; a second
+/// llama-bench test in the same process instead runs 7-9B models out of memory
+/// on an 8 GB Orin Nano. A CPU-only build has nothing per process to set up,
+/// and its own pass doubles each rep's time: one untimed process before the reps.
+fn warmup(flavor: &LlamaCppFlavor) -> MeasurementWarmup {
+    if runtimes::cpu_only(flavor) {
+        MeasurementWarmup::Once
+    } else {
+        MeasurementWarmup::Inline
+    }
+}
+
+/// Follows a GPU or NPU rep through llama-bench's `--progress` lines: logs how
+/// long the model load and the untimed pass took, and starts the timed pass as
+/// an attempt of its own, so the load with the untimed pass and the timed pass
+/// each get the whole limit. A process that exits or is stopped first prints
+/// no such line, and the rep stays one attempt.
+fn follow_passes(
+    llama_bench: &Process,
+    started: Instant,
+    rep: usize,
+    observer: MeasurementObserver<'_>,
+) {
+    let printed = |marker: &str| {
+        llama_bench
+            .wait_for_output(Stream::Stderr, time_left(started), |stderr| {
+                stderr.contains(marker)
+            })
+            .is_some()
+    };
+    if !printed(bench::UNTIMED_PROMPT_PASS) {
+        return;
+    }
+    let loaded = started.elapsed();
+    tracing::info!(
+        rep,
+        load_secs = loaded.as_secs_f64(),
+        "llama-bench loaded the model; its untimed pass started"
+    );
+    if !printed(bench::TIMED_PROMPT_PASS) {
+        return;
+    }
+    tracing::info!(
+        rep,
+        untimed_pass_secs = started.elapsed().saturating_sub(loaded).as_secs_f64(),
+        "llama-bench's untimed pass ended; its timed pass started"
+    );
+    (observer.on_attempt_start)(&format!("rep {rep}, the timed pass"));
+}
+
+/// What is left of a rep's [`bench::TIMING_TIMEOUT`], shared by the waits on
+/// its progress lines and on its exit.
+fn time_left(started: Instant) -> Duration {
+    bench::TIMING_TIMEOUT.saturating_sub(started.elapsed())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts, and the seams its entry takes"
+)]
 pub fn run(
     benchmark: &PrefillThroughputBenchmark,
     runtime_flags: PrefillThroughputLlamacppCliStockToolsGgufText,
+    flavor: &LlamaCppFlavor,
     program: &ResolvedLlamaBench,
     model: &ResolvedGgufTextModel,
     readiness_gate: ReadinessGate,
@@ -37,23 +101,37 @@ pub fn run(
         load_mode: runtimes::get_load_mode(runtime_flags.mmap, runtime_flags.load_mode),
         ..runtime_flags
     };
-    let launch = bench_launch(benchmark, &runtime_flags, program, model, client_config);
+    let warmup = warmup(flavor);
+    let launch = bench_launch(
+        benchmark,
+        &runtime_flags,
+        program,
+        model,
+        client_config,
+        warmup,
+    );
     let mut runs = Vec::new();
+    let mut rep = 0;
     let result = measurement::prefill(
         benchmark,
         NonZeroUsize::try_from(measurement::REPS)?,
         readiness_gate,
         observer,
-        MeasurementWarmup::Once,
+        warmup,
         &mut runs,
         |runs| {
             let command = launch.build();
+            let started = Instant::now();
             let mut llama_bench = start_process("llama-bench", command, OnStop::SIGTERM)
                 .map_err(anyhow::Error::from)?;
             let sampler = Sampler::start(llama_bench.pid(), SupportedWatch::OBSERVE)
                 .map_err(anyhow::Error::from)?;
+            rep += 1;
+            if warmup == MeasurementWarmup::Inline {
+                follow_passes(&llama_bench, started, rep, observer);
+            }
             let (memory, _) = llama_bench
-                .wait_success_before_reap(bench::TIMING_TIMEOUT, || sampler.stop())
+                .wait_success_before_reap(time_left(started), || sampler.stop())
                 .map_err(anyhow::Error::from)?;
             let stdout = llama_bench.output().runtime_stdout.unwrap_or_default();
             let row =
@@ -147,6 +225,7 @@ fn bench_launch(
     program: &ResolvedLlamaBench,
     model: &Path,
     client_config: Option<&LlamacppCliStockToolsExtraRuntimeConfiguration>,
+    warmup: MeasurementWarmup,
 ) -> bench::BenchCommandBuilder {
     let workload = bench::BenchWorkload::Prompt {
         n_prompt: benchmark
@@ -172,8 +251,8 @@ fn bench_launch(
         .raw(raw)
         .envs(envs)
         .client_config(client_config.cloned())
-        // The warm-up is the cell's own untimed first run.
-        .no_warmup(true)
+        .no_warmup(warmup == MeasurementWarmup::Once)
+        .progress(warmup == MeasurementWarmup::Inline)
 }
 
 /// Every field of the cell is named: a flag plan-types adds fails to compile
@@ -219,6 +298,8 @@ fn batched_bench_launch(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use pipette_plan_types::{
         BatchSize, BenchmarkId, LlamacppFlashAttention, LlamacppLoadMode, NonNegativeCount,
     };
@@ -229,6 +310,7 @@ mod tests {
     fn bench_args(
         benchmark: &PrefillThroughputBenchmark,
         flags: &PrefillThroughputLlamacppCliStockToolsGgufText,
+        flavor: &LlamaCppFlavor,
     ) -> Vec<String> {
         bench_launch(
             benchmark,
@@ -236,6 +318,7 @@ mod tests {
             &test_llama_bench(),
             Path::new("model.gguf"),
             None,
+            warmup(flavor),
         )
         .args()
     }
@@ -268,20 +351,79 @@ mod tests {
     }
 
     fn benchmark() -> anyhow::Result<PrefillThroughputBenchmark> {
+        prompt_of(512)
+    }
+
+    fn prompt_of(tokens: i32) -> anyhow::Result<PrefillThroughputBenchmark> {
         Ok(PrefillThroughputBenchmark {
-            benchmark_id: BenchmarkId::try_new("prefill_throughput_512".to_owned())?,
-            parameter_prefill_tokens: NonNegativeCount::try_new(512)?,
+            benchmark_id: BenchmarkId::try_new(format!("prefill_throughput_{tokens}"))?,
+            parameter_prefill_tokens: NonNegativeCount::try_new(tokens)?,
             parameter_batch_size: BatchSize::try_new(4)?,
         })
     }
 
-    #[test]
-    fn llama_bench_reads_the_prompt_alone() -> anyhow::Result<()> {
+    fn with_raw(raw: &[&str]) -> PrefillThroughputLlamacppCliStockToolsGgufText {
+        PrefillThroughputLlamacppCliStockToolsGgufText {
+            raw: raw.iter().map(|&token| token.to_owned()).collect(),
+            ..runtime_flags()
+        }
+    }
+
+    /// A CPU-only build reads the prompt once per process after a warm-up
+    /// process; any other build warms each process with llama-bench's own pass.
+    #[rstest]
+    #[case::cpu(
+        LlamaCppFlavor::LinuxX64Cpu,
+        512,
+        &["--poll", "0"],
+        "--flash-attn on --load-mode dio --n-gpu-layers 7 --no-warmup --poll 0 --repetitions 1 --threads 3 --n-prompt 512 --n-gen 0"
+    )]
+    #[case::cpu_past_a_batch(
+        LlamaCppFlavor::AndroidArm64Cpu,
+        4096,
+        &["--poll", "0"],
+        "--flash-attn on --load-mode dio --n-gpu-layers 7 --no-warmup --poll 0 --repetitions 1 --threads 3 --n-prompt 4096 --n-gen 0"
+    )]
+    #[case::gpu(
+        LlamaCppFlavor::LinuxArm64Cuda13,
+        512,
+        &["--poll", "0"],
+        "--flash-attn on --load-mode dio --n-gpu-layers 7 --poll 0 --progress --repetitions 1 --threads 3 --n-prompt 512 --n-gen 0"
+    )]
+    #[case::gpu_past_a_batch(
+        LlamaCppFlavor::WindowsX64Vulkan,
+        4096,
+        &["--poll", "0"],
+        "--flash-attn on --load-mode dio --n-gpu-layers 7 --poll 0 --progress --repetitions 1 --threads 3 --n-prompt 4096 --n-gen 0"
+    )]
+    #[case::npu_past_its_batch(
+        LlamaCppFlavor::AndroidArm64Snapdragon,
+        4096,
+        &["--device", "HTP0", "-ub", "1024"],
+        "--device HTP0 --flash-attn on --load-mode dio --n-gpu-layers 7 --progress --repetitions 1 --threads 3 -ub 1024 --n-prompt 4096 --n-gen 0"
+    )]
+    fn llama_bench_reads_the_prompt_alone(
+        #[case] flavor: LlamaCppFlavor,
+        #[case] tokens: i32,
+        #[case] raw: &[&str],
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
         assert_eq!(
-            bench_args(&benchmark()?, &runtime_flags()).join(" "),
-            "--flash-attn on --load-mode dio --n-gpu-layers 7 --no-warmup --poll 0 --repetitions 1 --threads 3 --n-prompt 512 --n-gen 0"
+            bench_args(&prompt_of(tokens)?, &with_raw(raw), &flavor).join(" "),
+            expected
         );
         Ok(())
+    }
+
+    #[rstest]
+    #[case::cpu(LlamaCppFlavor::LinuxX64Cpu, MeasurementWarmup::Once)]
+    #[case::gpu(LlamaCppFlavor::MacosArm64, MeasurementWarmup::Inline)]
+    #[case::npu(LlamaCppFlavor::AndroidArm64Snapdragon, MeasurementWarmup::Inline)]
+    fn only_a_cpu_build_warms_in_a_process_of_its_own(
+        #[case] flavor: LlamaCppFlavor,
+        #[case] expected: MeasurementWarmup,
+    ) {
+        assert_eq!(warmup(&flavor), expected);
     }
 
     #[test]

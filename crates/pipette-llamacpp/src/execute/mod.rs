@@ -132,6 +132,7 @@ pub fn run(
             prefill_throughput::run(
                 benchmark,
                 req.runtime_flags_ref()?.try_into()?,
+                runtimes::flavor(&req.runtime.bound)?,
                 &ResolvedLlamaBench::try_from(&req.runtime.bound)?,
                 &ResolvedGgufTextModel::try_from(&req.model.bound)?,
                 readiness_gate,

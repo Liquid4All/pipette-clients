@@ -554,9 +554,29 @@ launch.
 
 The same `/proc/<pid>/status` sampler as llama.cpp, every 10 ms from the
 measured server's launch until after the cell's one request, so the model load
-counts: `VmHWM` as `max_host_bytes`, with the swap term beside it in the
-observation. Each engine runs a warm-up server first
+counts. `max_host_bytes` is the swap-aware figure with its `client_extras`, as
+under [llama.cpp host counter](#llamacpp-host-counter); on a host with no swap
+it is `VmHWM`. Each engine runs a warm-up server first
 ([compile caches](peak-memory-usage.md#compile-caches)).
+
+Under memory pressure the figure gets back the anonymous memory the kernel
+swapped out, but not the pages of mapped files it dropped:
+
+| Run | `peak_rss_kib` | `max_swap_kib` | `max_host_bytes` | `major_faults` |
+| --- | ---: | ---: | ---: | ---: |
+| No cap | 1,036 MiB | 0 | 1,036 MiB | 946 |
+| 600 MiB cap | 595 MiB | 271 MiB | 858 MiB | 8,202 |
+
+OpenVINO 2026.4.1 on `cpu`, `OpenVINO/LFM2.5-350M-int8-ov`,
+`max_memory_usage_512`, in a 4 GiB Ubuntu 24.04 KVM guest with an 8 GiB swap
+file, the cap set with `systemd-run --scope -p MemoryMax=600M`. Without the
+swap term the capped row would read 595 MiB. A second pair of runs read the
+server's `RssAnon`, `RssFile` and `VmSwap` every 50 ms. With no cap its
+anonymous memory peaked at 599 MiB, beside 425 MiB of mapped files (the model
+and its libraries). Under the cap at most 357 MiB of anonymous memory was
+resident and 265 MiB was in swap, so swap accounts for it. The 178 MiB the
+capped figure still misses is file pages the kernel dropped and the server read
+back from disk, which `VmSwap` does not count.
 
 ### Server GPU counter
 

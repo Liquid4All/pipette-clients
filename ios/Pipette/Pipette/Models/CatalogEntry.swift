@@ -190,6 +190,8 @@ extension CatalogEntry {
     // Only models the project benchmarks on MLX (`type = "mlx"` in the plan files). The
     // bit-width is in the repo slug, since an MLX model is a repo directory. Sizes are each
     // repo's total bytes from the HF file tree.
+    //
+    // No 1-bit rows: the pinned mlx-swift's quantized kernels take 2, 3, 4, 5, 6 or 8 bits.
     nonisolated static let mlxDefaults: [CatalogEntry] = [
         .mlx("LFM 2.5 230M", "LiquidAI/LFM2.5-230M-MLX-4bit", bytes: 150_867_598),
         .mlx("LFM 2.5 350M", "LiquidAI/LFM2.5-350M-MLX-4bit", bytes: 226_574_864),
@@ -211,7 +213,6 @@ extension CatalogEntry {
         .mlx("Gemma 4 E4B IT", "mlx-community/gemma-4-e4b-it-4bit", bytes: 5_249_811_602),
         .mlx("Llama 3.2 3B Instruct", "mlx-community/Llama-3.2-3B-Instruct-4bit", bytes: 1_824_825_759),
         .mlx("Ministral 3 3B Instruct 2512", "mlx-community/Ministral-3-3B-Instruct-2512-4bit", bytes: 2_779_152_776),
-        .mlx("Bonsai 8B", "prism-ml/Bonsai-8B-mlx-1bit", bytes: 1_296_482_622, quant: "1bit"),
         .mlx("Ternary Bonsai 1.7B", "prism-ml/Ternary-Bonsai-1.7B-mlx-2bit", bytes: 495_636_905, quant: "2bit"),
         .mlx("Ternary Bonsai 8B", "prism-ml/Ternary-Bonsai-8B-mlx-2bit", bytes: 2_315_264_643, quant: "2bit"),
     ]

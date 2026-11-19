@@ -229,6 +229,20 @@ impl Footprint {
     pub fn peak_ram_kib(&self) -> u64 {
         self.peak_rss_kib.max(self.peak_committed_kib)
     }
+
+    /// The terms behind the swap-aware peak ([`Peak::counting_swap`]), for a
+    /// memory cell's `client_extras`.
+    pub fn extras(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::from_iter([
+            ("peak_rss_kib".to_owned(), self.peak_rss_kib.into()),
+            (
+                "peak_committed_kib".to_owned(),
+                self.peak_committed_kib.into(),
+            ),
+            ("max_swap_kib".to_owned(), self.max_swap_kib.into()),
+            ("major_faults".to_owned(), self.major_faults.into()),
+        ])
+    }
 }
 
 /// What a run is worth reporting as, or nothing: withheld unless the stop

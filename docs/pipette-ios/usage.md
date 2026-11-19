@@ -64,7 +64,12 @@ would refuse is refused. App Transport Security lets plain HTTP through to a
 loopback, private or link-local address (`10.x`, `172.16.x` to `172.31.x`,
 `192.168.x`, `169.254.x`) and to an unqualified name, and refuses a public or
 tailnet address (the tailnet's are in `100.64.0.0/10`) and a fully qualified
-name, so give the proxy as a LAN address or an unqualified name.
+name, so give the proxy as a LAN address or an unqualified name. The phone must
+also allow Pipette under Settings > Privacy & Security > Local Network; until
+then every proxied download fails at once as offline. The alert a proxied
+download raises cannot be answered on a phone in Single App Mode with touch off,
+so an internal build raises it each time it comes to the foreground without
+`headlessrun`, until someone answers.
 
 `runtime=` takes one of four short tokens, `llama`, `mlx`, `onnx` or `afm`, or a
 JSON `Runtime` object. A type tag such as `mlx_ios_pipette` is refused, because it

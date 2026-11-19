@@ -27,8 +27,6 @@ use crate::models::ResolvedGgufVisionModel;
 use crate::mtmd::{self, CtxInputs, MtmdCommandBuilder};
 use crate::runtimes::{self, ResolvedLlamaServer};
 use crate::server::{self, LoggingMarker, ServerCommandBuilder};
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use crate::swap_aware;
 
 #[expect(
     clippy::too_many_arguments,
@@ -96,7 +94,7 @@ pub fn run(
             let peak = serve(served, &launch, watch, &inputs, observer, timeout, deadline)?;
             #[cfg(any(target_os = "linux", target_os = "android"))]
             let peak = {
-                extras = swap_aware::extras(&peak.footprint);
+                extras = peak.footprint.extras();
                 peak.counting_swap()
             };
             Ok(VlMaxMemoryMeasurementReading {

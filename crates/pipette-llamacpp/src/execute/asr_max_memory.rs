@@ -35,8 +35,6 @@ use crate::models::ResolvedGgufVisionModel;
 use crate::mtmd::MtmdCommandBuilder;
 use crate::runtimes::{self, ResolvedLlamaServer};
 use crate::server::{self, LoggingMarker, ServerCommandBuilder};
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use crate::swap_aware;
 
 struct Clip<'a> {
     duration: AudioDurationMillis,
@@ -182,7 +180,7 @@ pub fn run(
             let peak = serve(served, &launch, watch, &clip, observer, timeout, deadline)?;
             #[cfg(any(target_os = "linux", target_os = "android"))]
             let peak = {
-                extras.extend(swap_aware::extras(&peak.footprint));
+                extras.extend(peak.footprint.extras());
                 peak.counting_swap()
             };
             Ok(MaxMemoryMeasurementReading {

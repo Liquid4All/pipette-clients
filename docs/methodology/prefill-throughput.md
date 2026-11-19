@@ -154,7 +154,7 @@ submitting a timing from an unstable condition.
 
 | Path | Workload | Timing source | Notes |
 | --- | --- | --- | --- |
-| llama.cpp CLI | `llama-bench --output json --model <path> --n-prompt <P> --n-gen 0 --repetitions 1 --no-warmup` per measured repetition | row `avg_ns`, converted to milliseconds | One untimed invocation of the same command first, then five separate one-repetition invocations so readiness can run between samples. |
+| llama.cpp CLI | `llama-bench --output json --model <path> --n-prompt <P> --n-gen 0 --repetitions 1` per measured repetition, its warm-up by build (below) | the prompt's row `avg_ns`, converted to milliseconds | Five separate one-repetition invocations so readiness can run between samples. A CPU-only build first runs one untimed invocation; any other build warms inside each invocation. |
 | llama.cpp CLI, batch of `N` | `llama-batched-bench --output-format jsonl --model <path> --ctx-size <N × (P + 1)> -npp <P> -ntg 1 -npl <N>,<N>` per measured repetition | second row's `t_pp`, converted to milliseconds | The first row warms the process at the cell's shape. |
 | MLX CLI | streamed `/v1/completions` with a `<P>`-token prompt, `max_tokens = 1` | client time to first token | Server prompt cache disabled. |
 | torch-oai (vLLM / SGLang, docker or uv) | streamed `/v1/completions` with a `<P>`-token prompt, `max_tokens = 1`, `ignore_eos` | client time to first token | Prefix caching disabled at launch. |
@@ -192,13 +192,36 @@ Backend choice, token handling and the measured cache effects are in
 
 ### llama.cpp
 
-`pipette-llamacpp` runs one `llama-bench` process per measured sample and
-passes `--repetitions 1 --no-warmup`, so each process reads the prompt once.
-Before the samples, one untimed process runs the same command as the warm-up:
-it pays the first run's kernel builds and page-ins, and its row is checked and
-dropped. `--no-warmup` stays reserved in a cell's raw flags. The run must print exactly one JSON row, the one test its
-arguments ask for (`n_gen == 0`), with `n_prompt == parameter_prefill_tokens`.
-The row's `avg_ns` is converted to milliseconds for that sample.
+`pipette-llamacpp` runs one `llama-bench` process per measured sample with
+`--repetitions 1`. Where the warm-up runs depends on the build:
+
+| Build | Arguments | Warm-up |
+| --- | --- | --- |
+| CPU-only | `--no-warmup --n-prompt <P>` | one untimed process with the same command before the samples, for the page cache |
+| GPU or NPU | `--n-prompt <P>` | llama-bench's own untimed pass over the prompt, in each sample's process |
+
+A GPU or NPU build sets up its device code, buffers and graphs at the process's
+first batch, and drops them with the process: a warm-up process before the
+samples leaves each sample's process cold. On an Orin Nano (CUDA,
+granite-4.0-h-350m, 256 tokens) that first prompt took 275 ms against 95 ms
+warm; an S26 Ultra's NPU and a GMKtec EVO-X2's Vulkan build paid 20 to 40 ms
+and 14 ms. A shorter untimed prompt as a second llama-bench test in the same
+process (`--n-prompt <B>,<P>`) runs 7 to 9B models out of memory on an Orin
+Nano at 1,024 tokens where one test fits, so each sample runs one test. On a
+CPU-only build llama-bench's own pass would double each sample's time, which
+pushed 4,096-token prompts on an S26 Ultra's CPU past their attempt deadline.
+A GPU or NPU sample runs with `--progress`, and its timed pass starts an
+attempt of its own when llama-bench prints `prompt run` on stderr: the load
+with the untimed pass, and the timed pass, each get the cell's
+`attempt_timeout_seconds`, the bound one warm-up process had before. The
+client logs each rep's model load and untimed pass times from the same lines
+(`warmup prompt run` marks the load's end), so a rep stopped as stuck shows
+which part it was in.
+
+`--no-warmup` stays reserved in a cell's raw flags. The run must print exactly
+one JSON row, the one test its arguments ask for (`n_gen == 0`), with
+`n_prompt == parameter_prefill_tokens`. The row's `avg_ns` is converted to
+milliseconds for that sample.
 
 At `parameter_batch_size` `N` above 1 the runner uses `llama-batched-bench`
 instead, still one process per measured sample:

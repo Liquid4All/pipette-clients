@@ -63,7 +63,10 @@ pub(crate) fn command(
         .env("PYTHONUNBUFFERED", "1")
         // ONNX GenAI prints non-ASCII diagnostics, which a Windows console's
         // legacy code page turns into a fatal UnicodeEncodeError.
-        .env("PYTHONIOENCODING", "utf-8");
+        .env("PYTHONIOENCODING", "utf-8")
+        // The PyPI wheels upload usage events to Microsoft by default; this
+        // keeps the uploader thread and its traffic out of measured runs.
+        .env("ORT_DISABLE_TELEMETRY", "1");
     Ok(command)
 }
 
@@ -133,6 +136,22 @@ mod tests {
             .nth(1)
             .context("no --execution-provider value")?;
         Ok(value.to_owned())
+    }
+
+    #[test]
+    fn the_server_starts_with_onnx_runtime_telemetry_off() -> anyhow::Result<()> {
+        let install = ResolvedOnnxGenaiInstall {
+            python: "/venv/bin/python".into(),
+            execution_provider: OnnxExecutionProvider::Cpu,
+        };
+        let command = command(&install, Path::new("/model"), Path::new("/script"), 1, None)?;
+        let value = command
+            .get_envs()
+            .find_map(|(name, value)| (name == "ORT_DISABLE_TELEMETRY").then_some(value))
+            .flatten()
+            .context("ORT_DISABLE_TELEMETRY is not set")?;
+        assert_eq!(value, "1");
+        Ok(())
     }
 
     /// A server that dies while loading reports its exit and the traceback it

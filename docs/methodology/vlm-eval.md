@@ -113,8 +113,9 @@ eval does, so every sample of an attempt shares one. That is not neutral on
 vLLM, which turns a request's seed into a noise vector over the vocabulary: a
 shared seed favors the same token ids across the whole dataset. MiniCPM-V
 4.5's POPE F1 on vLLM rose from 55.8 under the shared seed to 87.0 under the
-per-sample rule, against 87.6 to 87.8 on llama.cpp under either. A seeded entry
-names `per_sample_sha256`.
+per-sample rule, against 87.6 to 87.8 on llama.cpp under either. The rule is
+opt-in per entry: a sampled entry that names no rule sends one seed to all the
+samples of an attempt, so every seeded entry should name `per_sample_sha256`.
 
 The pinned numbers are tuned under Hugging Face and vLLM, so the request
 applies them the way those do rather than llama.cpp's default way:
@@ -220,53 +221,89 @@ list allows.
 | --- | --- | --- | --- | --- | --- |
 | Qwen3.5 0.8B / 2B (`unsloth/Qwen3.5-0.8B-GGUF`, `unsloth/Qwen3.5-2B-GGUF`) | `qwen3_5`: the dataset's, plus the card's `"answer": "C"` line on multiple choice | T 0.6, top_p 0.95, top_k 20, presence 1.5, seed 0 | 32,768 (card) | on | [0.8B card](https://huggingface.co/Qwen/Qwen3.5-0.8B), [2B card](https://huggingface.co/Qwen/Qwen3.5-2B): the vision-language results footnote and Best Practices |
 | Qwen3.5 4B (`unsloth/Qwen3.5-4B-GGUF`) | `qwen3_5` | T 0.6, top_p 0.95, top_k 20, presence 1.5, seed 0 | 32,768 (card) | on | [2B card](https://huggingface.co/Qwen/Qwen3.5-2B): the settings of the Qwen3.5 small models' published vision-language numbers in thinking mode (the [4B card](https://huggingface.co/Qwen/Qwen3.5-4B) gives no vision-language setting of its own) |
-| Gemma 4 E2B / E4B (`ggml-org/gemma-4-E{2,4}B-it-GGUF`, `unsloth/gemma-4-E{2,4}B-it-GGUF`) | the dataset's | T 1.0, top_p 0.95, top_k 64, seed 0; every image at 1,120 visual tokens | 32,768 (ours) | on | [E2B card](https://huggingface.co/google/gemma-4-E2B-it), [E4B card](https://huggingface.co/google/gemma-4-E4B-it): Best Practices; Variable Image Resolution (the highest budget, which the cards recommend for fine detail and text) |
-| InternVL3.5 2B / 4B (`bartowski/OpenGVLab_InternVL3_5-2B-GGUF`, `-4B-GGUF`) | `internvl_r1`: the R1 system prompt, then InternVL's own prompts | T 0.6, top_p 0.95, top_k 50, seed 0 | 32,768 (ours) | on, through the R1 system prompt | [2B card](https://huggingface.co/OpenGVLab/InternVL3_5-2B); VLMEvalKit [config.py L1340-L1347](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/config.py#L1340-L1347), [internvl_chat.py L126-L127, L416-L417](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/internvl/internvl_chat.py#L416-L417) (OpenGVLab's) |
+| Qwen3.5 9B / 35B-A3B, Qwen3.6 35B-A3B (`unsloth/Qwen3.5-9B-GGUF`, `bartowski/Qwen_Qwen3.5-35B-A3B-GGUF`, `bartowski/Qwen_Qwen3.6-35B-A3B-GGUF`) | `qwen3_5` | T 0.6, top_p 0.95, top_k 20, presence 1.5, seed 0 | 32,768 (cards) | on | [2B card](https://huggingface.co/Qwen/Qwen3.5-2B): the small models' vision-language setting, as for the 4B (the [9B](https://huggingface.co/Qwen/Qwen3.5-9B), [35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) and [Qwen3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) cards give no vision-language setting of their own) |
+| Gemma 4 E2B / E4B / 12B / 26B-A4B (`ggml-org/gemma-4-E{2,4}B-it-GGUF`, `unsloth/gemma-4-E{2,4}B-it-GGUF`, `unsloth/gemma-4-12b-it-GGUF`, `bartowski/google_gemma-4-26B-A4B-it-GGUF`) | the dataset's | T 1.0, top_p 0.95, top_k 64, seed 0; every image at 1,120 visual tokens | 32,768 (ours) | on | [E2B](https://huggingface.co/google/gemma-4-E2B-it), [E4B](https://huggingface.co/google/gemma-4-E4B-it), [12B](https://huggingface.co/google/gemma-4-12B-it) and [26B-A4B](https://huggingface.co/google/gemma-4-26B-A4B-it) cards: Best Practices; Variable Image Resolution (the highest budget, which the cards recommend for fine detail and text) |
+| InternVL3.5 1B / 2B / 4B / 8B / 30B-A3B (`bartowski/OpenGVLab_InternVL3_5-{1B,2B,4B,8B,30B-A3B}-GGUF`) | `internvl_r1`: the R1 system prompt, then InternVL's own prompts | T 0.6, top_p 0.95, top_k 50, seed 0 | 32,768 (ours) | on, through the R1 system prompt | [2B card](https://huggingface.co/OpenGVLab/InternVL3_5-2B); VLMEvalKit [config.py L1336-L1363](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/config.py#L1336-L1363) (the `-Thinking` entries), [internvl_chat.py L126-L127, L416-L417](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/internvl/internvl_chat.py#L416-L417) (OpenGVLab's) |
 | MiniCPM-V 4.5 (`openbmb/MiniCPM-V-4_5-gguf`) | `minicpm_v_cot` (OpenBMB's step-by-step prompts to an `Answer:` line) on MMMU, MMBench, MMStar and OCRBench; `minicpm_v` (its direct prompts) on RealWorldQA, MME and POPE | T 0.7, seed 0 (top_p 1.0, top_k 0, repetition 1.0: neutral) | 32,768 (ours; OpenBMB's 8,192 cuts long reasoning) | on | VLMEvalKit [minicpm_v.py L1063-L1085](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1063-L1085), [L1207-L1218](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1207-L1218) (OpenBMB's) |
+| MiniCPM-o 4.5, vision only (`openbmb/MiniCPM-o-4_5-gguf`, projector `vision/MiniCPM-o-4_5-vision-F16.gguf`) | as MiniCPM-V 4.5: `minicpm_v_cot` on MMMU, MMBench, MMStar and OCRBench; `minicpm_v` on RealWorldQA, MME and POPE | T 0.7, seed 0 (top_p 1.0, top_k 0, repetition 1.0: neutral) | 32,768 (ours; OpenBMB's 8,192 cuts long reasoning) | on | [card](https://huggingface.co/openbmb/MiniCPM-o-4_5); VLMEvalKit [minicpm_v.py L1320-L1349](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1320-L1349), [L1366-L1384](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1366-L1384) (OpenBMB's) |
 | MiniCPM-V 4.6-Thinking (`openbmb/MiniCPM-V-4.6-Thinking-gguf`) | `minicpm_v_cot` on every benchmark | T 0.7, seed 0 (top_p 1.0, top_k 0, repetition 1.0: neutral) | 32,768 (ours; OpenBMB's 8,192 cuts long reasoning) | on | VLMEvalKit [minicpm_v.py L1566-L1576](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1566-L1576), [L1611-L1617](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1611-L1617) (OpenBMB's) |
-| MiniCPM-V 4.7 1B (`openbmb/MiniCPM-V-4.7-1B-gguf` at revision `75785938`, projector `mmproj-model-f16-4x.gguf`) | `minicpm_v_cot` on every benchmark, as MiniCPM-V 4.6-Thinking | T 0.7, seed 0 (top_p 1.0, top_k 0, repetition 1.0: neutral) | 32,768 (ours) | on | [card](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B): the 4x projector (its mode for finer detail, four times the visual tokens of the default 16x); [gguf at 75785938](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B-gguf/tree/75785938dd7ed3efaf2dde273407ce8805b43498); VLMEvalKit [minicpm_v.py L1566-L1576](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1566-L1576) (its 4.6-Thinking sibling's) |
+| MiniCPM-V 4.7 1B / 35B-A3B (`openbmb/MiniCPM-V-4.7-1B-gguf`, which a plan pins at revision `75785938`; `AtomicChat/MiniCPM-V-4.7-1B-GGUF`, the same weights with a real F16 16x projector, where OpenBMB's `f16` projector files hold BF16; `openbmb/MiniCPM-V-4.7-35B-A3B-gguf`, its `thinking/` files. The recipe names no projector: the default 16x or the 4x) | `minicpm_v_cot` on every benchmark, as MiniCPM-V 4.6-Thinking | T 0.7, seed 0 (top_p 1.0, top_k 0, repetition 1.0: neutral) | 32,768 (ours) | on | [1B card](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B): the 16x and 4x projectors (the 4x for finer detail, four times the visual tokens); [35B-A3B card](https://huggingface.co/openbmb/MiniCPM-V-4.7-35B-A3B); [gguf at 75785938](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B-gguf/tree/75785938dd7ed3efaf2dde273407ce8805b43498); [AtomicChat gguf at b0efd525](https://huggingface.co/AtomicChat/MiniCPM-V-4.7-1B-GGUF/tree/b0efd52562b5115d80f81eba7c2b250b5f63bcf1); VLMEvalKit [minicpm_v.py L1566-L1576](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1566-L1576), [L1611-L1617](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/minicpm_v.py#L1611-L1617) (its 4.6-Thinking sibling's) |
+| LFM2.5-VL 450M / 1.6B (`LiquidAI/LFM2.5-VL-450M-GGUF`, `LiquidAI/LFM2.5-VL-1.6B-GGUF`) | the dataset's | greedy | 8,192 | none | VLMEvalKit [config.py L2434](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/config.py#L2434) (the 1.6B's; there is no 450M entry), [liquid.py L125](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/liquid.py#L125) (Liquid AI's) |
 | LFM2.5-VL-3B (`LiquidAI/LFM2.5-VL-3B-GGUF`) | `lfm2_5_vl_3b`: Liquid AI's VLMEvalKit prompts | greedy | 8,192 | none | VLMEvalKit [config.py L2437](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/config.py#L2437), [liquid.py L125](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/liquid.py#L125) (Liquid AI's) |
+| LFM3-VL-2B (`LiquidAI/LFM3-VL-2B-GGUF`) | `lfm2_5_vl_3b`, as LFM2.5-VL-3B | T 0.1, top_k 50, repetition 1.1, seed 0 | 16,384 (card) | on | [card](https://huggingface.co/LiquidAI/LFM3-VL-2B): Sampling parameters, and the 16,384 of its Transformers example; VLMEvalKit [liquid.py L125](https://github.com/open-compass/VLMEvalKit/blob/8eca8e5a1e27ba10c4e3760d09f912f11dca2389/vlmeval/vlm/liquid.py#L125) (LFM2.5-VL-3B's wrapper, Liquid AI's) |
+| Ministral 3 3B Reasoning (`unsloth/Ministral-3-3B-Reasoning-2512-GGUF`) | the dataset's, with no system message, so the template's reasoning system prompt stays | T 0.7, top_p 0.95, seed 0 | 32,768 (ours) | unset; the model always reasons | [card](https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512): System Prompt, Sampling Parameters, and the vision example's `top_p` |
+| MiMo-VL 7B RL 2508 (`bartowski/XiaomiMiMo_MiMo-VL-7B-RL-2508-GGUF`) | the dataset's | T 0.3, top_p 0.95, seed 0 | 16,384 (Xiaomi's) | unset; the model reasons by default | [card](https://huggingface.co/XiaomiMiMo/MiMo-VL-7B-RL-2508): Deployment Parameters, Thinking Control; Xiaomi's evaluation harness, [mivllm.py L62-L63](https://github.com/XiaomiMiMo/lmms-eval/blob/1ba1684caaf8c9f62433ec60b46120041dbad463/lmms_eval/models/mivllm.py#L62-L63) |
+| Step3-VL 10B (`JamePeng2023/Step3-VL-10B-GGUF`, a community conversion) | the dataset's | T 1.0, seed 0 (top_p 1.0, top_k 0: neutral) | 32,768 (ours) | unset; the model always reasons | [card](https://huggingface.co/stepfun-ai/Step3-VL-10B) and its `generation_config.json`; [report](https://arxiv.org/abs/2601.09668): Inference Settings |
 
 Where we depart from the vendor's own run, and why:
 
-- **Output budgets.** No public source gives Gemma 4's or MiniCPM-V 4.7's
-  evaluation budget: 32,768 is ours for both. VLMEvalKit gives InternVL3.5
-  thinking 65,536 tokens, more than the models' 40,960-token context: 32,768
-  here. OpenBMB's VLMEvalKit config stops MiniCPM-V 4.5 and 4.6-Thinking at
-  8,192 tokens; they get 32,768 here, so a long reasoning chain is not cut and
-  scored wrong: a recipe never holds a model below what its settings allow.
-- **MiniCPM-V 4.5 thinks on all seven benchmarks.** OpenBMB's wrapper thinks
-  on MMMU, MMBench and MMStar and answers the other four without thinking (with
-  its own prompts, as here); the recipe policy runs every reasoning model with its
-  reasoning on. Its wrapper's `<think>\nI` reply prefix is not reproduced: a
-  chat template kwarg cannot write into the reply.
-- **MiniCPM-V 4.7 thinks.** Its card evaluates only the instruct mode, and
-  OpenBMB's gguf commits of 2026-10-20 hard-disable thinking in the chat
-  template. A plan pins the gguf at `75785938`, the last revision whose
-  template carries the `enable_thinking` switch (the weights are the same), and
-  the recipe and prompts are its 4.6-Thinking sibling's. On a later revision
-  the probe finds no switch and the cell fails rather than run without
-  thinking.
+- **Output budgets.** No public source gives an evaluation budget for Gemma 4
+  (any size), MiniCPM-V 4.7 or Ministral 3 Reasoning: 32,768 is ours for each.
+  VLMEvalKit gives InternVL3.5 thinking 65,536 tokens, more than the models'
+  40,960-token context: 32,768 here. OpenBMB's VLMEvalKit configs stop
+  MiniCPM-V 4.5, MiniCPM-o 4.5 and 4.6-Thinking at 8,192 tokens; they get
+  32,768 here, so a long reasoning chain is not cut and scored wrong.
+  Step3-VL's report allows 65,536 tokens, the model's whole context: 32,768
+  here. MiMo-VL keeps the 16,384 that Xiaomi's own harness caps it at;
+  VLMEvalKit lists only the earlier MiMo-VL-7B-RL, at its wrapper's default of
+  2,048.
+- **MiniCPM-V 4.5 and MiniCPM-o 4.5 think on all seven benchmarks.** OpenBMB's
+  wrappers think on MMMU, MMBench and MMStar (MiniCPM-o's on OCRBench too) and
+  answer the others without thinking (with their own prompts, as here); the
+  recipe policy runs every reasoning model with its reasoning on. MiniCPM-V
+  4.5's wrapper's `<think>\nI` reply prefix is not reproduced: a chat template
+  kwarg cannot write into the reply.
+- **MiniCPM-V 4.7 thinks.** Its cards evaluate only the instruct mode, and
+  the 35B-A3B's GGUF notes say it is not trained as a reasoning model.
+  OpenBMB's 1B gguf commits of 2026-10-20 hard-disable thinking in the chat
+  template: a plan pins that gguf at `75785938`, the last revision whose
+  template carries the `enable_thinking` switch (the weights are the same),
+  and AtomicChat's GGUFs carry the same template. The 35B-A3B's root GGUFs
+  cannot think either; it runs the identical weights in the repo's `thinking/`
+  folder, whose template has the switch. The recipe and prompts are the
+  4.6-Thinking sibling's. On a template without the switch the probe finds
+  none and the cell fails rather than run without thinking.
 - **Gemma 4 thinks.** VLMEvalKit's Gemma 4 wrapper (not Google's) runs it
   without thinking at 4,096 tokens; Google's card documents the thinking
   switch, and the recipe policy turns it on.
-- **One seed.** A sampled recipe runs once, from base seed 0, each sample at
-  the seed its rule derives ([Sampling](#sampling)). llama.cpp's random
-  numbers are not Hugging Face's or vLLM's, so a sampled answer is not the
-  same draw as theirs at any seed; OpenBMB reports MiniCPM-V 4.5's thinking
-  scores as the mean of three runs.
+- **The larger Qwen models run the small models' setting.** The Qwen3.5 9B
+  and 35B-A3B and Qwen3.6 35B-A3B cards give no vision-language setting, and
+  their general thinking setting is T 1.0. They run the T 0.6 of the Qwen3.5
+  small models' vision-language numbers, so the sizes stay comparable.
+- **MiMo-VL runs its card's deployment setting.** Xiaomi's own harness decodes
+  greedily, sends the system prompt "You are a helpful assistant." and asks
+  for a `\boxed{}` answer. Here it runs the card's T 0.3 and top_p 0.95; the
+  datasets' prompts, as VLMEvalKit runs the earlier MiMo-VL-7B-RL; and no
+  system message of its own, so the chat template's applies, as the card
+  advises.
+- **Step3-VL gets the datasets' prompts.** Its report asks MMMU, MMBench,
+  MMStar and RealWorldQA questions for a `Final answer:` line; VLMEvalKit's
+  Step3-VL entry sends the datasets' prompts, as here.
+- **LFM2.5-VL 450M and 1.6B get the datasets' prompts alone.** Liquid AI's
+  wrapper runs the 1.6B on the datasets' prompts but appends "Please answer
+  directly with only the final answer, do not give any explanation." to each
+  of these seven; the entries send the prompts without it.
+- **LFM3-VL-2B runs LFM2.5-VL-3B's prompts.** Its card names no benchmark
+  prompts, so it gets Liquid AI's VLMEvalKit prompts for LFM2.5-VL-3B.
+- **One seed.** A sampled recipe runs once, from base seed 0 (ours), each
+  sample at the seed its entry's rule derives ([Sampling](#sampling)).
+  llama.cpp's random numbers are not
+  Hugging Face's or vLLM's, so a sampled answer is not the same draw as theirs
+  at any seed; OpenBMB reports MiniCPM-V 4.5's thinking scores as the mean of
+  three runs.
 - **Sampling order and penalty window.** As Hugging Face and vLLM apply them
   ([Sampling](#sampling)), with the one remaining difference stated there.
 - **Image preprocessing.** Each image goes through the model's own projector
-  in llama.cpp, at its own resolution handling, with two exceptions where
+  in llama.cpp, at its own resolution handling, with one exception where
   llama.cpp's default would hold the model below its own processor. Gemma 4's
   processor sizes every image to a visual-token budget, and llama.cpp's
   default gives a small image a fraction of it (a POPE image got about 150
   tokens, and the model would answer that it could not see the image): its
   entries fix every image at 1,120 tokens (`parameter_image_tokens`).
-  MiniCPM-V 4.7 runs its 4x projector. VLMEvalKit's per-dataset image handling
-  (InternVL's tile counts per dataset, MiniCPM-V's upsizing and slicing
-  options) is not reproduced.
+  MiniCPM-V 4.7 runs either projector its GGUF ships, the default 16x or the
+  4x; the recipe names neither, and a result names the one its plan loaded.
+  VLMEvalKit's per-dataset image handling (InternVL's tile counts per dataset,
+  the MiniCPM wrappers' upsizing and slicing options) is not reproduced.
 - **Answer extraction** has no LLM judge ([Scoring](#scoring)).
 
 **A cell runs only its entry's recipe.** mgmt refuses to queue a cell whose
@@ -322,6 +359,13 @@ If any candidate fails to calibrate, the image term falls back to the
 that point bounds it), floored at 256 tokens per image
 ([Fallback & safety](vl-calibration.md#fallback--safety)).
 
+**Non-causal images.** llama.cpp decodes the image tokens of Gemma 4 12B and
+26B-A4B with non-causal attention, which needs a whole image in one
+micro-batch, and aborts when an image's tokens exceed it (the default is 512;
+the 12B's images come to 1,166 tokens at the 1,120 budget, measured on
+b11551). Their cells set raw `-ub 2048 -b 2048`, which the calibration runs
+under too.
+
 **Text term.** Scanned from the dataset, not guessed: the largest sample's
 text at one token per UTF-8 byte, floored at 256. That is an upper bound even
 for digit-dense OCR text, where BPE emits about one token per digit, and about
@@ -358,8 +402,9 @@ slots and this cell's default is calibrated:
   without measuring; one below it is calibrated first, since a budgeted
   projector can give far fewer tokens than the grid. Every sample fitting is
   what lets the resume identity leave `ctx_size` out.
-- A raw `-np` above 1 needs the typed `parallel` or a pinned `ctx_size`: it
-  would otherwise split a one-slot context.
+- A raw `-np` above 1 would split a one-slot context: it is refused beside
+  the typed `parallel`, and without it unless `ctx_size` is pinned. Use the
+  typed `parallel` instead.
 - The `131072` **ceiling** bounds the total, because it stands for a KV cache
   the device allocates in one piece. A slot count a small-image dataset runs
   comfortably can be refused on an image-heavy one; the error names the
@@ -455,9 +500,10 @@ calibration and no slot arithmetic.
 - **Sampling.** Each request sends every knob, the entry's or the neutral
   value: `temperature`, `top_p` 1.0, `top_k` -1 (vLLM's "no cut"), `min_p` 0,
   `presence_penalty` and `frequency_penalty` 0, `repetition_penalty` 1.0, and
-  the per-sample seed when the entry pins one. The server starts with
-  `--generation-config vllm`, so a repo's `generation_config.json` sets no
-  default behind the recipe (its stop tokens still apply). vLLM applies the
+  the sample's seed ([Sampling](#sampling)) when the entry pins one. The
+  server starts with `--generation-config vllm`, so a repo's
+  `generation_config.json` sets no default behind the recipe (its stop tokens
+  still apply). vLLM applies the
   penalties and the temperature as Hugging Face does; its presence penalty
   counts the answer only, its repetition penalty the prompt too.
 - **Thinking.** The client probes the template through vLLM's `/tokenize`
@@ -467,8 +513,10 @@ calibration and no slot arithmetic.
   `internvl_r1` profile thinks through its system prompt as on llama.cpp.
   There is no restart: the kwarg is per request.
 - **The reply** is the model's text as written, as llama.cpp returns it: no
-  reasoning parser takes it apart (`--reasoning-parser` is reserved), and the
-  special tokens the model writes stay in it (`skip_special_tokens: false`).
+  reasoning parser takes it apart (`--reasoning-parser` is reserved; reasoning
+  a server streams apart anyway goes back in front of the answer, closed by
+  `</think>`), and the special tokens the model writes stay in it
+  (`skip_special_tokens: false`).
   Gemma 4's thought channel is marked by special tokens, and the scorer finds
   the reasoning by them.
 - **Image budget.** `parameter_image_tokens` is sent as each request's
@@ -476,8 +524,9 @@ calibration and no slot arithmetic.
   sizes every image to, on a server started with `--trust-request-mm-kwargs`
   (vLLM refuses a request's processor kwargs otherwise). Before any sample, two
   gray images, 1024×1024 and 256×512, are tokenized at the budget and at half
-  of it: at the budget each must come to between 80% of it and the budget plus
-  16 marker tokens, and at half to a different count, or the cell is refused
+  of it (twice it, under a budget of 140): at the budget each must come to
+  between 80% of it and the budget plus 16 marker tokens, and at the other to
+  a different count, or the cell is refused
   rather than score images sized off its recipe. A processor that sizes images
   by their pixels, or to a fixed count, fails one or the other.
 - **Context.** `max_model_len` is left unset, the model's own context. A cell
@@ -519,9 +568,17 @@ management service refuses a torch model's vlm_eval on any runtime but
 A vLLM row is not a llama.cpp row: the weights are the repo's own (BF16 as
 published), the vision preprocessing is the repo's processor rather than
 llama.cpp's port of it, and a sampled answer is a different random draw.
-Which architectures run depends on the vLLM version: every family in the
-recipes table runs on vLLM 0.32, the first with MiniCPM-V 4.7, and the
-bundled runtime catalog carries it for ROCm 7.2.3 (`vllm@0.32.0+rocm723`).
+
+A vLLM cell runs only a repo its entry's recipe lists, and the recipes list
+one only for Qwen3.5 0.8B, 2B and 4B, Gemma 4 E2B, E4B and 12B, InternVL3.5
+2B and 4B, MiniCPM-V 4.5, 4.6-Thinking and 4.7 1B, LFM2.5-VL 1.6B and 3B, and
+LFM3-VL-2B. The other models run on llama.cpp only. Which architectures run
+depends on the vLLM version: vLLM 0.32, the first with MiniCPM-V 4.7, runs all
+of these, and the bundled runtime catalog carries it for ROCm 7.2.3
+(`vllm@0.32.0+rocm723`).
+Gemma 4 12B has no vLLM rows: vLLM 0.32 on ROCm misreads its 1,120-token
+images, an image span longer than the model's 1,024-token sliding window, so
+its full-precision reference is the BF16 GGUF on llama.cpp.
 
 ## Scoring
 
@@ -529,15 +586,18 @@ Scoring is outside the client: mgmt submits the completions to pipette-scores,
 which computes each headline over the full dataset with VLMEvalKit's own
 scoring code at commit `8eca8e5`, and only when the reported corpus digest is
 the entry's pin. The headline per benchmark and the extraction rules are in
-[pipette-mgmt docs/benchmarks.md §2.9](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/benchmarks.md#29-vlm-eval-accuracy). Answer extraction is deterministic, with no LLM judge and
-no random choice: VLMEvalKit's matcher reads the answer first, and only an
-answer it cannot read, where VLMEvalKit would ask a judge, goes to fixed
-fallback readers, each counted in the score context's `fallback_answers`. A
-score can therefore read below a published VLMEvalKit number that a judge
-helped.
+[pipette-mgmt docs/benchmarks.md §2.9](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/benchmarks.md#29-vlm-eval-accuracy).
+Before matching, the reasoning is removed: a closed block (`<think>…</think>`,
+`[THINK]…[/THINK]`, Gemma 4's thought channel), the text up to a close whose
+opener the chat template wrote, and an opener never closed, with everything
+after it. A reply with no reasoning markup is graded whole. Answer extraction
+is deterministic, with no LLM judge and no random choice: VLMEvalKit's matcher
+reads the answer first, and only an answer it cannot read, where VLMEvalKit
+would ask a judge, goes to fixed fallback readers, each counted in the score
+context's `fallback_answers`. A score can therefore read below a published
+VLMEvalKit number that a judge helped.
 
 Where a family's wrapper cuts its reply down to the stated answer, so does the
 scorer: under `minicpm_v_cot` it reads OpenBMB's `Answer:` line as MiniCPM-V
 4.6's `extract_answer` does, even from a reply that ends inside its reasoning,
-on every benchmark but OCRBench. On MiniCPM-V 4.5's RealWorldQA run under that
-profile, 40% of the replies ended that way.
+on every benchmark but OCRBench.

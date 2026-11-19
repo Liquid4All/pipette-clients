@@ -146,8 +146,9 @@ methodology page:
 [gpqa_diamond](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/methodology/gpqa_diamond-2026.06.1.md),
 [ifbench](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/methodology/ifbench-2026.06.1.md),
 [ifstruct](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/methodology/ifstruct-release_v1_0.md)
-and
-[math_500](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/methodology/math_500-2026.06.1.md).
+and math_500
+([2026.06.1](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/methodology/math_500-2026.06.1.md),
+[2026.10.1](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/methodology/math_500-2026.10.1.md)).
 
 ## Runtime Details
 

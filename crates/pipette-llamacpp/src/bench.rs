@@ -42,7 +42,16 @@ pub struct BenchCommandBuilder {
     envs: Vec<EnvForward>,
     client_config: Option<LlamacppCliStockToolsExtraRuntimeConfiguration>,
     no_warmup: bool,
+    progress: bool,
 }
+
+/// What `llama-bench --progress` prints on stderr once the model is loaded, as
+/// its untimed pass starts (`llama-bench: benchmark 1/1: warmup prompt run`).
+pub(crate) const UNTIMED_PROMPT_PASS: &str = ": warmup prompt run";
+
+/// What it prints as a timed prompt pass starts
+/// (`llama-bench: benchmark 1/1: prompt run 1/1`).
+pub(crate) const TIMED_PROMPT_PASS: &str = ": prompt run ";
 
 impl BenchCommandBuilder {
     pub fn new(
@@ -63,7 +72,14 @@ impl BenchCommandBuilder {
             envs: Vec::new(),
             client_config: None,
             no_warmup: false,
+            progress: false,
         }
+    }
+
+    /// Prints a line on stderr as each pass starts ([`TIMED_PROMPT_PASS`]).
+    pub fn progress(mut self, progress: bool) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Skips the tool's own untimed pass, for a run whose warm-up came before.
@@ -144,6 +160,9 @@ impl BenchCommandBuilder {
         tokens.extend(knobs.raw.iter().cloned());
         if self.no_warmup {
             tokens.push("--no-warmup".to_owned());
+        }
+        if self.progress {
+            tokens.push("--progress".to_owned());
         }
         // One rep per invoke; the reps are the typed entry's. `raw` cannot carry one:
         // every bench cell reserves `--repetitions`.
@@ -324,6 +343,7 @@ mod tests {
         &["--mmap", "0", "--poll", "0", "--repetitions", "1", "--threads", "8"]
     )]
     #[case::no_warmup(launch().no_warmup(true), &["--no-warmup", "--repetitions", "1"])]
+    #[case::progress(launch().progress(true), &["--progress", "--repetitions", "1"])]
     #[case::load_mode_alone(
         launch().load_mode(Some(LlamacppLoadMode::MmapMlock)),
         &["--load-mode", "mmap+mlock", "--repetitions", "1"]

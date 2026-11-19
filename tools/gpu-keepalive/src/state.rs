@@ -145,7 +145,7 @@ pub fn log_line(level: &str, message: &str) {
     let _ = writeln!(
         file,
         "{} {level} {}",
-        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+        jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ"),
         message.replace(['\r', '\n'], " ")
     );
 }

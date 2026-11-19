@@ -104,7 +104,8 @@ Two properties matter when reading them:
   how much.
 - **`observation_max_host_bytes` is resident-only, so it is not always the same
   quantity as `max_host_bytes` on the same row.** On Android and Linux,
-  llama.cpp's text, VL and ASR memory metrics use the swap-aware peak (`max(VmHWM, max(VmRSS + VmSwap))`).
+  llama.cpp's text, VL and ASR memory metrics and the OVMS, OpenVINO and ONNX
+  GenAI `max_memory_usage` use the swap-aware peak (`max(VmHWM, max(VmRSS + VmSwap))`).
   On a row that swapped, that metric reads *higher* than the observation beside
   it. The difference is the metric's swap uplift, shown rather than hidden.
   Every other metric reads the same counter as its observation.
@@ -453,7 +454,7 @@ Each OS page holds its counters, cadences, reference measurements and caveats.
 | [macOS](peak-memory-macos.md) | `phys_footprint` lifetime maximum (llama.cpp, MLX, ONNX GenAI, Core AI) | none: unified memory; MLX's Metal allocator peak is a diagnostic |
 | [Windows](peak-memory-windows.md) | Process Status API (PSAPI) `PeakWorkingSetSize` | PDH `Total Committed` per adapter, GPU and NPU |
 | [Android](peak-memory-android.md) | `max(VmHWM, max(VmRSS + VmSwap))` from `/proc` | Snapdragon build: KGSL mappings (GPU) and dmabufs (NPU) |
-| [Linux](peak-memory-linux.md) | llama.cpp: Android's swap-aware `/proc` figure; OVMS, OpenVINO, ONNX GenAI: `VmHWM`; torch-oai: its cgroup's own memory | the Direct Rendering Manager (DRM) drivers' fdinfo, and the NVIDIA Management Library (NVML); torch-oai's AMD flavors the job's whole cards |
+| [Linux](peak-memory-linux.md) | llama.cpp, OVMS, OpenVINO, ONNX GenAI: Android's swap-aware `/proc` figure; torch-oai: its cgroup's own memory | the Direct Rendering Manager (DRM) drivers' fdinfo, and the NVIDIA Management Library (NVML); torch-oai's AMD flavors the job's whole cards |
 | [iOS](peak-memory-ios.md) | in-process `phys_footprint` poller, plus the kernel's interval maximum on the [private-API build](../pipette-ios/private-thermal-release-build.md) | none: unified memory |
 
 ## Result Validity and Comparability

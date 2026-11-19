@@ -24,10 +24,12 @@ libc.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 
-# `waitid` for an exited child's peak; on Linux, NVML, loaded at run time for
-# an NVIDIA GPU's memory, and the AMD GPU open's log.
+# `waitid` for an exited child's peak; the swap-aware peak's terms as a row's
+# `client_extras`; on Linux, NVML, loaded at run time for an NVIDIA GPU's
+# memory, and the AMD GPU open's log.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 
 # PSAPI for the peak working set, PDH and D3DKMT for the GPU and NPU memory.

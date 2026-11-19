@@ -79,7 +79,8 @@ counts depend on the build (see
 rows from every `2026.08.1` public release, count differently:
 their multi-image llama-server rows and their MLX rows include the markers, a
 few tokens high per image. Their single-image llama-server rows include the
-markers only when the helper was unavailable, and the row does not record that.
+markers only when the helper was unavailable, failed, or gave a count outside 1
+to `prompt_tokens`, and the row does not record that.
 
 **The marker scheme differs per model**, and the count per image can vary.
 For this reason, a marker-free count cannot be derived from a marker-inclusive
@@ -153,12 +154,8 @@ bound, `N × (patch·merge)²` pixels: `--image-min-tokens` the minimum and
 | `--image-min-tokens N` | `LLAMA_ARG_IMAGE_MIN_TOKENS` | floor: upscales small images to ≥ N tokens |
 | `--image-max-tokens N` | `LLAMA_ARG_IMAGE_MAX_TOKENS` | cap: downscales large images to ≤ N tokens (per tile) |
 
-The batch sizes matter too, on one kind of model: llama.cpp caps the image
-tokens of a projector the text model attends to non-causally at the effective
-micro-batch, the smaller of `--batch-size` and `--ubatch-size`.
-
-**They only affect dynamic-resolution models.** Measured with
-`--image-min-tokens 256 --image-max-tokens 256` (pin to ~256), as the
+**The min/max-token flags only affect dynamic-resolution models.** Measured on
+`b9789` with `--image-min-tokens 256 --image-max-tokens 256` (pin to ~256), as the
 marker-inclusive difference the server reported, so each figure includes the
 model's image markers (about 2); `image_tokens` excludes them:
 
@@ -175,6 +172,23 @@ GGUF metadata and have no CLI override (unlike vLLM, which forwards HF
 `mm_processor_kwargs` such as `max_dynamic_patch`/`use_thumbnail` at runtime).
 To keep a tiling model at one tile, cap its **input resolution** below its tile
 size (InternVL: ≤ 448 px → one tile = 256).
+
+The batch sizes matter too, on one kind of model: a projector whose image the
+text model attends to non-causally. On recent builds these include Gemma 3,
+DeepSeek V4 and every Gemma 4 model except E2B and E4B. llama.cpp attends over
+such an image inside one micro-batch, the smaller of `--batch-size` and
+`--ubatch-size` (512 by default). An image with more tokens than that fails
+decode's assert (`non-causal attention requires n_ubatch >= n_tokens`), and the
+process aborts. llama-server and `llama-mtmd-cli` cap the image-token budget
+(`--image-max-tokens`, or the projector's default) at the micro-batch, but the
+budget becomes a pixel bound, not a count, so an image can still come out
+larger than the micro-batch. A cell whose images need more sets both batch
+sizes in `raw` (`-ub` and `-b`, or `--ubatch-size` and `--batch-size`); the
+calibration helper gets them too. Measured on `b11551`: Gemma 4 12B with a
+1120-token budget aborted at the default `-ub 512`, in the server and in the
+helper. Its cells run `-ub 2048 -b 2048`, under which an image counts 1166
+tokens. Nothing checks the batch sizes before the run
+([vl-calibration.md](vl-calibration.md#fallback--safety)).
 
 ## Comparing models
 

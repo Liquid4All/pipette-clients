@@ -287,14 +287,35 @@ fn a_memory_cell_reads_the_servers_peak() -> anyhow::Result<()> {
         anyhow::bail!("not a host-only memory result: {:?}", response.result_data);
     };
     assert!(max_host_bytes > 0);
+    // On Linux the peak counts swap, which the observation carries beside its
+    // resident term.
+    let observed = response
+        .memory
+        .max_host_bytes
+        .unwrap_or(0)
+        .saturating_add(response.memory.max_swap_bytes.unwrap_or(0));
     assert!(
-        response
-            .memory
-            .max_host_bytes
-            .is_some_and(|observed| observed >= max_host_bytes),
+        observed >= max_host_bytes,
         "{max_host_bytes} against {:?}",
         response.memory
     );
+    let mut extras = response
+        .client_extras
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    extras.sort_unstable();
+    let expected: &[&str] = if cfg!(target_os = "linux") {
+        &[
+            "major_faults",
+            "max_swap_kib",
+            "peak_committed_kib",
+            "peak_rss_kib",
+        ]
+    } else {
+        &[]
+    };
+    assert_eq!(extras, expected);
     assert_eq!(
         response.command.get(1).map(String::as_str),
         Some("pipette_openvino_server.py")
