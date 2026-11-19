@@ -19,6 +19,9 @@ package ai.liquid.pipette
  * See `pipette-mgmt` `docs/client-integration.md` §2 and `docs/httpapi.md` §2.4.1; the CLI counterpart is
  * `pipette_cli::client::worker::profile::runtime_capability_flags` and the iOS one is `PlannerWorker.capabilityFlags`.
  */
+/** The two source trees the ONNX Runtime GenAI engine is built from, as the committed stamp names each: a release tag or a short commit. */
+data class OnnxGenaiStack(val onnxRuntime: String, val genai: String)
+
 object Capabilities {
   /** Prefix of the placeholder values [NativeLib.llamaCppCommit] returns in place of a real build id. */
   private const val NATIVE_SENTINEL_PREFIX = "native-"
@@ -42,7 +45,13 @@ object Capabilities {
    * The result is sorted. The server voids the client's queue standing whenever the reported set differs from the stored one. A stable order
    * therefore keeps a relaunch from costing a reindex and a lease relinquish.
    */
-  fun flags(nativeAvailable: Boolean, llamaCppCommit: String, llamaCppTag: String?, buildVersion: String?): List<String> {
+  fun flags(
+    nativeAvailable: Boolean,
+    llamaCppCommit: String,
+    llamaCppTag: String?,
+    buildVersion: String?,
+    onnxGenai: OnnxGenaiStack? = null,
+  ): List<String> {
     // No native library means no runtime at all, so advertise nothing rather than claim a capability we cannot honor. The client then matches no
     // runtime-gated job, which is the truthful outcome.
     if (!nativeAvailable) return emptyList()
@@ -56,6 +65,16 @@ object Capabilities {
     // profile alone — before any job finishes. The flag carries the string this build submits as `client_version` whenever that string is already
     // canonical, which holds for every release version CI stamps. The value reaches the build through an environment variable, so canonicalize it
     // here: a non-canonical flag is a `400` on the whole profile update.
+    // The ONNX Runtime GenAI engine, when this build has it and talks to a collector that can hand it work. The levels are iOS's
+    // (`PlannerWorker.capabilityFlags`): both source trees affect output, so each gets a flag, and the bare versioned form names genai's.
+    if (onnxGenai != null) {
+      flags += "runtime:onnx_genai"
+      buildId(onnxGenai.genai)?.let {
+        flags += "runtime:onnx_genai:$it"
+        flags += "runtime:onnx_genai:onnxruntime-genai=$it"
+      }
+      buildId(onnxGenai.onnxRuntime)?.let { flags += "runtime:onnx_genai:onnxruntime=$it" }
+    }
     canonical(buildVersion)?.let { flags += "client_version:$it" }
     return flags.distinct().sorted()
   }
@@ -80,5 +99,9 @@ object Capabilities {
       NativeLib.llamaCppCommit(),
       NativeLib.llamaCppTag(),
       BuildConfig.BUILD_VERSION.takeIf { BuildConfig.HAS_RELEASE_VERSION },
+      // Advertised with submission, not with the engine alone: a job claimed for a runtime whose result cannot be filed is a job lost.
+      OnnxGenaiStack(BuildConfig.ONNXRUNTIME_VERSION, BuildConfig.ONNXRUNTIME_GENAI_COMMIT).takeIf {
+        BuildConfig.ONNX_GENAI_ENGINE && BuildConfig.ONNX_GENAI_SUBMIT
+      },
     )
 }

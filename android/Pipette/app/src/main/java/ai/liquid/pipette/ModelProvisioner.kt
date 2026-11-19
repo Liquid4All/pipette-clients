@@ -37,6 +37,8 @@ class ModelProvisioner(
   /** `LocalStorage.resolveModelPath`. A function rather than the store, because that one call is all of it this needs. */
   private val resolvePath: (String) -> String?,
   private val downloads: Downloads,
+  /** The fetcher of directory models, or null where none is wired, which refuses such a model by name. */
+  private val packages: Packages? = null,
   /** The persisted transfer rows, re-read each poll: the worker updates them from another thread and a snapshot would never see the change. */
   private val records: () -> List<DownloadStore.Record>,
   private val isOnline: () -> Boolean,
@@ -58,6 +60,14 @@ class ModelProvisioner(
   }
 
   /**
+   * Puts a directory model on disk whole, returning its directory. Separate from [Downloads] because that layer names a transfer by one `.gguf` file,
+   * and a package is several files that are a model only together ([OnnxPackageFetcher]).
+   */
+  fun interface Packages {
+    fun ensure(ref: HfOnnxGenai, onStatus: (String) -> Unit): Result<String>
+  }
+
+  /**
    * Ensure the weights [ref] names are on disk, returning their resolved absolute path.
    *
    * Weights and projector are separate entry points rather than one call returning a pair, because [JobRunner] resolves `modelPath` and `mmprojPath`
@@ -69,12 +79,16 @@ class ModelProvisioner(
     when (ref) {
       is Model.GgufText -> ensureOne(ref.model.repo, ref.model.filename, onStatus)
       is Model.GgufVision -> ensureOne(ref.model.repo, ref.model.filename, onStatus)
+      is Model.OnnxGenai ->
+        packages?.ensure(ref.model, onStatus)
+          ?: Result.failure(IllegalStateException("This build has no ONNX Runtime GenAI engine, so it cannot run ${ref.model.name}"))
     }
 
   /** Ensure the projector a vision [ref] names, or null when [ref] names none. */
   override fun ensureMmproj(ref: Model, onStatus: (String) -> Unit): Result<String>? =
     when (ref) {
-      is Model.GgufText -> null
+      is Model.GgufText,
+      is Model.OnnxGenai -> null
       is Model.GgufVision -> ensureOne(ref.model.repo, ref.model.mmprojFilename, onStatus)
     }
 

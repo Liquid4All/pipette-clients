@@ -136,4 +136,70 @@ class JobRunnerProvisioningTest {
     assertTrue("present weights must not be fetched", provisioner.weightsAsked.isEmpty())
     assertEquals(listOf(missing), engine.loads.map { it.modelPath })
   }
+
+  private val packageRef =
+    Model.OnnxGenai(
+      HfOnnxGenai(HfRepo.parseSlug("org/genai-package"), RepoSubpath.parse("int4"), HfRevision.parse("5f5f794c1c23c9d5ee142af85df02a6cc52d6945"))
+    )
+  private val packageDir = "/data/models/org/genai-package/int4"
+
+  private fun packageCell(benchmarkId: String = DECODE_ID, benchmarkType: String = DECODE_TYPE) =
+    JobCell(benchmarkId = benchmarkId, benchmarkType = benchmarkType, modelPath = packageDir, modelName = "org/genai-package", modelRef = packageRef)
+
+  /**
+   * A package is asked of the provisioner even when its directory is there, unlike a file. The path says nothing of which snapshot it holds, and a
+   * cell pinned to one would otherwise run, and record, whatever had since replaced it.
+   */
+  @Test
+  fun `a package already present is still asked of the provisioner`() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine()
+    val provisioner = FakeProvisioner(weights = Result.success(packageDir))
+    val manifest = manifestWith(packageCell())
+    store.saveJobManifest(manifest)
+
+    runner(store, engine, provisioner).resume(manifest.jobId)
+
+    assertEquals(listOf<Model>(packageRef), provisioner.weightsAsked)
+    assertEquals(listOf(packageDir), engine.loads.map { it.modelPath })
+    assertEquals(CellRunStatus.COMPLETED, manifest.cells.single().runStatus)
+  }
+
+  /** And when the provisioner refuses it, as it does a package from another snapshot, the path on disk is not loaded in its place. */
+  @Test
+  fun `a package the provisioner refuses is not loaded from its path`() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine()
+    val provisioner = FakeProvisioner(weights = Result.failure(IllegalStateException("it is pinned to another snapshot")))
+    val manifest = manifestWith(packageCell())
+    store.saveJobManifest(manifest)
+
+    runner(store, engine, provisioner).resume(manifest.jobId)
+
+    val failed = manifest.cells.single()
+    assertEquals(CellRunStatus.FAILED, failed.runStatus)
+    assertTrue(failed.errorMessage.orEmpty(), failed.errorMessage?.contains("another snapshot") == true)
+    assertTrue(engine.loads.isEmpty())
+  }
+
+  /**
+   * A kind the ONNX Runtime GenAI engine does not run is refused before its package is fetched or loaded. Refused by the engine instead, each such
+   * cell would cost a multi-gigabyte load and warm the device ahead of the next timed one.
+   */
+  @Test
+  fun `a cell the ONNX engine does not run is refused before its package is fetched`() {
+    val store = FakeJobStore()
+    val engine = FakeBenchmarkEngine()
+    val provisioner = FakeProvisioner(weights = Result.success(packageDir))
+    val manifest = manifestWith(packageCell(benchmarkType = BenchmarkType.EVAL.wire))
+    store.saveJobManifest(manifest)
+
+    runner(store, engine, provisioner).resume(manifest.jobId)
+
+    val failed = manifest.cells.single()
+    assertEquals(CellRunStatus.FAILED, failed.runStatus)
+    assertTrue(failed.errorMessage.orEmpty(), failed.errorMessage?.contains("chat template") == true)
+    assertTrue("nothing is fetched for a cell that cannot run", provisioner.weightsAsked.isEmpty())
+    assertTrue(engine.loads.isEmpty())
+  }
 }

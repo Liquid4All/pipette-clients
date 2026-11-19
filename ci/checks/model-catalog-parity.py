@@ -76,19 +76,22 @@ IOS_ONNX_ENTRY = re.compile(
 # case the builder constructs in its own body.
 IOS_ONNX_ROW = re.compile(r'\.onnxGenai\(\s*"')
 
-# Android has no ONNX Runtime GenAI catalog yet (PIP-593). Any mention of ONNX there
-# fails, so the Android coordinate grammar gets written with its first rows instead of
-# comparing against an empty set forever.
-ANDROID_ONNX_MARKER = re.compile(r"onnx", re.IGNORECASE)
+# `OnnxPreset("Display Name", "org/repo", prefix = "a/b", revision = "sha", bytes = 123)`,
+# wrapped across lines: the Android row, one per `.onnxGenai(` row above.
+ANDROID_ONNX_ENTRY = re.compile(
+    r'OnnxPreset\(\s*"[^"]*",\s*"([^"]+)",'
+    r'\s*prefix\s*=\s*"([^"]*)",'
+    r'\s*revision\s*=\s*"([^"]+)"'
+)
+# Anchored on the display-name literal, as the iOS counter is: the `data class
+# OnnxPreset(` declaration opens with a parameter, not a string.
+ANDROID_ONNX_ROW = re.compile(r'OnnxPreset\(\s*"')
 
-# iOS-only because Android has no ONNX runtime yet; PIP-593 removes this set.
-IOS_ONLY_ONNX: set[tuple[str, str, str]] = {
-    (
-        "microsoft/Phi-3-mini-4k-instruct-onnx",
-        "cpu_and_mobile/cpu-int4-rtn-block-32",
-        "5f5f794c1c23c9d5ee142af85df02a6cc52d6945",
-    ),
-}
+# ONNX rows a platform offers alone, each with its reason. Empty: both engines run the
+# same packages on the CPU provider.
+IOS_ONLY_ONNX: set[tuple[str, str, str]] = set()
+
+ANDROID_ONLY_ONNX: set[tuple[str, str, str]] = set()
 
 
 def normalized_prefix(prefix: str) -> str:
@@ -135,19 +138,21 @@ def extract(
     return set(found)
 
 
-def extract_onnx(path: Path) -> set[tuple[str, str, str]]:
-    """Every `(repo, normalized prefix, revision)` in the iOS ONNX catalog.
+def extract_onnx(
+    path: Path, pattern: re.Pattern[str], row: re.Pattern[str], name: str
+) -> set[tuple[str, str, str]]:
+    """Every `(repo, normalized prefix, revision)` in one ONNX catalog.
 
     Same read-it-all-or-fail rule as `extract`.
     """
     text = path.read_text(encoding="utf-8")
-    found = IOS_ONNX_ENTRY.findall(text)
-    authored = len(IOS_ONNX_ROW.findall(text))
+    found = pattern.findall(text)
+    authored = len(row.findall(text))
     if len(found) != authored:
         print(
-            f"iOS ONNX: read {len(found)} coordinates from {authored} catalog rows in "
-            f"{path}.\n  A row this check cannot parse is invisible to it. Widen "
-            "IOS_ONNX_ENTRY, or IOS_ONNX_ROW if the extra hit is prose.",
+            f"{name} ONNX: read {len(found)} coordinates from {authored} catalog rows "
+            f"in {path}.\n  A row this check cannot parse is invisible to it. Widen "
+            "the coordinate regex, or the row counter if the extra hit is prose.",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -201,31 +206,28 @@ def main() -> int:
         )
         failed = failed or bool(undeclared or stale)
 
-    android_text = (root / ANDROID_CATALOG).read_text(encoding="utf-8")
-    if ANDROID_ONNX_MARKER.search(android_text):
-        print(
-            f"the Android catalog ({ANDROID_CATALOG}) mentions ONNX, but this check "
-            "has no coordinate grammar for its rows. Add one beside IOS_ONNX_ENTRY "
-            "and compare both sides, then clear IOS_ONLY_ONNX of anything Android now "
-            "offers (PIP-593).",
-            file=sys.stderr,
+    ios_onnx = extract_onnx(root / IOS_CATALOG, IOS_ONNX_ENTRY, IOS_ONNX_ROW, "iOS")
+    android_onnx = extract_onnx(
+        root / ANDROID_CATALOG, ANDROID_ONNX_ENTRY, ANDROID_ONNX_ROW, "Android"
+    )
+    onnx_sides = (
+        ("iOS", "Android", ios_onnx - android_onnx, IOS_ONLY_ONNX, ANDROID_CATALOG),
+        ("Android", "iOS", android_onnx - ios_onnx, ANDROID_ONLY_ONNX, IOS_CATALOG),
+    )
+    for side, other, diverging, declared, add_to in onnx_sides:
+        undeclared = diverging - declared
+        stale = declared - diverging
+        report(
+            f"ONNX package present on {side} but missing on {other}",
+            undeclared,
+            f"add to {add_to}, or declare it in this check",
         )
-        return 1
-
-    ios_onnx = extract_onnx(root / IOS_CATALOG)
-    undeclared_onnx = ios_onnx - IOS_ONLY_ONNX
-    stale_onnx = IOS_ONLY_ONNX - ios_onnx
-    report(
-        "present in the iOS ONNX catalog but not declared",
-        undeclared_onnx,
-        "declare it in IOS_ONLY_ONNX with its reason",
-    )
-    report(
-        "declared iOS-only ONNX but no longer in the catalog",
-        stale_onnx,
-        "drop from IOS_ONLY_ONNX",
-    )
-    failed = failed or bool(undeclared_onnx or stale_onnx)
+        report(
+            f"declared {side}-only ONNX but no longer diverging",
+            stale,
+            "drop from this check's exemption list",
+        )
+        failed = failed or bool(undeclared or stale)
 
     if failed:
         return 1
@@ -233,7 +235,11 @@ def main() -> int:
     shared = len(ios & android)
     divergent = len(IOS_ONLY) + len(ANDROID_ONLY)
     print(f"GGUF catalogs agree on {shared} entries, {divergent} declared divergent")
-    print(f"ONNX: {len(ios_onnx)} iOS rows, all declared iOS-only pending PIP-593")
+    onnx_divergent = len(IOS_ONLY_ONNX) + len(ANDROID_ONLY_ONNX)
+    print(
+        f"ONNX catalogs agree on {len(ios_onnx & android_onnx)} entries, "
+        f"{onnx_divergent} declared divergent"
+    )
     return 0
 
 

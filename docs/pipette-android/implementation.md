@@ -398,6 +398,12 @@ The Models tab (`compose/models/`, `ModelsViewModel`) supports:
   downloading the selected families
 - pausing, resuming, and canceling a download
 
+An ONNX Runtime GenAI package is listed as one model: `ModelStore` scans for a
+directory holding a `genai_config.json` under the repo layout, and its size is its
+files'. Deleting it removes the directory. The tab cannot download one: a run that
+names a package fetches it through `OnnxPackageFetcher`
+([onnx-genai-runtime.md](onnx-genai-runtime.md#models)).
+
 The headless `model=` argument downloads a model by its exact coordinate before
 a run (`ModelProvisioner`). The Compose UI has no field for a manual Hugging
 Face identifier or for the Hugging Face token. The token comes from an
@@ -620,6 +626,13 @@ the AIDL boundary. The main-process gate runs only between cells. See
   KV-cache clear, sampler reset, RSS read, `nativeDecodeNGreedyIgnoreEog` (the
   timed decode loop, in C++), and the mtmd calls for vision-language cells
 - `BenchmarkCrashReporter.nativeInit` (`android/native/jni_crash_reporter.cpp`)
+
+**ONNX Runtime GenAI JNI surface** (`android/native/onnx_genai_jni.cpp`, `kotlinEngine`
+only, on `OnnxGenai`): `nativeIsBuilt`, `nativeOnnxRuntimeVersion`,
+`nativeGenaiCommit`, `nativeModelLoad`, `nativeModelFree`, `nativeEncode`, and
+`nativeGenerate`, one fixed-length generation timed in C++. `EngineActor` reaches it
+through `OnnxGenaiBenchmark` when the model path is a package. The engine's own page
+is [onnx-genai-runtime.md](onnx-genai-runtime.md).
 
 **`rustEngine` JNI surface** (`crates/pipette-android/src/lib.rs`, on
 `LlamaEngine` unless noted):
@@ -905,6 +918,13 @@ The [cpuset guard](#cpuset-demotion-guard) is covered by:
   drops at the job boundary and not per cell) and `JobRunnerTest` (each payload
   carries its own cpuset reading)
 
+The ONNX Runtime GenAI engine and its models are covered by `OnnxGenaiTest` (the
+timing arithmetic and the refusals, in `app/src/testKotlinEngine`),
+`OnnxGenaiPackageTest`, `OnnxPackageFetcherTest` (against a scripted network),
+`OnnxGenaiModelTest`, and the ONNX cases in `ModelUriTest`, `ModelStoreRefTest`,
+`ModelCatalogOfferableTest`, `LocalStoragePayloadTest` and
+`UnsubmittedResultCountTest`.
+
 Instrumented tests run on a device or emulator:
 
 - `app/src/androidTest`: `RemoteEngineIsolationTest` (process isolation),
@@ -912,7 +932,10 @@ Instrumented tests run on a device or emulator:
   (KleidiAI A/B), `CpusetWatcherCostTest` (the guard's per-poll cost),
   `LocalStoragePayloadInstrumentedTest`, `ThermalTelemetrySmokeTest`
 - `app/src/androidTestKotlinEngine`: `LlamaBenchmarkInstrumentedTest`,
-  `LlamaCppCheckJniTest`
+  `LlamaCppCheckJniTest`, and for the ONNX Runtime GenAI engine
+  `OnnxGenaiBenchmarkInstrumentedTest`, `OnnxGenaiCheckJniTest` and
+  `OnnxPackageFetchInstrumentedTest` (which downloads a package, so it runs only
+  with `-e onnxFetch true`)
 
 Build and test commands are in [build.md](build.md#how-to-build).
 
@@ -931,6 +954,10 @@ The remaining work is mostly validation:
   ([Track A validation](engine-port.md#6-readiness-simplification-track-a)), and
   emulators do not throttle realistically
 - expand native ABI support if non-arm64 devices matter
+- the ONNX Runtime GenAI engine's results are not submitted unless the build says its
+  collector takes them (`pipette.onnxGenaiSubmit`), and it has no numbers
+  from a phone with the memory to time it: see
+  [onnx-genai-runtime.md](onnx-genai-runtime.md#known-limitations)
 
 ## Useful Commands
 

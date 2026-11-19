@@ -370,6 +370,28 @@ val buildRustAndroidArm64 by tasks.registering(Exec::class) {
     outputs.dir(layout.buildDirectory.dir("generated/rustNativeSymbols/arm64-v8a"))
 }
 
+// The two trees the ONNX Runtime GenAI engine is built from, read from the committed
+// stamp iOS generates from the same two submodules (ios/gen-onnx-genai-build-info.sh):
+// a release tag where the pin is one, else the short commit. Not read from the
+// submodules: Gradle configures before build-onnx-genai-android.sh has checked them
+// out, which on a CI runner is always. That script fails when the stamp is stale.
+val onnxGenaiEnabled: Boolean =
+    providers.environmentVariable("PIPETTE_ENABLE_ONNX_GENAI").orNull?.lowercase() !in setOf("0", "off", "false")
+val onnxGenaiBuildInfo: Map<*, *> =
+    providers.fileContents(rootProject.layout.projectDirectory.file("../../ios/Pipette/Pipette/Generated/OnnxGenai/OnnxGenaiBuildInfo.json"))
+        .asText.orNull?.let { groovy.json.JsonSlurper().parseText(it) as? Map<*, *> } ?: emptyMap<Any, Any>()
+fun onnxPin(tree: String): String =
+    (onnxGenaiBuildInfo[tree] as? Map<*, *>)?.let { (it["tag"] ?: it["commit"]) as? String } ?: "unknown"
+val onnxRuntimeVersion: String = onnxPin("onnxruntime")
+// Whether results of the ONNX Runtime GenAI engine are submitted, and the engine
+// advertised to the planner. Off by default: a collector takes the result either way,
+// the descriptor being opaque to it, but one whose plan-types has no
+// `onnx_genai_apk_pipette` files it under a runtime nothing there can name. Turn it on
+// with `pipette.onnxGenaiSubmit=true` in local.properties or PIPETTE_ONNX_GENAI_SUBMIT=1.
+val onnxGenaiSubmit: Boolean =
+    localOrEnv("pipette.onnxGenaiSubmit", "PIPETTE_ONNX_GENAI_SUBMIT")?.lowercase() in setOf("1", "on", "true")
+val onnxRuntimeGenaiCommit: String = onnxPin("onnxruntime_genai")
+
 val buildNativeAndroidArm64 by tasks.registering(Exec::class) {
     group = "build"
     description = "Build and copy the C++ llama.cpp bridge into jniLibs for arm64-v8a."
@@ -391,6 +413,14 @@ val buildNativeAndroidArm64 by tasks.registering(Exec::class) {
         inputs.dir(File(repoRoot, "vendor/sentry-native/include"))
         inputs.file(File(repoRoot, "vendor/sentry-native/CMakeLists.txt"))
     }
+    // The ONNX Runtime GenAI engine, which build-native-android.sh builds through its own
+    // script. The two version files stand for the vendored trees: onnxruntime's alone is
+    // too large to snapshot, and the script keys its own stamp on both submodule commits.
+    // `files`, not `file`: the script initializes the submodules when they are absent.
+    inputs.file(rootProject.file("build-onnx-genai-android.sh"))
+    inputs.files(File(repoRoot, "vendor/onnxruntime/VERSION_NUMBER"), File(repoRoot, "vendor/onnxruntime-genai/VERSION_INFO"))
+    inputs.file(File(repoRoot, "ios/Pipette/Pipette/Generated/OnnxGenai/OnnxGenaiBuildInfo.json"))
+    inputs.property("onnxGenai", providers.environmentVariable("PIPETTE_ENABLE_ONNX_GENAI").orElse(""))
     inputs.property("kleidiai", providers.environmentVariable("PIPETTE_ENABLE_KLEIDIAI").orElse(""))
     inputs.property("crashReporting", crashReportingEnabled)
     environment("PIPETTE_ENABLE_CRASH_REPORTING", if (crashReportingEnabled) "1" else "0")
@@ -432,6 +462,15 @@ android {
         // the `client_version:` flag only then, so a build that names no release
         // advertises nothing in that namespace.
         buildConfigField("Boolean", "HAS_RELEASE_VERSION", "$hasReleaseVersion")
+
+        // The two trees the ONNX Runtime GenAI engine is built from, for a result's
+        // `runtime_version` (see LocalStorage.kt): the onnxruntime release and the
+        // onnxruntime-genai commit, whose pin has no release tag. Read here rather
+        // than from the engine because the main process writes the payload and does
+        // not load the native library.
+        buildConfigField("String", "ONNXRUNTIME_VERSION", "\"$onnxRuntimeVersion\"")
+        buildConfigField("String", "ONNXRUNTIME_GENAI_COMMIT", "\"$onnxRuntimeGenaiCommit\"")
+        buildConfigField("Boolean", "ONNX_GENAI_SUBMIT", "$onnxGenaiSubmit")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -495,10 +534,15 @@ android {
             dimension = "engine"
             isDefault = true
             buildConfigField("String", "ENGINE_FLAVOR", "\"kotlin\"")
+            // Whether this build has the ONNX Runtime GenAI engine, which is this
+            // flavor's alone and is left out by PIPETTE_ENABLE_ONNX_GENAI=0 (see
+            // build-native-android.sh). The catalog offers its ONNX rows only then.
+            buildConfigField("Boolean", "ONNX_GENAI_ENGINE", "$onnxGenaiEnabled")
         }
         create("rustEngine") {
             dimension = "engine"
             buildConfigField("String", "ENGINE_FLAVOR", "\"rust\"")
+            buildConfigField("Boolean", "ONNX_GENAI_ENGINE", "false")
         }
     }
 

@@ -55,6 +55,21 @@ case "${PIPETTE_ENABLE_CRASH_REPORTING:-0}" in
     ;;
 esac
 
+# The ONNX Runtime GenAI engine: on by default, as iOS builds it. Its own script
+# builds the two vendored trees (a no-op when they are unchanged), and CMake links
+# and stages the result. Off leaves the engine's JNI in place but refusing.
+case "${PIPETTE_ENABLE_ONNX_GENAI:-1}" in
+  1 | on | ON | true | TRUE)
+    "$SCRIPT_DIR/build-onnx-genai-android.sh"
+    ONNX_GENAI_DIR="$REPO_ROOT/target/onnx-genai-android-$ABI/out"
+    ;;
+  0 | off | OFF | false | FALSE) ONNX_GENAI_DIR="" ;;
+  *)
+    echo "error: PIPETTE_ENABLE_ONNX_GENAI must be 1/0 (on/off, true/false); got '${PIPETTE_ENABLE_ONNX_GENAI}'" >&2
+    exit 1
+    ;;
+esac
+
 SCCACHE_ARGS=()
 if [[ "${PIPETTE_NO_SCCACHE:-}" != "1" ]] && command -v sccache >/dev/null 2>&1; then
   SCCACHE="$(command -v sccache)"
@@ -69,6 +84,7 @@ cmake --preset android-arm64-v8a-cpp \
   -DANDROID_PLATFORM="android-$API_LEVEL" \
   -DGGML_CPU_KLEIDIAI="$KLEIDIAI" \
   -DPIPETTE_ENABLE_CRASH_REPORTING="$CRASH_REPORTING" \
+  -DPIPETTE_ONNX_GENAI_DIR="$ONNX_GENAI_DIR" \
   -DPIPETTE_JNILIBS_DIR="$ABI_DIR" \
   -DPIPETTE_SYMBOLS_DIR="$SYMBOLS_DIR" \
   ${SCCACHE_ARGS[@]+"${SCCACHE_ARGS[@]}"}

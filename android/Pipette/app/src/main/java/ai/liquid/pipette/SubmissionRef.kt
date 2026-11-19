@@ -65,6 +65,31 @@ object SubmissionRef {
     )
 
   /**
+   * The two trees the ONNX Runtime GenAI engine is built from, scheme-less as [LLAMACPP_REPOSITORY_URL] is: iOS's `OnnxGenaiBuildInfo` names the
+   * same.
+   */
+  const val ONNXRUNTIME_REPOSITORY_URL = "github.com/microsoft/onnxruntime"
+  const val ONNXRUNTIME_GENAI_REPOSITORY_URL = "github.com/microsoft/onnxruntime-genai"
+
+  /** The type tag of [onnxGenaiRuntime], which is also the payload's `runtime_name`. */
+  const val ONNX_GENAI_RUNTIME_TYPE = "onnx_genai_apk_pipette"
+
+  /**
+   * `runtime_descriptor` for the in-process ONNX Runtime GenAI engine: the plan-types `Runtime::OnnxGenaiApkPipette` descriptor, the Android
+   * counterpart of iOS's `onnx_genai_ios_pipette`. Its version is the pair of source trees the engine was compiled from (`OnnxGenaiStack`), each
+   * named by [onnxRuntimeVersion] and [genaiVersion] as the committed stamp records them: a release tag where the pin is one, else a short commit.
+   * The flavor is [ANDROID_FLAVOR], as for llama.cpp. No `private_apis`: those are the iOS app's.
+   */
+  fun onnxGenaiRuntime(onnxRuntimeVersion: String, genaiVersion: String): String {
+    fun source(url: String, version: String) = JSONObject().put("repository_url", url).put("repository_version", version)
+    val packages =
+      JSONObject()
+        .put("onnxruntime", source(ONNXRUNTIME_REPOSITORY_URL, onnxRuntimeVersion))
+        .put("onnxruntime_genai", source(ONNXRUNTIME_GENAI_REPOSITORY_URL, genaiVersion))
+    return canonical(JSONObject().put("type", ONNX_GENAI_RUNTIME_TYPE).put("flavor", ANDROID_FLAVOR).put("packages", packages))
+  }
+
+  /**
    * `runtime_flags`: the llama.cpp load knobs as the cell resolved them, in the flat wire form of `pipette_plan_types::RuntimeFlagRef`. This is what
    * the payload's `runtime_flags` field is documented to carry: "canonical JSON of the run's RuntimeFlags in its flat wire form ... plan entry plus
    * whatever the client derived".
@@ -132,6 +157,15 @@ object SubmissionRef {
         putRepo(obj, model.model.repo)
         obj.put("model", model.model.filename.value)
         obj.put("mmproj", model.model.mmprojFilename.value)
+      }
+      // plan-types `OnnxGenai` with its flattened `ModelSource::HuggingFace`; `prefix` is `skip_serializing_if` there.
+      is Model.OnnxGenai -> {
+        obj.put("type", "onnx_genai")
+        obj.put("source", "huggingface")
+        putRepo(obj, model.model.repo)
+        model.model.prefix?.let { obj.put("prefix", it.value) }
+        // plan-types' `HfRepo.revision`, flattened beside the repo and skipped when absent.
+        model.model.revision?.let { obj.put("revision", it.value) }
       }
     }
     return obj

@@ -48,7 +48,7 @@ to design.
 | 8 | `vl_spec_decode` | Android trails | **Open on Android.** Closed on iOS; see below |
 | 9 | Vault sources (`vault_*`) | Both trail | **Open.** iOS fetches a gguf `vault_url` and an MLX or ONNX GenAI `vault_archive`. Android fetches none. See below. |
 | 10 | Catalog-pinned eval sampling | Android trails | **Open on Android.** Closed on iOS; see below |
-| 11 | ONNX Runtime GenAI runtime | Android trails | **Open.** PIP-593 |
+| 11 | ONNX Runtime GenAI runtime | Android trails | **Open.** PIP-593. Android has the engine, the catalog row and the fetch; its results are submitted only by a build that switches that on, until plan-types has the Android variant. See below. |
 | 12 | Declared `benchmark_type` + `benchmark_params` | Android trails | **Open on Android.** Closed on iOS; see below |
 | 13 | Runtime output (`runtime_stdout` / `runtime_stderr`) | Both trail | **Open.** Sent by the iOS proxy, not the apps; see below |
 | 14 | `vl_max_memory` | Android trails | **Open on Android.** Closed on iOS; see below |
@@ -455,23 +455,33 @@ and the seed.
 ## Gap 11: the ONNX Runtime GenAI runtime
 
 iOS has a fourth in-process engine, `onnx_genai_ios_pipette`, with one catalog
-row (`microsoft/Phi-3-mini-4k-instruct-onnx`). Android has none of it, so a plan
-naming that runtime runs on iPhones alone. PIP-593 is the Android side. Two
-things it closes besides the engine itself:
+row (`microsoft/Phi-3-mini-4k-instruct-onnx`). PIP-593 is the Android side, and
+most of it exists
+([pipette-android/onnx-genai-runtime.md](pipette-android/onnx-genai-runtime.md)):
 
-- `ci/checks/model-catalog-parity.py` carries every iOS ONNX row in
-  `IOS_ONLY_ONNX`, declared rather than compared, because Android has no ONNX
-  catalog to compare against. The check fails the moment the Android catalog
-  mentions ONNX, so whoever adds it has to write the coordinate grammar.
-- mgmt's capability rule for this runtime pins `os:ios` or `os:ipados`
-  (pipette-mgmt's planner, `capability_rules.rs`; no mgmt doc states it).
-  An Android engine needs its own rule.
+- the engine, in the `kotlinEngine` flavor, built from the same two vendored
+  trees and running the four cells iOS runs;
+- the model: an `onnx-genai://` coordinate, the same catalog row at the same
+  commit, and a fetch that pins one commit, stages, checks and publishes whole;
+- `ci/checks/model-catalog-parity.py` compares the two catalogs' ONNX rows, where
+  it used to declare every iOS row iOS-only.
 
-An Android engine also needs a model store to land in. The iOS store admits
-every model before a transfer starts, publishes staged and atomic, and pins a
-directory transfer to one resolved commit. Android has no quota or eviction at
-all (gap 2). [storage-quota.md](storage-quota.md) records how iOS admission
-diverges from the CLI's sweep after publish.
+What keeps the gap open is in pipette-mgmt, not here. plan-types needs an Android
+variant of the runtime (`onnx_genai_apk_pipette`) and the planner a capability
+rule for it (`os:android`, where iOS's pins `os:ios` or `os:ipados`). The client
+side is in place behind a build switch, `pipette.onnxGenaiSubmit`, off by default:
+on, a result is submitted under that descriptor and the client advertises
+`runtime:onnx_genai` at iOS's levels; off, the result stays on the device and no
+flag is advertised. A collector accepts the result as it is, a descriptor being
+opaque to it; the switch is off because the runtime's name is not plan-types' yet,
+and goes when it is.
+
+Two things differ from iOS meanwhile. Android fetches a package from the run
+that names it and not from its Models tab, whose download layer names a transfer
+by one `.gguf` file. And Android still has no quota or eviction (gap 2), where the
+iOS store admits every model before a transfer starts;
+[storage-quota.md](storage-quota.md) records how iOS admission diverges from the
+CLI's sweep after publish.
 
 ## Gap 12: Android does not declare the benchmark it ran
 

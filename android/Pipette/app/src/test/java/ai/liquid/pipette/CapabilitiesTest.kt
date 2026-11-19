@@ -149,4 +149,34 @@ class CapabilitiesTest {
       }
     )
   }
+
+  /**
+   * The ONNX Runtime GenAI engine is advertised at iOS's levels: the family, genai's build bare and named, and onnxruntime's named. Absent when the
+   * build has no engine or its collector cannot take the result, which is the default.
+   */
+  @Test
+  fun `the ONNX engine is advertised at iOS's levels, and only when given`() {
+    val with =
+      Capabilities.flags(
+        nativeAvailable = true,
+        llamaCppCommit = "876a43211",
+        llamaCppTag = null,
+        buildVersion = null,
+        onnxGenai = OnnxGenaiStack(onnxRuntime = "v1.31.1", genai = "533de8cc9"),
+      )
+    assertEquals(
+      listOf(
+        "runtime:llama_cpp",
+        "runtime:llama_cpp:876a43211",
+        "runtime:onnx_genai",
+        "runtime:onnx_genai:533de8cc9",
+        "runtime:onnx_genai:onnxruntime-genai=533de8cc9",
+        "runtime:onnx_genai:onnxruntime=v1.31.1",
+      ),
+      with,
+    )
+
+    val without = Capabilities.flags(nativeAvailable = true, llamaCppCommit = "876a43211", llamaCppTag = null, buildVersion = null)
+    assertEquals(listOf("runtime:llama_cpp", "runtime:llama_cpp:876a43211"), without)
+  }
 }

@@ -82,11 +82,15 @@ class LocalStorage(private val context: Context) : JobStore {
    * `ResultsStore.isUnsubmitted`.
    */
   fun isUnsubmitted(jobId: String, cell: JobCell): Boolean =
-    cell.runStatus == CellRunStatus.COMPLETED && cell.serverJobId.isNullOrBlank() && submittablePayloadDir(jobId, cell.cellId) != null
+    cell.runStatus == CellRunStatus.COMPLETED &&
+      cell.serverJobId.isNullOrBlank() &&
+      cell.isSubmittable &&
+      submittablePayloadDir(jobId, cell.cellId) != null
 
   /**
-   * Device-wide total of [unsubmittedResultCount]. Named apart from it rather than overloading, because by default this one reads the job store
-   * instead of a manifest it was handed: it parses every manifest on disk and stats a payload per completed cell, so keep it off the main thread.
+   * Device-wide total of the results a reset would destroy: [unsubmittedResultCount] plus the ones that cannot be submitted. Named apart from it
+   * rather than overloading, because by default this one reads the job store instead of a manifest it was handed: it parses every manifest on disk
+   * and stats a payload per completed cell, so keep it off the main thread.
    *
    * The nearest iOS call is `ResultsStore.deletableResultCount(across:)`, which takes the manifests already in hand. It is not on this branch yet: it
    * arrives with #1196, which this stack sits under and has not been restacked onto, where it still reads `unsubmittedResultCount(across:)`. Not a
@@ -96,7 +100,16 @@ class LocalStorage(private val context: Context) : JobStore {
    *
    * [manifests] is for a caller that has already paid for the walk and would otherwise repeat it, which is the only reason it is a parameter.
    */
-  fun unsubmittedResultCountOnDevice(manifests: List<JobManifest> = loadAllJobManifests()): Int = manifests.sumOf { unsubmittedResultCount(it) }
+  fun unsubmittedResultCountOnDevice(manifests: List<JobManifest> = loadAllJobManifests()): Int =
+    manifests.sumOf { manifest -> manifest.cells.count { existsOnlyHere(manifest.jobId, it) } }
+
+  /**
+   * Whether this cell's result is on the device and nowhere else, which is what a reset destroys. Wider than [isUnsubmitted] by the results that
+   * cannot be submitted at all ([JobCell.isSubmittable]): those have no other copy either, and never will, so they are the last ones a sign-out
+   * warning should leave out.
+   */
+  private fun existsOnlyHere(jobId: String, cell: JobCell): Boolean =
+    cell.runStatus == CellRunStatus.COMPLETED && cell.serverJobId.isNullOrBlank() && submittablePayloadDir(jobId, cell.cellId) != null
 
   fun jobDir(jobId: String): File = File(jobsDir, jobId)
 
@@ -142,6 +155,9 @@ class LocalStorage(private val context: Context) : JobStore {
 
   fun availableModels(): List<ModelFile> = modelStore.availableModels()
 
+  /** The models directory changed behind [modelStore]'s cached scan, as when [OnnxPackageFetcher] publishes a package into it. */
+  fun modelsChanged() = modelStore.invalidate()
+
   fun copyModelFromUri(uri: Uri, fallbackName: String, repo: String? = null): ModelFile {
     val name = fallbackName.ifBlank { "model-${System.currentTimeMillis()}.gguf" }
     val dest = modelDestFile(repo, name)
@@ -171,7 +187,14 @@ class LocalStorage(private val context: Context) : JobStore {
     val rootPath = modelsDir.canonicalPath
     val filePath = file.canonicalPath
     require(filePath == rootPath || filePath.startsWith("$rootPath${File.separator}")) { "Model file is outside app model storage" }
-    if (file.exists()) file.delete()
+    // A package is a directory and goes whole. Only a package: a recursive delete of anything else the path might name is not this call's to make.
+    if (filePath != rootPath && OnnxGenaiPackage.isPackage(file.path)) {
+      file.deleteRecursively()
+      // And whatever a fetch of it left staged, which the model list never shows and nothing else would reclaim.
+      OnnxPackageFetcher.discardStagings(file)
+    } else if (file.exists()) {
+      file.delete()
+    }
     // Invalidated before the prune, not after it. The prune walks parents and calls `canonicalPath`, which is IO and can throw; with the order
     // reversed, a throw there would leave [modelStore] still listing a file that is gone, so every later read of the cache in this process would
     // count bytes the disk no longer holds. Tidying empty directories is the lesser job of the two and should not be able to skip the greater one.
@@ -187,10 +210,50 @@ class LocalStorage(private val context: Context) : JobStore {
    * is not a valid `*.gguf`), which the server would reject as an invalid descriptor rather than store. `model_flags` is eval-only by contract and no
    * Android model carries a flag yet, so it is absent on every submission this client currently produces; see [ModelFlags].
    */
-  private fun putModelIdentity(json: JSONObject, modelName: String, modelFilename: String, mmprojFilename: String?, benchmarkType: BenchmarkType) {
-    val model = SubmissionRef.typedModelOrNull(modelName, modelFilename, mmprojFilename) ?: return
+  private fun putModelIdentity(
+    json: JSONObject,
+    modelRef: Model?,
+    modelName: String,
+    modelFilename: String,
+    mmprojFilename: String?,
+    benchmarkType: BenchmarkType,
+  ) {
+    // A directory model's coordinate cannot be rebuilt from a name and a filename, so it is read off the cell's own.
+    val model = modelRef as? Model.OnnxGenai ?: SubmissionRef.typedModelOrNull(modelName, modelFilename, mmprojFilename) ?: return
+    // A package has no quant in its name to parse: its directory's name is what tells it from its repo's others, as iOS reports it.
+    (model as? Model.OnnxGenai)?.let { json.put("model_quant", it.model.name) }
     json.put("model_descriptor", SubmissionRef.model(model))
     model.modelFlags.submissionString(benchmarkType)?.let { json.put("model_flags", it) }
+  }
+
+  /**
+   * The payload fields that say which engine ran the cell. llama.cpp's commit, descriptor and load knobs for a GGUF cell.
+   *
+   * For a cell the ONNX Runtime GenAI engine ran, nothing of llama.cpp's describes it. Its descriptor is plan-types' `onnx_genai_apk_pipette`, with
+   * both pins as iOS's `OnnxGenaiStack` carries both, and it has no `runtime_flags`: plan-types declares none for this runtime, the graph fixing its
+   * own batching at export. Whether the cell is then submitted is [JobCell.isSubmittable]'s to say.
+   */
+  private fun putRuntimeIdentity(
+    json: JSONObject,
+    onnx: Model.OnnxGenai?,
+    runtimeVersion: String,
+    runtimeFlags: RuntimeFlagRef,
+    runtimeCpuBackend: String?,
+  ) {
+    if (onnx != null) {
+      json.put("runtime_name", SubmissionRef.ONNX_GENAI_RUNTIME_TYPE)
+      json.put("runtime_version", "onnxruntime-${BuildConfig.ONNXRUNTIME_VERSION}+genai-${BuildConfig.ONNXRUNTIME_GENAI_COMMIT}")
+      json.put("runtime_descriptor", SubmissionRef.onnxGenaiRuntime(BuildConfig.ONNXRUNTIME_VERSION, BuildConfig.ONNXRUNTIME_GENAI_COMMIT))
+      return
+    }
+    json.put("runtime_name", "llamacpp_apk_pipette")
+    json.put("runtime_version", runtimeVersion)
+    json.put("runtime_descriptor", SubmissionRef.runtime(runtimeVersion))
+    json.put("runtime_flags", SubmissionRef.runtimeFlags(runtimeFlags))
+    // Active CPU backend variant the loader selected for this device (the
+    // ggml feature descriptor, e.g. "dotprod,fp16_va,neon"); omitted when
+    // not yet known. Lets result analysis detect a backend change.
+    runtimeCpuBackend?.let { json.put("runtime_cpu_variant", it) }
   }
 
   override fun writePayload(
@@ -206,6 +269,7 @@ class LocalStorage(private val context: Context) : JobStore {
     benchmarkType: BenchmarkType,
     readinessPolicy: ReadinessPolicy,
     benchmarkCpuAffinity: CpuAffinitySnapshot?,
+    modelRef: Model?,
   ) {
     val json = JSONObject(resultJson)
     val modelFile = File(modelPath)
@@ -214,7 +278,7 @@ class LocalStorage(private val context: Context) : JobStore {
     // model_descriptor / runtime_descriptor: the lossless typed descriptors the server stores opaquely (mmproj_quant was retired server-side).
     // model_descriptor is elided for a source-less cell (imported file with no HF slug); runtime_descriptor is the engine identity, runtime_flags the
     // load knobs as this cell resolved them (matching iOS's typed submission value).
-    putModelIdentity(json, modelName, modelFile.name, mmprojPath?.let { File(it).name }, benchmarkType)
+    putModelIdentity(json, modelRef, modelName, modelFile.name, mmprojPath?.let { File(it).name }, benchmarkType)
     json.put("submitted_at", DateFormats.isoNow())
     // This app build: the harness, not the engine it drove (runtime_version).
     // The server stores it opaquely as a grouping key, so a shift in the numbers
@@ -227,18 +291,11 @@ class LocalStorage(private val context: Context) : JobStore {
     // by what Play accepts; it cannot also be this. "dev" on a local build,
     // "<version>-debug" on a debug build. See app/build.gradle.kts.
     json.put("client_version", BuildConfig.BUILD_VERSION)
-    json.put("runtime_name", "llamacpp_apk_pipette")
-    json.put("runtime_version", runtimeVersion)
-    json.put("runtime_descriptor", SubmissionRef.runtime(runtimeVersion))
-    json.put("runtime_flags", SubmissionRef.runtimeFlags(runtimeFlags))
+    putRuntimeIdentity(json, modelRef as? Model.OnnxGenai, runtimeVersion, runtimeFlags, runtimeCpuBackend)
     // What the harness ran under, next to the engine's load knobs above: the
     // readiness policy this cell was gated by. Omitted (not null) for a cell the
     // flag schema reports no readiness for. See SubmissionRef.benchmarkFlagsOrNull.
     SubmissionRef.benchmarkFlagsOrNull(benchmarkType, readinessPolicy)?.let { json.put("benchmark_flags", it) }
-    // Active CPU backend variant the loader selected for this device (the
-    // ggml feature descriptor, e.g. "dotprod,fp16_va,neon"); omitted when
-    // not yet known. Lets result analysis detect a backend change.
-    runtimeCpuBackend?.let { json.put("runtime_cpu_variant", it) }
     json.put("device_name", DeviceInfo.modelName())
     json.put("device_form_factor", DeviceInfo.formFactor(context))
     json.put("device_os_name", DeviceInfo.OS_NAME)

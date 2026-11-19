@@ -4,6 +4,7 @@ import ai.liquid.pipette.BenchmarkType
 import ai.liquid.pipette.CpuAffinitySnapshot
 import ai.liquid.pipette.JobManifest
 import ai.liquid.pipette.JobStore
+import ai.liquid.pipette.Model
 import ai.liquid.pipette.ReadinessPolicy
 import ai.liquid.pipette.RegistrationData
 import ai.liquid.pipette.RuntimeFlagRef
@@ -78,6 +79,7 @@ class FakeJobStore(
     benchmarkType: BenchmarkType,
     readinessPolicy: ReadinessPolicy,
     benchmarkCpuAffinity: CpuAffinitySnapshot?,
+    modelRef: Model?,
   ) {
     payloadWrites +=
       PayloadWrite(jobId, cellId, resultJson, runtimeVersion, benchmarkType, readinessPolicy, runtimeCpuBackend, benchmarkCpuAffinity, runtimeFlags)

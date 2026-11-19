@@ -7,6 +7,9 @@
 #   DEST_DIR     : jniLibs/<abi>
 #   SENTRY_SO    : libpipette_sentry.so; set iff PIPETTE_ENABLE_CRASH_REPORTING=ON.
 #                  Then it is mandatory: the engine has it as DT_NEEDED.
+#   ONNX_GENAI_LIB_DIR : libonnxruntime-genai.so and libonnxruntime.so; set iff the
+#                  ONNX Runtime GenAI engine is built in. Then both are mandatory: the
+#                  engine has the first as DT_NEEDED, and it loads the second by name.
 #   STRIP        : llvm-strip (optional)
 #   READELF      : llvm-readelf (optional; without it the SONAME guard is skipped)
 #   SYMBOLS_DIR  : receives unstripped copies for Sentry symbol upload (optional)
@@ -105,6 +108,14 @@ else()
   message(STATUS "stage_android_jnilibs: no SENTRY_SO, staging without native "
                  "crash capture (engine built with "
                  "PIPETTE_ENABLE_CRASH_REPORTING=OFF).")
+endif()
+
+if(DEFINED ONNX_GENAI_LIB_DIR AND ONNX_GENAI_LIB_DIR)
+  stage("${ONNX_GENAI_LIB_DIR}/libonnxruntime-genai.so")
+  stage("${ONNX_GENAI_LIB_DIR}/libonnxruntime.so")
+else()
+  message(STATUS "stage_android_jnilibs: no ONNX_GENAI_LIB_DIR, staging without "
+                 "the ONNX Runtime GenAI engine.")
 endif()
 
 file(GLOB _variants "${GGML_BIN_DIR}/libggml-cpu-android_*.so")

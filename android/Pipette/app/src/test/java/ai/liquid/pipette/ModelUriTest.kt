@@ -66,10 +66,80 @@ class ModelUriTest {
     assertTrue(failure is ModelUri.Failure.UnsupportedScheme)
     assertTrue(failure.reason, failure.reason.contains("does not link"))
 
-    val onnx = failure("onnx-genai://repo=microsoft/Phi-3-mini-4k-instruct-onnx")
+    val openvino = failure("openvino://repo=LiquidAI/LFM2.5-350M-ov&prefix=int4-sym-cw")
 
-    assertTrue(onnx is ModelUri.Failure.UnsupportedScheme)
-    assertTrue(onnx.reason, onnx.reason.contains("does not link"))
+    assertTrue(openvino is ModelUri.Failure.UnsupportedScheme)
+    assertTrue(openvino.reason, openvino.reason.contains("does not link"))
+  }
+
+  /** The directory arm, as the crate's `parse_dir_source` reads it: a repo, and the subdirectory of it that holds the package. */
+  @Test
+  fun `an onnx-genai coordinate parses to its repo and prefix`() {
+    val model = ok("onnx-genai://repo=microsoft/Phi-3-mini-4k-instruct-onnx&prefix=cpu_and_mobile/cpu-int4-rtn-block-32")
+    val onnx = (model as Model.OnnxGenai).model
+
+    assertEquals("microsoft/Phi-3-mini-4k-instruct-onnx", onnx.repo.toString())
+    assertEquals("cpu_and_mobile/cpu-int4-rtn-block-32", onnx.prefix.toString())
+    assertEquals("microsoft/Phi-3-mini-4k-instruct-onnx/cpu_and_mobile/cpu-int4-rtn-block-32", onnx.relativeDir)
+    assertEquals("cpu-int4-rtn-block-32", onnx.name)
+  }
+
+  /** A package at the root of its repo names no prefix, and is then named for the repo. */
+  @Test
+  fun `an onnx-genai coordinate needs no prefix`() {
+    val onnx = (ok("onnx-genai://repo=org/some-genai-package") as Model.OnnxGenai).model
+
+    assertEquals(null, onnx.prefix)
+    assertEquals("org/some-genai-package", onnx.relativeDir)
+    assertEquals("some-genai-package", onnx.name)
+  }
+
+  /**
+   * A prefix is joined onto a path under the models directory that a delete later removes, so one that climbs out is refused here, before it is a
+   * path at all. A GGUF key is refused rather than ignored, and a digest is refused as it is on every scheme.
+   */
+  @Test
+  fun `an onnx-genai coordinate refuses a traversal, a GGUF key and a digest`() {
+    for (prefix in listOf("../other", "a/../b", "/absolute", "a//b", "a/", ".")) {
+      val bad = failure("onnx-genai://repo=org/name&prefix=$prefix")
+      assertTrue("$prefix: ${bad.reason}", bad is ModelUri.Failure.InvalidValue)
+    }
+
+    val ggufKey = failure("onnx-genai://repo=org/name&path=model.gguf")
+    assertTrue(ggufKey.reason, ggufKey is ModelUri.Failure.UnknownKey)
+
+    val digest = failure("onnx-genai://repo=org/name&sha256=abc123")
+    assertTrue(digest.reason, digest is ModelUri.Failure.NotRepresentable)
+
+    val badRevision = failure("onnx-genai://repo=org/name&rev=-leading-dash")
+    assertTrue(badRevision.reason, badRevision is ModelUri.Failure.InvalidValue)
+
+    val noRepo = failure("onnx-genai://prefix=a/b")
+    assertTrue(noRepo.reason, noRepo is ModelUri.Failure.MissingKey)
+  }
+
+  /**
+   * The one pin this client honours: a directory model's revision, which the catalog's own row carries so a resumed multi-gigabyte pull cannot meet a
+   * tree that moved on `main`. On a GGUF coordinate `rev` is still refused, as the pin there would be accepted and ignored.
+   */
+  @Test
+  fun `an onnx-genai coordinate keeps its revision`() {
+    val commit = "5f5f794c1c23c9d5ee142af85df02a6cc52d6945"
+    val onnx = (ok("onnx-genai://repo=org/name&prefix=a/b&rev=$commit") as Model.OnnxGenai).model
+
+    assertEquals(commit, onnx.revision.toString())
+    assertEquals("the pin is not part of where the package sits", "org/name/a/b", onnx.relativeDir)
+
+    val gguf = failure("gguf-text://repo=org/name&path=model.gguf&rev=$commit")
+    assertTrue(gguf.reason, gguf is ModelUri.Failure.NotRepresentable)
+  }
+
+  /** `prefix` is a directory model's key alone: on a GGUF coordinate it stays the refusal it was. */
+  @Test
+  fun `a prefix on a GGUF coordinate is still refused`() {
+    val failure = failure("gguf-text://repo=org/name&path=model.gguf&prefix=a/b")
+
+    assertTrue(failure.reason, failure is ModelUri.Failure.NotRepresentable)
   }
 
   /** The crate separates a real-but-non-importable source from an unknown one, so the taxonomy is mirrored rather than flattened. */

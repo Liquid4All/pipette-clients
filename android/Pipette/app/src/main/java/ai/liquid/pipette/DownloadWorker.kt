@@ -14,7 +14,6 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.ProtocolException
 import java.net.SocketException
-import java.net.URL
 import java.net.UnknownHostException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -135,33 +134,9 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
       }
     }
 
-  /** Open the URL, following redirects manually so the HF bearer token is never replayed to a non-`huggingface.co` redirect target (e.g. a CDN). */
-  private fun openConnection(urlString: String, existing: Long): HttpURLConnection {
-    var target = URL(urlString)
-    var redirects = 0
-    while (true) {
-      val connection = buildConnection(target, existing)
-      if (connection.responseCode !in REDIRECT_CODES) return connection
-      val location = connection.getHeaderField("Location")
-      connection.disconnect()
-      if (location.isNullOrBlank() || redirects++ >= MAX_REDIRECTS) throw IOException("Too many redirects for $urlString")
-      target = URL(target, location) // resolve relative redirects against the current URL
-    }
-  }
-
-  private fun buildConnection(url: URL, existing: Long): HttpURLConnection =
-    (url.openConnection() as HttpURLConnection).apply {
-      requestMethod = "GET"
-      connectTimeout = TIMEOUT_MS
-      readTimeout = TIMEOUT_MS
-      instanceFollowRedirects = false
-      setRequestProperty("User-Agent", USER_AGENT)
-      if (isHuggingFaceHost(url.host)) {
-        Secrets(applicationContext).loadHfToken()?.let { setRequestProperty("Authorization", "Bearer $it") }
-      }
-      if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
-      connect()
-    }
+  /** Open the URL through [HuggingFaceConnection], which keeps the HF bearer token off any redirect target that is not `huggingface.co`. */
+  private fun openConnection(urlString: String, existing: Long): HttpURLConnection =
+    HuggingFaceConnection.open(urlString, existing) { Secrets(applicationContext).loadHfToken() }
 
   /** Decide how to write the body from the response, or null when the server reports the `.part` is already complete (416). */
   private fun resolveTransfer(connection: HttpURLConnection, existing: Long): Transfer? =
@@ -407,28 +382,12 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
      */
     const val MAX_NETWORK_ATTEMPTS = 5
 
-    // Exact host or a real subdomain — so the HF token isn't sent to look-alikes like "evil-huggingface.co".
-    private const val HF_HOST = "huggingface.co"
+    fun isHuggingFaceHost(host: String?): Boolean = HuggingFaceConnection.isHuggingFaceHost(host)
 
-    fun isHuggingFaceHost(host: String?): Boolean = host == HF_HOST || (host != null && host.endsWith(".$HF_HOST"))
-
-    private const val USER_AGENT = "pipette-android"
-    private const val TIMEOUT_MS = 30_000
     private const val BUFFER_SIZE = 64 * 1024
     private const val PROGRESS_INTERVAL_MS = 500L
     private const val MILLIS_PER_SECOND = 1000L
     private const val UNKNOWN_TOTAL = -1L
     private const val HTTP_RANGE_NOT_SATISFIABLE = 416
-    private const val HTTP_TEMP_REDIRECT = 307
-    private const val HTTP_PERM_REDIRECT = 308
-    private const val MAX_REDIRECTS = 5
-    private val REDIRECT_CODES =
-      setOf(
-        HttpURLConnection.HTTP_MOVED_PERM,
-        HttpURLConnection.HTTP_MOVED_TEMP,
-        HttpURLConnection.HTTP_SEE_OTHER,
-        HTTP_TEMP_REDIRECT,
-        HTTP_PERM_REDIRECT,
-      )
   }
 }

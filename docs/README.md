@@ -77,7 +77,7 @@ as needed; other files keep descriptive names.
 ### Native mobile apps
 
 - [pipette-ios](pipette-ios/architecture.md) · [build](pipette-ios/build.md) · [usage](pipette-ios/usage.md) · [model store design](pipette-ios/model-store-design.md) · [execution alignment](pipette-ios/execution-alignment.md) · [private-API builds](pipette-ios/private-thermal-release-build.md) · [memory carry-over](pipette-ios/memory-carry-over.md) · [AFM runtime](pipette-ios/afm-runtime.md) · [ONNX GenAI runtime](pipette-ios/onnx-genai-runtime.md) · [AFM token enforcement](pipette-ios/afm-token-enforcement.md)
-- [pipette-android](pipette-android/architecture.md) · [build](pipette-android/build.md) · [Kotlin/JNI engine port](pipette-android/engine-port.md) · [implementation ledger](pipette-android/implementation.md) · [native engine source](../android/native/README.md)
+- [pipette-android](pipette-android/architecture.md) · [build](pipette-android/build.md) · [Kotlin/JNI engine port](pipette-android/engine-port.md) · [implementation ledger](pipette-android/implementation.md) · [ONNX GenAI runtime](pipette-android/onnx-genai-runtime.md) · [native engine source](../android/native/README.md)
 - [pipette-ios-proxy](../tools/pipette-ios-proxy/README.md) · [design](../tools/pipette-ios-proxy/DESIGN.md): runs jobs on tethered iPhones from a Mac, one server client per phone ([how builds reach the phones](pipette-ios/build.md#on-the-farm-pipette-ios-proxy))
 
 ### Shared libraries

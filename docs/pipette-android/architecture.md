@@ -155,6 +155,12 @@ The app has two Gradle product flavors on the `engine` dimension
   (`lib.rs` → `engine.rs` → `llama.rs`). That crate runs the kernel in
   `android/native/benchmarks.rs`.
 
+The `kotlinEngine` flavor has a second engine, ONNX Runtime GenAI. `EngineActor`
+sends a model path that is a package (a directory holding a `genai_config.json`) to
+`OnnxGenaiBenchmark` and every other path to `LlamaBenchmark`, so nothing above the
+actor tells the two apart. [onnx-genai-runtime.md](onnx-genai-runtime.md) covers it.
+The `rustEngine` flavor has llama.cpp alone, and refuses an ONNX model by name.
+
 Both flavors link the shim and the CPU-variant loader
 (`android/native/native_loader.cpp`), and both produce `libpipette_android.so`.
 [engine-port.md](engine-port.md) records the port and the invariants that the
@@ -268,6 +274,10 @@ or downloads one from Hugging Face, from a bundled template or a manual
 identifier. `ModelCatalog` groups the files into families, so job setup selects
 model *families* and then resolves them through the active quant filters. See
 [implementation.md](implementation.md#model-management).
+
+An ONNX Runtime GenAI package is a directory, listed as one model. The Models tab
+does not download one: the run that names it fetches it, whole, before its first
+cell ([onnx-genai-runtime.md](onnx-genai-runtime.md#models)).
 
 ### Benchmark catalog
 

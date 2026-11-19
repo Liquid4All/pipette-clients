@@ -3,22 +3,40 @@ package ai.liquid.pipette
 import ai.liquid.pipette.llama.LlamaBenchmark
 import ai.liquid.pipette.llama.LlamaCpp
 import ai.liquid.pipette.llama.LlamaModel
+import ai.liquid.pipette.onnx.OnnxGenai
+import ai.liquid.pipette.onnx.OnnxGenaiBenchmark
+import ai.liquid.pipette.onnx.OnnxGenaiModel
 import android.os.Handler
 import android.os.HandlerThread
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
-/** Kotlin engine actor implementation for kotlinEngine flavor. Mirrors the BenchmarkEngine interface for pure-Kotlin llama.cpp execution. */
+/**
+ * Kotlin engine actor implementation for kotlinEngine flavor. Mirrors the BenchmarkEngine interface for pure-Kotlin execution on llama.cpp, or on
+ * ONNX Runtime GenAI when the model path is a package ([OnnxGenai.isPackage]): the two engines take the same calls, so nothing above this class tells
+ * them apart.
+ */
 @Suppress("TooManyFunctions")
 class EngineActor : BenchmarkEngine {
+  /** The resident model of whichever engine loaded it. */
+  sealed class Resident : AutoCloseable {
+    data class Llama(val model: LlamaModel) : Resident() {
+      override fun close() = model.close()
+    }
+
+    data class Onnx(val model: OnnxGenaiModel) : Resident() {
+      override fun close() = model.close()
+    }
+  }
+
   sealed class State {
     object Empty : State()
 
-    data class Ready(val model: LlamaModel, val modelPath: String, val contextSize: Int) : State()
+    data class Ready(val model: Resident, val modelPath: String, val contextSize: Int) : State()
 
-    data class Busy(val model: LlamaModel, val modelPath: String, val contextSize: Int) : State()
+    data class Busy(val model: Resident, val modelPath: String, val contextSize: Int) : State()
 
-    val loadedModel: LlamaModel?
+    val loadedModel: Resident?
       get() =
         when (this) {
           is Ready -> model
@@ -60,7 +78,12 @@ class EngineActor : BenchmarkEngine {
   override fun loadSync(modelPath: String, nGpuLayers: Int, contextSize: Int, nUbatch: Int, loadMode: LlamacppLoadMode) {
     onWorker {
       destroyModelLocked()
-      val model = LlamaCpp.loadModel(modelPath, nGpuLayers, contextSize, nUbatch, loadMode)
+      val model =
+        if (OnnxGenai.isPackage(modelPath)) {
+          Resident.Onnx(OnnxGenai.loadModel(modelPath))
+        } else {
+          Resident.Llama(LlamaCpp.loadModel(modelPath, nGpuLayers, contextSize, nUbatch, loadMode))
+        }
       _state.set(State.Ready(model, modelPath, contextSize))
     }
   }
@@ -76,16 +99,20 @@ class EngineActor : BenchmarkEngine {
     val ready = _state.get() as? State.Ready ?: error("Engine not ready")
     _state.set(State.Busy(ready.model, ready.modelPath, ready.contextSize))
     try {
-      LlamaBenchmark.runOnModel(
-        benchmarkJson = benchmarkJson,
-        model = ready.model,
-        nGpuLayers = nGpuLayers,
-        contextSize = ready.contextSize,
-        mmprojPath = mmprojPath,
-        progress = progress,
-        cooldown = cooldown,
-        thermal = thermal,
-      )
+      when (val resident = ready.model) {
+        is Resident.Llama ->
+          LlamaBenchmark.runOnModel(
+            benchmarkJson = benchmarkJson,
+            model = resident.model,
+            nGpuLayers = nGpuLayers,
+            contextSize = ready.contextSize,
+            mmprojPath = mmprojPath,
+            progress = progress,
+            cooldown = cooldown,
+            thermal = thermal,
+          )
+        is Resident.Onnx -> OnnxGenaiBenchmark.runOnModel(benchmarkJson, resident.model, progress, cooldown, thermal)
+      }
     } finally {
       if ((_state.get() as? State.Busy)?.model === ready.model) _state.set(ready)
     }
@@ -104,18 +131,22 @@ class EngineActor : BenchmarkEngine {
     thermal: BenchmarkThermalCallback?,
   ): String = onWorker {
     destroyModelLocked()
-    LlamaBenchmark.runFresh(
-      benchmarkJson = benchmarkJson,
-      modelPath = modelPath,
-      nGpuLayers = nGpuLayers,
-      contextSize = contextSize,
-      nUbatch = nUbatch,
-      loadMode = loadMode,
-      mmprojPath = mmprojPath,
-      progress = progress,
-      cooldown = cooldown,
-      thermal = thermal,
-    )
+    if (OnnxGenai.isPackage(modelPath)) {
+      OnnxGenaiBenchmark.runFresh(benchmarkJson, modelPath, progress, cooldown, thermal)
+    } else {
+      LlamaBenchmark.runFresh(
+        benchmarkJson = benchmarkJson,
+        modelPath = modelPath,
+        nGpuLayers = nGpuLayers,
+        contextSize = contextSize,
+        nUbatch = nUbatch,
+        loadMode = loadMode,
+        mmprojPath = mmprojPath,
+        progress = progress,
+        cooldown = cooldown,
+        thermal = thermal,
+      )
+    }
   }
 
   override fun unloadSync() {

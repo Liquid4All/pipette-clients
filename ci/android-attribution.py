@@ -60,6 +60,11 @@ VENDORED = [
     ("llama.cpp", "MIT", "vendor/llama.cpp/LICENSE"),
     ("sentry-native", "MIT", "vendor/sentry-native/LICENSE"),
     ("KleidiAI", "Apache-2.0", "vendor/kleidiai/LICENSES/Apache-2.0.txt"),
+    # The ONNX Runtime GenAI engine's two trees, shipped as libonnxruntime.so and
+    # libonnxruntime-genai.so (android/Pipette/build-onnx-genai-android.sh). Listed
+    # as iOS lists them (ios/generate-third-party-licenses.py).
+    ("ONNX Runtime", "MIT", "vendor/onnxruntime/LICENSE"),
+    ("ONNX Runtime GenAI", "MIT", "vendor/onnxruntime-genai/LICENSE"),
 ]
 
 # SPDX id -> SPDX full name, shown in the app's acknowledgements screen.

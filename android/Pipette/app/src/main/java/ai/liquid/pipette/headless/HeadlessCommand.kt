@@ -1,5 +1,6 @@
 package ai.liquid.pipette.headless
 
+import ai.liquid.pipette.BuildConfig
 import ai.liquid.pipette.Model
 import ai.liquid.pipette.ModelUri
 import ai.liquid.pipette.RunReadiness
@@ -215,7 +216,7 @@ object HeadlessCommand {
     // Every field is read unconditionally and the reader keeps the first complaint, so this reads as
     // the shape of a Request rather than as a chain of early returns.
     val reader = Reader(args)
-    val modelUri = reader.coordinate("model")
+    val modelUri = reader.runnableCoordinate("model")
     val request =
       Request(
         matchQuery = reader.text("match"),
@@ -374,6 +375,15 @@ object HeadlessCommand {
         is ModelUri.Result.Error -> null.also { fail("$key is not a coordinate this client understands: ${parsed.failure.reason}") }
       }
     }
+
+    /**
+     * A coordinate a run can start against: [coordinate], less a model no engine of this build loads. Refused here, where the caller is told at once,
+     * and not after the run has planned a cell around it. The run's refusal alone: `models-delete` reads [coordinate], since it names the same
+     * package to reclaim one an earlier build fetched.
+     */
+    fun runnableCoordinate(key: String): Model? =
+      coordinate(key)?.takeUnless { it is Model.OnnxGenai && !BuildConfig.ONNX_GENAI_ENGINE }
+        ?: null.also { if (args[key] != null) fail("$key names an ONNX Runtime GenAI package, and this build has no ONNX Runtime GenAI engine") }
 
     fun list(key: String): List<String> {
       val raw = args[key] ?: return emptyList()

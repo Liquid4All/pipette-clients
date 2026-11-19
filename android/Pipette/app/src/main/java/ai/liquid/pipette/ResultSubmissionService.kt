@@ -42,7 +42,7 @@ class ResultSubmissionService(
     val payloads = mutableListOf<JSONObject>()
 
     manifest.cells.forEachIndexed { index, cell ->
-      if (cell.runStatus != CellRunStatus.COMPLETED || cell.serverJobId != null) return@forEachIndexed
+      if (cell.runStatus != CellRunStatus.COMPLETED || cell.serverJobId != null || !cell.isSubmittable) return@forEachIndexed
 
       val existing = submittedServerJobId(manifest.jobId, cell.cellId)
       if (existing != null) {
@@ -136,6 +136,9 @@ class ResultSubmissionService(
     submittedServerJobId(jobId, cellId)?.let {
       return CellSubmissionRecord.submitted(it)
     }
+    // Asked of the cell here, and not left to each caller's gate: a payload with no `runtime_descriptor` is one the server has nowhere to file.
+    val cell = storage.loadJobManifest(jobId)?.cells?.firstOrNull { it.cellId == cellId }
+    if (cell?.isSubmittable == false) return null
     val dir = storage.submittablePayloadDir(jobId, cellId) ?: return null
     val payload = File(dir, "payload.json").readText()
     return try {
