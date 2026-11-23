@@ -454,18 +454,11 @@ and the seed.
 
 ## Gap 11: the ONNX Runtime GenAI runtime
 
-iOS has a fourth in-process engine, `onnx_genai_ios_pipette`, with one catalog
-row (`microsoft/Phi-3-mini-4k-instruct-onnx`). Android has none of it, so a plan
-naming that runtime runs on iPhones alone. PIP-593 is the Android side. Two
-things it closes besides the engine itself:
-
-- `ci/checks/model-catalog-parity.py` carries every iOS ONNX row in
-  `IOS_ONLY_ONNX`, declared rather than compared, because Android has no ONNX
-  catalog to compare against. The check fails the moment the Android catalog
-  mentions ONNX, so whoever adds it has to write the coordinate grammar.
-- mgmt's capability rule for this runtime pins `os:ios` or `os:ipados`
-  (pipette-mgmt's planner, `capability_rules.rs`; no mgmt doc states it).
-  An Android engine needs its own rule.
+iOS has a fourth in-process engine, `onnx_genai_ios_pipette`. The descriptor
+catalog offers its models to an iPhone. Plans that use this runtime run only
+on iOS. PIP-593 tracks the Android engine, which needs its own capability
+rule. The management server sets `os:ios` or `os:ipados` for the iOS runtime
+in the planner's `capability_rules.rs`.
 
 An Android engine also needs a model store to land in. The iOS store admits
 every model before a transfer starts, publishes staged and atomic, and pins a
@@ -598,23 +591,18 @@ Do not file these.
   bytes already present; `model=` names bytes to obtain. Widening it would turn
   an existing runbook's `match=LFM` into a multi-gigabyte download nobody asked
   for.
-- **Each preset GGUF catalog is the set of configurations the results dashboard
-  publishes for that handset** (PIP-511), filtered to its llama.cpp engine:
+- **Both clients read their model lists from the descriptor catalog short
+  list for the device** (`GET /clients/me/descriptor-catalog`). Each client
+  caches the last answer for the registration that fetched it. When neither
+  the answer nor the cache offers a model, each client uses a bundled list of
+  LFM models: `CatalogEntry.fallback` on iOS, `ModelTemplateCatalog.fallback`
+  on Android. The lists differ in these ways:
 
-      https://pipette.liquid.ai/results?hw=Galaxy+S26+Ultra+%2F+llama.cpp%3Aandroid-arm64-v8a
-      https://pipette.liquid.ai/results?hw=iPhone+17+Pro+%2F+llama.cpp%3Aios
-
-  That filter is the whole rule, and it is re-derivable: open the link and read
-  the rows. A model absent from it has no published reading on that handset and
-  is not offered; one present is. `ci/checks/model-catalog-parity.py` names the
-  rows where the two lists differ and fails on any divergence it does not; read
-  the list there rather than a copy here.
-
-  The rule is scoped to llama.cpp, which is what those filters pin. The
-  dashboard publishes no MLX results on any device, so it cannot speak to the
-  iOS MLX catalog either way; that catalog keeps its own criterion (`hf_mlx` in
-  the plan files) and so carries families that the GGUF catalogs do not offer.
-  `CatalogEntryTests.mlxOnlyFamilies` audits which.
+  - iOS offers GGUF, MLX, ONNX Runtime GenAI and Vault members. Android offers
+    Hugging Face `gguf_text` members only.
+  - iOS refreshes at launch, after registration, on pull-to-refresh, and from
+    headless `sync`. Android refreshes at launch, after its profile report, and
+    after registration.
 - **An ambiguous `match=` resolves differently per client** (PIP-511). Three
   behaviors, not two. iOS refuses, preferring a row named exactly `match`, on
   the `bench` verb and on any deep link that named a model. iOS's bare sweep

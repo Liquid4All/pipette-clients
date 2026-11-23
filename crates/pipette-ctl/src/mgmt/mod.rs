@@ -938,10 +938,8 @@ pub fn kind_name(kind: Kind) -> String {
         Kind::JsonOrToml => {
             "a JSON object, JSON or TOML text, or the path of a file holding either".into()
         }
-        Kind::Owner { detach: true } => {
-            "a `user_…` or `org_…` id, an owner object, or `none`".into()
-        }
-        Kind::Owner { detach: false } => "a `user_…` or `org_…` id, or an owner object".into(),
+        Kind::Owner { detach: true } => "an `org_…` id, an owner object, or `none`".into(),
+        Kind::Owner { detach: false } => "an `org_…` id, or an owner object".into(),
         Kind::Path => "a file path".into(),
         Kind::Toml => "TOML text or a path to a TOML file".into(),
         Kind::VaultFile => "a file path or `{filename, sha256}`".into(),
@@ -962,12 +960,11 @@ fn owner_value(name: &str, value: &Value, detach: bool) -> anyhow::Result<Value>
     };
     match id {
         None if detach => Ok(Value::Null),
-        None => anyhow::bail!("`{name}` cannot be cleared here: name a `user_…` or `org_…` id"),
-        Some(id) if id.starts_with("user_") => Ok(json!({ "type": "user", "user_id": id })),
+        None => anyhow::bail!("`{name}` cannot be cleared here: name an `org_…` id"),
         Some(id) if id.starts_with("org_") => Ok(json!({ "type": "org", "org_id": id })),
         Some(id) => anyhow::bail!(
-            "`{name}` `{id}` is neither a `user_…` nor an `org_…` id (an organization is named \
-             by its id, not its handle)"
+            "`{name}` `{id}` is not an `org_…` id: only an organization owns records, named by \
+             its id, not its handle"
         ),
     }
 }

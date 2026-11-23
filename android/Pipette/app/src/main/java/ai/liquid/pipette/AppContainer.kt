@@ -34,7 +34,14 @@ class AppContainer(
   // Server-synced benchmark catalog store. BenchmarkSync writes it; BenchmarkCatalog reads it (loaded from disk in init so a prior sync is available
   // before the first render). See [BenchmarkSync] / [BenchmarkCatalog].
   val benchmarkStore = FileBenchmarkStore(storage.benchmarksDir)
-  val registrationService = RegistrationService(storage, secrets, managementClient, analytics)
+  val registrationService =
+    RegistrationService(
+      storage,
+      secrets,
+      managementClient,
+      { ProfileRefreshService.profileUpdateBody(appContext, Capabilities.current()) },
+      analytics,
+    )
   val profileRefreshService = ProfileRefreshService(appContext, storage, managementClient)
   // `by lazy` so merely constructing AppContainer never calls WorkManager.getInstance() before we
   // want it to. AppContainer is only ever built in the main process (PipetteApp guards it), which is
@@ -156,7 +163,7 @@ class AppContainer(
       // the :benchmark process (see the class doc), which is also the process that must never start a download.
       provisioner =
         ModelProvisioner(
-          resolvePath = storage::resolveModelPath,
+          resolvePath = storage::resolveModelFile,
           // Adapter rather than making the coordinator implement the interface: it is the app's download API, and should not take on a second,
           // narrower identity because one caller wants two methods of it.
           downloads =
@@ -181,5 +188,13 @@ class AppContainer(
     // Restore the benchmark catalog from the last sync so the picker isn't empty before the first network sync of this launch completes. A small
     // JSON read, on par with the job/model reads LocalStorage already does at startup.
     BenchmarkCatalog.load(benchmarkStore)
+    // The same for the model list, so the pickers show the last fetched list rather than the fallback until this launch's refresh lands.
+    val ramBytes = DeviceInfo.ramBytes(appContext)
+    ModelTemplateCatalog.limitFallbackTo(ramBytes)
+    ModelShortList.loadCache(storage.modelListCacheFile, storage.loadRegistration(), ramBytes)
   }
+
+  /** Fetch the `logo_uri` for [sha256] on `Dispatchers.IO`. The function returns null if the device has no registration. */
+  fun familyLogoUri(sha256: String): String? =
+    storage.loadRegistration()?.let { managementClient.fetchFamilyLogoUri(it.serverUrl, it.clientId, sha256) }
 }

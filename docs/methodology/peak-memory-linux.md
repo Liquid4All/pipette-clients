@@ -445,11 +445,19 @@ loaded at `-ngl 99` and `--load-mode none`, the resident set grew by the
 1,756 on gemma-4-E2B Q4_K_M) and NVML's figure by the `CUDA0` one (1,212 for
 1,211, 1,408 for 1,408).
 
-A Jetson is the exception: its iGPU allocates from host memory mapped into
-the tool, so the resident set already holds the CUDA buffers and nothing bills
-them apart (NVML reports `Not Supported` for its memory, and nvgpu prints no
-DRM fdinfo). On a host whose device tree names an `nvidia,tegra` SoC, the GPU
-watch reads the resident set alone and reports no `max_gpu_bytes`. On a Jetson
+A Jetson Orin is the exception: its nvgpu-driven iGPU allocates from host
+memory mapped into the tool, so the resident set already holds the CUDA buffers
+and nothing bills them apart (NVML reports `Not Supported` for its memory, and
+nvgpu prints no DRM fdinfo). On a host with the nvgpu module loaded
+(`/sys/module/nvgpu`), the GPU watch reads the resident set alone and reports
+no `max_gpu_bytes`. A Jetson Thor has no nvgpu: its iGPU runs NVIDIA's open
+driver (`nvidia`, 595.78 on L4T R39.2.1), whose CUDA buffers stay out of the
+resident set and which NVML lists per process as on a card, so Thor reads as a
+card does. There a `llama-bench` decode held 1,259 MiB of `VmRSS` while NVML
+listed 8,042 MiB for it. A CUDA context there also opens the SoC's host1x DRM
+node (`renderD128`, `OF_COMPATIBLE_0=nvidia,tegra264-host1x` in its device's
+`uevent`), whose fdinfo prints no memory, so a DRM node of an `nvidia,tegra`
+SoC counts as NVIDIA's, read through NVML, not as a DRM client. On a Jetson
 AGX Orin (JetPack 7.2.1, `linux-arm64-cuda-13` b11829), gemma-3-4b-it Q4_K_M
 (2,375 MiB) at `--load-mode none` held a `VmRSS` of 3,981 MiB through its
 decode at `-ngl -1` and 4,000 MiB at `-ngl 0`, while `MemAvailable` fell by

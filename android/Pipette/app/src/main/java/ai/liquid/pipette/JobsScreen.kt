@@ -509,11 +509,11 @@ class JobsScreen(ctx: ScreenContext) : Screen(ctx) {
     val rowCells = linkedMapOf<String, MutableMap<String, JobCell>>()
     val rowLabels = linkedMapOf<String, String>()
     cells.forEach { cell ->
-      val key = CompletedResultsCsvExporter.resultModelGroupKey(cell) + "|" + CompletedResultsCsvExporter.quantLabel(cell)
+      val key = ResultsGrid.rowKey(cell)
       if (!rowCells.containsKey(key)) {
         rowOrder += key
         rowCells[key] = mutableMapOf()
-        rowLabels[key] = "${CompletedResultsCsvExporter.modelDisplayName(cell)}\n${CompletedResultsCsvExporter.quantLabel(cell)}"
+        rowLabels[key] = "${ResultsGrid.modelDisplayName(cell)}\n${CompletedResultsCsvExporter.quantLabel(cell)}"
       }
       rowCells.getValue(key)[cell.benchmarkId] = cell
     }

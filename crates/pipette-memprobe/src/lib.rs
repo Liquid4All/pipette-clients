@@ -9,7 +9,7 @@
 //!
 //! Every [`Watch`] exists on every OS. [`Watch::supported`] says whether this
 //! OS's sampler reads it, refusing one it does not with an
-//! [`UnsupportedError`] (or, on Linux, one whose device tree it cannot read,
+//! [`UnsupportedError`] (or, on Linux, one whose nvgpu module it cannot read,
 //! with a [`WatchError`]), and returns the [`SupportedWatch`] that
 //! [`Sampler::start`] takes, so an engine asks before anything spawns. Every
 //! OS reads [`SupportedWatch::OBSERVE`].
@@ -419,7 +419,7 @@ mod tests {
 
     /// A process on no GPU has no GPU peak, so the watch for one fails: it
     /// holds no DRM client and no NVIDIA device, whatever NVML says. On a
-    /// Jetson the watch reads the resident set alone, so it has a peak.
+    /// Jetson Orin the watch reads the resident set alone, so it has a peak.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_process_off_the_gpu_fails_a_gpu_watch() -> anyhow::Result<()> {

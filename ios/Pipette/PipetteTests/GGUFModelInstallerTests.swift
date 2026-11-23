@@ -9,7 +9,7 @@ import Testing
 @MainActor struct GGUFModelInstallerTests {
     private static let repo = "LiquidAI/LFM2.5-350M-GGUF"
     private static let filename = "LFM2.5-350M-Q4_0.gguf"
-    private static let familyId = "lfm2.5-350m"
+    private static let modelId = "lfm2.5-350m"
 
     private func downloadedFile() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".gguf")
@@ -46,7 +46,7 @@ import Testing
 
         let model = try #require(ws.availableModels().first { $0.name == Self.filename })
         #expect(model.hfRepo == Self.repo)
-        #expect(model.familyId == Self.familyId)
+        #expect(model.modelId == Self.modelId)
     }
 
     /// No typed source (sideload / legacy record): the entry is keyed on a text model

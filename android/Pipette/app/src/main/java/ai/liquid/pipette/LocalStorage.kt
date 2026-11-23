@@ -18,6 +18,9 @@ class LocalStorage(private val context: Context) : JobStore {
 
   private val registrationFile: File = File(metadataDir, "registration.json")
 
+  /** The last catalog short list and the registration that fetched it. See [ModelShortList]. */
+  val modelListCacheFile: File = File(root, "catalog/short-list.json")
+
   init {
     migrateLegacyModelsDir()
     modelStore.availableModels()
@@ -25,14 +28,18 @@ class LocalStorage(private val context: Context) : JobStore {
 
   fun isRegistered(): Boolean = loadRegistration() != null
 
+  /** Save [data]. A registration for another identity clears the model list, which can hold the previous organization's private entries. */
   fun saveRegistration(data: RegistrationData) {
+    val previous = loadRegistration()
     writeJson(registrationFile, data.toJson())
+    if (previous != null && ModelShortList.Owner.of(previous) != ModelShortList.Owner.of(data)) ModelShortList.clear(modelListCacheFile)
   }
 
   override fun loadRegistration(): RegistrationData? = readJson(registrationFile)?.let { runCatching { RegistrationData.fromJson(it) }.getOrNull() }
 
   fun deleteRegistration() {
     registrationFile.delete()
+    ModelShortList.clear(modelListCacheFile)
   }
 
   fun recoverInterruptedJobs() {
@@ -140,6 +147,8 @@ class LocalStorage(private val context: Context) : JobStore {
     return resolveModelPath(storedPath, modelsDir)
   }
 
+  override fun resolveModelFile(storageKey: String): String? = resolveModelFile(storageKey, modelsDir)
+
   fun availableModels(): List<ModelFile> = modelStore.availableModels()
 
   fun copyModelFromUri(uri: Uri, fallbackName: String, repo: String? = null): ModelFile {
@@ -152,9 +161,9 @@ class LocalStorage(private val context: Context) : JobStore {
     return registerModelFile(dest, repo)
   }
 
-  fun registerModelFile(file: File, repo: String?, displayName: String? = null, familyId: String? = null): ModelFile {
+  fun registerModelFile(file: File, repo: String?, displayName: String? = null, modelId: String? = null): ModelFile {
     require(file.exists()) { "Model file does not exist: ${file.absolutePath}" }
-    return modelStore.registerModel(file, repo, displayName, familyId)
+    return modelStore.registerModel(file, repo, displayName, modelId)
   }
 
   /**
@@ -179,18 +188,10 @@ class LocalStorage(private val context: Context) : JobStore {
     pruneEmptyModelParents(file.parentFile)
   }
 
-  /**
-   * The two payload fields that describe the model: `model_descriptor`, the lossless coordinate the server stores opaquely, and `model_flags`, what
-   * shaped the generation. Both are read off one typed model, because building it twice would let them disagree.
-   *
-   * Both elide rather than emit a placeholder. The descriptor is absent for a source-less cell (an imported file with no HF slug, or a filename that
-   * is not a valid `*.gguf`), which the server would reject as an invalid descriptor rather than store. `model_flags` is eval-only by contract and no
-   * Android model carries a flag yet, so it is absent on every submission this client currently produces; see [ModelFlags].
-   */
-  private fun putModelIdentity(json: JSONObject, modelName: String, modelFilename: String, mmprojFilename: String?, benchmarkType: BenchmarkType) {
-    val model = SubmissionRef.typedModelOrNull(modelName, modelFilename, mmprojFilename) ?: return
-    json.put("model_descriptor", SubmissionRef.model(model))
-    model.modelFlags.submissionString(benchmarkType)?.let { json.put("model_flags", it) }
+  private fun putModelDescriptor(json: JSONObject, modelRef: Model?, modelName: String, filename: String, mmprojPath: String?) {
+    // Older manifests need to recover their declared coordinate from the repo slug and filenames.
+    val declaredModel = modelRef ?: SubmissionRef.typedModelOrNull(modelName, filename, mmprojPath?.let { File(it).name })
+    declaredModel?.let { json.put("model_descriptor", SubmissionRef.model(it)) }
   }
 
   override fun writePayload(
@@ -200,6 +201,7 @@ class LocalStorage(private val context: Context) : JobStore {
     modelName: String,
     modelPath: String,
     mmprojPath: String?,
+    modelRef: Model?,
     runtimeFlags: RuntimeFlagRef,
     runtimeVersion: String,
     runtimeCpuBackend: String?,
@@ -211,10 +213,8 @@ class LocalStorage(private val context: Context) : JobStore {
     val modelFile = File(modelPath)
     json.put("model_name", modelName)
     json.put("model_quant", parseQuant(modelFile.name) ?: "unknown")
-    // model_descriptor / runtime_descriptor: the lossless typed descriptors the server stores opaquely (mmproj_quant was retired server-side).
-    // model_descriptor is elided for a source-less cell (imported file with no HF slug); runtime_descriptor is the engine identity, runtime_flags the
-    // load knobs as this cell resolved them (matching iOS's typed submission value).
-    putModelIdentity(json, modelName, modelFile.name, mmprojPath?.let { File(it).name }, benchmarkType)
+    // Android does not apply model flags during execution, so the payload carries only the model descriptor.
+    putModelDescriptor(json, modelRef, modelName, modelFile.name, mmprojPath)
     json.put("submitted_at", DateFormats.isoNow())
     // This app build: the harness, not the engine it drove (runtime_version).
     // The server stores it opaquely as a grouping key, so a shift in the numbers
@@ -357,6 +357,8 @@ class LocalStorage(private val context: Context) : JobStore {
         base.lowercase()
       }
     }
+
+    internal fun resolveModelFile(storageKey: String, modelsRoot: File): String? = File(modelsRoot, storageKey).takeIf { it.isFile }?.absolutePath
 
     fun resolveModelPath(storedPath: String, modelsRoot: File): String? {
       val components = storedPath.split(File.separatorChar, '/').filter { it.isNotBlank() }

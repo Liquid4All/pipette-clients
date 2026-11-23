@@ -93,9 +93,9 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun modelCatalogGroupsQuantVariantsByFamilyId() {
-    val q4 = testModel(name = "shared-Q4_0.gguf", hfRepo = "org/shared-q4-GGUF", displayName = "Shared", familyId = "shared-family")
-    val q5 = testModel(name = "shared-Q5_K_M.gguf", hfRepo = "org/shared-q5-GGUF", displayName = "Shared", familyId = "shared-family")
+  fun modelCatalogGroupsQuantVariantsByModelId() {
+    val q4 = testModel(name = "shared-Q4_0.gguf", hfRepo = "org/shared-q4-GGUF", displayName = "Shared", modelId = "shared-family")
+    val q5 = testModel(name = "shared-Q5_K_M.gguf", hfRepo = "org/shared-q5-GGUF", displayName = "Shared", modelId = "shared-family")
 
     val groups = ModelCatalog.groups(listOf(q4, q5))
 
@@ -119,9 +119,9 @@ class ExampleUnitTest {
 
   @Test
   fun modelCatalogResolvesSelectedGroupsThroughQuantFilter() {
-    val q4 = testModel(name = "shared-Q4_0.gguf", familyId = "shared-family")
-    val q5 = testModel(name = "shared-Q5_K_M.gguf", familyId = "shared-family")
-    val other = testModel(name = "other-Q4_0.gguf", familyId = "other-family")
+    val q4 = testModel(name = "shared-Q4_0.gguf", modelId = "shared-family")
+    val q5 = testModel(name = "shared-Q5_K_M.gguf", modelId = "shared-family")
+    val other = testModel(name = "other-Q4_0.gguf", modelId = "other-family")
     val groups = ModelCatalog.groups(listOf(q4, q5, other))
 
     val resolved =
@@ -132,8 +132,8 @@ class ExampleUnitTest {
 
   @Test
   fun modelCatalogFindsSelectedGroupsMissingActiveQuant() {
-    val shared = testModel(name = "shared-Q4_0.gguf", displayName = "Shared", familyId = "shared-family")
-    val other = testModel(name = "other-Q5_K_M.gguf", displayName = "Other", familyId = "other-family")
+    val shared = testModel(name = "shared-Q4_0.gguf", displayName = "Shared", modelId = "shared-family")
+    val other = testModel(name = "other-Q5_K_M.gguf", displayName = "Other", modelId = "other-family")
     val groups = ModelCatalog.groups(listOf(shared, other))
 
     val missing =
@@ -261,6 +261,25 @@ class ExampleUnitTest {
   }
 
   @Test
+  fun downloadParserPinsTheRevisionInTheUrlAndTheRepo() {
+    val parsed = DownloadCoordinator.parseDownloadInput("LiquidAI/LFM2.5-350M-GGUF@abc123/LFM2.5-350M-Q4_K_M.gguf")
+    assertEquals("LiquidAI/LFM2.5-350M-GGUF@abc123", parsed.repo)
+    assertEquals("https://huggingface.co/LiquidAI/LFM2.5-350M-GGUF/resolve/abc123/LFM2.5-350M-Q4_K_M.gguf", parsed.url)
+  }
+
+  @Test
+  fun downloadParserKeepsThePinForQuantShorthandAndFileUrls() {
+    val repo = "LiquidAI/LFM2.5-350M-GGUF"
+    val filename = "LFM2.5-350M-Q4_K_M.gguf"
+    val resolveUrl = "https://huggingface.co/$repo/resolve/abc123/$filename"
+    val expected = ParsedDownload(resolveUrl, "$repo@abc123")
+
+    assertEquals(expected, DownloadCoordinator.parseDownloadInput("$repo@abc123:Q4_K_M"))
+    assertEquals(expected, DownloadCoordinator.parseDownloadInput(resolveUrl))
+    assertEquals(expected, DownloadCoordinator.parseDownloadInput(resolveUrl.replace("/resolve/", "/blob/")))
+  }
+
+  @Test
   fun downloadParserNormalizesHuggingFaceBlobLinks() {
     val parsed =
       DownloadCoordinator.parseDownloadInput("https://huggingface.co/LiquidAI/LFM2.5-350M-GGUF/blob/main/LFM2.5-350M-Q4_K_M.gguf?download=true")
@@ -278,27 +297,8 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun modelTemplateCatalogDeclaresMinistralAcrossRepos() {
-    val ministral = ModelTemplateCatalog.byFamilyId["ministral-3-3b-instruct-2512"]!!
-    assertTrue(ministral.variants.map { it.repo }.toSet().size > 1)
-    assertEquals("unsloth/Ministral-3-3B-Instruct-2512-GGUF", ministral.variants.first { it.quant == "Q4_0" }.repo)
-    assertEquals(setOf("mistralai/Ministral-3-3B-Instruct-2512-GGUF"), ministral.variants.filter { it.quant != "Q4_0" }.map { it.repo }.toSet())
-  }
-
-  @Test
-  fun everyTemplateFamilyIdMatchesSideloadGroupingKey() {
-    ModelTemplateCatalog.defaults.forEach { preset -> assertEquals(LocalStorage.normalizedModelStem(preset.filename), preset.familyId) }
-  }
-
-  @Test
-  fun presetEstimatedBytesParseMbAndGbLabels() {
-    val small = PresetModel(id = "test-small", name = "Small", detail = "Q4_K_M · 267 MB", identifier = "LiquidAI/LFM2.5-350M-GGUF:Q4_K_M")
-    val large = PresetModel(id = "test-large", name = "Large", detail = "Q4_K_M · 1.28 GB", identifier = "unsloth/Qwen3.5-2B-GGUF:Q4_K_M")
-
-    // Decimal, matching how the labels are written: they are `ByteCountFormatter`'s
-    // `.file` output for the real byte count, so a 1024-based parse read them ~7% high.
-    assertEquals(267L * 1_000L * 1_000L, small.estimatedBytes)
-    assertEquals((1.28 * 1_000_000_000.0).toLong(), large.estimatedBytes)
+  fun everyTemplateModelIdMatchesSideloadGroupingKey() {
+    ModelTemplateCatalog.fallback.forEach { preset -> assertEquals(LocalStorage.normalizedModelStem(preset.filename), preset.modelId) }
   }
 
   @Test
@@ -503,8 +503,8 @@ class ExampleUnitTest {
     assertEquals(8192, BenchmarkContextSize.perCell(vl.benchmarkType, vl.rawJson))
   }
 
-  private fun testModel(name: String, hfRepo: String? = null, displayName: String? = null, familyId: String? = null): ModelFile =
-    ModelFile(name = name, path = "/tmp/$name", sizeBytes = 1, hfRepo = hfRepo, displayName = displayName, familyId = familyId)
+  private fun testModel(name: String, hfRepo: String? = null, displayName: String? = null, modelId: String? = null): ModelFile =
+    ModelFile(name = name, path = "/tmp/$name", sizeBytes = 1, hfRepo = hfRepo, displayName = displayName, modelId = modelId)
 
   private fun testCell(id: String, benchmark: BenchmarkDefinition, status: CellRunStatus, modelPath: String = "/tmp/model.gguf"): JobCell =
     JobCell(

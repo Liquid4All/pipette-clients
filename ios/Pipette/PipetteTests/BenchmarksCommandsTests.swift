@@ -48,8 +48,7 @@ struct BenchmarksCommandsTests {
     /// A match that is nobody's full name is left alone, so a genuinely ambiguous
     /// selector still fails loudly instead of picking one. Asserts the rows, not a count.
     @Test func aPartialNameIsNotDisambiguated() {
-        #expect(names("ministral", quant: "Q4_K_M")
-            == ["Ministral 3 3B Instruct 2512", "Ministral 3 8B Instruct 2512"])
+        #expect(names("LFM 2.5 2", quant: "Q4_K_M") == ["LFM 2.5 2.6B", "LFM 2.5 230M"])
     }
 
     @Test func everyRowIsReachableByItsOwnCoordinate() {

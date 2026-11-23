@@ -478,6 +478,15 @@ constructor(
       completedInRun = position
       val cell = manifest.cells[index]
 
+      if (cell.hasMalformedModelRef) {
+        val message = "The saved model reference is invalid or unsupported. Create a new job with the model from the catalog."
+        cell.runStatus = CellRunStatus.FAILED
+        cell.errorMessage = message
+        saveManifest()
+        publishCell(manifest, cell, message, 0.0)
+        continue
+      }
+
       failedModelPaths[cell.modelPath]?.let { reason ->
         cell.runStatus = CellRunStatus.FAILED
         cell.errorMessage = reason
@@ -514,9 +523,19 @@ constructor(
       // what to report would let a stale reason survive as this attempt's.
       var fetchError: String? = null
       val fetch = { attempt: Result<String>? -> attempt?.onFailure { fetchError = it.message }?.getOrNull() }
-      val resolvedModelPath =
-        storage.resolveModelPath(cell.modelPath)
-          ?: cell.modelRef?.let { ref -> fetch(provisioner?.ensureWeights(ref) { s -> publishCell(manifest, cell, s, 0.0) }) }
+      val ref = cell.modelRef
+      val storedWeights =
+        if (ref == null) {
+          storage.resolveModelPath(cell.modelPath)
+        } else {
+          val filename =
+            when (ref) {
+              is Model.GgufText -> ref.model.filename
+              is Model.GgufVision -> ref.model.filename
+            }
+          storage.resolveModelFile(LocalStorage.modelRelativePath(ref.repo.reference, filename.value))
+        }
+      val resolvedModelPath = storedWeights ?: ref?.let { fetch(provisioner?.ensureWeights(it) { s -> publishCell(manifest, cell, s, 0.0) }) }
       if (resolvedModelPath == null) {
         cell.runStatus = CellRunStatus.FAILED
         cell.errorMessage = fetchError ?: "Model file not found: ${File(cell.modelPath).name}. Re-download it from the Models tab."
@@ -524,9 +543,13 @@ constructor(
         publishCell(manifest, cell, cell.errorMessage ?: "Model file not found", 0.0)
         continue
       }
-      val resolvedMmprojPath =
-        storage.resolveModelPath(cell.mmprojPath)
-          ?: cell.modelRef?.let { ref -> fetch(provisioner?.ensureMmproj(ref) { s -> publishCell(manifest, cell, s, 0.0) }) }
+      val storedMmproj =
+        if (ref?.repo?.revision == null) storage.resolveModelPath(cell.mmprojPath)
+        else
+          (ref as? Model.GgufVision)?.model?.let {
+            storage.resolveModelFile(LocalStorage.modelRelativePath(it.repo.reference, it.mmprojFilename.value))
+          }
+      val resolvedMmprojPath = storedMmproj ?: ref?.let { fetch(provisioner?.ensureMmproj(it) { s -> publishCell(manifest, cell, s, 0.0) }) }
       if (cell.mmprojPath != null && resolvedMmprojPath == null) {
         cell.runStatus = CellRunStatus.FAILED
         cell.errorMessage = fetchError ?: "mmproj file not found: ${File(cell.mmprojPath ?: "").name}. Re-download it from the Models tab."
@@ -670,6 +693,7 @@ constructor(
           modelName = cell.modelName,
           modelPath = cell.modelPath,
           mmprojPath = cell.mmprojPath,
+          modelRef = cell.modelRef,
           runtimeFlags = resolvedFlags,
           runtimeVersion = engine.llamaCppCommit(),
           runtimeCpuBackend = engine.cpuBackendDescriptor(),
@@ -954,6 +978,7 @@ constructor(
           if (benchmark.type.requiresVisionProjector) {
             if (!isVlCompatible(model, mmprojFiles)) continue
             for (mmproj in selectedMmprojs) {
+              if (!matchesVisionRevision(model, mmproj)) continue
               cells +=
                 JobCell(
                   benchmarkId = benchmark.benchmarkId.toString(),
@@ -991,16 +1016,20 @@ constructor(
     internal fun visionRef(model: ModelFile, mmproj: ModelFile): Model? {
       val weights = (model.modelRef as? Model.GgufText)?.model
       val projector = GgufFilename.parseOrNull(mmproj.name)
-      // A projector with no repo of its own is taken to be in the weights' repo, which is what a local import beside them looks like.
-      val sameRepo = mmproj.hfRepo == null || mmproj.hfRepo == model.hfRepo
-      return if (weights == null || projector == null || !sameRepo) null
+      // Unpinned weights can pair with a local import that has no repo. A pinned pair must resolve both files from the same repo and revision.
+      val canUseWeightsRepo = matchesVisionRevision(model, mmproj) && (mmproj.hfRepo == null || mmproj.repoReference == model.repoReference)
+      return if (weights == null || projector == null || !canUseWeightsRepo) null
       else Model.GgufVision(HfGgufVision(weights.repo, weights.filename, projector, weights.modelFlags))
     }
+
+    private fun matchesVisionRevision(model: ModelFile, mmproj: ModelFile): Boolean =
+      (model.modelRef?.repo?.revision == null && mmproj.modelRef?.repo?.revision == null) || model.repoReference == mmproj.repoReference
 
     fun isVlCompatible(model: ModelFile, mmprojFiles: List<ModelFile>): Boolean {
       val stem = LocalStorage.normalizedModelStem(model.name)
       return mmprojFiles.any { mmproj ->
-        (model.hfRepo != null && model.hfRepo == mmproj.hfRepo) || LocalStorage.normalizedModelStem(mmproj.name) == stem
+        matchesVisionRevision(model, mmproj) &&
+          ((model.hfRepo != null && model.repoReference == mmproj.repoReference) || LocalStorage.normalizedModelStem(mmproj.name) == stem)
       }
     }
 

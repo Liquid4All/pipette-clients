@@ -1,6 +1,6 @@
 //! The `--config` file (`docs/pipette-cli/usage.md` §8a), read once per
 //! invocation. Each section's rules are its own type's serde rules
-//! ([`ExtraRuntimeConfigurationRef`], [`ReadinessConfiguration`]).
+//! ([`ExtraRuntimeConfigurationRef`], [`ReadinessConfiguration`], [`Hooks`]).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,8 @@ struct ClientConfigurationRef {
     runtimes: Vec<ExtraRuntimeConfigurationRef>,
     #[serde(default)]
     readiness: Option<ReadinessConfiguration>,
+    #[serde(default)]
+    hooks: Hooks,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -29,17 +31,41 @@ pub struct ClientConfiguration {
     pub runtimes: ExtraRuntimeConfigurations,
     /// `[readiness.<gate>]`
     pub readiness: Option<ReadinessConfiguration>,
+    /// `[hooks]`
+    pub hooks: Hooks,
+}
+
+/// `[hooks]`: scripts the client runs at fixed points of every cell, with the
+/// cell's types in `PIPETTE_HOOK_*`, so a script picks the cells it acts on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hooks {
+    /// After the downloads and before the warm-up, outside the attempt timeout.
+    /// Again before each rep of a llama.cpp cell whose reps each start a
+    /// process, after the rep's readiness gate.
+    #[serde(default)]
+    pub before_cell_script: Option<String>,
 }
 
 impl fmt::Display for ClientConfiguration {
     /// For the `run` log line.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.readiness {
-            None => write!(f, "{}", self.runtimes),
-            Some(readiness) if self.runtimes == ExtraRuntimeConfigurations::default() => {
-                write!(f, "{readiness}")
-            }
-            Some(readiness) => write!(f, "{}; {readiness}", self.runtimes),
+        let set: Vec<String> = [
+            (self.runtimes != ExtraRuntimeConfigurations::default())
+                .then(|| self.runtimes.to_string()),
+            self.readiness.as_ref().map(ToString::to_string),
+            self.hooks
+                .before_cell_script
+                .as_ref()
+                .map(|_| "hooks.before_cell_script".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if set.is_empty() {
+            write!(f, "{}", self.runtimes)
+        } else {
+            write!(f, "{}", set.join("; "))
         }
     }
 }
@@ -117,6 +143,7 @@ fn parse(path: &Path, text: &str) -> Result<ClientConfiguration, ClientConfigura
     Ok(ClientConfiguration {
         runtimes,
         readiness: file.readiness,
+        hooks: file.hooks,
     })
 }
 
@@ -262,6 +289,8 @@ mod tests {
         "unknown field `die_below_c`"
     )]
     #[case::unknown_gate("[readiness.ios]\n", "unknown variant `ios`")]
+    #[case::unknown_hook("[hooks]\nafter_cell_script = \"true\"\n", "after_cell_script")]
+    #[case::hook_as_a_list("[[hooks]]\nbefore_cell_script = \"true\"\n", "invalid type")]
     #[case::duplicate_runtime(
         "[[runtimes]]\nruntime_type = \"docker_vllm\"\n[[runtimes]]\nruntime_type = \"docker_vllm\"\n",
         "appears twice"
@@ -276,6 +305,17 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("in --config"), "{msg}");
         assert!(msg.contains(needle), "{msg}");
+        Ok(())
+    }
+
+    #[test]
+    fn the_hook_loads_and_is_named_on_the_run_line() -> anyhow::Result<()> {
+        let config = load_text("[hooks]\nbefore_cell_script = '''\necho one\necho two\n'''\n")?;
+        assert_eq!(
+            config.hooks.before_cell_script.as_deref(),
+            Some("echo one\necho two\n")
+        );
+        assert_eq!(config.to_string(), "hooks.before_cell_script");
         Ok(())
     }
 

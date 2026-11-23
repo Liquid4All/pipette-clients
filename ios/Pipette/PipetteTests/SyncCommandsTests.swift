@@ -142,6 +142,7 @@ extension SyncCommandsTests {
         let ok = await SyncCommands.run(
             jobId: nil, ws: ws,
             pullCatalog: { _ in 0 },
+            pullModelCatalog: { 0 },
             uploader: ResultUploader(
                 submitResultBatch: { _, _, _ in throw URLError(.cannotConnectToHost) },
                 ws: ws),

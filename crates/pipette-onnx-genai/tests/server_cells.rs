@@ -117,7 +117,8 @@ fn a_timing_cell_runs_against_the_server(
         | BenchmarkResultData::VlThroughput { .. }
         | BenchmarkResultData::AsrThroughput { .. }
         | BenchmarkResultData::VlSpecDecode { .. }
-        | BenchmarkResultData::DecisionLatency { .. }) => {
+        | BenchmarkResultData::DecisionLatency { .. }
+        | BenchmarkResultData::Session { .. }) => {
             anyhow::bail!("not a timing result: {other:?}")
         }
     };

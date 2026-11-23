@@ -86,7 +86,8 @@ fn total(clients: impl IntoIterator<Item = Result<Client, Unread>>) -> Result<u6
 enum Device {
     /// A DRM node whose driver prints its clients' memory.
     Drm,
-    /// One of NVIDIA's: `/dev/nvidia*`, or a DRM node its driver backs.
+    /// One of NVIDIA's: `/dev/nvidia*`, a DRM node its driver backs, or a node
+    /// of a Tegra SoC.
     Nvidia,
 }
 
@@ -98,9 +99,17 @@ fn device(sysfs: &Path, path: &str) -> Option<Device> {
         return Some(Device::Nvidia);
     }
     let node = path.strip_prefix("/dev/dri/")?;
-    let driver = std::fs::read_link(sysfs.join(node).join("device/driver")).ok();
+    let device = sysfs.join(node).join("device");
+    let driver = std::fs::read_link(device.join("driver")).ok();
+    // CUDA on a Thor also opens the SoC's host1x node, whose fdinfo bills
+    // nothing: its GPU memory is NVML's.
+    let tegra = std::fs::read_to_string(device.join("uevent")).is_ok_and(|uevent| {
+        uevent
+            .lines()
+            .any(|line| line.starts_with("OF_COMPATIBLE_") && line.contains("=nvidia,tegra"))
+    });
     Some(
-        if driver.is_some_and(|driver| driver.file_name() == Some("nvidia".as_ref())) {
+        if tegra || driver.is_some_and(|driver| driver.file_name() == Some("nvidia".as_ref())) {
             Device::Nvidia
         } else {
             Device::Drm
@@ -471,9 +480,17 @@ drm-total-cycles-ccs:\t7655183225
                 sysfs.join(node).join("device/driver"),
             )?;
         }
+        // Thor's host1x node, as its sysfs prints it.
+        std::fs::create_dir_all(sysfs.join("renderD130/device"))?;
+        std::fs::write(
+            sysfs.join("renderD130/device/uevent"),
+            "DRIVER=drm\nOF_NAME=host1x\nOF_FULLNAME=/bus@0/host1x@8181200000\n\
+             OF_COMPATIBLE_0=nvidia,tegra264-host1x\nOF_COMPATIBLE_N=1\n",
+        )?;
         let device = |path| device(sysfs, path);
         assert_eq!(device("/dev/dri/renderD128"), Some(Device::Drm));
         assert_eq!(device("/dev/dri/renderD129"), Some(Device::Nvidia));
+        assert_eq!(device("/dev/dri/renderD130"), Some(Device::Nvidia));
         assert_eq!(
             device("/dev/dri/card7"),
             Some(Device::Drm),

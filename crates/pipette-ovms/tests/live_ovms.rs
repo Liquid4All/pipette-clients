@@ -134,7 +134,8 @@ fn headline(data: &BenchmarkResultData) -> anyhow::Result<String> {
         | BenchmarkResultData::VlThroughput { .. }
         | BenchmarkResultData::AsrThroughput { .. }
         | BenchmarkResultData::VlSpecDecode { .. }
-        | BenchmarkResultData::DecisionLatency { .. }) => {
+        | BenchmarkResultData::DecisionLatency { .. }
+        | BenchmarkResultData::Session { .. }) => {
             anyhow::bail!("unexpected result {other:?}")
         }
     })

@@ -68,8 +68,8 @@ data class ActiveDownload(
 
 /**
  * Orchestrates resumable model downloads on top of WorkManager (the transfer itself lives in [DownloadWorker]). Each download is a unique work named
- * by its `<repo>/<filename>` key, so it survives process death and resumes from its `.part`. Pause/cancel are both WorkManager cancellation; this
- * class owns the distinction — pause keeps the `.part` and the persisted record so [resume] can re-enqueue, cancel deletes both.
+ * by its `<repo>[@<revision>]/<filename>` key, so it survives process death and resumes from its `.part`. Pause/cancel are both WorkManager
+ * cancellation; this class owns the distinction — pause keeps the `.part` and the persisted record so [resume] can re-enqueue, cancel deletes both.
  *
  * The public surface (enqueue + callbacks, [activeDownloads], [cancel]) is unchanged from the old DownloadManager implementation; [pause]/[resume]
  * are new. Live progress and the per-download callbacks flow through [DownloadRegistry], which the worker updates from the same process.
@@ -87,13 +87,13 @@ class DownloadCoordinator(context: Context, private val storage: LocalStorage, p
   fun enqueueDownload(
     urlString: String,
     repo: String?,
-    familyId: String? = null,
+    modelId: String? = null,
     displayName: String? = null,
     onProgress: (DownloadProgress) -> Unit = {},
     onComplete: (ModelFile) -> Unit = {},
     onFailure: (Throwable) -> Unit = {},
   ): ActiveDownload {
-    val record = buildRecord(urlString, repo, familyId, displayName)
+    val record = buildRecord(urlString, repo, modelId, displayName)
     require(!File(record.destPath).exists()) { "${record.filename} already exists" }
     require(DownloadRegistry.get(record.key) == null) { "${record.filename} is already downloading" }
 
@@ -165,7 +165,7 @@ class DownloadCoordinator(context: Context, private val storage: LocalStorage, p
         .putString(DownloadWorker.KEY_URL, record.urlString)
         .putString(DownloadWorker.KEY_REPO, record.repo)
         .putString(DownloadWorker.KEY_FILENAME, record.filename)
-        .putString(DownloadWorker.KEY_FAMILY, record.familyId)
+        .putString(DownloadWorker.KEY_MODEL_ID, record.modelId)
         .putString(DownloadWorker.KEY_DISPLAY, record.displayName)
         .putString(DownloadWorker.KEY_DEST, record.destPath)
         .putString(DownloadWorker.KEY_PART, record.partialPath)
@@ -184,7 +184,7 @@ class DownloadCoordinator(context: Context, private val storage: LocalStorage, p
     workManager.enqueueUniqueWork(record.key, policy, request)
   }
 
-  private fun buildRecord(urlString: String, repo: String?, familyId: String?, displayName: String?): DownloadStore.Record {
+  private fun buildRecord(urlString: String, repo: String?, modelId: String?, displayName: String?): DownloadStore.Record {
     val parsed = parseDownloadInput(urlString)
     val url = URL(parsed.url)
     val filename = url.path.substringAfterLast('/').ifBlank { "model-${System.currentTimeMillis()}.gguf" }
@@ -198,7 +198,7 @@ class DownloadCoordinator(context: Context, private val storage: LocalStorage, p
       filename = filename,
       urlString = parsed.url,
       repo = resolvedRepo,
-      familyId = familyId,
+      modelId = modelId,
       displayName = displayName,
       destPath = dest.absolutePath,
       partialPath = partial.absolutePath,
@@ -253,33 +253,35 @@ class DownloadCoordinator(context: Context, private val storage: LocalStorage, p
         val repo = trimmed.substring(0, colonIndex).trim()
         val suffix = trimmed.substring(colonIndex + 1).trim()
         require(repo.isNotBlank() && suffix.isNotBlank()) { "Use org/repo-GGUF:quant, org/repo-GGUF:file.gguf, org/repo/file.gguf, or a full URL" }
-        val repoName = repo.substringAfterLast('/')
-        val stem = LocalStorage.repoStem(repoName)
+        val parsedRepo = HfRepo.parseReference(repo)
+        val stem = LocalStorage.repoStem(parsedRepo.repoName.value)
         val filename = if (suffix.endsWith(".gguf", ignoreCase = true)) suffix else "$stem-$suffix.gguf"
-        val parsedRepo = HfRepo.parseSlug(repo)
         GgufFilename.parse(filename)
-        return ParsedDownload(huggingFaceResolveUrl(parsedRepo.toString(), filename), parsedRepo.toString())
+        return ParsedDownload(huggingFaceResolveUrl(parsedRepo, filename), parsedRepo.reference)
       }
 
       val parts = trimmed.split("/")
       require(parts.size >= 3) { "Use org/repo-GGUF:quant, org/repo-GGUF:file.gguf, org/repo/file.gguf, or a full URL" }
-      val parsedRepo = HfRepo.parseSlug("${parts[0]}/${parts[1]}")
+      val parsedRepo = HfRepo.parseReference("${parts[0]}/${parts[1]}")
       val filename = parts.drop(2).joinToString("/")
       GgufFilename.parse(filename.substringAfterLast('/'))
-      return ParsedDownload(huggingFaceResolveUrl(parsedRepo.toString(), filename), parsedRepo.toString())
+      return ParsedDownload(huggingFaceResolveUrl(parsedRepo, filename), parsedRepo.reference)
     }
 
-    private fun huggingFaceResolveUrl(repo: String, filename: String): String {
+    private fun huggingFaceResolveUrl(repo: HfRepo, filename: String): String {
       val encodedFile =
         filename.split("/").joinToString("/") { segment -> java.net.URLEncoder.encode(segment, Charsets.UTF_8.name()).replace("+", "%20") }
-      return "https://huggingface.co/$repo/resolve/main/$encodedFile"
+      return "https://huggingface.co/$repo/resolve/${repo.revision ?: "main"}/$encodedFile"
     }
 
     private fun huggingFaceRepoFromUrl(url: String): String? {
-      if (!url.contains("huggingface.co/")) return null
-      val afterHost = url.substringAfter("huggingface.co/").substringBefore("?").substringBefore("#")
+      val afterHost = url.substringAfter("huggingface.co/", "").substringBefore("?").substringBefore("#")
       val parts = afterHost.split("/")
-      return if (parts.size >= 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) "${parts[0]}/${parts[1]}" else null
+      if (parts.size < 2 || parts[0].isBlank() || parts[1].isBlank()) return null
+      val slug = "${parts[0]}/${parts[1]}"
+      val revision =
+        parts.getOrNull(3)?.takeIf { parts.size >= 5 && parts[2] in setOf("blob", "resolve") && it != "main" }?.let(HfRevision::parseOrNull)
+      return revision?.let { "$slug@$it" } ?: slug
     }
 
     private fun normalizeHuggingFaceFileUrl(url: String): String {
@@ -299,4 +301,5 @@ class DownloadCoordinator(context: Context, private val storage: LocalStorage, p
   }
 }
 
+/** [repo] contains the [HfRepo.reference] value, `org/repo[@revision]`, for the directory within the model store. */
 data class ParsedDownload(val url: String, val repo: String?)

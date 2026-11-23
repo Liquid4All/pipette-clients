@@ -119,7 +119,8 @@ fn cell_shape(req: &RunRequest) -> anyhow::Result<(u32, u32)> {
         | BenchmarkType::AsrThroughput
         | BenchmarkType::AsrMaxMemory
         | BenchmarkType::DecisionLatency
-        | BenchmarkType::DecisionMaxMemory) => {
+        | BenchmarkType::DecisionMaxMemory
+        | BenchmarkType::Session) => {
             anyhow::bail!("{other:?} cells are not supported for OVMS")
         }
     })

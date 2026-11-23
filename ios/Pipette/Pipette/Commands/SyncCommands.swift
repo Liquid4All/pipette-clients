@@ -2,17 +2,20 @@ import Foundation
 
 /// `sync`: pull the catalog, submit what is pending, then refresh the scores of submitted
 /// evals, as `pipette sync` does. One line per phase, so the output has the same shape
-/// whether or not a phase found work. The pull is public, so an unregistered device runs
-/// it and is told the authenticated phases were skipped.
+/// whether or not a phase found work. Every device can pull the public benchmark catalog.
+/// The model catalog pull and the result phases require a signing identity.
 enum SyncCommands {
     /// The catalog pull, injectable so a test drives the command without a network.
     typealias CatalogPuller = (ServerUrl) async throws -> Int
+    /// Returns the number of models that the server offers.
+    typealias ModelCatalogPuller = () async throws -> Int
 
-    /// A failed catalog pull ends the command. Per-job submission errors and per-result
-    /// refresh failures are reported and do not fail it, as in `pipette sync`.
+    /// A failed benchmark catalog pull ends the command. The command reports model
+    /// catalog, submission, and result refresh errors and continues.
     static func run(jobId: String?, serverUrl requested: String? = nil,
                     ws: PipetteWorkspace,
                     pullCatalog: CatalogPuller? = nil,
+                    pullModelCatalog: ModelCatalogPuller? = nil,
                     uploader: ResultUploader = .shared,
                     getJob: @escaping JobFetcher = fetchJobFromServer) async -> Bool {
         let registration = ws.registration.get()
@@ -51,6 +54,15 @@ enum SyncCommands {
                 + "(run `headlessrun auth register …`, or `headlessrun auth import "
                 + "bundle=…` to restore one, to submit results)")
             return true
+        }
+
+        // Signed: the server offers models by this device's profile and organization.
+        let pullModels = pullModelCatalog ?? { try await ModelShortList.refreshExplicitly(ws: ws) }
+        do {
+            let offered = try await pullModels()
+            HeadlessRunner.log("sync pulled models=\(offered)")
+        } catch {
+            HeadlessRunner.log("sync ERROR model catalog pull failed: \(error.localizedDescription)")
         }
 
         // The CLI narrows by result id; iOS by job, the unit its store and submission

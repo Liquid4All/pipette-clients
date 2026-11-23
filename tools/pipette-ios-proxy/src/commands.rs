@@ -11,7 +11,7 @@ use crate::cli::{BuildsCommand, Cli};
 use crate::config::{self, BuildSource, Config, ConfigError};
 use crate::device::{Reachability, gpu_pin};
 use crate::logging;
-use crate::pool::{self, Pool, display_name};
+use crate::pool::{self, APPLE_FOUNDATION_FLAG, Pool, display_name};
 use crate::profile;
 use crate::releases::catalog::Catalog;
 use crate::releases::sign::Signer;
@@ -20,7 +20,8 @@ use crate::server::{self, Session};
 use crate::state::{self, InstalledBuild, ReleasePaths, StateLock, StatePaths};
 use crate::timing;
 use crate::worker::{
-    Fleet, Phone, client_details, connect, device_profile, listed_catalog, refresh_pool,
+    Fleet, Phone, client_details, connect, device_profile, filter_apple_foundation, listed_catalog,
+    refresh_pool,
 };
 
 const FIELD_LABEL_WIDTH: usize = 14;
@@ -51,6 +52,12 @@ pub(crate) fn register(fleet: Fleet) -> anyhow::Result<()> {
     };
 
     phones.iter_mut().try_for_each(|phone| {
+        let mut capabilities = capabilities.clone();
+        let ready = capabilities
+            .iter()
+            .any(|flag| flag == APPLE_FOUNDATION_FLAG)
+            && phone.probe_apple_foundation();
+        filter_apple_foundation(&mut capabilities, ready);
         let (_, profile) = connect(phone, &capabilities)?;
         print_field("device:", phone.control.udid());
         print_field("client:", &profile.client_id);
@@ -484,14 +491,17 @@ pub(crate) fn probe(fleet: &Fleet) -> anyhow::Result<()> {
         .try_for_each(|phone| probe_one(phone, &capabilities))
 }
 
-/// The pool's flags as last read, or the bucket's versions; nothing is installed.
+/// The pool's flags as last read, or the bucket's versions. This read-only verb
+/// can run alongside a job, so it does not launch the app to check readiness.
 fn probed_capabilities(fleet: &Fleet) -> anyhow::Result<Vec<String>> {
-    Ok(match &fleet.config.builds {
+    let mut flags = match &fleet.config.builds {
         BuildSource::Pool(source) => {
             Pool::open(source, &fleet.state.build_index)?.capabilities()?
         }
         BuildSource::Releases(_) => listed_catalog(&fleet.config, &fleet.state)?.advertised()?,
-    })
+    };
+    filter_apple_foundation(&mut flags, false);
+    Ok(flags)
 }
 
 fn probe_one(phone: &Phone, capabilities: &[String]) -> anyhow::Result<()> {

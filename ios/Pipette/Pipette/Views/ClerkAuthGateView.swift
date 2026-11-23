@@ -287,6 +287,7 @@ struct ClerkAuthGateView: View {
 
     private func deleteDeviceIdentity() {
         ws.registration.clear()
+        ModelShortList.clearCacheBestEffort(ws: ws)
         registration = nil
         hasPrivateKey = false
         isRegistered = false

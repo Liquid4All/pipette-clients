@@ -127,6 +127,9 @@
     "benchmark_type": "prefill_throughput",
     "prefill_tokens": 512
   },
+  "benchmark/session.json": {
+    "benchmark_type": "session"
+  },
   "benchmark/vl_max_memory.decode256.json": {
     "benchmark_type": "vl_max_memory",
     "decode_tokens": 256,

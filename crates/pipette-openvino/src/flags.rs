@@ -1,10 +1,10 @@
-//! `LLMPipeline` properties for one cell: defaults derived from the benchmark
-//! shape and the device, so a cell is correct without its author knowing the
-//! device's quirks, with the cell's authored overrides on top. A wrong default
-//! fails the run rather than skewing it.
+//! `LLMPipeline` and `VLMPipeline` properties for one cell: defaults derived
+//! from the benchmark shape and the device, so a cell is correct without its
+//! author knowing the device's quirks, with the cell's authored overrides on
+//! top. A wrong default fails the run rather than skewing it.
 //!
 //! [`resolve_runtime_flags`] settles what the cell runs with and
-//! [`pipeline_properties`] renders that for `LLMPipeline`. The result records
+//! [`pipeline_properties`] renders that for the pipeline. The result records
 //! the resolved flags, so the record and the pipeline cannot disagree.
 
 use serde_json::{Map, Value};
@@ -13,6 +13,8 @@ use pipette_plan_types::{
     BenchmarkType, OpenvinoDevice, OpenvinoGenerateHint, PositiveCount, RunRequest, RuntimeFlagRef,
     RuntimeFlags,
 };
+
+use crate::models::ResolvedOpenvinoVlModel;
 
 /// GenAI's default response reservation. A cell generating more than this on
 /// the NPU must raise it or the static shape truncates the run.
@@ -48,7 +50,10 @@ pub fn resolve_runtime_flags(req: &RunRequest) -> anyhow::Result<RuntimeFlagRef>
     let bound = r
         .max_prompt_len
         .map_or(NPU_MAX_PROMPT_LEN, |n| n.into_inner().unsigned_abs());
-    if prompt_tokens > bound {
+    // A prompt this client cannot size meets GenAI's own check, after the compile.
+    if let Some(prompt_tokens) = prompt_tokens
+        && prompt_tokens > bound
+    {
         anyhow::bail!(
             "this cell prompts with {prompt_tokens} tokens, over the NPU's \
              {bound}-token static bound. Raising it costs superlinear compile \
@@ -67,10 +72,10 @@ pub fn resolve_runtime_flags(req: &RunRequest) -> anyhow::Result<RuntimeFlagRef>
     Ok(r)
 }
 
-/// `LLMPipeline` properties for resolved flags.
+/// Pipeline properties for resolved flags.
 ///
 /// Reads the flat [`RuntimeFlagRef`] form rather than matching each cell's
-/// variant, so all four OpenVINO cells share one renderer.
+/// variant, so every OpenVINO cell shares one renderer.
 pub fn pipeline_properties(flags: &RuntimeFlags) -> Map<String, Value> {
     let r = RuntimeFlagRef::from(flags.clone());
     let mut props = Map::new();
@@ -87,16 +92,19 @@ pub fn pipeline_properties(flags: &RuntimeFlags) -> Map<String, Value> {
 }
 
 /// `(prompt_tokens, response_tokens)` for the cell: what the static shape has
-/// to accommodate.
-fn cell_shape(req: &RunRequest) -> anyhow::Result<(u32, u32)> {
+/// to accommodate. A VL prompt counts its image tokens, so it is known only for a
+/// model whose image rule this client has.
+fn cell_shape(req: &RunRequest) -> anyhow::Result<(Option<u32>, u32)> {
     Ok(match req.benchmark.benchmark_type() {
         BenchmarkType::PrefillThroughput => (
-            req.benchmark
-                .as_prefill_throughput()
-                .map_err(anyhow::Error::from)?
-                .parameter_prefill_tokens
-                .into_inner()
-                .unsigned_abs(),
+            Some(
+                req.benchmark
+                    .as_prefill_throughput()
+                    .map_err(anyhow::Error::from)?
+                    .parameter_prefill_tokens
+                    .into_inner()
+                    .unsigned_abs(),
+            ),
             1,
         ),
         BenchmarkType::DecodeThroughput => {
@@ -105,7 +113,7 @@ fn cell_shape(req: &RunRequest) -> anyhow::Result<(u32, u32)> {
                 .as_decode_throughput()
                 .map_err(anyhow::Error::from)?;
             (
-                b.parameter_prefill_tokens.into_inner().unsigned_abs(),
+                Some(b.parameter_prefill_tokens.into_inner().unsigned_abs()),
                 b.parameter_decode_tokens.into_inner().unsigned_abs(),
             )
         }
@@ -115,29 +123,63 @@ fn cell_shape(req: &RunRequest) -> anyhow::Result<(u32, u32)> {
                 .as_end_to_end_latency()
                 .map_err(anyhow::Error::from)?;
             (
-                b.parameter_prefill_tokens.into_inner().unsigned_abs(),
+                Some(b.parameter_prefill_tokens.into_inner().unsigned_abs()),
                 b.parameter_decode_tokens.into_inner().unsigned_abs(),
             )
         }
         BenchmarkType::MaxMemoryUsage => (
-            req.benchmark
-                .as_max_memory_usage()
-                .map_err(anyhow::Error::from)?
-                .parameter_prefill_tokens
-                .into_inner()
-                .unsigned_abs(),
+            Some(
+                req.benchmark
+                    .as_max_memory_usage()
+                    .map_err(anyhow::Error::from)?
+                    .parameter_prefill_tokens
+                    .into_inner()
+                    .unsigned_abs(),
+            ),
             1,
         ),
+        BenchmarkType::VlThroughput => {
+            let b = req
+                .benchmark
+                .as_vl_throughput()
+                .map_err(anyhow::Error::from)?;
+            (
+                ResolvedOpenvinoVlModel::try_from(&req.model.bound)?.prompt_tokens(
+                    b.parameter_text_tokens.into_inner().unsigned_abs(),
+                    b.parameter_image_width.into_inner().unsigned_abs(),
+                    b.parameter_image_height.into_inner().unsigned_abs(),
+                    // A cell reads 0 images as 1.
+                    b.parameter_num_images.into_inner().unsigned_abs().max(1),
+                ),
+                b.parameter_decode_tokens.into_inner().unsigned_abs(),
+            )
+        }
+        BenchmarkType::VlMaxMemory => {
+            let b = req
+                .benchmark
+                .as_vl_max_memory()
+                .map_err(anyhow::Error::from)?;
+            (
+                ResolvedOpenvinoVlModel::try_from(&req.model.bound)?.prompt_tokens(
+                    b.parameter_text_tokens.into_inner().unsigned_abs(),
+                    b.parameter_image_width.into_inner().unsigned_abs(),
+                    b.parameter_image_height.into_inner().unsigned_abs(),
+                    // A cell reads 0 images as 1.
+                    b.parameter_num_images.into_inner().unsigned_abs().max(1),
+                ),
+                b.parameter_decode_tokens
+                    .map_or(1, |tokens| tokens.into_inner().unsigned_abs()),
+            )
+        }
         other @ (BenchmarkType::Eval
         | BenchmarkType::VlmEval
         | BenchmarkType::AsrEval
-        | BenchmarkType::VlThroughput
-        | BenchmarkType::VlMaxMemory
         | BenchmarkType::VlSpecDecode
         | BenchmarkType::AsrThroughput
         | BenchmarkType::AsrMaxMemory
         | BenchmarkType::DecisionLatency
-        | BenchmarkType::DecisionMaxMemory) => {
+        | BenchmarkType::DecisionMaxMemory
+        | BenchmarkType::Session) => {
             anyhow::bail!("{other:?} cells are not supported for OpenVINO")
         }
     })
@@ -145,12 +187,14 @@ fn cell_shape(req: &RunRequest) -> anyhow::Result<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use pipette_plan_types::{
         AbsolutePath, BatchSize, BenchmarkDefinition, BenchmarkId, DeclaredBound,
         DecodeThroughputBenchmark, EndToEndLatencyBenchmark, EndToEndLatencyUvOpenvinoOpenvino,
         Model, ModelSource, ModelType, NonEmptyString, NonNegativeCount, Openvino,
         PrefillThroughputBenchmark, PrefillThroughputUvOpenvinoOpenvino, Runtime, RuntimeType,
-        UvOpenvino, UvPythonVersion, UvRuntimeSource, UvServerVersion,
+        UvOpenvino, UvPythonVersion, UvRuntimeSource, UvServerVersion, VlThroughputBenchmark,
     };
 
     use super::*;
@@ -370,6 +414,69 @@ mod tests {
         assert_eq!(r.max_prompt_len, None);
         assert_eq!(r.min_response_len, None);
         assert_eq!(r.generate_hint, None);
+        Ok(())
+    }
+
+    /// An NPU VL cell whose model is a VL IR in `dir`, of `model_type`.
+    fn vl_req(
+        dir: &Path,
+        model_type: &str,
+        benchmark: BenchmarkDefinition,
+    ) -> anyhow::Result<RunRequest> {
+        crate::models::write_vl_ir(dir, model_type)?;
+        let mut req = req(OpenvinoDevice::Npu, benchmark)?;
+        req.model = DeclaredBound::already_bound(Model::Openvino(Openvino {
+            source: ModelSource::AbsoluteDir {
+                dir: AbsolutePath::try_new(dir.to_string_lossy().into_owned())?,
+            },
+        }));
+        Ok(req)
+    }
+
+    fn vl_throughput(side: i32, images: i32) -> anyhow::Result<BenchmarkDefinition> {
+        Ok(BenchmarkDefinition::VlThroughput(VlThroughputBenchmark {
+            benchmark_id: BenchmarkId::try_new(format!(
+                "vl_throughput_{side}x{side}_text0_decode256_img{images}"
+            ))?,
+            parameter_image_width: PositiveCount::try_new(side)?,
+            parameter_image_height: PositiveCount::try_new(side)?,
+            parameter_text_tokens: NonNegativeCount::try_new(0)?,
+            parameter_decode_tokens: PositiveCount::try_new(256)?,
+            parameter_num_images: NonNegativeCount::try_new(images)?,
+        }))
+    }
+
+    /// One 512x512 image is a 268-token prompt, inside the default bound; the
+    /// 256 output tokens raise the reservation as on a text cell.
+    #[test]
+    fn an_npu_vl_cell_within_the_bound_takes_the_text_cells_settings() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let props = properties_of(&vl_req(dir.path(), "lfm3_vl", vl_throughput(512, 1)?)?)?;
+        assert_eq!(props.get("MIN_RESPONSE_LEN"), Some(&Value::from(256)));
+        assert_eq!(props.get("GENERATE_HINT"), Some(&Value::from("BEST_PERF")));
+        assert!(props.get("MAX_PROMPT_LEN").is_none(), "{props:?}");
+        Ok(())
+    }
+
+    /// Five make 1300 tokens, refused before the compile with the count.
+    #[test]
+    fn an_npu_vl_prompt_over_the_bound_is_refused_with_its_length() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let Err(err) = properties_of(&vl_req(dir.path(), "lfm3_vl", vl_throughput(512, 5)?)?)
+        else {
+            anyhow::bail!("expected an over-bound rejection");
+        };
+        assert!(err.to_string().contains("1300 tokens"), "got {err}");
+        Ok(())
+    }
+
+    /// Without the model's image rule the prompt's length is unknown, so
+    /// GenAI's own check decides.
+    #[test]
+    fn an_npu_vl_prompt_of_unknown_length_is_left_to_genai() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let props = properties_of(&vl_req(dir.path(), "qwen2_vl", vl_throughput(512, 5)?)?)?;
+        assert_eq!(props.get("GENERATE_HINT"), Some(&Value::from("BEST_PERF")));
         Ok(())
     }
 

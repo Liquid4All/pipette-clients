@@ -1,5 +1,6 @@
-//! OpenVINO-backed pipette client: LFM2 exported to OpenVINO IR, served by
-//! `openvino-genai` in a uv-managed venv, on Intel CPU / iGPU / NPU.
+//! OpenVINO-backed pipette client: models exported to OpenVINO IR, served by
+//! `openvino-genai` in a uv-managed venv, on Intel CPU / iGPU / NPU. Text cells
+//! run `LLMPipeline`, VL cells `VLMPipeline`.
 //!
 //! Runs on Linux and Windows (where Intel NPUs live). Not gated at compile
 //! time, unlike `pipette-mlx`: the client refuses any other OS at run time
@@ -11,6 +12,7 @@
 mod completions;
 mod execute;
 mod flags;
+mod memory;
 mod models;
 mod response;
 mod runtimes;

@@ -55,15 +55,43 @@ value class GgufFilename private constructor(val value: String) {
   }
 }
 
+/**
+ * A Hugging Face tag, branch, or commit SHA. Android uses the revision in one directory component (`<org>/<repo>@<revision>/<file>`), so it excludes
+ * the slash that plan-types accepts in names such as `refs/pr/3`. The catalog pins commit SHAs.
+ */
+@JvmInline
+value class HfRevision private constructor(val value: String) {
+  override fun toString(): String = value
+
+  companion object {
+    // pipette-plan-types: nutype(validate(regex = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")), without the `/`.
+    private val REGEX = Regex("^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    fun parse(raw: String): HfRevision =
+      if (REGEX.matches(raw)) HfRevision(raw) else throw PlanTypeError("The Hugging Face revision '$raw' is invalid.")
+
+    fun parseOrNull(raw: String): HfRevision? = if (REGEX.matches(raw)) HfRevision(raw) else null
+  }
+}
+
 /** `org/repo_name` coordinate. Mirrors plan-types `HfRepo`. */
 data class HfRepo(
   val org: HfOrg,
   val repoName: HfRepoName,
   /** Gated/private repo needing an HF token; not part of the repo identity. */
   val requiresAuth: Boolean = false,
+  /** The pinned snapshot, or null for the default branch. Part of the repo identity: see [reference]. */
+  val revision: HfRevision? = null,
 ) {
   /** Canonical `org/repo_name` slug — HuggingFace's own convention. */
   override fun toString(): String = "$org/$repoName"
+
+  /**
+   * The identity form `org/repo_name[@revision]`, as plan-types `HfRepo::reference` writes it. The model store and the download keys use this form,
+   * so two revisions of one file get two paths.
+   */
+  val reference: String
+    get() = revision?.let { "$this@$it" } ?: toString()
 
   companion object {
     /** Mirrors `HfRepo::parse_slug` — split on the first `/`. */
@@ -74,6 +102,14 @@ data class HfRepo(
     }
 
     fun parseSlugOrNull(slug: String): HfRepo? = runCatching { parseSlug(slug) }.getOrNull()
+
+    fun parseReference(reference: String): HfRepo {
+      val at = reference.indexOf('@')
+      if (at < 0) return parseSlug(reference)
+      return parseSlug(reference.substring(0, at)).copy(revision = HfRevision.parse(reference.substring(at + 1)))
+    }
+
+    fun parseReferenceOrNull(reference: String): HfRepo? = runCatching { parseReference(reference) }.getOrNull()
   }
 }
 
@@ -81,13 +117,7 @@ data class HfRepo(
  * Per-model flags: what the *generation* was shaped by, as opposed to how the engine was loaded (`runtime_flags`) or how the harness was driven
  * (`benchmark_flags`). Mirrors plan-types `ModelFlags`.
  *
- * **Nothing on Android constructs this with a value yet.** [SubmissionRef] builds every model with the default, so [submissionString] answers null on
- * every submission this client currently produces. The type is not dead, though: it is a field of [HfGgufText] / [HfGgufVision] and keeps the Kotlin
- * mirror shaped like the plan-types one, and the encoder below is the wire rule, so a model that does carry a flag reaches the server correctly.
- *
- * Making it settable needs a source for the value, and the blocker is upstream of this file: `enable_thinking` and `reasoning_effort` only affect
- * eval, and `BenchmarkCatalog.SELECTABLE_TYPES` offers no eval cell to attach them to. Android's kernel does run eval
- * (`android/native/benchmarks.rs`), so this is a picker gap rather than a capability one. See PIP-436.
+ * Android preserves these settings in a job manifest. PIP-436 tracks applying them during eval execution and reporting them in submissions.
  *
  * Flat, where plan-types has a variant per cell: plan-types gives `reasoning_effort` to the text cell alone and refuses it on a vision one.
  */
@@ -150,9 +180,15 @@ sealed class Model {
   abstract val modelFlags: ModelFlags
   abstract val requiresAuth: Boolean
 
+  /** This repo supplies the weights and, for a vision model, the projector. */
+  abstract val repo: HfRepo
+
   data class GgufText(val model: HfGgufText) : Model() {
     override val modelFlags: ModelFlags
       get() = model.modelFlags
+
+    override val repo: HfRepo
+      get() = model.repo
 
     override val requiresAuth: Boolean
       get() = model.repo.requiresAuth
@@ -161,6 +197,9 @@ sealed class Model {
   data class GgufVision(val model: HfGgufVision) : Model() {
     override val modelFlags: ModelFlags
       get() = model.modelFlags
+
+    override val repo: HfRepo
+      get() = model.repo
 
     override val requiresAuth: Boolean
       get() = model.repo.requiresAuth
@@ -191,6 +230,7 @@ sealed class Model {
           put("mmproj_filename", model.mmprojFilename.toString())
         }
       }
+      repo.revision?.let { put("revision", it.value) }
       if (requiresAuth) put("requires_auth", true)
       modelFlags.enableThinking?.let { put("enable_thinking", it) }
       modelFlags.reasoningEffort?.let { put("reasoning_effort", it.wire) }
@@ -203,16 +243,16 @@ sealed class Model {
     /**
      * Read back what [toJson] wrote, or null for anything this build cannot turn into a fetchable coordinate.
      *
-     * Null rather than throwing, and null for a *malformed* entry as much as an absent one, because the caller is decoding a job manifest: a cell
-     * whose reference no longer parses must still list and still report its results. It loses the ability to re-fetch itself, which is exactly where
-     * the client was before the reference existed, so the degradation is to the old behaviour rather than to a crash.
+     * [JobCell.fromJson] preserves malformed references so a job can still be opened. The runner refuses to execute the affected cells.
      */
     @Suppress("ReturnCount") // one guard per field that can fail to parse; folding them would hide which one did
     fun fromJsonOrNull(json: JSONObject?): Model? {
       if (json == null) return null
       val repo = HfRepo.parseSlugOrNull(json.optString("repo")) ?: return null
       val filename = GgufFilename.parseOrNull(json.optString("filename")) ?: return null
-      val authed = repo.copy(requiresAuth = json.optBoolean("requires_auth", false))
+      // A revision that does not parse makes the whole entry null: fetching the default branch instead would run files the cell did not pin.
+      val revision = if (json.has("revision")) (json.opt("revision") as? String)?.let(HfRevision::parseOrNull) ?: return null else null
+      val authed = repo.copy(requiresAuth = json.optBoolean("requires_auth", false), revision = revision)
       val flags =
         ModelFlags(
           enableThinking = if (json.has("enable_thinking")) json.optBoolean("enable_thinking") else null,

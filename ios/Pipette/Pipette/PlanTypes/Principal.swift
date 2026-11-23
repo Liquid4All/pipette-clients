@@ -26,14 +26,12 @@ nonisolated struct VaultResourceId: ValidatedString {
     static let rejection = ModelError.invalidVaultResourceId
 }
 
-/// The crate's `VaultPrincipalId` (`org_…` or `user_…`). Carried, never acted on: the
-/// server decides who may fetch.
+/// The crate's `VaultPrincipalId`: the owning organization (`org_…`). Carried, never
+/// acted on: the server decides who may fetch.
 nonisolated struct VaultPrincipalId: ValidatedString {
     let value: String
     init(validated value: String) { self.value = value }
-    static func validate(_ value: String) -> Bool {
-        isPrefixedId(value, prefix: "org_") || isPrefixedId(value, prefix: "user_")
-    }
+    static func validate(_ value: String) -> Bool { isPrefixedId(value, prefix: "org_") }
     static func sanitize(_ value: String) -> String { rustTrim(value) }
     static let rejection = ModelError.invalidVaultPrincipalId
 }

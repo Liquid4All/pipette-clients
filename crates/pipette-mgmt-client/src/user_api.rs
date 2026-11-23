@@ -260,7 +260,7 @@ pub(crate) mod tests {
         call::test_support::{http_ctx, server_url, user_auth, user_auth_and_key},
         error::Error,
         httpsig::test_support::signed_by,
-        types::{ContactEmail, KeyDetails, PrivateKey, PublicKey, UserPreauthKey, UserStatus},
+        types::{KeyDetails, PrivateKey, PublicKey, UserPreauthKey, UserStatus},
     };
 
     /// mgmt's whole `OwnUserView`, including fields the client drops.
@@ -312,8 +312,7 @@ pub(crate) mod tests {
     fn register_request() -> anyhow::Result<RegisterUserRequest> {
         Ok(RegisterUserRequest {
             public_key: public_key("a3f8")?,
-            user_preauth_key: Some(user_preauth_key("user_preauth_id.secret")?),
-            contact_email: None,
+            user_preauth_key: user_preauth_key("user_preauth_id.secret")?,
             key_details: KeyDetails::try_new("work laptop")?,
         })
     }
@@ -340,39 +339,6 @@ pub(crate) mod tests {
         assert_eq!(response.user_id.to_string(), "user_0192f0c1");
         assert_eq!(response.status, UserStatus::Active);
         assert_eq!(response.user_key_id.to_string(), "userkey_9f2c");
-        mock.assert();
-        Ok(())
-    }
-
-    /// The absent invite is omitted rather than `null`, which the server could
-    /// not tell from a malformed invited registration.
-    #[test]
-    fn register_posts_a_contact_address_when_no_invite_admits_it() -> anyhow::Result<()> {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/api/v1/users/register")
-                .json_body(serde_json::json!({
-                    "public_key": "a3f8".repeat(16),
-                    "contact_email": "ops@example.com",
-                    "key_details": "work laptop",
-                }));
-            then.status(201).json_body(serde_json::json!({
-                "user_id": "user_0192f0c1",
-                "status": "pending",
-                "key_id": "userkey_9f2c",
-            }));
-        });
-        let response = register(
-            &server_url(&server)?,
-            &http_ctx()?,
-            RegisterUserRequest {
-                user_preauth_key: None,
-                contact_email: Some(ContactEmail::try_new("ops@example.com")?),
-                ..register_request()?
-            },
-        )?;
-        assert_eq!(response.status, UserStatus::Pending);
         mock.assert();
         Ok(())
     }

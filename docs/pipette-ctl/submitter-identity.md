@@ -91,14 +91,14 @@ stored for a different account, it says which one it rewrote it to.
 
 ## Getting an account
 
-Two paths in, both through `auth register`. Which one you are on is decided by
-what you pass: an invite joins an account that exists, an address asks for one.
-The two flags are exclusive, refused at the flag rather than after a round
-trip. How the server admits each, and what it refuses, is in pipette-mgmt
+Nothing here asks for an account. One comes from signing in to the server's web
+console, after which `auth login` approves this machine's key, or from an
+administrator, after which `auth register` presents the invite. How the server
+admits a registration, and what it refuses, is in pipette-mgmt
 [`docs/authentication.md` §5.11](https://github.com/Liquid4All/pipette-mgmt/blob/main/docs/authentication.md#511-users)
 (Provisioning and routes).
 
-### With an invite (pre-approved)
+### With an invite
 
 An administrator creates the account (`pipette-ctl users create`, or
 `pipette-mgmt users create` on the server host) and mints a **user pre-auth
@@ -119,22 +119,6 @@ written to disk.
 A user's pre-auth key is not a device's, so they are two types here,
 `UserPreauthKey` and `ClientPreauthKey`, and the `client_preauth_...` token a
 device registers with registers nothing here.
-
-### Without one (requested)
-
-No invite, no account yet. `--contact-email` asks for one:
-
-```bash
-pipette-ctl init
-pipette-ctl auth register --contact-email ops@example.com
-```
-
-The account comes up `pending` and may do nothing until an operator admits it:
-filing a campaign is refused, and `auth me` reports the status. The key is
-chosen and stored exactly as on the invited path, so the account is signed for
-the moment it is admitted and nothing here is re-run.
-
-### Either way
 
 Register refuses if this working directory already holds a user identity.
 Overwriting would leave the registered key with no local copy, and revoking a

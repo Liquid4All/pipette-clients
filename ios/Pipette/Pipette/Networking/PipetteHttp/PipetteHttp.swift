@@ -1,5 +1,25 @@
 import Foundation
 
+nonisolated extension URLSession {
+    /// Return a nil body when the response exceeds the byte limit.
+    func boundedData(
+        for request: URLRequest,
+        limit: Int,
+        readBody: (URLResponse) -> Bool = { _ in true }
+    ) async throws -> (Data?, URLResponse) {
+        let (bytes, response) = try await self.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard readBody(response) else { return (Data(), response) }
+
+        var body = Data()
+        for try await byte in bytes {
+            guard body.count < limit else { return (nil, response) }
+            body.append(byte)
+        }
+        return (body, response)
+    }
+}
+
 /// Workspace HTTPS client policy and the process-shared ``HttpClient``: the
 /// `pipette-http` crate's `lib.rs`. Build once at the application edge and pass it
 /// down; no endpoint defaults one in.

@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 pub(crate) use self::console::{Signals, run_benchmark, run_console};
 pub(crate) use self::launch::{LaunchPlan, launch_plan_from_claim};
 pub(crate) use self::verbs::{
-    ListedResult, ResultRef, RuntimesListFailedError, app_version, delete_result, list_results,
-    list_runtimes, local_client_id, show_result,
+    ListedResult, ResultRef, RuntimesListFailedError, app_version, apple_foundation_ready,
+    delete_result, list_results, list_runtimes, local_client_id, show_result,
 };
 
 /// The token `HeadlessRunner` looks for; everything after it is parsed.

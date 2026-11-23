@@ -19,28 +19,21 @@ object ModelCatalog {
    * the picker to downloads was a rule the run path never needed, and it was the reason a fresh device could not start a run at all without a trip
    * through the Models tab first. The headless surface hit the same wall harder, having no tab to send anyone to.
    *
-   * A downloaded row wins a collision, because only it knows the real on-disk size and path. The catalog's figure is the declared download size, an
-   * estimate parsed out of a label.
+   * A downloaded row supplies the real on-disk size and path. The offer supplies the catalog quant when present.
    *
    * Collision is judged on the model's coordinate, not on the whole [ModelFile]: the two forms disagree about size and about whether the path exists
    * yet, so comparing values would list the same model twice. iOS keys `offerable` the same way and for the same reason.
    */
-  fun offerable(downloaded: List<ModelFile>, presets: List<PresetModel> = ModelTemplateCatalog.defaults): List<ModelFile> {
+  fun offerable(downloaded: List<ModelFile>, presets: List<PresetModel> = ModelTemplateCatalog.current): List<ModelFile> {
     val byCoordinate = linkedMapOf<String, ModelFile>()
-    presets.forEach { preset -> preset.asOffer()?.let { byCoordinate[it.path] = it } }
-    // Second, so it overwrites the offer for a model already present. Keyed on the same relative path the offer used, which is what
-    // `LocalStorage.modelRelativePath` produces for both.
-    downloaded.forEach { model -> byCoordinate[coordinateKey(model)] = model }
+    presets.forEach { preset -> preset.asOffer()?.let { byCoordinate[it.storageKey] = it } }
+    downloaded.forEach { model ->
+      val key = model.storageKey
+      val catalogQuant = byCoordinate[key]?.catalogQuant
+      byCoordinate[key] = if (catalogQuant == null) model else model.copy(catalogQuant = catalogQuant)
+    }
     return byCoordinate.values.toList()
   }
-
-  /**
-   * The key both forms of one model agree on: its `repo/filename` relative path.
-   *
-   * A downloaded file's [ModelFile.path] may be absolute, so it is recomposed from the repo and name rather than used directly. An import with no
-   * repo keys on its filename alone, which is also what its download path would have been.
-   */
-  private fun coordinateKey(model: ModelFile): String = LocalStorage.modelRelativePath(model.hfRepo, model.name)
 
   /**
    * One file of a coordinate as something a run can be planned against, preferring the downloaded row when there is one.
@@ -55,9 +48,9 @@ object ModelCatalog {
    * figure would be a guess presented as a fact in the run summary.
    */
   fun resolve(repo: HfRepo, filename: GgufFilename, downloaded: List<ModelFile>): ModelFile {
-    val relative = LocalStorage.modelRelativePath(repo.toString(), filename.toString())
+    val relative = LocalStorage.modelRelativePath(repo.reference, filename.toString())
     downloaded
-      .firstOrNull { coordinateKey(it) == relative }
+      .firstOrNull { it.storageKey == relative }
       ?.let {
         return it
       }
@@ -67,7 +60,7 @@ object ModelCatalog {
       sizeBytes = 0L,
       hfRepo = repo.toString(),
       displayName = ModelTemplateCatalog.repoToName[repo.toString()],
-      familyId = LocalStorage.normalizedModelStem(filename.toString()),
+      modelId = LocalStorage.normalizedModelStem(filename.toString()),
       modelRef = Model.GgufText(HfGgufText(repo, filename)),
       onDisk = false,
     )
@@ -89,7 +82,7 @@ object ModelCatalog {
         ResolvedCoordinate(resolve(ref.model.repo, ref.model.filename, downloaded), resolve(ref.model.repo, ref.model.mmprojFilename, downloaded))
     }
 
-  fun groups(from: List<ModelFile>): List<ModelGroup> {
+  fun groups(from: List<ModelFile>, catalogModels: Map<String, CatalogModel> = ModelTemplateCatalog.byModelId): List<ModelGroup> {
     val keys = mutableListOf<String>()
     val seen = mutableSetOf<String>()
     from.forEach { model ->
@@ -101,16 +94,13 @@ object ModelCatalog {
       val files = byKey[key] ?: return@mapNotNull null
       ModelGroup(
         key = key,
-        name =
-          ModelTemplateCatalog.byFamilyId[key]?.displayName
-            ?: files.firstOrNull()?.displayName
-            ?: LocalStorage.modelStem(files.firstOrNull()?.name ?: key),
+        name = catalogModels[key]?.displayName ?: files.firstOrNull()?.displayName ?: LocalStorage.modelStem(files.firstOrNull()?.name ?: key),
         files = files,
       )
     }
   }
 
-  fun groupKey(model: ModelFile): String = model.familyId ?: LocalStorage.normalizedModelStem(model.name)
+  fun groupKey(model: ModelFile): String = model.modelId ?: LocalStorage.normalizedModelStem(model.name)
 
   fun resolveSelectedFiles(groups: List<ModelGroup>, selectedKeys: Set<String>, quantMatches: (String?) -> Boolean): List<ModelFile> =
     groups.filter { selectedKeys.contains(it.key) }.flatMap { group -> group.files.filter { quantMatches(it.quant) } }

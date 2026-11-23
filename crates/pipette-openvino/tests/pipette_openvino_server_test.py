@@ -1,6 +1,7 @@
 """The OpenVINO server without a wheel, model or device: the engine against a
 fake `openvino_genai`, and one exchange over HTTP."""
 
+import base64
 import http.client
 import importlib.util
 import json
@@ -12,6 +13,7 @@ import threading
 import time
 import types
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -630,6 +632,9 @@ class Main(unittest.TestCase):
             patch.object(
                 server, "exit_with_parent", lambda pid: order.append(("watch", pid))
             ),
+            patch.object(
+                server, "decline_telemetry", lambda: order.append(("decline",))
+            ),
             patch.object(server, "make_server", make_server),
             patch.object(server, "log"),
             self.assertRaises(Stop),
@@ -649,7 +654,13 @@ class Main(unittest.TestCase):
                 ]
             )
         self.assertEqual(
-            order, [("watch", 99), ("load", "/m", "NPU", {"A": 1}), ("listen", 8123)]
+            order,
+            [
+                ("watch", 99),
+                ("decline",),
+                ("load", "/m", "NPU", {"A": 1}),
+                ("listen", 8123),
+            ],
         )
 
 
@@ -714,6 +725,321 @@ class ParentWatch(unittest.TestCase):
                 ):
                     server.exit_with_parent(42)
                 self.assertEqual(calls, exits)
+
+
+def png(width, height, filter_type=0, color=2, rows=None):
+    """An image laid out as `pipette_ops::png::gray` writes one, its pixel data
+    `rows` rows long when given."""
+
+    def chunk(kind, data):
+        crc = struct.pack(">I", zlib.crc32(kind + data))
+        return struct.pack(">I", len(data)) + kind + data + crc
+
+    row = bytes([filter_type]) + b"\x80" * (3 * width)
+    header = struct.pack(">IIBBBBB", width, height, 8, color, 0, 0, 0)
+    pixels = row * (height if rows is None else rows)
+    return (
+        server.PNG_SIGNATURE
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(pixels))
+        + chunk(b"IEND", b"")
+    )
+
+
+def image_part(data):
+    url = server.DATA_URL + base64.b64encode(data).decode()
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+class PngRgb(unittest.TestCase):
+    def test_pipettes_gray_image_reads_back(self):
+        self.assertEqual(server.png_rgb(png(3, 2)), (2, 3, b"\x80" * 18))
+
+    def test_any_other_png_is_refused(self):
+        truncated = server.PNG_SIGNATURE + struct.pack(">I", 13) + b"IHDR"
+        for data in [
+            b"GIF89a",
+            png(2, 2, filter_type=1),
+            png(2, 2, color=6),
+            png(2, 2, rows=1),
+            truncated,
+        ]:
+            with self.subTest(data=data[:24]), self.assertRaises(server.RequestError):
+                server.png_rgb(data)
+
+
+class FakeVlmGenai:
+    """A `VLMPipeline` that records each call and reports fixed metrics."""
+
+    def __init__(self):
+        self.loaded = None
+        self.calls = []
+        owner = self
+
+        class GenerationConfig:
+            do_sample = True
+            max_new_tokens = None
+            ignore_eos = False
+
+        class Tokenizer:
+            def encode(self, text, add_special_tokens):
+                ids = list(text.encode())
+                ids = [BOS] + ids if add_special_tokens else ids
+                return types.SimpleNamespace(
+                    input_ids=types.SimpleNamespace(data=[ids])
+                )
+
+        class VLMPipeline:
+            def __init__(self, model_dir, device, **properties):
+                owner.loaded = (model_dir, device, properties)
+
+            def get_tokenizer(self):
+                return Tokenizer()
+
+            def generate(self, prompt, *, images, generation_config):
+                owner.calls.append((prompt, images, generation_config))
+                metrics = types.SimpleNamespace(
+                    get_num_input_tokens=lambda: 300,
+                    get_ttft=lambda: types.SimpleNamespace(mean=120.5),
+                    get_num_generated_tokens=lambda: 3,
+                    raw_metrics=types.SimpleNamespace(m_durations=[20000.0, 30000.0]),
+                )
+                return types.SimpleNamespace(
+                    texts=["abc"],
+                    finish_reasons=[types.SimpleNamespace(name="LENGTH")],
+                    perf_metrics=metrics,
+                )
+
+        self.genai = types.ModuleType("openvino_genai")
+        self.genai.GenerationConfig = GenerationConfig
+        self.genai.VLMPipeline = VLMPipeline
+        self.ov = types.ModuleType("openvino")
+        self.ov.Tensor = lambda array: ("tensor", array)
+        self.np = types.ModuleType("numpy")
+        self.np.uint8 = "uint8"
+        self.np.frombuffer = lambda data, dtype: types.SimpleNamespace(
+            reshape=lambda *shape: (dtype, shape, data)
+        )
+
+    def modules(self):
+        return {"openvino_genai": self.genai, "openvino": self.ov, "numpy": self.np}
+
+
+class VlmEngineContract(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeVlmGenai()
+        modules = patch.dict(sys.modules, self.fake.modules())
+        modules.start()
+        self.addCleanup(modules.stop)
+        self.engine = server.VlmEngine("/models/vl", "NPU", {"MAX_PROMPT_LEN": 2048})
+
+    def test_the_pipeline_compiles_with_the_properties_as_sent(self):
+        self.assertEqual(
+            self.fake.loaded, ("/models/vl", "NPU", {"MAX_PROMPT_LEN": 2048})
+        )
+
+    def test_encode_follows_add_special(self):
+        self.assertEqual(self.engine.encode("ab", False), [97, 98])
+        self.assertEqual(self.engine.encode("ab", True), [BOS, 97, 98])
+
+    def test_generate_is_greedy_and_reports_llama_server_timings(self):
+        text, finish, timings = self.engine.generate(
+            "hi<ov_genai_image_0>", [(2, 3, b"px")], 3, True
+        )
+        ((prompt, images, config),) = self.fake.calls
+        self.assertEqual(prompt, "hi<ov_genai_image_0>")
+        self.assertEqual(images, [("tensor", ("uint8", (1, 2, 3, 3), b"px"))])
+        self.assertEqual(
+            (config.do_sample, config.max_new_tokens, config.ignore_eos),
+            (False, 3, True),
+        )
+        self.assertEqual((text, finish), ("abc", "length"))
+        self.assertEqual(
+            timings,
+            {
+                "prompt_n": 300,
+                "prompt_ms": 120.5,
+                "predicted_n": 3,
+                "predicted_ms": 50.0,
+            },
+        )
+
+
+class FakeVlmEngine:
+    """One token per character of the prompt, tags included."""
+
+    def __init__(self):
+        self.requests = []
+
+    def encode(self, text, add_special_tokens):
+        ids = [ord(c) for c in text]
+        return [BOS] + ids if add_special_tokens else ids
+
+    def generate(self, prompt, images, max_tokens, ignore_eos):
+        self.requests.append((prompt, images, max_tokens, ignore_eos))
+        timings = {
+            "prompt_n": len(prompt),
+            "prompt_ms": 12.5,
+            "predicted_n": max_tokens,
+            "predicted_ms": 3.0,
+        }
+        return "x" * max_tokens, "length" if ignore_eos else "stop", timings
+
+
+class VlmServerContract(unittest.TestCase):
+    def setUp(self):
+        self.engine = FakeVlmEngine()
+        with patch.object(server, "make_server", server.make_vlm_server):
+            self.port = serve(self, self.engine).server_address[1]
+
+    def post(self, path, body):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        self.addCleanup(conn.close)
+        conn.request("POST", path, json.dumps(body))
+        response = conn.getresponse()
+        return response.status, json.loads(response.read())
+
+    def turn(self, content, **body):
+        return {
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 4,
+            "temperature": 0.0,
+            "ignore_eos": True,
+            "cache_prompt": False,
+            **body,
+        }
+
+    def test_tokenize_takes_llama_servers_form(self):
+        for add_special, tokens in [(False, [104, 233]), (True, [BOS, 104, 233])]:
+            with self.subTest(add_special=add_special):
+                body = {"content": "hé", "add_special": add_special}
+                self.assertEqual(
+                    self.post("/tokenize", body), (200, {"tokens": tokens})
+                )
+
+    def test_the_finish_reason_is_the_engines(self):
+        status, body = self.post(
+            "/v1/chat/completions", self.turn("hi", ignore_eos=False)
+        )
+        self.assertEqual((status, body["choices"][0]["finish_reason"]), (200, "stop"))
+
+    def test_a_turn_is_its_text_then_a_tag_per_image(self):
+        content = [{"type": "text", "text": "look"}, image_part(png(3, 2))]
+        content.append(image_part(png(3, 2)))
+        status, body = self.post("/v1/chat/completions", self.turn(content))
+        self.assertEqual(status, 200)
+        ((prompt, images, max_tokens, ignore_eos),) = self.engine.requests
+        self.assertEqual(prompt, "look<ov_genai_image_0><ov_genai_image_1>")
+        self.assertEqual(images, [(2, 3, b"\x80" * 18)] * 2)
+        self.assertEqual((max_tokens, ignore_eos), (4, True))
+        message = {"role": "assistant", "content": "xxxx"}
+        self.assertEqual(
+            body["choices"],
+            [{"index": 0, "message": message, "finish_reason": "length"}],
+        )
+        self.assertEqual(
+            body["timings"],
+            {
+                "prompt_n": len(prompt),
+                "prompt_ms": 12.5,
+                "predicted_n": 4,
+                "predicted_ms": 3.0,
+            },
+        )
+        self.assertEqual(body["usage"]["completion_tokens"], 4)
+
+    def test_refused_turns(self):
+        image = image_part(png(1, 1))
+        remote = {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/a.png"},
+        }
+        garbled = {"type": "image_url", "image_url": {"url": server.DATA_URL + "%%"}}
+        for body in [
+            {"messages": [], "max_tokens": 1},
+            self.turn("x", messages=[{"role": "system", "content": "x"}]),
+            self.turn([image], max_tokens=0),
+            self.turn([image], temperature=0.7),
+            self.turn([remote]),
+            self.turn([garbled]),
+            self.turn([{"type": "input_audio"}]),
+            self.turn(7),
+        ]:
+            with self.subTest(body=body):
+                status, error = self.post("/v1/chat/completions", body)
+                self.assertEqual(status, 400, error)
+        self.assertEqual(self.engine.requests, [])
+
+    def test_the_text_routes_are_not_served(self):
+        self.assertEqual(self.post("/v1/completions", {"prompt": "hi"})[0], 404)
+
+
+class MainVlm(unittest.TestCase):
+    def test_vlm_loads_a_vlm_pipeline_behind_the_vl_routes(self):
+        made = []
+
+        class Stop(Exception):
+            pass
+
+        def make_vlm_server(engine, port):
+            made.append((engine, port))
+            return types.SimpleNamespace(
+                server_address=("127.0.0.1", port),
+                serve_forever=lambda: (_ for _ in ()).throw(Stop()),
+            )
+
+        with (
+            patch.object(server, "VlmEngine", lambda *args: ("vlm", *args)),
+            patch.object(server, "make_vlm_server", make_vlm_server),
+            patch.object(server, "decline_telemetry"),
+            patch.object(server, "log"),
+            self.assertRaises(Stop),
+        ):
+            server.main(
+                ["--port", "8124", "--model-dir", "/m", "--device", "CPU", "--vlm"]
+            )
+        self.assertEqual(made, [(("vlm", "/m", "CPU", {}), 8124)])
+
+
+def fake_telemetry(written, works=True, home="/home/user"):
+    """`openvino_telemetry`'s consent writer: records each result in `written`
+    and reports `works`; a `home` of None is a user without a home folder."""
+
+    def update_result(result):
+        written.append(result)
+        return works
+
+    checker = types.ModuleType("openvino_telemetry.utils.opt_in_checker")
+    checker.ConsentCheckResult = types.SimpleNamespace(DECLINED="declined")
+    checker.OptInChecker = lambda: types.SimpleNamespace(
+        consent_file_base_dir=lambda: home, update_result=update_result
+    )
+    return {
+        "openvino_telemetry": types.ModuleType("openvino_telemetry"),
+        "openvino_telemetry.utils": types.ModuleType("openvino_telemetry.utils"),
+        "openvino_telemetry.utils.opt_in_checker": checker,
+    }
+
+
+class DeclineTelemetry(unittest.TestCase):
+    def test_the_consent_file_is_written_as_declined(self):
+        written = []
+        with patch.dict(sys.modules, fake_telemetry(written)):
+            server.decline_telemetry()
+        self.assertEqual(written, ["declined"])
+
+    def test_a_consent_file_it_cannot_write_stops_the_server(self):
+        with (
+            patch.dict(sys.modules, fake_telemetry([], works=False)),
+            self.assertRaises(RuntimeError),
+        ):
+            server.decline_telemetry()
+
+    def test_without_a_home_folder_the_package_declines_on_its_own(self):
+        written = []
+        with patch.dict(sys.modules, fake_telemetry(written, works=False, home=None)):
+            server.decline_telemetry()
+        self.assertEqual(written, [])
 
 
 if __name__ == "__main__":

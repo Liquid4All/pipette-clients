@@ -20,7 +20,7 @@ object DownloadStore {
     val filename: String,
     val urlString: String,
     val repo: String?,
-    val familyId: String?,
+    val modelId: String?,
     val displayName: String?,
     val destPath: String,
     val partialPath: String,
@@ -35,7 +35,8 @@ object DownloadStore {
         .put("filename", filename)
         .put("urlString", urlString)
         .putOptString("repo", repo)
-        .putOptString("familyId", familyId)
+        // Stored as `familyId`, the key that saved records use.
+        .putOptString("familyId", modelId)
         .putOptString("displayName", displayName)
         .put("destPath", destPath)
         .put("partialPath", partialPath)
@@ -48,7 +49,7 @@ object DownloadStore {
           filename = json.getString("filename"),
           urlString = json.optString("urlString"),
           repo = json.optNullableString("repo"),
-          familyId = json.optNullableString("familyId"),
+          modelId = json.optNullableString("familyId"),
           displayName = json.optNullableString("displayName"),
           destPath = json.getString("destPath"),
           partialPath = json.getString("partialPath"),

@@ -101,8 +101,8 @@ nonisolated extension Model {
         case let .ggufVisionSpeculative(m):
             return LocalStorage.parseQuant(from: Self.leaf(m.source.vision.weightsReference))
         case let .mlx(m):
-            // Any `<n>bit`, not an enumerated set: `familyId` strips this, so an
-            // unrecognized width would silently split the family.
+            // Any `<n>bit`, not an enumerated set: `modelId` strips this, so an
+            // unrecognized width would silently split the model.
             guard case let .huggingFace(repo, _) = m.source,
                   let seg = repo.repoName.value.split(separator: "-").last.map(String.init),
                   seg.hasSuffix("bit") else { return nil }
@@ -118,9 +118,9 @@ nonisolated extension Model {
         }
     }
 
-    /// Family stem shared across a model's quants and formats, so GGUF, MLX and ONNX of
+    /// Model stem shared across a model's quants and formats, so GGUF, MLX and ONNX of
     /// one model resolve to the same id.
-    var familyId: String {
+    var modelId: String {
         switch self {
         case let .ggufText(m): return LocalStorage.normalizedModelStem(Self.leaf(m.source.reference))
         case let .ggufVision(m): return LocalStorage.normalizedModelStem(Self.leaf(m.source.weightsReference))
@@ -141,7 +141,7 @@ nonisolated extension Model {
             }
             return slug.lowercased()
         case let .onnxGenai(m):
-            // The prefix carries the quantization, so the repo name alone is the family,
+            // The prefix carries the quantization, so the repo name alone is the model,
             // minus its `-onnx` format tag.
             guard case let .huggingFace(repo, _) = m.source else {
                 return Self.leaf(m.source.reference).lowercased()

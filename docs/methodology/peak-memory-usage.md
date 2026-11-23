@@ -104,8 +104,9 @@ Two properties matter when reading them:
   how much.
 - **`observation_max_host_bytes` is resident-only, so it is not always the same
   quantity as `max_host_bytes` on the same row.** On Android and Linux,
-  llama.cpp's text, VL and ASR memory metrics and the OVMS, OpenVINO and ONNX
-  GenAI `max_memory_usage` use the swap-aware peak (`max(VmHWM, max(VmRSS + VmSwap))`).
+  llama.cpp's text, VL and ASR memory metrics, OpenVINO's `vl_max_memory`
+  and the OVMS, OpenVINO and ONNX GenAI `max_memory_usage` use the
+  swap-aware peak (`max(VmHWM, max(VmRSS + VmSwap))`).
   On a row that swapped, that metric reads *higher* than the observation beside
   it. The difference is the metric's swap uplift, shown rather than hidden.
   Every other metric reads the same counter as its observation.

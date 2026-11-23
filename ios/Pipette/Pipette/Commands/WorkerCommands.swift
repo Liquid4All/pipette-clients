@@ -266,11 +266,15 @@ final class PlannerWorker {
                     + "until the next PATCH")
         } else {
             statusText = "Refreshing profile…"
+            let appleFoundation = AFMRuntime.availability()
+            AppLog.jobRun.info(
+                "planner worker: apple foundation availability=\(appleFoundation.logDescription)")
             let profile: ClientProfile?
             do {
                 profile = try await refreshProfileAtStartup(
                     registration: ws.registration, deviceStore: ws.device,
-                    capabilities: installedRuntimeCapabilities() + installedRuntimeBuildFlags())
+                    capabilities: installedRuntimeCapabilities(appleFoundation: appleFoundation.isAvailable)
+                        + installedRuntimeBuildFlags())
             } catch {
                 if Task.isCancelled {
                     finish(.stopped)

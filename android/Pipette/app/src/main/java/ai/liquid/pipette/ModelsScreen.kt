@@ -146,7 +146,7 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
         orientation = LinearLayout.VERTICAL
         layoutParams = LinearLayout.LayoutParams(0, wrap, 1f)
         addView(label(file.quant ?: file.name))
-        addView(mutedLabel("${file.hfRepo ?: "sideloaded"} · ${file.sizeFormatted}"))
+        addView(mutedLabel("${file.repoReference ?: "sideloaded"} · ${file.sizeFormatted}"))
       }
     )
     addView(textButton("Delete") { deleteModel(file) })
@@ -159,14 +159,15 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
         orientation = LinearLayout.VERTICAL
         layoutParams = LinearLayout.LayoutParams(0, wrap, 1f)
         addView(label(model.displayName ?: model.name))
-        addView(mutedLabel("${model.hfRepo ?: "sideloaded"} · ${model.sizeFormatted}" + (model.quant?.let { " · $it" } ?: "")))
+        addView(mutedLabel("${model.repoReference ?: "sideloaded"} · ${model.sizeFormatted}" + (model.quant?.let { " · $it" } ?: "")))
       }
     )
     addView(textButton("Delete") { deleteModel(model) })
   }
 
   private fun deleteModel(model: ModelFile) {
-    confirm("Delete ${model.name}?\n\nThis permanently removes ${model.sizeFormatted} from this device.") {
+    val name = model.modelRef?.repo?.revision?.let { "${model.name} (@$it)" } ?: model.name
+    confirm("Delete $name?\n\nThis permanently removes ${model.sizeFormatted} from this device.") {
       storage.deleteModel(model)
       selectedModelKeys -= ModelCatalog.groupKey(model)
       selectedMmprojPaths -= model.path
@@ -223,7 +224,7 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
   // --- "Add models" sub-screen ---
 
   private fun renderAddModels(body: LinearLayout) {
-    val families = ModelTemplateCatalog.families
+    val families = ModelTemplateCatalog.models
     val filtered = families.filter { familyMatchesSearch(it, templateSearchText) }
     val allFamilyIds = families.map { it.id }.toSet()
     val allSelected = allFamilyIds.isNotEmpty() && selectedAddFamilyIds.containsAll(allFamilyIds)
@@ -302,7 +303,7 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
     )
   }
 
-  private fun familyRow(family: ModelFamily): View {
+  private fun familyRow(family: CatalogModel): View {
     val selected = selectedAddFamilyIds.contains(family.id)
     val repo = family.variants.firstOrNull()?.repo
     val size = family.variants.firstOrNull()?.sizeLabel.orEmpty()
@@ -345,15 +346,17 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
   /** Presets to download: selected families × selected quants, minus anything already downloaded or in flight. */
   private fun resolvedAddPresets(): List<PresetModel> {
     val unavailable = unavailableDownloadKeys()
-    return ModelTemplateCatalog.defaults.filter { preset ->
-      selectedAddFamilyIds.contains(preset.familyId) &&
-        ModelQuantFilter.matchesSelection(selectedAddQuants, preset.quant) &&
-        !unavailable.contains(preset.downloadKey)
-    }
+    return ModelTemplateCatalog.downloads(
+      ModelTemplateCatalog.current.filter { preset ->
+        selectedAddFamilyIds.contains(preset.modelId) &&
+          ModelQuantFilter.matchesSelection(selectedAddQuants, preset.quant) &&
+          !unavailable.contains(preset.downloadKey)
+      }
+    )
   }
 
   private fun unavailableDownloadKeys(): Set<String> {
-    val downloaded = storage.availableModels().map { LocalStorage.modelRelativePath(it.hfRepo, it.name) }.toSet()
+    val downloaded = storage.availableModels().map { it.storageKey }.toSet()
     val active = downloadCoordinator.activeDownloads().map { it.key }.toSet()
     return downloaded + active
   }
@@ -363,7 +366,7 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
       showError(IllegalStateException("Select at least one model"))
       return
     }
-    val totalBytes = selected.sumOf { it.estimatedBytes }
+    val totalBytes = selected.sumOf { it.sizeBytes ?: 0L }
     if (totalBytes > LARGE_DOWNLOAD_WARNING_BYTES) {
       confirm(
         message =
@@ -392,7 +395,7 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
           downloadCoordinator.enqueueDownload(
             urlString = preset.identifier,
             repo = preset.repoIdentifier,
-            familyId = preset.familyId,
+            modelId = preset.modelId,
             displayName = preset.name,
             onProgress = { progress -> vm.postDownloadStatus("Downloading ${index + 1}/$total: $label - ${progress.message}") },
             onComplete = { model -> vm.postDownloadStatus("Downloaded ${model.name}") },
@@ -425,7 +428,7 @@ class ModelsScreen(ctx: ScreenContext) : Screen(ctx) {
     render()
   }
 
-  private fun familyMatchesSearch(family: ModelFamily, query: String): Boolean {
+  private fun familyMatchesSearch(family: CatalogModel, query: String): Boolean {
     val q = query.trim().lowercase()
     if (q.isBlank()) return true
     val fields = listOf(family.displayName, family.id) + family.variants.flatMap { listOf(it.quant, it.repo) }

@@ -198,10 +198,9 @@ and exits without taking work if it is still on.
 
 ### Android (Samsung Galaxy S26 Ultra)
 
-The Galaxy S26 Ultra is model `SM-S948U1`. This file and the fleet table below
-use the marketing name; `docs/methodology/peak-memory-android.md` and
-`ci/checks/model-catalog-parity.py` use the model number. Both spellings mean
-this handset under the conditions below.
+This file and the fleet table use the name Galaxy S26 Ultra.
+`docs/methodology/peak-memory-android.md` uses the model number `SM-S948U1`
+for the same handset.
 
 The manufacturer controls Android's power management and maintenance behavior,
 not the Android Open Source Project (AOSP). Most of the features below are

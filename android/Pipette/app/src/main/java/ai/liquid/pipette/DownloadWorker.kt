@@ -14,7 +14,6 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.ProtocolException
 import java.net.SocketException
-import java.net.URL
 import java.net.UnknownHostException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -123,44 +122,23 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
       withContext(Dispatchers.IO) {
         inputs.partial.parentFile?.mkdirs()
         val existing = if (inputs.partial.exists()) inputs.partial.length() else 0L
-        val connection = openConnection(inputs.url, existing)
+        val connection = openModelConnection(inputs.url, Secrets(applicationContext).loadHfToken(), existing = existing)
         try {
           val transfer = resolveTransfer(connection, existing) ?: return@withContext // server says the .part is already complete
           if (!transfer.append && inputs.partial.exists()) inputs.partial.delete()
+          val remaining = transfer.total - transfer.startBytes
+          val free = inputs.partial.parentFile?.usableSpace ?: 0L
+          if (transfer.total > 0 && remaining > free) {
+            throw IOException(
+              "Not enough storage to download ${inputs.filename}. ${ByteFormat.fileSize(remaining)} needed, ${ByteFormat.fileSize(free)} available."
+            )
+          }
           stream(connection, inputs, transfer)
         } finally {
           runCatching { connection.errorStream?.close() }
           connection.disconnect() // always release the socket, including the error/416 paths
         }
       }
-    }
-
-  /** Open the URL, following redirects manually so the HF bearer token is never replayed to a non-`huggingface.co` redirect target (e.g. a CDN). */
-  private fun openConnection(urlString: String, existing: Long): HttpURLConnection {
-    var target = URL(urlString)
-    var redirects = 0
-    while (true) {
-      val connection = buildConnection(target, existing)
-      if (connection.responseCode !in REDIRECT_CODES) return connection
-      val location = connection.getHeaderField("Location")
-      connection.disconnect()
-      if (location.isNullOrBlank() || redirects++ >= MAX_REDIRECTS) throw IOException("Too many redirects for $urlString")
-      target = URL(target, location) // resolve relative redirects against the current URL
-    }
-  }
-
-  private fun buildConnection(url: URL, existing: Long): HttpURLConnection =
-    (url.openConnection() as HttpURLConnection).apply {
-      requestMethod = "GET"
-      connectTimeout = TIMEOUT_MS
-      readTimeout = TIMEOUT_MS
-      instanceFollowRedirects = false
-      setRequestProperty("User-Agent", USER_AGENT)
-      if (isHuggingFaceHost(url.host)) {
-        Secrets(applicationContext).loadHfToken()?.let { setRequestProperty("Authorization", "Bearer $it") }
-      }
-      if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
-      connect()
     }
 
   /** Decide how to write the body from the response, or null when the server reports the `.part` is already complete (416). */
@@ -329,7 +307,7 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
         file = inputs.dest,
         repo = inputs.repo,
         displayName = inputs.displayName ?: inputs.repo?.let { ModelTemplateCatalog.repoToName[it] },
-        familyId = inputs.familyId,
+        modelId = inputs.modelId,
       )
   }
 
@@ -360,7 +338,7 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
       url = url,
       filename = filename,
       repo = inputData.getString(KEY_REPO),
-      familyId = inputData.getString(KEY_FAMILY),
+      modelId = inputData.getString(KEY_MODEL_ID),
       displayName = inputData.getString(KEY_DISPLAY),
       dest = File(dest),
       partial = File(part),
@@ -372,7 +350,7 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
     val url: String,
     val filename: String,
     val repo: String?,
-    val familyId: String?,
+    val modelId: String?,
     val displayName: String?,
     val dest: File,
     val partial: File,
@@ -385,7 +363,8 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
     const val KEY_URL = "url"
     const val KEY_REPO = "repo"
     const val KEY_FILENAME = "filename"
-    const val KEY_FAMILY = "familyId"
+    // `familyId`, the key that work enqueued by an earlier install uses.
+    const val KEY_MODEL_ID = "familyId"
     const val KEY_DISPLAY = "displayName"
     const val KEY_DEST = "dest"
     const val KEY_PART = "part"
@@ -407,28 +386,10 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
      */
     const val MAX_NETWORK_ATTEMPTS = 5
 
-    // Exact host or a real subdomain — so the HF token isn't sent to look-alikes like "evil-huggingface.co".
-    private const val HF_HOST = "huggingface.co"
-
-    fun isHuggingFaceHost(host: String?): Boolean = host == HF_HOST || (host != null && host.endsWith(".$HF_HOST"))
-
-    private const val USER_AGENT = "pipette-android"
-    private const val TIMEOUT_MS = 30_000
     private const val BUFFER_SIZE = 64 * 1024
     private const val PROGRESS_INTERVAL_MS = 500L
     private const val MILLIS_PER_SECOND = 1000L
     private const val UNKNOWN_TOTAL = -1L
     private const val HTTP_RANGE_NOT_SATISFIABLE = 416
-    private const val HTTP_TEMP_REDIRECT = 307
-    private const val HTTP_PERM_REDIRECT = 308
-    private const val MAX_REDIRECTS = 5
-    private val REDIRECT_CODES =
-      setOf(
-        HttpURLConnection.HTTP_MOVED_PERM,
-        HttpURLConnection.HTTP_MOVED_TEMP,
-        HttpURLConnection.HTTP_SEE_OTHER,
-        HTTP_TEMP_REDIRECT,
-        HTTP_PERM_REDIRECT,
-      )
   }
 }

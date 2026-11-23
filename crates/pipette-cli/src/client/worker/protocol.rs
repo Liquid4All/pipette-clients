@@ -124,7 +124,7 @@ fn readiness_timed_out(err: &anyhow::Error) -> bool {
 }
 
 /// No host of the OS the flavor is built for reads its devices. An unreadable
-/// device tree (`WatchError::DeviceTree`) is this host's fault and stays retriable.
+/// nvgpu module (`WatchError::NvgpuModule`) is this host's fault and stays retriable.
 fn watch_unsupported(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
@@ -960,11 +960,11 @@ pub(crate) mod tests {
         assert_eq!(failure_code(&err), code, "{err:#}");
     }
 
-    /// Unlike a missing reader, a device tree this host could not read is its own.
+    /// Unlike a missing reader, an nvgpu module this host could not read is its own.
     #[cfg(target_os = "linux")]
     #[test]
-    fn an_unreadable_device_tree_stays_retriable() {
-        let err = anyhow::Error::from(OsBoundWatchError(WatchError::DeviceTree {
+    fn an_unreadable_nvgpu_module_stays_retriable() {
+        let err = anyhow::Error::from(OsBoundWatchError(WatchError::NvgpuModule {
             kind: std::io::ErrorKind::PermissionDenied,
         }))
         .context("flavor linux-arm64-cuda-13's devices cannot be read here");

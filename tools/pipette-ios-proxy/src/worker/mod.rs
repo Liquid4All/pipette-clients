@@ -25,14 +25,14 @@ use anyhow::Context;
 use serde_json::Value;
 
 use pipette_mgmt_client::types::{ClientProfile, DeviceProfileFields};
-use pipette_plan_types::RuntimeBuildFlagError;
+use pipette_plan_types::{Runtime, RuntimeBuildFlagError};
 
 use self::job::{log_claimed_job, run_claimed_job};
 use self::pause::{pause_claims, resume_claims, wait_until_runnable};
 use self::version::Releases;
 use crate::config::BuildSource;
 use crate::device::{Reachability, gpu_pin};
-use crate::pool::Pool;
+use crate::pool::{APPLE_FOUNDATION_FLAG, Pool};
 use crate::server::{self, ClaimPoll, Session};
 use crate::timing;
 
@@ -45,11 +45,23 @@ pub(crate) enum Builds {
 }
 
 impl Builds {
-    fn capabilities(&self) -> Result<Vec<String>, RuntimeBuildFlagError> {
+    fn candidate_capabilities(&self) -> Result<Vec<String>, RuntimeBuildFlagError> {
         match self {
             Self::Pool(pool) => pool.capabilities(),
             Self::Releases(releases) => releases.catalog.advertised(),
         }
+    }
+
+    fn capabilities(&self, phone: &Phone) -> Result<Vec<String>, RuntimeBuildFlagError> {
+        let mut flags = self.candidate_capabilities()?;
+        filter_apple_foundation(&mut flags, phone.apple_foundation_ready);
+        Ok(flags)
+    }
+}
+
+pub(crate) fn filter_apple_foundation(flags: &mut Vec<String>, ready: bool) {
+    if !ready {
+        flags.retain(|flag| flag != APPLE_FOUNDATION_FLAG);
     }
 }
 
@@ -293,7 +305,29 @@ fn run_one(phone: &mut Phone, builds: &mut Builds, tally: &mut Tally) -> anyhow:
             }
         }
     }
-    let (ctx, profile) = connect(phone, &builds.capabilities()?)?;
+    let mut capabilities = builds.candidate_capabilities()?;
+    phone.apple_foundation_ready = false;
+    if capabilities
+        .iter()
+        .any(|flag| flag == APPLE_FOUNDATION_FLAG)
+    {
+        phone.apple_foundation_ready = match builds {
+            Builds::Pool(pool) => match prepare_readiness_probe(phone, pool) {
+                Ok(()) => phone.probe_apple_foundation(),
+                Err(error) if halts_phone(&error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "could not prepare the app to check Apple Foundation readiness"
+                    );
+                    false
+                }
+            },
+            Builds::Releases(_) => phone.probe_apple_foundation(),
+        };
+    }
+    filter_apple_foundation(&mut capabilities, phone.apple_foundation_ready);
+    let (ctx, profile) = connect(phone, &capabilities)?;
 
     // The sleep's return value is the stop signal: dropping it turns the
     // remaining polls into a spin and then a bogus "not approved after 300s".
@@ -320,6 +354,21 @@ fn run_one(phone: &mut Phone, builds: &mut Builds, tally: &mut Tally) -> anyhow:
     );
 
     claim_loop(phone, builds, &Arc::new(ctx), tally)
+}
+
+/// A phone can start with an already indexed pool and no app installed.
+fn prepare_readiness_probe(phone: &mut Phone, pool: &Pool) -> anyhow::Result<()> {
+    if job::bundle_present(phone.control.as_ref(), &phone.entry.bundle_id)? {
+        return Ok(());
+    }
+    if let Some(runtime) = pool
+        .known()
+        .flat_map(|build| &build.runtimes)
+        .find(|runtime| matches!(runtime, Runtime::AppleFoundation(_)))
+    {
+        job::ensure_installed(phone, pool, runtime, &mut summary::JobSummary::default())?;
+    }
+    Ok(())
 }
 
 /// `PATCH /clients/me` with the profile and `capabilities`, returning the
@@ -424,7 +473,7 @@ fn claim_loop(
     let mut paused = None;
     // What `connect` just sent, so a reindex after an unchanged report reads as a
     // replaced profile.
-    let mut reported = serde_json::to_value(report(phone, &builds.capabilities()?))?;
+    let mut reported = serde_json::to_value(report(phone, &builds.capabilities(phone)?))?;
 
     tracing::info!(
         device = %phone.control.udid(),
@@ -438,7 +487,7 @@ fn claim_loop(
         if let Builds::Releases(releases) = builds
             && releases.refresh()?
         {
-            reassert_profile(phone, &builds.capabilities()?, ctx, &mut reported)?;
+            reassert_profile(phone, &builds.capabilities(phone)?, ctx, &mut reported)?;
         }
         match phone.control.reachability(&phone.entry.bundle_id) {
             Reachability::Unreachable(reason) => {
@@ -455,7 +504,7 @@ fn claim_loop(
                 // The server matches `os_version:` against the report, so a
                 // new iOS goes up before the next claim.
                 if phone.note_os_version(os_version) {
-                    reassert_profile(phone, &builds.capabilities()?, ctx, &mut reported)?;
+                    reassert_profile(phone, &builds.capabilities(phone)?, ctx, &mut reported)?;
                     continue;
                 }
             }
@@ -496,7 +545,7 @@ fn claim_loop(
                     return Ok(());
                 }
                 if !stop.load(Ordering::SeqCst) {
-                    reassert_profile(phone, &builds.capabilities()?, ctx, &mut reported)?;
+                    reassert_profile(phone, &builds.capabilities(phone)?, ctx, &mut reported)?;
                 }
                 if let Builds::Releases(releases) = builds {
                     releases.pace(&stop);
@@ -559,9 +608,70 @@ mod tests {
     use crate::logging::testing::{captured, said};
     use crate::state::DeviceFacts;
     use crate::worker::testing::{
-        fast_paced, identity_of, knows_every_benchmark, llamacpp, memory_claim, phone,
+        BUNDLE, fast_paced, identity_of, knows_every_benchmark, llamacpp, memory_claim, phone,
         profile_body, session,
     };
+
+    #[test]
+    fn each_phone_reports_its_own_apple_foundation_readiness() -> anyhow::Result<()> {
+        let state = tempfile::tempdir()?;
+        let (_, mut pool) = phone(FakeDevice::new("pool-index"), state.path())?;
+        pool.seed(
+            &state.path().join("builds/A.app"),
+            vec![
+                llamacpp("b10216")?,
+                serde_json::from_value(json!({"type": "apple_foundation"}))?,
+            ],
+        );
+        let mut builds = Builds::Pool(Arc::new(pool));
+
+        for (name, ready) in [("phone-a", true), ("phone-b", false)] {
+            let device =
+                FakeDevice::new(name)
+                    .with_installed(BUNDLE)
+                    .then_console(crate::app::ConsoleRun {
+                        stdout: format!("[HEADLESS] runtimes readiness apple_foundation={ready}\n"),
+                        stderr: String::new(),
+                        sentinel: Some(0),
+                        exit_code: Some(0),
+                        timed_out: false,
+                        engine_time: None,
+                        aborted: false,
+                        stopped: false,
+                        silent: false,
+                    });
+            let calls = device.log();
+            let (mut phone, _) = phone(device, state.path())?;
+            let server = MockServer::start();
+            Arc::make_mut(&mut phone.config).server.url =
+                pipette_mgmt_client::types::ServerUrl::try_new(server.base_url())
+                    .map_err(|error| anyhow::anyhow!("test server url: {error}"))?;
+            let expected = if ready {
+                r#""capabilities":["runtime:apple_foundation","runtime:descriptor:"#
+            } else {
+                r#""capabilities":["runtime:descriptor:"#
+            };
+            let patch = server.mock(|when, then| {
+                when.method(PATCH)
+                    .path("/clients/me")
+                    .body_includes(expected);
+                then.status(403);
+            });
+
+            assert!(run_one(&mut phone, &mut builds, &mut Tally::default()).is_err());
+            patch.assert();
+            assert_eq!(
+                calls.calls()?,
+                [crate::device::fake::Call::Launch {
+                    bundle_id: BUNDLE.to_owned(),
+                    app_args: ["headlessrun", "runtimes", "readiness"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                }]
+            );
+        }
+        Ok(())
+    }
 
     /// What the phone told the proxy since its last report.
     #[derive(Debug, Clone, Copy)]

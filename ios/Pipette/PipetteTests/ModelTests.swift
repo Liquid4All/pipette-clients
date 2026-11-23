@@ -114,7 +114,7 @@ struct ModelTests {
         let model = Model.appleFoundationText
         #expect(model.repo == nil)
         #expect(model.quant == nil)
-        #expect(model.familyId == "apple-foundation")
+        #expect(model.modelId == "apple-foundation")
         #expect(model.engineLabel == "Apple Foundation")
         #expect(model.authToken == nil)
     }
@@ -506,7 +506,7 @@ struct ModelTests {
     /// vault arm reads, and writes back the JSON it read, principal and pins included.
     @Test(arguments: [
         #"{"type":"gguf_text","source":"vault_url","url":"/vault/resources/vault_1/content","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","principal_id":"org_01936d"}"#,
-        #"{"type":"gguf_text","source":"vault_url","url":"/vault/resources/vault_1/content","principal_id":"user_01936d"}"#,
+        #"{"type":"gguf_text","source":"vault_url","url":"/vault/resources/vault_1/content","principal_id":"org_01936d"}"#,
         #"{"type":"gguf_vision","source":"vault_url","model":"/vault/resources/vault_1/content","mmproj":"/vault/resources/vault_2/content","mmproj_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","principal_id":"org_1"}"#,
         #"{"type":"gguf_vision_speculative","source":"vault_url","model":"/vault/resources/vault_1/content","mmproj":"/vault/resources/vault_2/content","draft":"/vault/resources/vault_3/content","draft_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","principal_id":"org_1"}"#,
         #"{"type":"mlx","source":"vault_archive","url":"/vault/resources/vault_1/content","principal_id":"org_1"}"#,
@@ -556,7 +556,7 @@ struct ModelTests {
             #expect(Set([plain, labelled]).count == 1)
             #expect(labelled.description == plain.description)
             #expect(labelled.artifactName == plain.artifactName)
-            #expect(labelled.familyId == plain.familyId)
+            #expect(labelled.modelId == plain.modelId)
             // Guards the premise: the two differ on the wire, and only by the label.
             #expect(try encoded(labelled)["custom_label"] as? String == "acme LFM3 q4")
             #expect(try encoded(plain)["custom_label"] == nil)
@@ -603,14 +603,14 @@ struct ModelTests {
     }
 
     /// Every vault path ends in `content`, so a vault model takes its resource id as its
-    /// name and its family. Two vault models stay apart, and a job cell is not unnamed.
+    /// name and its model id. Two vault models stay apart, and a job cell is not unnamed.
     @Test func aVaultModelIsLabelledByItsResourceId() throws {
         let text = try decode(#"{"type":"gguf_text","source":"vault_url","url":"/vault/resources/vault_1/content","principal_id":"org_1"}"#)
         let vision = try decode(#"{"type":"gguf_vision","source":"vault_url","model":"/vault/resources/vault_2/content","mmproj":"/vault/resources/vault_3/content","principal_id":"org_1"}"#)
         #expect(text.artifactName == "vault_1")
-        #expect(text.familyId == "vault_1")
+        #expect(text.modelId == "vault_1")
         #expect(vision.artifactName == "vault_2")
-        #expect(vision.familyId == "vault_2")
+        #expect(vision.modelId == "vault_2")
 
         let cell = JobCell(
             cellId: CellId("cell-vault"), benchmarkId: "prefill_throughput_512",
@@ -643,6 +643,6 @@ struct ModelTests {
         #expect(try VaultPath("  /vault/resources/ vault_1 /content ").value
             == "/vault/resources/vault_1/content")
         #expect(try VaultPath("/vault/resources/vault_1/content").resourceId.value == "vault_1")
-        #expect(try VaultPrincipalId(" user_01936d ").value == "user_01936d")
+        #expect(try VaultPrincipalId(" org_01936d ").value == "org_01936d")
     }
 }

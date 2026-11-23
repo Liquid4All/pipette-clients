@@ -61,7 +61,8 @@ pub fn run(
         | BenchmarkDefinition::AsrThroughput(_)
         | BenchmarkDefinition::AsrMaxMemory(_)
         | BenchmarkDefinition::DecisionLatency(_)
-        | BenchmarkDefinition::DecisionMaxMemory(_)) => anyhow::bail!(
+        | BenchmarkDefinition::DecisionMaxMemory(_)
+        | BenchmarkDefinition::Session(_)) => anyhow::bail!(
             "TensorRT Edge-LLM runs vl_throughput and vl_max_memory only, not {}",
             other.benchmark_type()
         ),

@@ -24,9 +24,9 @@ use tabled::{Tabled, settings::Style};
 
 use pipette_http::HttpClient;
 use pipette_mgmt_client::{
-    AddUserKeyRequest, ContactEmail, Error, KeyDetails, KeyOnlyIdentity, PrivateKey, PublicKey,
-    RegisterUserRequest, ServerUrl, Timestamp, UserPreauthKey, UserProfile, UserSigner, UserStatus,
-    generate_keypair, key_id_for, parse_contact_email,
+    AddUserKeyRequest, Error, KeyDetails, KeyOnlyIdentity, PrivateKey, PublicKey,
+    RegisterUserRequest, ServerUrl, Timestamp, UserPreauthKey, UserProfile, UserSigner,
+    generate_keypair, key_id_for,
     user_api::{self, KeyApproval, RefusalError},
 };
 use pipette_plan_types::{UserId, UserKeyId};
@@ -43,7 +43,7 @@ use crate::{
 };
 
 const REGISTER_LONG_ABOUT: &str = "\
-Register this machine's key against a user account, on either path in.
+Register this machine's key against the user account a pre-auth key names.
 
 Signs with a key this machine already has, from an agent or from ~/.ssh, and
 sends its public half. `auth keys available` lists them. With one
@@ -54,20 +54,11 @@ Nothing is copied by registering an SSH key: the identity records which public
 key signs for the account, and the private half is read from where it already
 lives, or never read at all when an agent holds it.
 
-What goes with it decides which account it lands on:
-
-  --user-preauth-key   an account that already exists, named by the key, and
-                       admitted already approved. Nothing else on the command
-                       line sets a field of the record, and there is no
-                       approval step to wait for.
-
-  --contact-email      no account yet: this asks for one. It comes up pending,
-                       and an operator has to admit it before the account can
-                       file a plan. The key registered here is the account's
-                       from the start, so nothing is re-run once it is.
-
-The two are exclusive. An invite carries the account this key joins, so an
-address beside it would describe a record this route may not touch.
+--user-preauth-key names an account that already exists. Nothing else on the
+command line sets a field of the record, and there is no approval step to wait
+for. Nothing here asks for an account: one comes from an administrator, who
+mints the pre-auth key, or from signing in to the server's web console, after
+which `auth login` approves this machine's key from the browser.
 
 A user's pre-auth key is not a device's. The server keeps the two in separate
 records, mints them with separate commands, and admits each on its own
@@ -160,7 +151,7 @@ pub struct AuthArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Register this machine's key against an account, or ask for a new account
+    /// Register this machine's key against the account a pre-auth key names
     #[command(long_about = REGISTER_LONG_ABOUT)]
     Register(RegisterArgs),
     /// Approve this machine's key from a browser signed in to the account
@@ -293,21 +284,10 @@ pub struct RegisterArgs {
     /// Also read from PIPETTE_USER_PREAUTH_KEY to keep it out of shell history;
     /// it is sent with the request and never written to disk.
     ///
-    /// Omit it to ask for an account instead, with --contact-email.
+    /// Nothing here asks for an account: an administrator creates one, or a
+    /// sign-in to the web console does.
     #[arg(long, env = "PIPETTE_USER_PREAUTH_KEY", hide_env_values = true)]
-    pub user_preauth_key: Option<UserPreauthKey>,
-
-    /// Where to reach whoever is asking, when there is no pre-auth key to
-    /// present. It is the whole of what an operator decides on, so it is
-    /// required on that path and refused on the other: an invite already names
-    /// an account, and that account already carries an address.
-    #[arg(
-        long,
-        value_parser = parse_contact_email,
-        required_unless_present = "user_preauth_key",
-        conflicts_with = "user_preauth_key"
-    )]
-    pub contact_email: Option<ContactEmail>,
+    pub user_preauth_key: UserPreauthKey,
 
     /// What this machine is, for whoever later decides whether to revoke the
     /// key: a key id is 64 hex characters and settles nothing. Defaults to
@@ -565,7 +545,6 @@ fn register_with_key(
         RegisterUserRequest {
             public_key: public_key_hex,
             user_preauth_key: args.user_preauth_key,
-            contact_email: args.contact_email,
             key_details: key_details.clone(),
         },
     )
@@ -628,14 +607,7 @@ fn register_with_key(
         )
     })?;
 
-    // An account that was asked for is not one that was joined, and the
-    // difference is the whole of what the operator does next.
-    let pending = response.status == UserStatus::Pending;
-    println!(
-        "{} {}",
-        if pending { "requested" } else { "registered" },
-        response.user_id
-    );
+    println!("registered {}", response.user_id);
     println!("status:       {}", response.status);
     println!("user_key_id:  {key_id}");
     // The one field the operator may not have written, so the run shows what
@@ -647,12 +619,6 @@ fn register_with_key(
         "identity:     {}",
         identity::identity_dir(work_dir).display()
     );
-    if pending {
-        println!();
-        println!("An operator has to admit the account before it can file a plan.");
-        println!("`auth me` reports the status. This key is already registered to");
-        println!("it, so nothing here is re-run once the account is admitted.");
-    }
     Ok(())
 }
 
@@ -1091,10 +1057,6 @@ fn save_login(
         "identity:     {}",
         identity::identity_dir(work_dir).display()
     );
-    if profile.status == UserStatus::Pending {
-        println!();
-        println!("An operator has to admit the account before it can file a plan.");
-    }
     Ok(())
 }
 
@@ -1446,8 +1408,7 @@ mod tests {
 
     fn register_args(server: ServerUrl) -> anyhow::Result<RegisterArgs> {
         Ok(RegisterArgs {
-            user_preauth_key: Some(user_preauth_key()?),
-            contact_email: None,
+            user_preauth_key: user_preauth_key()?,
             key_details: Some(KeyDetails::try_new("work laptop")?),
             server,
             key: generating(),
@@ -1577,48 +1538,6 @@ mod tests {
         let label = key_details_label(user.map(str::to_string), hostname.map(str::to_string));
         anyhow::ensure!(label == expected, "unexpected label: {label}");
         KeyDetails::try_new(label)?;
-        Ok(())
-    }
-
-    #[test]
-    fn a_request_registers_the_key_under_a_pending_account() -> anyhow::Result<()> {
-        let tmp = work_dir()?;
-        let work_dir = tmp.path();
-        let server = MockServer::start();
-        let (private_key_hex, public_key_hex) = generate_keypair()?;
-        let key_id = key_id_for(&public_key_hex)?;
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/api/v1/users/register")
-                .json_body_includes(r#"{"contact_email": "ops@example.com"}"#)
-                // The invite is absent rather than null, so the server can tell
-                // a request from a malformed invited registration.
-                .body_excludes("user_preauth_key");
-            then.status(201).json_body(serde_json::json!({
-                "user_id": "user_9f2c",
-                "status": "pending",
-                "key_id": key_id.as_ref(),
-            }));
-        });
-
-        register_with_key(
-            work_dir,
-            RegisterArgs {
-                user_preauth_key: None,
-                contact_email: Some(ContactEmail::try_new("ops@example.com")?),
-                ..register_args(ServerUrl::try_new(server.base_url())?)?
-            },
-            &http_ctx()?,
-            ChosenKey::generated((private_key_hex, public_key_hex)),
-        )?;
-        mock.assert();
-
-        let (_, credential) = identity::registered(work_dir)?;
-        assert_eq!(credential.user_id.as_ref(), "user_9f2c");
-        assert_eq!(
-            credential.user_key_id,
-            key_id_for(&identity::public_key(work_dir)?)?
-        );
         Ok(())
     }
 

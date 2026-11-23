@@ -7,9 +7,13 @@ import ai.liquid.pipette.fakes.FakeResultSubmitter
 import ai.liquid.pipette.fakes.JobRunnerFixtures.DECODE_ID
 import ai.liquid.pipette.fakes.JobRunnerFixtures.DECODE_TYPE
 import ai.liquid.pipette.fakes.JobRunnerFixtures.directExecutor
+import java.io.File
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /**
  * What [JobRunner] does about a cell whose weights are not on disk.
@@ -19,6 +23,8 @@ import org.junit.Test
  * gets, and it must not have quietly changed.
  */
 class JobRunnerProvisioningTest {
+  @get:Rule val temp = TemporaryFolder()
+
   private val missing = "LiquidAI/LFM2-1.2B-GGUF/lfm2-1.2b-q4_k_m.gguf"
   private val fetched = "/data/models/$missing"
   private val ref = Model.GgufText(HfGgufText(HfRepo.parseSlug("LiquidAI/LFM2-1.2B-GGUF"), GgufFilename.parse("lfm2-1.2b-q4_k_m.gguf")))
@@ -40,7 +46,7 @@ class JobRunnerProvisioningTest {
     }
   }
 
-  private fun runner(store: FakeJobStore, engine: FakeBenchmarkEngine, provisioner: ModelProvisioning?) =
+  private fun runner(store: JobStore, engine: FakeBenchmarkEngine, provisioner: ModelProvisioning?) =
     JobRunner(
       storage = store,
       engine = engine,
@@ -70,6 +76,84 @@ class JobRunnerProvisioningTest {
     assertEquals(listOf(ref), provisioner.weightsAsked)
     assertEquals("the cell must load the file the fetch produced", listOf(fetched), engine.loads.map { it.modelPath })
     assertEquals(CellRunStatus.COMPLETED, manifest.cells.single().runStatus)
+  }
+
+  @Test
+  fun `a pinned cell fetches the pin even when its stored path resolves to the default copy`() {
+    val pinned = ref.copy(model = ref.model.copy(repo = ref.repo.copy(revision = HfRevision.parse("abc123"))))
+    val pinnedKey = LocalStorage.modelRelativePath(pinned.repo.reference, pinned.model.filename.value)
+    val pinnedPath = "/data/models/$pinnedKey"
+    val store = FakeJobStore(unresolvablePaths = setOf(pinnedKey))
+    val engine = FakeBenchmarkEngine()
+    val provisioner = FakeProvisioner(weights = Result.success(pinnedPath))
+    val manifest = manifestWith(cell(pinned))
+    store.saveJobManifest(manifest)
+
+    runner(store, engine, provisioner).resume(manifest.jobId)
+
+    assertEquals(listOf(pinned), provisioner.weightsAsked)
+    assertEquals(listOf(pinnedPath), engine.loads.map { it.modelPath })
+  }
+
+  @Test
+  fun `an unpinned cell fetches the default copy when its stored path resolves to a pin`() {
+    val pinnedPath = "/data/models/${ref.repo}@abc123/${ref.model.filename}"
+    val store = FakeJobStore(unresolvablePaths = setOf(missing))
+    val engine = FakeBenchmarkEngine()
+    val provisioner = FakeProvisioner(weights = Result.success(fetched))
+    val manifest = manifestWith(cell(ref).copy(modelPath = pinnedPath))
+    store.saveJobManifest(manifest)
+
+    runner(store, engine, provisioner).resume(manifest.jobId)
+
+    assertEquals(listOf(ref), provisioner.weightsAsked)
+    assertEquals(listOf(fetched), engine.loads.map { it.modelPath })
+  }
+
+  @Test
+  fun `a malformed pin stays blocked after its job is saved and retried`() {
+    val pinnedPath = "/data/models/${ref.repo}@abc123/${ref.model.filename}"
+    val invalidRef = ref.toJson().put("revision", "refs/pr/3")
+    val cellJson = cell(ref).copy(modelPath = pinnedPath).toJson().put("modelRef", invalidRef)
+    val manifest = manifestWith(JobCell.fromJson(cellJson))
+
+    val unpinned = File(temp.root, missing)
+    unpinned.parentFile?.mkdirs()
+    unpinned.writeText("unpinned weights")
+    assertEquals(unpinned.absolutePath, LocalStorage.resolveModelPath(pinnedPath, temp.root))
+
+    val persisted = FakeJobStore()
+    var pathLookups = 0
+    val store =
+      object : JobStore by persisted {
+        override fun resolveModelPath(storedPath: String?): String? {
+          pathLookups++
+          return storedPath?.let { LocalStorage.resolveModelPath(it, temp.root) }
+        }
+
+        override fun saveJobManifest(manifest: JobManifest) {
+          persisted.saveJobManifest(JobManifest.fromJson(JSONObject(manifest.toJson().toString())))
+        }
+      }
+    val engine = FakeBenchmarkEngine()
+    val provisioner = FakeProvisioner(weights = Result.success(fetched))
+    val runner = runner(store, engine, provisioner)
+
+    store.saveJobManifest(manifest)
+    runner.resume(manifest.jobId)
+    val failed = checkNotNull(store.loadJobManifest(manifest.jobId)).cells.single()
+    assertEquals(CellRunStatus.FAILED, failed.runStatus)
+    assertTrue(failed.errorMessage.orEmpty().contains("Create a new job"))
+    assertEquals(invalidRef.toString(), failed.toJson().getJSONObject("modelRef").toString())
+
+    runner.retryFailed(manifest.jobId)
+    val retried = checkNotNull(store.loadJobManifest(manifest.jobId)).cells.single()
+    assertEquals(CellRunStatus.FAILED, retried.runStatus)
+    assertEquals(invalidRef.toString(), retried.toJson().getJSONObject("modelRef").toString())
+    assertEquals(0, pathLookups)
+    assertTrue(engine.loads.isEmpty())
+    assertTrue(provisioner.weightsAsked.isEmpty())
+    assertTrue(persisted.payloadWrites.isEmpty())
   }
 
   @Test

@@ -31,15 +31,16 @@ nonisolated func register(
 ) async throws -> IdentityRegistration {
     // A second registration would orphan every result submitted under the first.
     try registrationStore.ensureEmpty()
-    let profile = registrationProfile()
-    AppLog.auth.info(
-        "registering client against \(server) (cpu_arch=\(profile.deviceCpuArch ?? "unset"), "
-            + "os_family=\(profile.deviceOsFamily ?? "unset"))")
     let prior = try device.get()
     // Before the server call: an I/O failure aborts before a client id is spent, and a
     // refused registration still leaves the device named.
     try device.put(mergeLabelsForRegister(
         deviceName: input.deviceName, deviceFormFactor: input.deviceFormFactor, prior: prior))
+    // After the labels, so the profile carries the name and form factor just stored.
+    let profile = try registrationProfile(deviceStore: device)
+    AppLog.auth.info(
+        "registering client against \(server) (cpu_arch=\(profile.deviceCpuArch ?? "unset"), "
+            + "os_family=\(profile.deviceOsFamily ?? "unset"))")
     // Counted, or a Keychain fault reads in the funnel as a user who wandered off.
     guard let publicKeyHex = KeychainHelper.generatePendingSigningKeyPair() else {
         throw registrationFailed(IdentityError.keyNotPersisted)
@@ -111,11 +112,16 @@ nonisolated func register(
     return registration
 }
 
-/// The device fields sent at registration: the CPU architecture and the OS family, so the
-/// server derives the `arch:` and `os_family:` flags before the planner worker first
-/// reports the full profile.
-nonisolated func registrationProfile() -> DeviceProfileFields {
-    DeviceProfileFields(deviceCpuArch: detectCpuArch(), deviceOsFamily: detectOsFamily())
+/// The app registers with the same device profile and capability flags as the planner
+/// worker. The server derives flags such as `os:`, `arch:`, and `chip:` from the profile.
+/// The catalog uses both sets of flags to offer models before the worker first starts.
+///
+/// Throws when a runtime build flag does not encode, as the worker's profile refresh does.
+nonisolated func registrationProfile(deviceStore: ClientDeviceStore) throws -> DeviceProfileFields {
+    try buildProfileUpdate(
+        deviceStore: deviceStore,
+        capabilities: installedRuntimeCapabilities() + installedRuntimeBuildFlags()
+    ).device
 }
 
 /// An explicit label beats the one `device.json` holds, and an absent or blank one keeps

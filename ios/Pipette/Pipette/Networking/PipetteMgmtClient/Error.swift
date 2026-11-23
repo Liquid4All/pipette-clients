@@ -32,6 +32,8 @@ nonisolated extension PipetteMgmtClient {
         /// response adds nothing to the message.
         case httpStatus(method: String, url: String, status: Int, body: String)
 
+        case responseTooLarge(method: String, url: String, limit: Int)
+
         /// `body` is quoted because `JSONDecoder`'s coding path names a position in
         /// JSON the operator never saw.
         case decodeJson(method: String, url: String, body: String, source: any Swift.Error)
@@ -64,6 +66,8 @@ nonisolated extension PipetteMgmtClient {
                 return "request failed for \(method) \(url): \(message)"
             case .httpStatus(let method, let url, let status, let body):
                 return "request returned \(status) for \(method) \(url)\(body)"
+            case .responseTooLarge(let method, let url, let limit):
+                return "response exceeded \(limit) bytes for \(method) \(url)"
             case .decodeJson(let method, let url, let body, let source):
                 return "failed to parse JSON response for \(method) \(url): \(source)\(body)"
             }

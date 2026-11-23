@@ -1,7 +1,9 @@
 package ai.liquid.pipette
 
+import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -14,7 +16,25 @@ import org.robolectric.shadows.ShadowBuild
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = android.app.Application::class)
 class RegisterBodyTest {
-  private fun body(preauthKey: String? = null) = registerBody("Example", "user@example.com", "Pixel 9", "a3f8", preauthKey)
+  private fun body(preauthKey: String? = null) =
+    registerBody(
+      "Example",
+      "user@example.com",
+      "Pixel 9",
+      "a3f8",
+      preauthKey,
+      ProfileRefreshService.profileUpdateBody(ApplicationProvider.getApplicationContext(), listOf("runtime:llama_cpp")),
+    )
+
+  /** The server derives `os:` and the other device flags from these fields, and the catalog offers models by them from the first fetch. */
+  @Test
+  fun `carries the device profile and the capabilities`() {
+    val json = body()
+    assertEquals(DeviceInfo.OS_NAME, json.getString("device_os_name"))
+    assertTrue(json.has("device_os_version"))
+    assertTrue(json.has("device_ram_bytes"))
+    assertEquals("runtime:llama_cpp", json.getJSONArray("capabilities").getString(0))
+  }
 
   @Test
   fun `carries the arch and os family`() {

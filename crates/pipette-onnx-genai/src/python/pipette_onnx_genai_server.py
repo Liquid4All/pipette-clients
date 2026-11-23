@@ -146,13 +146,15 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error_json(404, f"no route for GET {self.path}")
 
+    def routes(self):
+        return {"/tokenize": self.tokenize, "/v1/completions": self.complete}
+
     def do_POST(self):
-        routes = {"/tokenize": self.tokenize, "/v1/completions": self.complete}
         try:
             # Read before any answer, a 404 included: closing on an unread body
             # resets the connection on Windows, and the reset loses the answer.
             raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            route = routes.get(self.path)
+            route = self.routes().get(self.path)
             if route is None:
                 self.send_error_json(404, f"no route for POST {self.path}")
                 return

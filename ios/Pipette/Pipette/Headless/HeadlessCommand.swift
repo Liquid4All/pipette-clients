@@ -77,8 +77,8 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
     case diagMemseq(models: [String], batch: UInt32, prefill: UInt32)
     case modelsList(format: ModelsCommands.ListFormat)
     case modelsRm(name: String?, repo: String?)
-    /// A phone installs no runtimes, so `list` is the only leaf.
     case runtimesList(format: RuntimesCommands.ListFormat)
+    case runtimesReadiness
     case benchmarksList(benchmarkType: BenchmarkType?)
     case benchmarksShow(SourcedBenchmarkId)
     case benchmarksInitLocal
@@ -206,7 +206,7 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
             return true
         case .benchmarksRun, .modelsPull, .modelsDelete,
              .authRegister, .diagMemseq, .modelsList, .modelsRm, .listJobs, .removeJob,
-             .worker, .runtimesList, .benchmarksList, .benchmarksShow,
+             .worker, .runtimesList, .runtimesReadiness, .benchmarksList, .benchmarksShow,
              .benchmarksInitLocal,
              .storageStatus, .storageGc, .sync, .version,
              .authMe, .authSetDevice, .authReset, .authExport, .authImport, .diagProbe,
@@ -792,6 +792,8 @@ nonisolated enum HeadlessCommand: Equatable, Sendable {
                     throw .invalidValue(key: "format", value: raw)
                 }
                 return .runtimesList(format: format)
+            case "readiness":
+                return .runtimesReadiness
             case let other?:
                 throw .unknownVerb("runtimes \(other)")
             }

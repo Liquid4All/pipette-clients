@@ -12,7 +12,7 @@ struct DiscoveredModelTests {
         // AFM has no HF repo, so the row reports its fixed slug rather than "".
         #expect(file.hfRepo == AFMRuntime.submissionModelName)
         #expect(file.quant == nil)
-        #expect(file.familyId == "apple-foundation")
+        #expect(file.modelId == "apple-foundation")
         #expect(file.name == "Apple Foundation")
         #expect(file.displayName == "Apple Foundation")
         #expect(file.path == "")

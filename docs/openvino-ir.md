@@ -144,7 +144,9 @@ chat history up to 1024 tokens. 1509 is passed.
 
 Every prompt of 1024 tokens or fewer runs on the default bound. pipette refuses
 an NPU cell whose prompt is longer than the bound, unless the cell sets
-`max_prompt_len`. A larger `max_prompt_len` compiles a larger static shape, at
+`max_prompt_len`. A VL prompt includes its image tokens, which pipette counts on
+LFM3-VL only; on another VL model GenAI refuses an over-long prompt itself, after
+the compile ([pipette-cli/openvino.md](pipette-cli/openvino.md#runtime-flags)). A larger `max_prompt_len` compiles a larger static shape, at
 the cost above. A prefill ladder that reaches 8k tokens is therefore not
 practical on the NPU. This limit belongs to plan authoring: a backend cannot
 work around it.

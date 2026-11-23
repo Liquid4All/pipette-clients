@@ -4,6 +4,18 @@ import FoundationModels
 enum AFMAvailability: Equatable {
     case available
     case unavailable(reason: String)
+
+    nonisolated var isAvailable: Bool {
+        if case .available = self { return true }
+        return false
+    }
+
+    nonisolated var logDescription: String {
+        switch self {
+        case .available: return "available"
+        case .unavailable(let reason): return "unavailable(\(reason))"
+        }
+    }
 }
 
 /// Apple's on-device foundation model (FoundationModels) as a benchmark runtime, emitting
@@ -50,15 +62,11 @@ nonisolated enum AFMRuntime {
     }
 
     static var isAvailable: Bool {
-        if case .available = availability() { return true }
-        return false
+        availability().isAvailable
     }
 
     static func availabilityText() -> String {
-        switch availability() {
-        case .available: return "available"
-        case .unavailable(let reason): return "unavailable(\(reason))"
-        }
+        availability().logDescription
     }
 
     static func run(_ request: RunRequest,

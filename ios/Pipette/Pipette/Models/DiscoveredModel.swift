@@ -15,11 +15,13 @@ nonisolated struct DiscoveredModel: Identifiable, Sendable, Hashable {
     /// On-disk size, or the catalog's declared size for a row not yet downloaded; `0` for
     /// AFM.
     let sizeBytes: Int64
+    private let catalogQuant: String?
 
-    init(source: Model, path: String, sizeBytes: Int64) {
+    init(source: Model, path: String, sizeBytes: Int64, catalogQuant: String? = nil) {
         self.source = source
         self.path = path
         self.sizeBytes = sizeBytes
+        self.catalogQuant = catalogQuant
     }
 
     static let appleFoundation = DiscoveredModel(
@@ -40,7 +42,8 @@ nonisolated struct DiscoveredModel: Identifiable, Sendable, Hashable {
     }
 
     init(catalog entry: CatalogEntry) {
-        self.init(source: entry.source, path: "", sizeBytes: entry.sizeBytes)
+        self.init(source: entry.source, path: "", sizeBytes: entry.sizeBytes,
+                  catalogQuant: entry.quant)
     }
 
     /// This entry as a run that named `requested` carries it, so a report states the model
@@ -53,16 +56,16 @@ nonisolated struct DiscoveredModel: Identifiable, Sendable, Hashable {
 
     var hfRepo: String { source.repoSlug }
 
-    /// The catalog's family name, or nil for a model absent from the catalog (callers fall
+    /// The catalog's model name, or nil for a model absent from the catalog (callers fall
     /// back to the filename stem). AFM reports its engine label.
     var displayName: String? {
         if case .appleFoundationText = source { return source.engineLabel }
         return CatalogEntry.repoToName[hfRepo]
     }
 
-    var familyId: String { source.familyId }
+    var modelId: String { source.modelId }
 
-    var quant: String? { source.quant }
+    var quant: String? { source.quant ?? catalogQuant }
 
     var engineLabel: String { source.engineLabel }
 }

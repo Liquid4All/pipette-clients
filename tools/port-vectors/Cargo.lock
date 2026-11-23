@@ -430,7 +430,7 @@ dependencies = [
 [[package]]
 name = "pipette-plan-types"
 version = "0.1.0"
-source = "git+https://github.com/Liquid4All/pipette-mgmt.git?rev=1b24fe0c441eef6bf3d4843eac0076f602bfddf3#1b24fe0c441eef6bf3d4843eac0076f602bfddf3"
+source = "git+https://github.com/Liquid4All/pipette-mgmt.git?rev=1b118d1d83e69d838aa0643d89192804a27bcf77#1b118d1d83e69d838aa0643d89192804a27bcf77"
 dependencies = [
  "base64",
  "email_address",

@@ -15,10 +15,11 @@ was measured on, and is an illustration. The llama.cpp that pipette vendors
 Image tokens are **not** a function of pixel dimensions alone; each model's
 vision encoder has its own patch size, pooling, and tiling policy. `image_tokens`
 is measured, model- and runtime-agnostic (works for any VLM the runtime can
-load), and it means the same thing on every path and at every frame count: **the
+load) on every path but OpenVINO, where the client computes it for LFM3-VL
+only, and it means the same thing on every path and at every frame count: **the
 image embeddings alone, without the image markers around them** (see
 [`image_tokens` and the model's image markers](#image_tokens-and-the-models-image-markers)).
-Each path reads it from its own engine:
+Each path gets it from its own engine, OpenVINO from GenAI's rule:
 
 - **Native (mtmd, Android and iOS): summed directly from mtmd's IMAGE-type chunks**
   (`mtmd_input_chunk_get_n_tokens` over `MTMD_INPUT_CHUNK_TYPE_IMAGE`). This is
@@ -37,6 +38,15 @@ Each path reads it from its own engine:
   llama-server. A count the measured `prompt_tokens` cannot hold fails the cell
   instead: the helper runs the server's own processor, so the images did not
   reach the server's prompt.
+- **OpenVINO (`VLMPipeline`): GenAI's resize rule, recomputed by the client**,
+  known for LFM3-VL only. Each side is rounded to a multiple of patch size x
+  merge size (32 pixels), ties to even, and scaled into the processor's pixel
+  bounds, then each 32x32 block is a token, as in GenAI's `lfm3_vl` encoder. It
+  matches GenAI's own counts, read off its `prompt_tokens`, on each branch of
+  the rule, and llama.cpp `b11988`'s on the three ladder sizes it ran on an
+  Intel Core Ultra X7 368H (64, 256 and 1600 tokens). Each rep checks it: a prompt GenAI
+  counts otherwise than 10 + text + N x (image tokens + 2) fails the run. GenAI
+  exposes no count, so another model's rows report none.
 
 `prompt_tokens` always carries the full prompt cost, markers included, so no cost
 is lost; `image_tokens` is the image-embedding share of it.
@@ -220,9 +230,11 @@ linearity: before upstream #27348 they merged consecutive same-size images in
 pairs for Qwen-VL models (measured: Qwen3.5 at 3 × 512² takes 512 image tokens
 on `b10216`, 768 on builds since #27348 such as `b11349` and `b11706`, which
 merge only video frames).
-That is why no path multiplies a one-frame count: each counts the cell's frames
-together (mtmd's chunks natively, a helper run with all the frames on
-llama-server, the processor on MLX). `mlx_vlm` does not merge frames
+That is why every path but OpenVINO counts the cell's frames together (mtmd's
+chunks natively, a helper run with all the frames on llama-server, the processor
+on MLX). OpenVINO multiplies its one-image count, which holds because GenAI
+encodes each LFM3-VL image on its own: 5 x 512² images make a 1300-token prompt
+on GenAI and on llama.cpp `b11988`. `mlx_vlm` does not merge frames
 (3 × 512² counts 768), so the same model can report different `image_tokens` on
 an older llama.cpp build and on MLX; that is the engines' difference, not the
 count's.

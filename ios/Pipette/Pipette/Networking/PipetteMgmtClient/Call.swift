@@ -74,11 +74,13 @@ nonisolated extension PipetteMgmtClient {
             server: ServerUrl,
             http: HttpClient,
             path: String,
-            auth: (any SignsRequest)?
+            auth: (any SignsRequest)?,
+            responseLimit: Int? = nil
         ) async throws(PipetteMgmtClient.Error) -> T {
             try decodeSuccess(
                 await dispatch(
-                    server: server, http: http, method: .get, path: path, auth: auth, body: nil))
+                    server: server, http: http, method: .get, path: path, auth: auth, body: nil,
+                    responseLimit: responseLimit))
         }
 
         static func getJsonConditional<T: Decodable>(
@@ -149,13 +151,14 @@ nonisolated extension PipetteMgmtClient {
             path: String,
             auth: (any SignsRequest)?,
             ifNoneMatch: IfNoneMatch? = nil,
-            body: Data?
+            body: Data?,
+            responseLimit: Int? = nil
         ) async throws(PipetteMgmtClient.Error) -> Dispatched {
             let url = "\(server.value)\(path)"
             let request = try buildRequest(
                 method: method, url: url, auth: auth, ifNoneMatch: ifNoneMatch, body: body)
             let response = try await execute(
-                request, on: http, method: method.asStr, url: url)
+                request, on: http, method: method.asStr, url: url, responseLimit: responseLimit)
             return Dispatched(response: response, url: url, method: method.asStr)
         }
 
@@ -262,20 +265,29 @@ nonisolated extension PipetteMgmtClient {
             _ request: HttpRequest,
             on http: HttpClient,
             method: String,
-            url: String
+            url: String,
+            responseLimit: Int?
         ) async throws(PipetteMgmtClient.Error) -> HttpResponse {
-            let data: Data
+            let data: Data?
             let response: URLResponse
             do {
-                (data, response) = try await http.clientNoRedirects.data(for: urlRequest(request))
+                if let responseLimit {
+                    (data, response) = try await http.clientNoRedirects.boundedData(
+                        for: urlRequest(request), limit: responseLimit)
+                } else {
+                    (data, response) = try await http.clientNoRedirects.data(for: urlRequest(request))
+                }
             } catch {
                 throw .transport(method: method, url: url, message: error.localizedDescription)
             }
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw .transport(method: method, url: url, message: "response was not HTTP")
             }
+            if let responseLimit, data == nil, (200..<300).contains(httpResponse.statusCode) {
+                throw .responseTooLarge(method: method, url: url, limit: responseLimit)
+            }
             return HttpResponse(
-                status: httpResponse.statusCode, headers: headerPairs(httpResponse), body: data)
+                status: httpResponse.statusCode, headers: headerPairs(httpResponse), body: data ?? Data())
         }
 
         fileprivate static func urlRequest(_ request: HttpRequest) -> URLRequest {

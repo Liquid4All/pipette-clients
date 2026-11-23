@@ -4,7 +4,6 @@ import ai.liquid.pipette.AccentKind
 import ai.liquid.pipette.BenchmarkDefinition
 import ai.liquid.pipette.JobCell
 import ai.liquid.pipette.JobManifest
-import ai.liquid.pipette.JobQuantFilter
 import ai.liquid.pipette.ModelFile
 import ai.liquid.pipette.PresetModel
 import ai.liquid.pipette.Readiness
@@ -30,7 +29,7 @@ fun accentColor(kind: AccentKind): Color {
 
 data class ModelRowUi(val model: ModelFile, val title: String, val subtitle: String)
 
-/** A downloaded model family in the Models list: brand (from name) + size + collapsible quant chips. */
+/** A downloaded model in the Models list: brand (from name) + size + collapsible quant chips. */
 data class DownloadedGroupUi(
   val key: String,
   val name: String,
@@ -40,8 +39,21 @@ data class DownloadedGroupUi(
   val files: List<ModelFile>,
 )
 
-/** A selectable model family in the Add-models cover. */
-data class AddModelGroupUi(val id: String, val name: String, val sizeLabel: String, val checked: Boolean)
+/** [checked] and [mixed] describe selection among available quants. [subtitle] shows the selection count or the model format if none are selected. */
+data class AddModelUi(
+  val name: String,
+  val subtitle: String,
+  val expanded: Boolean,
+  val checked: Boolean,
+  val mixed: Boolean,
+  val sections: List<AddQuantSectionUi>,
+)
+
+/** The quants of an Add-models row that come from one repo. */
+data class AddQuantSectionUi(val label: String, val chips: List<AddQuantChipUi>)
+
+/** One quant of an Add-models row. [key] is its download key. [onDevice] is true if the file exists or appears in Active downloads. */
+data class AddQuantChipUi(val key: String, val label: String, val sizeLabel: String, val selected: Boolean, val onDevice: Boolean)
 
 data class TemplateGroupUi(val name: String, val rows: List<PresetRowUi>)
 
@@ -62,9 +74,10 @@ data class JobCardUi(
   val isRegistered: Boolean,
 )
 
-data class ModelGroupRowUi(val key: String, val label: String, val name: String, val sizeLabel: String, val checked: Boolean)
+data class ModelGroupRowUi(val key: String, val name: String, val sizeLabel: String, val checked: Boolean)
 
-data class QuantChipUi(val filter: JobQuantFilter, val label: String, val selected: Boolean)
+/** One quant pill. [quant] is the upper-case quant label, or null for "All quants". See [QuantFilter]. */
+data class QuantChipUi(val quant: String?, val label: String, val selected: Boolean)
 
 data class BenchmarkGroupUi(
   val type: String,
@@ -149,5 +162,5 @@ data class PocketUi(
 fun ModelFile.matchesSearch(query: String): Boolean {
   val q = query.trim().lowercase()
   if (q.isBlank()) return true
-  return listOfNotNull(name, displayName, hfRepo, familyId, quant).any { it.lowercase().contains(q) }
+  return listOfNotNull(name, displayName, hfRepo, modelId, quant).any { it.lowercase().contains(q) }
 }

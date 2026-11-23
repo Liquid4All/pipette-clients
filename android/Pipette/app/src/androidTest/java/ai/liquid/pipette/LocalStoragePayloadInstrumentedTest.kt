@@ -32,6 +32,7 @@ class LocalStoragePayloadInstrumentedTest {
       modelName = "LiquidAI/LFM2.5-350M-GGUF",
       modelPath = "/models/LiquidAI/LFM2.5-350M-GGUF/LFM2.5-350M-Q4_0.gguf",
       mmprojPath = null,
+      modelRef = null,
       runtimeFlags = RuntimeFlagRef(numberGpuLayers = 99, ctxSize = 4096, nUbatch = 512, loadMode = LlamacppLoadMode.READ),
       runtimeVersion = "b8683",
       runtimeCpuBackend = "dotprod,neon",

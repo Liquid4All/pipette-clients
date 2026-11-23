@@ -13,6 +13,7 @@ use super::store::{Held, Records};
 use super::{Build, BuildVersion, Listing, Reach, list_newest};
 use crate::RUNTIME_BUILD_FLAG_PREFIX;
 use crate::config::ReleasesBucket;
+use crate::pool::APPLE_FOUNDATION_FLAG;
 use crate::state::ReleasePaths;
 use crate::timing;
 
@@ -271,21 +272,25 @@ impl Catalog {
     }
 
     /// `client_version:<V>` per offered build, and the build flag of each runtime that
-    /// an offered build carries, sorted and unique: the server reindexes whenever the
-    /// set changes. A runtime that this proxy cannot read gets no build flag because no
-    /// claim can select it. The manifest reader already warned about the runtime.
+    /// an offered build carries, plus the Apple Foundation flag if the catalog carries it.
+    /// The phone's readiness filters that flag before reporting. Unreadable runtimes
+    /// have no flags because claims cannot select them.
     pub(crate) fn advertised(&self) -> Result<Vec<String>, RuntimeBuildFlagError> {
-        let build_flags = self
+        let runtime_flags = self
             .offered()
             .flat_map(Build::readable_runtimes)
-            .map(|runtime| runtime_build_flag(&runtime))
+            .map(|runtime| {
+                if matches!(runtime, Runtime::AppleFoundation(_)) {
+                    return Ok(Some(APPLE_FOUNDATION_FLAG.to_owned()));
+                }
+                Ok(runtime_build_flag(&runtime)?.map(|flag| flag.into_inner()))
+            })
             .filter_map(Result::transpose)
-            .map(|flag| flag.map(|flag| flag.into_inner()))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, RuntimeBuildFlagError>>()?;
         let mut flags: Vec<String> = self
             .version_flags()
             .into_iter()
-            .chain(build_flags)
+            .chain(runtime_flags)
             .collect();
         flags.sort();
         flags.dedup();

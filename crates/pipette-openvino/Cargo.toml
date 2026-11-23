@@ -23,6 +23,7 @@ doc = false
 # time.
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 pipette-completions.workspace = true
 pipette-http.workspace = true
 pipette-memprobe.workspace = true

@@ -6,8 +6,8 @@ struct DownloadRecord: Codable {
     let filename: String
     let urlString: String
     let repo: String?
-    /// Keeps a restored row grouped under its family in the Models tab.
-    var familyId: String?
+    /// Keeps a restored row grouped under its model in the Models tab.
+    var modelId: String?
     /// So a completion redelivered after relaunch still writes an exact manifest. Nil for
     /// sideloads and old records, whose provenance falls back to strings.
     var source: Model?
@@ -19,4 +19,16 @@ struct DownloadRecord: Codable {
     var etag: String?
     /// See `DownloadCoordinator.Download.resumeProxy`.
     var proxy: String?
+    /// Nil for records written under the original repo/filename key.
+    var keyOverride: String?
+
+    var key: String {
+        keyOverride ?? LocalStorage.modelRelativePath(repo: repo, filename: filename)
+    }
+
+    /// The stored key of `modelId` is `familyId`, the key that records on disk use.
+    enum CodingKeys: String, CodingKey {
+        case filename, urlString, repo, source, sha256, etag, proxy, keyOverride
+        case modelId = "familyId"
+    }
 }

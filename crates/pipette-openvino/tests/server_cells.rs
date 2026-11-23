@@ -14,6 +14,7 @@ use pipette_plan_types::{
     DecodeThroughputBenchmark, EndToEndLatencyBenchmark, MaxMemoryUsageBenchmark, Model,
     ModelSource, ModelType, NonNegativeCount, Openvino, OpenvinoDevice, PositiveCount,
     PrefillThroughputBenchmark, RunRequest, Runtime, RuntimeFlagRef, RuntimeFlags, RuntimeType,
+    VlMaxMemoryBenchmark, VlThroughputBenchmark,
 };
 
 /// How the fake's one stderr line starts.
@@ -42,14 +43,27 @@ fn request(dir: &std::path::Path, benchmark: BenchmarkDefinition) -> anyhow::Res
     std::fs::copy(env!("CARGO_BIN_EXE_fake_openvino_server"), interpreter)?;
     let model = dir.join("model");
     std::fs::create_dir_all(&model)?;
+    // A text IR and a VL one in one directory, so it passes either check.
     [
         "openvino_model.xml",
         "openvino_model.bin",
         "openvino_tokenizer.xml",
         "openvino_detokenizer.xml",
+        "openvino_language_model.xml",
+        "openvino_language_model.bin",
+        "openvino_text_embeddings_model.xml",
+        "openvino_text_embeddings_model.bin",
+        "openvino_vision_embeddings_model.xml",
+        "openvino_vision_embeddings_model.bin",
     ]
     .iter()
     .try_for_each(|file| std::fs::write(model.join(file), b"ir"))?;
+    std::fs::write(model.join("config.json"), r#"{"model_type": "lfm3_vl"}"#)?;
+    std::fs::write(
+        model.join("preprocessor_config.json"),
+        r#"{"patch_size": 16, "merge_size": 2,
+            "size": {"shortest_edge": 65536, "longest_edge": 16777216}}"#,
+    )?;
 
     let runtime: Runtime = serde_json::from_value(serde_json::json!({
         "type": "uv_openvino", "server_version": "2026.4.1",
@@ -129,7 +143,8 @@ fn a_timing_cell_runs_against_the_server(
         | BenchmarkResultData::VlThroughput { .. }
         | BenchmarkResultData::AsrThroughput { .. }
         | BenchmarkResultData::VlSpecDecode { .. }
-        | BenchmarkResultData::DecisionLatency { .. }) => {
+        | BenchmarkResultData::DecisionLatency { .. }
+        | BenchmarkResultData::Session { .. }) => {
             anyhow::bail!("not a timing result: {other:?}")
         }
     };
@@ -157,21 +172,140 @@ fn a_timing_cell_runs_against_the_server(
     Ok(())
 }
 
-/// A single token is the prefill's own, with no decode step after it, so the
-/// cell is refused before the gate and before the server compiles the
-/// pipeline.
+/// A `side` x `side` VL throughput cell of 16 text tokens, `images` images and
+/// 8 output tokens.
+fn vl_throughput(side: i32, images: i32) -> anyhow::Result<BenchmarkDefinition> {
+    Ok(BenchmarkDefinition::VlThroughput(VlThroughputBenchmark {
+        benchmark_id: BenchmarkId::try_new(format!(
+            "vl_throughput_{side}x{side}_text16_decode8_img{images}"
+        ))?,
+        parameter_image_width: PositiveCount::try_new(side)?,
+        parameter_image_height: PositiveCount::try_new(side)?,
+        parameter_text_tokens: NonNegativeCount::try_new(16)?,
+        parameter_decode_tokens: PositiveCount::try_new(8)?,
+        parameter_num_images: NonNegativeCount::try_new(images)?,
+    }))
+}
+
+/// The VL cell sends `pipette-llamacpp`'s request to the VL routes and reads
+/// the server's counters; its image tokens are the model's rule, 256 for each
+/// 512x512 image on LFM3-VL, which the fake's prompt count agrees with. A
+/// cell of 0 images sends one, as llama.cpp's does.
+#[rstest]
+#[case::two_images(2, 10 + 16 + 2 * 258, 512)]
+#[case::zero_reads_as_one(0, 10 + 16 + 258, 256)]
+fn a_vl_throughput_cell_runs_against_the_server(
+    #[case] images: i32,
+    #[case] prompt: u32,
+    #[case] image_tokens: u32,
+) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let req = request(dir.path(), vl_throughput(512, images)?)?;
+    let gates = Cell::new(0);
+    let gate = || {
+        gates.set(gates.get() + 1);
+        Ok(())
+    };
+    let observer = MeasurementObserver::QUIET;
+    let response = pipette_openvino::run(&req, &gate, observer, &dir.path().join("cache"), None)?;
+    let BenchmarkResultData::VlThroughput {
+        prompt_tokens,
+        image_tokens: counted,
+        prompt_ms,
+        predicted_ms,
+        ..
+    } = response.result_data
+    else {
+        anyhow::bail!("not a VL throughput result: {:?}", response.result_data);
+    };
+    assert_eq!(prompt_tokens, prompt);
+    assert_eq!(counted, Some(image_tokens));
+    assert!(
+        prompt_ms > 0.0 && predicted_ms > 0.0,
+        "{prompt_ms} {predicted_ms}"
+    );
+    assert_eq!(gates.get(), 6, "one gate before the server, one per rep");
+    assert_eq!(
+        response.command.get(1).map(String::as_str),
+        Some("pipette_openvino_server.py")
+    );
+    Ok(())
+}
+
+/// The fake counts every image as a 512x512 one, so at 256x256 its prompt
+/// disagrees with the client's rule: the cell fails naming both counts rather
+/// than record image tokens the engine did not run.
 #[test]
-fn a_single_decode_token_is_refused_before_the_server_starts() -> anyhow::Result<()> {
+fn a_prompt_the_engine_counts_otherwise_fails_the_cell() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let req = request(dir.path(), vl_throughput(256, 2)?)?;
+    let observer = MeasurementObserver::QUIET;
+    let Err(err) =
+        pipette_openvino::run(&req, &|| Ok(()), observer, &dir.path().join("cache"), None)
+    else {
+        anyhow::bail!("a prompt the rule does not count was measured");
+    };
+    let message = format!("{err:#}");
+    let (engine, rule) = (10 + 16 + 2 * 258, 10 + 16 + 2 * 66);
+    assert!(
+        message.contains(&format!("GenAI prompted with {engine} tokens"))
+            && message.contains(&format!("rule counts {rule}")),
+        "{message}"
+    );
+    Ok(())
+}
+
+/// The VL memory cell runs the text memory cell's two servers, here each
+/// serving one image and decoding the one token a cell without an output
+/// length asks for.
+#[test]
+fn a_vl_memory_cell_reads_the_servers_peak() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let req = request(
         dir.path(),
-        BenchmarkDefinition::DecodeThroughput(DecodeThroughputBenchmark {
-            benchmark_id: BenchmarkId::try_new("decode_throughput_64_1".to_owned())?,
-            parameter_prefill_tokens: NonNegativeCount::try_new(64)?,
-            parameter_decode_tokens: PositiveCount::try_new(1)?,
-            parameter_batch_size: BatchSize::one(),
+        BenchmarkDefinition::VlMaxMemory(VlMaxMemoryBenchmark {
+            benchmark_id: BenchmarkId::try_new("vl_max_memory_256x256_text0_img1".to_owned())?,
+            parameter_image_width: PositiveCount::try_new(256)?,
+            parameter_image_height: PositiveCount::try_new(256)?,
+            parameter_text_tokens: NonNegativeCount::try_new(0)?,
+            parameter_decode_tokens: None,
+            parameter_num_images: NonNegativeCount::try_new(1)?,
         }),
     )?;
+    let observer = MeasurementObserver::QUIET;
+    let response =
+        pipette_openvino::run(&req, &|| Ok(()), observer, &dir.path().join("cache"), None)?;
+    let BenchmarkResultData::MaxMemoryUsage { max_host_bytes, .. } = response.result_data else {
+        anyhow::bail!("not a memory result: {:?}", response.result_data);
+    };
+    assert!(max_host_bytes > 0);
+    Ok(())
+}
+
+/// A single token is the prefill's own, with no decode step after it, so the
+/// cell is refused before the gate and before the server compiles the
+/// pipeline.
+#[rstest]
+#[case::decode("decode_throughput_64_1", |benchmark_id| Ok(BenchmarkDefinition::DecodeThroughput(DecodeThroughputBenchmark {
+    benchmark_id,
+    parameter_prefill_tokens: NonNegativeCount::try_new(64)?,
+    parameter_decode_tokens: PositiveCount::try_new(1)?,
+    parameter_batch_size: BatchSize::one(),
+})))]
+#[case::vl("vl_throughput_256x256_text0_decode1_img1", |benchmark_id| Ok(BenchmarkDefinition::VlThroughput(VlThroughputBenchmark {
+    benchmark_id,
+    parameter_image_width: PositiveCount::try_new(256)?,
+    parameter_image_height: PositiveCount::try_new(256)?,
+    parameter_text_tokens: NonNegativeCount::try_new(0)?,
+    parameter_decode_tokens: PositiveCount::try_new(1)?,
+    parameter_num_images: NonNegativeCount::try_new(1)?,
+})))]
+fn a_single_decode_token_is_refused_before_the_server_starts(
+    #[case] id: &str,
+    #[case] build: fn(BenchmarkId) -> anyhow::Result<BenchmarkDefinition>,
+) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let req = request(dir.path(), build(BenchmarkId::try_new(id.to_owned())?)?)?;
     let gated = Cell::new(false);
     let gate = || {
         gated.set(true);

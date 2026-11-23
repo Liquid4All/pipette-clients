@@ -1,8 +1,7 @@
 import Foundation
 
 /// The `runtimes` group, the crate's `commands/runtimes.rs`. A phone installs no runtimes,
-/// so `list` is the only leaf: the CLI's `pull`/`remove`/`catalog`/`flavors` act on a store
-/// that does not exist here.
+/// so the CLI's `pull`/`remove`/`catalog`/`flavors` have no equivalent here.
 enum RuntimesCommands {
     /// How `runtimes list` renders the runtime column, the crate's `--format`.
     nonisolated enum ListFormat: String, Sendable {
@@ -26,6 +25,12 @@ enum RuntimesCommands {
         }
         HeadlessRunner.log("runtimes count=\(rows.count)")
         for row in rows { HeadlessRunner.log(row) }
+        return true
+    }
+
+    /// Read device readiness separately from the build inventory used for release validation.
+    static func readiness() -> Bool {
+        HeadlessRunner.log("runtimes readiness apple_foundation=\(AFMRuntime.isAvailable)")
         return true
     }
 

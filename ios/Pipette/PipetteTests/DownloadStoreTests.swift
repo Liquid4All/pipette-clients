@@ -18,7 +18,7 @@ import Testing
             filename: filename,
             urlString: "https://huggingface.co/\(repo)/resolve/main/\(filename)",
             repo: repo,
-            familyId: nil,
+            modelId: nil,
             source: spec
         ))
 
@@ -32,5 +32,16 @@ import Testing
             FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
         #expect(PipetteWorkspace.production.downloadsDir.path
             == caches.appendingPathComponent("Pipette/downloads").path)
+    }
+
+    /// Records on disk store the model id under the key `familyId`.
+    @Test func recordKeepsTheStoredModelIdKey() throws {
+        let record = DownloadRecord(filename: "a-Q4_0.gguf", urlString: "https://example.com/a",
+                                    repo: nil, modelId: "lfm2.5-350m")
+        let data = try PropertyListEncoder().encode(record)
+        let plist = try #require(
+            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        #expect(plist["familyId"] as? String == "lfm2.5-350m")
+        #expect(try PropertyListDecoder().decode(DownloadRecord.self, from: data).modelId == "lfm2.5-350m")
     }
 }

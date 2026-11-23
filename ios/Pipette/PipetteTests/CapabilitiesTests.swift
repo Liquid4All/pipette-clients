@@ -15,10 +15,19 @@ struct CapabilitiesTests {
     ]
 
     @Test func everyRuntimeReportsItsGeneralLevel() {
-        let flags = installedRuntimeCapabilities()
+        let flags = installedRuntimeCapabilities(appleFoundation: true)
         #expect(flags.contains("runtime:llama_cpp"))
         #expect(flags.contains("runtime:mlx"))
         #expect(flags.contains("runtime:apple_foundation"))
+    }
+
+    @Test(arguments: [true, false])
+    func appleFoundationIsReportedOnlyWhenAvailable(_ available: Bool) {
+        let flags = installedRuntimeCapabilities(appleFoundation: available)
+        #expect(flags.contains("runtime:apple_foundation") == available)
+        #expect(flags.filter { $0 != "runtime:apple_foundation" }
+            == installedRuntimeCapabilities(appleFoundation: !available)
+                .filter { $0 != "runtime:apple_foundation" })
     }
 
     // Matching compares whole strings, so without the general flag the client matches only
@@ -167,9 +176,9 @@ struct CapabilitiesTests {
     // The server voids queue standing whenever the reported set changes, so an
     // unstable ordering would cost a reindex on every launch.
     @Test func reportsAStableSortedSet() {
-        let flags = installedRuntimeCapabilities()
+        let flags = installedRuntimeCapabilities(appleFoundation: true)
         #expect(flags == flags.sorted())
-        #expect(flags == installedRuntimeCapabilities())
+        #expect(flags == installedRuntimeCapabilities(appleFoundation: true))
         #expect(Set(flags).count == flags.count)
     }
 

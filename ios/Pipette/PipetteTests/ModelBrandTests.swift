@@ -2,10 +2,10 @@ import Testing
 
 @testable import Pipette
 
-/// Brand detection keys off the model family in the name or repo, not the HF org, so a
+/// Brand detection keys off the model name or repo, not the HF org, so a
 /// redistributor's repackaging is labelled by whoever trained the model.
 struct ModelBrandTests {
-    @Test func brandDetectionKeysOffModelFamilyNotJustRepoOwner() {
+    @Test func brandDetectionKeysOffModelNameNotJustRepoOwner() {
         #expect(ModelBrand.detect(name: "unsloth/gemma-3n", hfRepo: "unsloth/gemma-3n-GGUF") == .google)
         #expect(ModelBrand.detect(name: "Granite Tiny", hfRepo: nil) == .ibm)
         #expect(ModelBrand.detect(name: "Qwen Test", hfRepo: nil) == .qwen)

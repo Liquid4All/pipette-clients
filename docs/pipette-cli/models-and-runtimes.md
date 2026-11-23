@@ -53,7 +53,7 @@ Rules:
 | `mlx-speculative` | two HF repo snapshots: a vision-language (VL) target and its drafter |
 | `torch` | HF repo snapshot (safetensors) |
 | `torch-speculative` | two HF repo snapshots: a VL target and its DSpark drafter (the speculative drafter that `LiquidAI/LFM2.5-VL-3B-DSpark` publishes) |
-| `openvino` | compiled OpenVINO IR (Intermediate Representation) bundle |
+| `openvino` | compiled OpenVINO IR (Intermediate Representation) bundle, text or vision-language |
 | `onnx-genai` | GenAI config, ONNX graph, external weights and tokenizer |
 
 Which runtimes load each model type is [below](#model--runtime-compatibility).

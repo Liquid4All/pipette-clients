@@ -278,15 +278,21 @@ fn classify_stop(sse: &SseOutcome) -> StopClassification {
 /// reasoning and its answer with them, and the GGUF converter makes every
 /// `<|…|>` token a control token, so without them the scorer gets reasoning
 /// and answer with no boundary between. vLLM already keeps them, since the HF
-/// tokenizer marks them non-special, so the text matches across runtimes. A
+/// tokenizer marks them non-special, so the text matches across runtimes.
+/// Inkling 2 (Thinking Machines) writes its reasoning and its answer as two
+/// messages, `<|content_thinking|>` and `<|content_text|>`, each ended by
+/// `<|end_message|>`, all special tokens in its tokenizer. A
 /// string that is not one token of the model's vocabulary is skipped, so every
 /// model can carry the list: it changes what is rendered, not what is sampled
 /// or where generation stops.
-const PRESERVED_TOKENS: [&str; 4] = [
+const PRESERVED_TOKENS: [&str; 7] = [
     "<|START_THINKING|>",
     "<|END_THINKING|>",
     "<|START_TEXT|>",
     "<|END_TEXT|>",
+    "<|content_thinking|>",
+    "<|content_text|>",
+    "<|end_message|>",
 ];
 
 /// How a sample's `/completion` is fetched. MCQ and streaming differ in client,

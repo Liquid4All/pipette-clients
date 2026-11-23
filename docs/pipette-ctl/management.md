@@ -161,9 +161,10 @@ ids, plan and benchmark documents, labels, vault files, downloads) is in its
     it ran.
   - An `eval` benchmark carries its whole sample set under `samples`. Name
     `--fields` without `samples` to leave the set out.
-- `--org-id none` on `users set-org` clears membership, and `--owner none` on
-  `clients set-owner` detaches the device. Both are required, so leaving one
-  out is refused.
+- `--owner none` on `clients set-owner` detaches the device. It is required,
+  so leaving it out is refused. Owners are organizations, named by `org_…` id.
+  An account always belongs to an organization, so `users set-org` only moves
+  it.
 - A boolean flag, `--all` and `--overwrite` included, reads bare as `true`. A
   value follows an `=` (`--dry-run=false`), so a positional after the flag
   stays a positional.

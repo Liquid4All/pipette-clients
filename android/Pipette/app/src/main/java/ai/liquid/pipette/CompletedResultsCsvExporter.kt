@@ -184,7 +184,7 @@ object CompletedResultsCsvExporter {
 
   fun modelDisplayName(cell: JobCell): String {
     val modelKey = resultModelGroupKeyFromPath(cell.modelPath)
-    ModelTemplateCatalog.byFamilyId[modelKey]?.let {
+    ModelTemplateCatalog.byModelId[modelKey]?.let {
       return it.displayName
     }
     ModelTemplateCatalog.repoToName[cell.modelName]?.let {

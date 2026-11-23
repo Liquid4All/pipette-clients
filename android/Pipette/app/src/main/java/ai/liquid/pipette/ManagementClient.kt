@@ -1,6 +1,7 @@
 package ai.liquid.pipette
 
 import android.net.Uri
+import android.util.Log
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URISyntaxException
@@ -20,6 +21,10 @@ class ManagementClientException(val statusCode: Int, val responseBody: String) :
     if (responseBody.isBlank()) "Management server returned HTTP $statusCode" else "Management server returned HTTP $statusCode: $responseBody"
   )
 
+// Allow room for the base64 representation of a 2 MiB logo and the JSON envelope.
+private const val FAMILY_LOGO_RESPONSE_LIMIT = 4 * 1024 * 1024
+
+@Suppress("TooManyFunctions") // one method per management-server endpoint the app calls, plus the shared request plumbing
 class ManagementClient(private val secrets: Secrets) {
   data class RegistrationResult(val clientId: String, val status: String)
 
@@ -79,9 +84,10 @@ class ManagementClient(private val secrets: Secrets) {
     contactEmail: String,
     clientDetails: String,
     publicKeyHex: String,
+    profile: JSONObject,
     preauthKey: String? = null,
   ): RegistrationResult {
-    val body = registerBody(organization, contactEmail, clientDetails, publicKeyHex, preauthKey)
+    val body = registerBody(organization, contactEmail, clientDetails, publicKeyHex, preauthKey, profile)
     val response = request(serverUrl, "/clients/register", "POST", null, body.toString())
     val json = JSONObject(response)
     return RegistrationResult(clientId = json.getString("client_id"), status = json.getString("status"))
@@ -105,6 +111,31 @@ class ManagementClient(private val secrets: Secrets) {
     // A few hundred bytes of profile, and `verb=auth-me` waits on it from a synchronous `onCreate`. The submission budget would let a server that
     // accepts the connection and then stalls hold a fleet script for two minutes per device.
     clientProfile(request(serverUrl, "/clients/me", "GET", clientId, null, readTimeoutMs = 15_000))
+
+  /**
+   * `GET /clients/me/descriptor-catalog` — the catalog short list for this device, as the raw response body. [ModelShortList] parses it and caches it
+   * as received. Signed like the other `/clients/me` calls.
+   */
+  fun fetchDescriptorCatalog(serverUrl: String, clientId: String): String =
+    request(serverUrl, "/clients/me/descriptor-catalog", "GET", clientId, null, readTimeoutMs = 30_000)
+
+  /**
+   * Fetch the `logo_uri` for [sha256] from `GET /clients/me/descriptor-catalog/family-logos/{sha256}`. The response contains inline image data or an
+   * address under `https://pipette.liquid.ai/logos/`.
+   */
+  fun fetchFamilyLogoUri(serverUrl: String, clientId: String, sha256: String): String =
+    JSONObject(
+        request(
+          serverUrl,
+          "/clients/me/descriptor-catalog/family-logos/$sha256",
+          "GET",
+          clientId,
+          null,
+          readTimeoutMs = 15_000,
+          responseLimit = FAMILY_LOGO_RESPONSE_LIMIT,
+        )
+      )
+      .getString("logo_uri")
 
   /** The `/clients/me` response body, from whichever method returned it. */
   private fun clientProfile(response: String): ClientProfile {
@@ -136,7 +167,15 @@ class ManagementClient(private val secrets: Secrets) {
    *   to store it. A caller whose response is a short record passes a smaller budget, because a server that accepts the connection and then does not
    *   answer imposes this whole wait on it.
    */
-  private fun request(serverUrl: String, path: String, method: String, clientId: String?, body: String?, readTimeoutMs: Int = 120_000): String {
+  private fun request(
+    serverUrl: String,
+    path: String,
+    method: String,
+    clientId: String?,
+    body: String?,
+    readTimeoutMs: Int = 120_000,
+    responseLimit: Int? = null,
+  ): String {
     val url = URL(endpoint(serverUrl, path))
     val connection = url.openConnection() as HttpURLConnection
     connection.requestMethod = method
@@ -162,9 +201,20 @@ class ManagementClient(private val secrets: Secrets) {
     }
 
     val status = connection.responseCode
-    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-    val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-    if (status !in 200..299) {
+    val success = status in 200..299
+    val stream = if (success) connection.inputStream else connection.errorStream
+    val text =
+      try {
+        if (responseLimit == null) {
+          stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        } else {
+          stream?.use { HttpResponseBody.read(it, responseLimit).toString(Charsets.UTF_8) }.orEmpty()
+        }
+      } catch (error: HttpResponseBody.TooLarge) {
+        if (success) throw error
+        ""
+      }
+    if (!success) {
       throw ManagementClientException(status, text)
     }
     return text
@@ -209,19 +259,25 @@ private fun JSONObject.optStringList(name: String): List<String> {
 }
 
 /**
- * The `POST /clients/register` body. It carries the CPU architecture and the OS family, so the server derives the `arch:` and `os_family:` flags
- * before the first profile refresh.
+ * The `POST /clients/register` body. It carries [profile], the same device fields and capability flags as the profile refresh
+ * ([ProfileRefreshService.profileUpdateBody]). The server derives flags such as `os:` and `chip:` from the device fields. The descriptor catalog uses
+ * these flags and the capabilities to select models. With the full profile, the short list can offer models on the first fetch after registration.
  */
-internal fun registerBody(organization: String, contactEmail: String, clientDetails: String, publicKeyHex: String, preauthKey: String?): JSONObject {
+internal fun registerBody(
+  organization: String,
+  contactEmail: String,
+  clientDetails: String,
+  publicKeyHex: String,
+  preauthKey: String?,
+  profile: JSONObject,
+): JSONObject {
   val body =
     JSONObject()
       .put("public_key", publicKeyHex)
       .put("organization", organization)
       .put("contact_email", contactEmail)
       .put("client_details", clientDetails)
-      // `putOpt` skips a null, so an unknown ABI is absent rather than null.
-      .putOpt("device_cpu_arch", DeviceInfo.cpuArch)
-      .put("device_os_family", DeviceInfo.OS_FAMILY)
+  profile.keys().forEach { key -> body.put(key, profile.get(key)) }
   // Optional pre-auth key (`client_preauth_{key_id}.{secret}`): a valid one makes the server
   // auto-approve this registration instead of leaving it pending manual approval. Omitted when
   // blank. The server renamed the field from `preauth_key`, which it still reads as an alias;
@@ -294,6 +350,8 @@ class RegistrationService(
   private val storage: LocalStorage,
   private val secrets: Secrets,
   private val client: ManagementClient,
+  /** The device fields and capability flags to register with. See [registerBody]. */
+  private val profile: () -> JSONObject,
   private val analytics: Analytics = NoOpAnalytics,
 ) {
   fun register(
@@ -314,6 +372,7 @@ class RegistrationService(
           contactEmail = contactEmail,
           clientDetails = DeviceInfo.modelName(),
           publicKeyHex = publicKeyHex,
+          profile = profile(),
           preauthKey = preauthKey,
         )
       } catch (error: Throwable) {
@@ -353,6 +412,7 @@ class RegistrationService(
         base
       }
     storage.saveRegistration(data)
+    Log.i("Registration", "client registered: clientId=${result.clientId} status=${result.status}")
     // From here on every event attributes to the server-assigned device id. Deliberately no
     // email / organization / Clerk identity: the management server already holds those, and
     // PostHog has no need for them.

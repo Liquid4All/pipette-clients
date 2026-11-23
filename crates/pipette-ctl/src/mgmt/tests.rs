@@ -10,9 +10,9 @@ use pipette_mgmt_client::generate_keypair;
 use pipette_plan_types::{
     Answered, AuditActorKind, AuditOutcome, BenchmarkType, CampaignCreated, CampaignRevised,
     ClientPreauthUsage, ClientStatus, DescriptorEntryKind, DescriptorEntryState, DescriptorKind,
-    FleetOwner, ListOrder, OrgStatus, OwnerFilter, PlanDryRun, PlanFiled, PlanStatus,
-    RequestedScope, RevisionDryRun, UserAccountType, UserId, UserKeyId, UserStatus, VaultModel,
-    VaultRuntime, VaultUploadFile,
+    ListOrder, OrgStatus, OwnerFilter, PlanDryRun, PlanFiled, PlanStatus, RequestedScope,
+    RevisionDryRun, UserAccountType, UserId, UserKeyId, UserStatus, VaultModel, VaultRuntime,
+    VaultUploadFile,
 };
 
 use super::{catalog::ROUTES, *};
@@ -185,7 +185,7 @@ fn campaign_created() -> Value {
     json!({
         "campaign_id": "campaign_1",
         "name": "nightly",
-        "owner": { "type": "user", "user_id": "user_0192f0c1" },
+        "owner": { "type": "org", "org_id": "org_acme" },
         "current_plan_id": "plan_1",
         "created_at": "2026-01-02T03:04:05Z",
         "updated_at": "2026-01-02T03:04:05Z",
@@ -204,6 +204,7 @@ fn campaign_revised(previous_plan_id: &str, change: Value) -> Value {
         "rerun_job_count": 0,
         "marked_job_count": 0,
         "recalculated_job_count": 0,
+        "replaced_job_count": 0,
         "dropped_job_count": 0,
         "cancel_requested": true,
         "plan": plan,
@@ -224,9 +225,13 @@ fn revision_dry_run() -> Value {
         "restored_job_count": 0,
         "satisfied_job_count": 0,
         "inherited_job_count": 0,
+        "inherited_failed_job_count": 0,
         "rerun_job_ids": [],
         "marked_job_ids": [],
         "recalculated_job_count": 0,
+        "replaced_job_count": 0,
+        "replaced_jobs": [],
+        "replaced_models": [],
         "dropped_job_ids": [],
         "held_jobs": [],
         "repeated_variants": [],
@@ -336,14 +341,13 @@ macro_rules! wire_words {
 )]
 #[case::user_status(
     catalog::USER_STATUSES,
-    wire_words!(UserStatus: Active, Pending, Disabled),
+    wire_words!(UserStatus: Active, Disabled),
 )]
 #[case::org_status(catalog::ORG_STATUSES, wire_words!(OrgStatus: Active, Disabled))]
 #[case::account_type(
     catalog::ACCOUNT_TYPES,
     wire_words!(UserAccountType: Human, Service),
 )]
-#[case::fleet_owner(catalog::FLEET_OWNERS, wire_words!(FleetOwner: Mine))]
 #[case::list_order(catalog::LIST_ORDERS, wire_words!(ListOrder: Oldest, Newest))]
 #[case::client_preauth_usage(
     catalog::CLIENT_PREAUTH_USAGES,
@@ -476,45 +480,35 @@ fn a_device_owner_detaches_with_none_or_null() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// mgmt clears a membership only on an explicit `null`, which `none` spells
-/// too; an organization id goes as given.
+/// A move names its organization by id, sent as given; nothing clears a
+/// membership, so a `null` is refused before any request.
 #[test]
-fn a_membership_clears_with_none_or_null() -> anyhow::Result<()> {
-    let cleared = json!({
-        "user_id": "user_1",
-        "contact_email": "a@b.test",
-        "account_type": "human",
-        "status": "active",
-        "created_at": "2026-01-02T03:04:05Z",
-        "changed": true,
-    });
-    let mut joined = cleared.clone();
-    joined["org_id"] = json!("org_acme");
+fn a_membership_moves_to_the_named_organization() -> anyhow::Result<()> {
     let server = MockServer::start();
-    let clear = server.mock(|when, then| {
-        when.method(PUT)
-            .path("/api/v1/users/user_1/org")
-            .json_body(json!({ "org_id": null }));
-        then.status(200).json_body(cleared);
-    });
     let join = server.mock(|when, then| {
         when.method(PUT)
             .path("/api/v1/users/user_1/org")
             .json_body(json!({ "org_id": "org_acme" }));
-        then.status(200).json_body(joined);
+        then.status(200).json_body(json!({
+            "user_id": "user_1",
+            "contact_email": "a@b.test",
+            "account_type": "human",
+            "status": "active",
+            "created_at": "2026-01-02T03:04:05Z",
+            "org_id": "org_acme",
+            "changed": true,
+        }));
     });
     let session = session(&server, true)?;
-    [json!("none"), Value::Null, json!("org_acme")]
-        .into_iter()
-        .try_for_each(|org_id| {
-            session
-                .invoke(
-                    route("users_set_org")?,
-                    &args(json!({ "user_id": "user_1", "org_id": org_id }))?,
-                )
-                .map(drop)
-        })?;
-    clear.assert_calls(2);
+    session.invoke(
+        route("users_set_org")?,
+        &args(json!({ "user_id": "user_1", "org_id": "org_acme" }))?,
+    )?;
+    let refused = session.invoke(
+        route("users_set_org")?,
+        &args(json!({ "user_id": "user_1", "org_id": null }))?,
+    );
+    anyhow::ensure!(refused.is_err(), "a null org_id should be refused");
     join.assert();
     Ok(())
 }
@@ -547,7 +541,7 @@ fn a_membership_clears_with_none_or_null() -> anyhow::Result<()> {
 #[case::owner_by_handle(
     "clients_set_owner",
     json!({ "client_id": "ev1_a", "owner": "acme" }),
-    "`owner` `acme` is neither",
+    "`owner` `acme` is not an `org_…` id",
 )]
 // A campaign always has an owner.
 #[case::campaign_owner_none(
@@ -650,11 +644,11 @@ fn a_membership_clears_with_none_or_null() -> anyhow::Result<()> {
 #[case::principal_by_handle(
     "vault_blob_exists",
     json!({ "principal_id": "acme", "sha256": "a".repeat(64) }),
-    "principal id must start with `org_` or `user_`",
+    "organization id must start with `org_`",
 )]
 #[case::short_digest(
     "vault_blob_exists",
-    json!({ "principal_id": "user_1", "sha256": "abc" }),
+    json!({ "principal_id": "org_1", "sha256": "abc" }),
     "`sha256` must be 64 hex characters",
 )]
 #[case::definition_not_an_object(
@@ -683,12 +677,6 @@ fn a_membership_clears_with_none_or_null() -> anyhow::Result<()> {
     "orgs_list",
     json!({ "fields": [] }),
     "`fields` must be a non-empty list of keys",
-)]
-// The fleet listing's owner is only ever the caller.
-#[case::fleet_owner_not_mine(
-    "clients_list",
-    json!({ "owner": "org" }),
-    "`owner` must be one of mine",
 )]
 #[case::unknown_account_type(
     "users_create",
@@ -1725,7 +1713,6 @@ fn a_write_sends_its_arguments_as_the_body(
 
 #[rstest::rstest]
 #[case::clients_unowned("clients_list", "/api/v1/clients", json!({ "owned": false }))]
-#[case::clients_mine("clients_list", "/api/v1/clients", json!({ "owner": "mine" }))]
 #[case::clients_of_an_org("clients_list", "/api/v1/clients", json!({ "org_id": "org_acme" }))]
 #[case::orgs_without_counts("orgs_list", "/api/v1/orgs", json!({ "counts": false }))]
 #[case::campaigns_list(
@@ -2148,19 +2135,19 @@ fn a_blob_put_derives_its_digest_from_the_file() -> anyhow::Result<()> {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(httpmock::Method::HEAD)
-            .path(format!("/api/v1/vault/blobs/user_1/{digest}"));
+            .path(format!("/api/v1/vault/blobs/org_1/{digest}"));
         then.status(404);
     });
     let mock = server.mock(|when, then| {
         when.method(PUT)
-            .path(format!("/api/v1/vault/blobs/user_1/{digest}"))
+            .path(format!("/api/v1/vault/blobs/org_1/{digest}"))
             .body("weights");
         then.status(201)
             .json_body(json!({ "sha256": digest, "bytes": 7 }));
     });
     session(&server, true)?.invoke(
         route("vault_blob_put")?,
-        &args(json!({ "principal_id": "user_1", "file": file }))?,
+        &args(json!({ "principal_id": "org_1", "file": file }))?,
     )?;
     mock.assert();
     Ok(())
@@ -2177,7 +2164,7 @@ fn a_blob_already_there_is_not_sent_again() -> anyhow::Result<()> {
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(httpmock::Method::HEAD)
-            .path(format!("/api/v1/vault/blobs/user_1/{digest}"));
+            .path(format!("/api/v1/vault/blobs/org_1/{digest}"));
         then.status(200);
     });
     let put = server.mock(|when, then| {
@@ -2186,7 +2173,7 @@ fn a_blob_already_there_is_not_sent_again() -> anyhow::Result<()> {
     });
     let answer = session(&server, true)?.invoke(
         route("vault_blob_put")?,
-        &args(json!({ "principal_id": "user_1", "file": file, "sha256": digest.to_uppercase() }))?,
+        &args(json!({ "principal_id": "org_1", "file": file, "sha256": digest.to_uppercase() }))?,
     )?;
     put.assert_calls(0);
     assert_eq!(answer.value, json!({ "sha256": digest, "bytes": 7 }));
@@ -2209,7 +2196,7 @@ fn a_blob_put_refuses_a_digest_the_file_does_not_hash_to() -> anyhow::Result<()>
     let refused = session(&server, true)?
         .invoke(
             route("vault_blob_put")?,
-            &args(json!({ "principal_id": "user_1", "file": file, "sha256": "b".repeat(64) }))?,
+            &args(json!({ "principal_id": "org_1", "file": file, "sha256": "b".repeat(64) }))?,
         )
         .err()
         .context("the digest is not the file's")?;
@@ -2222,7 +2209,7 @@ fn a_blob_put_refuses_a_digest_the_file_does_not_hash_to() -> anyhow::Result<()>
 #[test]
 fn a_refused_head_says_what_the_status_means() -> anyhow::Result<()> {
     let server = MockServer::start();
-    for (principal, status) in [("user_2", 403), ("user_3", 401)] {
+    for (principal, status) in [("org_2", 403), ("org_3", 401)] {
         server.mock(|when, then| {
             when.method(httpmock::Method::HEAD)
                 .path_includes(format!("/{principal}/"));
@@ -2231,8 +2218,8 @@ fn a_refused_head_says_what_the_status_means() -> anyhow::Result<()> {
     }
     let session = session(&server, true)?;
     for (principal, meaning) in [
-        ("user_2", "outside this account's reach"),
-        ("user_3", "refused this session's signature"),
+        ("org_2", "outside this account's reach"),
+        ("org_3", "refused this session's signature"),
     ] {
         let refused = session
             .invoke(

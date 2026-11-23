@@ -38,6 +38,22 @@ detokenizer IR pairs.
 --model 'openvino://repo=OpenVINO/LFM2.5-350M-int8-ov'
 ```
 
+A VL cell takes a VL IR under the same model type: the language model, text
+embeddings and vision embeddings IR pairs (`openvino_language_model`,
+`openvino_text_embeddings_model`, `openvino_vision_embeddings_model`), the
+tokenizer and detokenizer IRs, `config.json`, and the image processor's
+settings in `processor_config.json` or `preprocessor_config.json`, as
+optimum-intel exports them. A text cell refuses a VL IR, and a VL cell a text
+IR, before the server starts.
+
+LFM3-VL needs openvino-genai 2026.5, which no catalog row ships yet (the
+newest is 2026.4.1). Pin the nightly, tested on 2026.5.1.0.dev20261116, as a
+JSON `--runtime` with a `pip_requirements_text` body and OpenVINO's nightly
+index in `install_flags`
+([when you must use JSON](models-and-runtimes.md#when-you-must-use-json)), as
+[`examples/plans/intel-openvino-vl.toml`](../../examples/plans/intel-openvino-vl.toml)
+does.
+
 Weight precision is never inferred from the directory; it is authored into the
 repo name or the `prefix`
 ([openvino-ir.md](../openvino-ir.md#identifying-weight-precision)).
@@ -71,7 +87,11 @@ What this client does with them (`crates/pipette-openvino/src/flags.rs`):
   - If the cell's decode length is above GenAI's 128-token default, the client
     raises `min_response_len` to the decode length.
   - The client refuses a prompt over the 1024-token `max_prompt_len` bound
-    with an error that explains why. It does not truncate the prompt.
+    with an error that explains why. It does not truncate the prompt. A VL
+    prompt counts its image tokens and the chat template's: on LFM3-VL it is
+    10 + text + N x (image tokens + 2), so five 512x512 images make 1300
+    tokens. The client counts it for LFM3-VL only; on another model GenAI
+    refuses an over-long prompt itself, after the compile.
   - `generate_hint` defaults to `BEST_PERF`.
 
 Set them yourself only to override that. See
@@ -82,8 +102,9 @@ Set them yourself only to override that. See
 | Type | Status |
 |------|--------|
 | `prefill_throughput`, `decode_throughput`, `end_to_end_latency`, `max_memory_usage` | supported |
+| `vl_throughput`, `vl_max_memory` | supported, through `VLMPipeline` ([vl-throughput.md](../methodology/vl-throughput.md#runtime-details)) |
 | `eval` | refused: `eval benchmarks are not yet supported for OpenVINO` |
-| `vl_throughput`, `vl_max_memory`, `vlm_eval`, `vl_spec_decode` | refused: `VL benchmarks are not yet supported for OpenVINO` |
+| `vlm_eval`, `vl_spec_decode` | refused: `vlm_eval and vl_spec_decode are not yet supported for OpenVINO` |
 | `asr_throughput`, `asr_max_memory`, `asr_eval` | refused: `ASR benchmarks are not yet supported for OpenVINO` (`asr_eval is not yet supported for OpenVINO`) |
 
 A batched entry (`parameter_batch_size` above 1) is refused before the model
