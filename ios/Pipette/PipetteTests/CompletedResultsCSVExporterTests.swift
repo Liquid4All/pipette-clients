@@ -135,6 +135,24 @@ struct CompletedResultsCSVExporterTests {
         #expect(cellIds == ["b-decode", "b-prefill", "a-decode"])
     }
 
+    @Test func csvAndResultGroupsUseTheCatalogDisplayName() throws {
+        let entry = CatalogEntry.gguf("Catalog Display Name", "example/catalog-model-GGUF", "Q4_0", bytes: 1024)
+        let jobCell = cell(id: "catalog-cell", benchmarkId: "decode_throughput_100_100",
+                           type: "decode_throughput", source: entry.source)
+        let job = manifest(cells: [jobCell])
+        let store = makeTemporaryBenchmarkStore()
+        let modelNames = CatalogEntry.modelNames(in: [entry])
+        let csv = CompletedResultsCSVExporter.csv(
+            for: job, payloadsByCellId: [:], store: store, modelNames: modelNames)
+        let rows = try parseCSV(csv)
+        let exported = try dictionary(
+            header: CompletedResultsCSVExporter.headers, row: try #require(rows.dropFirst().first))
+        #expect(exported["model_display_name"] == "Catalog Display Name")
+        let groups = CompletedResultsCSVExporter.resultGroups(
+            for: job, payloadsByCellId: [:], store: store, modelNames: modelNames)
+        #expect(groups.map(\.modelName) == ["Catalog Display Name"])
+    }
+
     @Test func filenameUsesDateTitleAndJobPrefix() {
         let manifest = makeManifest(cells: [])
 
@@ -177,7 +195,7 @@ struct CompletedResultsCSVExporterTests {
         errorMessage: String? = nil,
         source: Model? = nil
     ) -> JobCell {
-        // The weights leaf carries the quant token the derived quant and family read.
+        // The weights leaf carries the quant token the derived quant and model id read.
         let resolvedSource = source ?? ggufTextFixture(modelName, weightsFile)
         return JobCell(
             cellId: id,
@@ -455,7 +473,6 @@ struct CompletedResultsCSVExporterTests {
 
         #expect(groups.count == 1)
         #expect(groups[0].id == "ministral-3-3b-instruct-2512")
-        #expect(groups[0].modelName == "Ministral 3 3B Instruct 2512")
         #expect(groups[0].brand == .mistral)
         #expect(groups[0].rows.map(\.quant) == ["q4_0", "q4_km", "q5_km"])
         #expect(groups[0].rows[0].values[0].displayValue == "200")

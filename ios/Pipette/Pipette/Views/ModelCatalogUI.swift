@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// A model family collapsed across its quant variants.
-struct ModelGroup: Identifiable {
+/// A model collapsed across its quant variants.
+struct ModelGroup: FamilyMember {
     let key: String
     let name: String
     let paramLabel: String?
     let files: [DiscoveredModel]
-
+    /// The catalog family, or ``CatalogEntry/defaultFamily(_:)`` of the name for a model
+    /// absent from the catalog.
+    let family: String
     var id: String { key }
 
     var brand: ModelBrand {
@@ -17,13 +19,16 @@ struct ModelGroup: Identifiable {
         paramLabel ?? files.first?.sizeFormatted ?? ""
     }
 
-    /// What of this family is already on disk, or nil when none of it is. Marks the
+    /// What of this model is already on disk, or nil when none of it is. Marks the
     /// present, not the absent: most catalog rows are not downloaded, and a run fetches
-    /// an absent model anyway.
+    /// an absent model anyway. A partly downloaded model names its downloaded quants.
     var downloadedHint: String? {
-        let onDisk = files.filter(\.isDownloaded).count
-        guard onDisk > 0 else { return nil }
-        return onDisk == files.count ? "Downloaded" : "\(onDisk) of \(files.count) downloaded"
+        let onDisk = files.filter(\.isDownloaded)
+        guard !onDisk.isEmpty else { return nil }
+        if onDisk.count == files.count { return "Downloaded" }
+        let quants = onDisk.compactMap(\.quant)
+        guard quants.count == onDisk.count else { return "\(onDisk.count) of \(files.count) downloaded" }
+        return "\(Set(quants).sorted().joined(separator: ", ")) downloaded"
     }
 
     var quantCountLabel: String {
@@ -41,33 +46,26 @@ enum ModelCatalog {
     /// Group downloaded files by model identity, not `hf_repo`, so a model whose quants
     /// come from different repos shows as one card. Each `DiscoveredModel` keeps its own
     /// `hfRepo`, so per-cell provenance is unaffected.
-    static func groups(from models: [DiscoveredModel]) -> [ModelGroup] {
-        // `familyId` is shared across quants and formats, so a catalog download and a
+    ///
+    /// The groups are sorted by name, ignoring case.
+    static func groups(
+        from models: [DiscoveredModel],
+        entries: [String: CatalogEntry] = CatalogEntry.firstEntryByModelId
+    ) -> [ModelGroup] {
+        // `modelId` is shared across quants and formats, so a catalog download and a
         // sideloaded copy of the same file group together, as do GGUF and MLX builds.
-        func key(_ model: DiscoveredModel) -> String {
-            model.familyId
+        return Dictionary(grouping: models, by: \.modelId).map { k, group in
+            let name = entries[k]?.name
+                ?? group.first?.displayName
+                ?? LocalStorage.modelStem(from: group.first?.name ?? k)
+            let param = LocalStorage.parseParamSize(
+                name: group.first?.name ?? name,
+                hfRepo: group.first?.hfRepo
+            )
+            return ModelGroup(key: k, name: name, paramLabel: param, files: group,
+                              family: CatalogEntry.family(of: entries[k], name: name))
         }
-
-        var seen = Set<String>()
-        var keys: [String] = []
-        for model in models where seen.insert(key(model)).inserted {
-            keys.append(key(model))
-        }
-
-        let byKey = Dictionary(grouping: models, by: key)
-
-        return keys.compactMap { k in
-            byKey[k].map { group in
-                let name = CatalogEntry.familyIdToName[k]
-                    ?? group.first?.displayName
-                    ?? LocalStorage.modelStem(from: group.first?.name ?? k)
-                let param = LocalStorage.parseParamSize(
-                    name: group.first?.name ?? name,
-                    hfRepo: group.first?.hfRepo
-                )
-                return ModelGroup(key: k, name: name, paramLabel: param, files: group)
-            }
-        }
+        .sorted { $0.name == $1.name ? $0.key < $1.key : namesAscending($0.name, $1.name) }
     }
 
     static func displayName(for key: String) -> String {
@@ -78,12 +76,12 @@ enum ModelCatalog {
         return LocalStorage.repoStem(repoName)
     }
 
-    /// Display name for a model spec: the catalog's repo name, then its family name,
+    /// Display name for a model spec: the catalog's repo name, then its model name,
     /// then a derived stem for sideloads and uncatalogued repos. The one place a `Model`
     /// spec's user-facing name is resolved.
     static func displayName(for model: Model) -> String {
         if let repo = model.repo, let name = CatalogEntry.repoToName[repo.description] { return name }
-        if let name = CatalogEntry.familyIdToName[model.familyId] { return name }
+        if let name = CatalogEntry.modelIdToName[model.modelId] { return name }
         // AFM has no repo or file to derive a name from.
         if case .appleFoundationText = model { return model.engineLabel }
         // The GGUF arms prefer their repo because their references name a file
@@ -97,12 +95,12 @@ enum ModelCatalog {
             model.repo?.description ?? m.source.vision.weightsReference
         case let .mlx(m): m.source.reference
         case let .onnxGenai(m): m.source.reference
-        case .appleFoundationText: model.familyId
+        case .appleFoundationText: model.modelId
         }
         return displayName(for: key)
     }
 
-    /// Family name plus quant (e.g. `LFM 2.5 350M · Q4_K_M`), never the on-disk filename.
+    /// Model name plus quant (e.g. `LFM 2.5 350M · Q4_K_M`), never the on-disk filename.
     static func displayLabel(for model: DiscoveredModel) -> String {
         let name = displayName(for: model.source)
         guard let quant = model.quant else { return name }
@@ -325,11 +323,17 @@ extension EmptyModelsPrompt {
 
 typealias NoDownloadedModelsState = EmptyModelsPrompt
 
-struct ModelFamilyRow<Accessory: View>: View {
+enum ModelRowLayout {
+    static let logoSize: CGFloat = 28
+    static let spacing: CGFloat = 12
+}
+
+struct ModelRow<Accessory: View>: View {
     let title: String
     let subtitle: String
     let brand: ModelBrand
-    var logoSize: CGFloat = 18
+    var logoDigest: String?
+    var logoSize: CGFloat
     var titleFont: Font = .system(size: 16, weight: .semibold)
     var subtitleFont: Font = .system(size: 13)
     var titleLineLimit: Int = 1
@@ -339,7 +343,8 @@ struct ModelFamilyRow<Accessory: View>: View {
         title: String,
         subtitle: String,
         brand: ModelBrand,
-        logoSize: CGFloat = 18,
+        logoDigest: String? = nil,
+        logoSize: CGFloat = ModelRowLayout.logoSize,
         titleFont: Font = .system(size: 16, weight: .semibold),
         subtitleFont: Font = .system(size: 13),
         titleLineLimit: Int = 1,
@@ -348,6 +353,7 @@ struct ModelFamilyRow<Accessory: View>: View {
         self.title = title
         self.subtitle = subtitle
         self.brand = brand
+        self.logoDigest = logoDigest
         self.logoSize = logoSize
         self.titleFont = titleFont
         self.subtitleFont = subtitleFont
@@ -356,8 +362,8 @@ struct ModelFamilyRow<Accessory: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            BrandLogoView(brand: brand, size: logoSize)
+        HStack(spacing: ModelRowLayout.spacing) {
+            BrandLogoView(brand: brand, logoDigest: logoDigest, size: logoSize)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(titleFont)
@@ -380,25 +386,136 @@ struct ModelFamilyRow<Accessory: View>: View {
 struct SelectableModelGroupRow: View {
     let group: ModelGroup
     let isSelected: Bool
+    let logoDigest: String?
     var checkboxSize: CGFloat = 22
+    /// Extra leading space, so the logo lines up under a family header's logo.
+    var leadingInset: CGFloat = 0
+    /// Set to false when every listed model is on disk. The hint would say nothing.
+    var showsDownloadedHint = true
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            ModelFamilyRow(
+            ModelRow(
                 title: group.name,
-                subtitle: [group.sizeLabel, group.downloadedHint]
+                subtitle: [group.sizeLabel, showsDownloadedHint ? group.downloadedHint : nil]
                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
                 brand: group.brand,
-                logoSize: 18
+                logoDigest: logoDigest
             ) {
                 WizardCheckbox(isOn: isSelected, size: checkboxSize)
             }
             .contentShape(Rectangle())
-            .padding(.horizontal, 16)
+            .padding(.leading, 16 + leadingInset)
+            .padding(.trailing, 16)
             .padding(.vertical, 14)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Model families
+
+/// A model that a list groups under its catalog family.
+protocol FamilyMember: Identifiable {
+    var name: String { get }
+    var family: String { get }
+    var brand: ModelBrand { get }
+}
+
+/// The models of one catalog family, such as `LFM2.5`.
+struct ModelFamily<Member: FamilyMember>: Identifiable {
+    let name: String
+    let members: [Member]
+    let logoDigest: String?
+
+    var id: String { name }
+
+    var brand: ModelBrand { members.first?.brand ?? .unknown }
+
+    /// Families sorted by name, ignoring case, each with its members sorted the same way.
+    static func grouping(_ members: [Member], logoDigests: [String: String] = [:]) -> [ModelFamily] {
+        Dictionary(grouping: members, by: \.family)
+            .map { name, members in
+                ModelFamily(name: name, members: members.sorted { namesAscending($0.name, $1.name) },
+                            logoDigest: logoDigests[name.lowercased()])
+            }
+            .sorted { namesAscending($0.name, $1.name) }
+    }
+}
+
+/// Case-insensitive order, with a case-sensitive tie-break so the order is stable.
+private func namesAscending(_ lhs: String, _ rhs: String) -> Bool {
+    let order = lhs.caseInsensitiveCompare(rhs)
+    return order == .orderedSame ? lhs < rhs : order == .orderedAscending
+}
+
+/// The header of a family with more than one model. It shows, from left to right:
+///
+/// - the chevron that opens and closes the family
+/// - the logo
+/// - the name and the model count
+/// - the checkbox for the whole family
+///
+/// The checkbox appears only when the list selects models.
+struct ModelFamilyHeader: View {
+    /// The width of the chevron column in the pickers. A model row has this inset.
+    static let chevronWidth: CGFloat = 22
+    /// The extra indent of the models in an open family. The indent shows which models
+    /// belong to the family.
+    static let memberIndent: CGFloat = 16
+
+    let name: String
+    let count: Int
+    let brand: ModelBrand
+    var logoDigest: String?
+    let isOpen: Bool
+    var isSelected = false
+    var isMixed = false
+    var chevronColumnWidth: CGFloat = ModelFamilyHeader.chevronWidth
+    var logoSize: CGFloat = 28
+    var titleFont: Font = .system(size: 16, weight: .semibold)
+    var subtitleFont: Font = .system(size: 13)
+    var checkboxSize: CGFloat = 22
+    var horizontalPadding: CGFloat = 16
+    var verticalPadding: CGFloat = 14
+    let onToggleOpen: () -> Void
+    /// Nil for a list without selection, which shows no checkbox.
+    var onToggleSelection: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onToggleOpen) {
+                HStack(spacing: 0) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isOpen ? 0 : -90))
+                        .frame(width: chevronColumnWidth, alignment: .leading)
+                    ModelRow(
+                        title: name,
+                        subtitle: "\(count) \("model".pluralized(count))",
+                        brand: brand,
+                        logoDigest: logoDigest,
+                        logoSize: logoSize,
+                        titleFont: titleFont,
+                        subtitleFont: subtitleFont
+                    ) { EmptyView() }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if let onToggleSelection {
+                Button(action: onToggleSelection) {
+                    WizardCheckbox(isOn: isSelected, isMixed: isMixed, size: checkboxSize)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 12)
+            }
+        }
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
     }
 }
 

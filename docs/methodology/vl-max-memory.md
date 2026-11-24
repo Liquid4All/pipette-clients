@@ -266,8 +266,8 @@ so only flavors with a matching probe run:
 - **Linux GPU**: the same host figure, plus the server's DRM clients' resident
   bytes from its fdinfo and, on an NVIDIA GPU, NVML's bytes for it, as
   `max_gpu_bytes` ([peak memory: Linux](peak-memory-linux.md#llamacpp-linux)).
-  A GPU showing none fails the run. A Jetson (a device tree that names
-  `nvidia,tegra`) is the exception: its iGPU allocates into the server's
+  A GPU showing none fails the run. A Jetson Orin (the nvgpu module is
+  loaded) is the exception: its iGPU allocates into the server's
   resident set, so the watch reads the swap-aware host figure alone,
   `max_gpu_bytes` is null, and the run does not fail for it
   ([peak memory: Linux](peak-memory-linux.md#llamacpp-gpu-counter)).
@@ -285,6 +285,13 @@ so only flavors with a matching probe run:
   GPU run; the Linux Snapdragon build (`linux-arm64-snapdragon`), whose Adreno
   and Hexagon memory nothing reads on Linux; and custom flavors, whose devices
   pipette does not know.
+- **OpenVINO** (`uv_openvino`) runs its text memory cell's protocol, a warm-up
+  server and then the measured one, each watched from its launch, with each
+  server sending this runner's request to its VL routes
+  ([OpenVINO](../pipette-cli/openvino.md)). The watch is the text cell's for the
+  device. On the NPU the prompt, images included, has to fit the compiled
+  prompt length, as on `vl_throughput`
+  ([runtime details](vl-throughput.md#runtime-details)).
 - **iOS** measures in process and **MLX** through `mlx_vlm.server`, both below.
   The Android app does not run this cell.
 
@@ -407,3 +414,5 @@ and sizes the context in
 On MLX the runner is
 [`pipette-mlx vl_max_memory`](../../crates/pipette-mlx/src/execute/vl_max_memory.rs),
 with the server launch in [`server`](../../crates/pipette-mlx/src/server.rs).
+On OpenVINO the runner is
+[`pipette-openvino vl_max_memory`](../../crates/pipette-openvino/src/execute/vl_max_memory.rs).

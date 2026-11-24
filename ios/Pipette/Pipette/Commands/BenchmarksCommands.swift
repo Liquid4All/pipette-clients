@@ -322,10 +322,11 @@ enum BenchmarksCommands {
             }
         } else {
             let match = modelMatch ?? ""
-            let resolved = resolveCatalogRows(match: match, quant: quant, runtime: runtime)
+            let catalog = ModelShortList.current(ws: ws)
+            let resolved = resolveCatalogRows(match: match, quant: quant, runtime: runtime, rows: catalog)
             let runtimeTag = runtime.rawValue
             guard !resolved.isEmpty else {
-                let available = CatalogEntry.catalog
+                let available = catalog
                     .filter { isCompatible($0.source, runtime) }
                     .map { "\($0.name)[\($0.quant ?? "-")]" }.joined(separator: ", ")
                 HeadlessRunner.log("bench ERROR no catalog model matches match=\(match) quant=\(quant ?? "-"); "

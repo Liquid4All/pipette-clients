@@ -188,7 +188,9 @@ enum AuthCommands {
         do {
             try clearRemoteState(benchmarks: ws.benchmarks, results: results,
                                  evals: ws.evalCompletions)
+            try ModelShortList.clearCache(ws: ws)
         } catch {
+            ModelShortList.clearCacheBestEffort(ws: ws)
             HeadlessRunner.log("auth reset ERROR the identity is deleted but its caches are "
                 + "not: \(error.localizedDescription)")
             return false
@@ -363,6 +365,7 @@ enum AuthCommands {
                 pending: results.listIds(.remotePending).count,
                 synced: results.listIds(.remoteSynced).count)
             do {
+                try ModelShortList.clearCache(ws: ws)
                 try clearRemoteState(benchmarks: ws.benchmarks, results: results,
                                      evals: ws.evalCompletions)
             } catch {
@@ -372,6 +375,7 @@ enum AuthCommands {
             }
             replaced = "\(targets) model_tokens_cleared=\(clearModelTokens())"
             store.clear()
+            ModelShortList.clearCacheBestEffort(ws: ws)
         }
 
         if disposition != .unchanged {
@@ -391,6 +395,9 @@ enum AuthCommands {
                     + "registration is not: \(error.localizedDescription). Rerun the same "
                     + "bundle to finish it")
                 return false
+            }
+            if disposition == .restores, let held, held.serverUrl != bundle.serverUrl {
+                ModelShortList.clearCacheBestEffort(ws: ws)
             }
         }
 

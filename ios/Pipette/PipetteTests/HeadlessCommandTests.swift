@@ -1256,6 +1256,7 @@ struct HeadlessCommandTests {
 
     @Test func inspectVerbsParseWithoutParameters() {
         #expect(parse("headlessrun", "runtimes") == .runtimesList(format: .name))
+        #expect(parse("headlessrun", "runtimes", "readiness") == .runtimesReadiness)
         #expect(parse("headlessrun", "benchmarks") == .benchmarksList(benchmarkType: nil))
         #expect(parse("headlessrun", "storage", "status") == .storageStatus)
     }

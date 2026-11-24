@@ -601,23 +601,18 @@ fn gpu_peak(
     }
 }
 
-/// A Jetson's iGPU allocates into `VmRSS`, and neither NVML nor DRM fdinfo
-/// reports it (docs/methodology/peak-memory-linux.md, "GPU Counter").
+/// A Jetson Orin's iGPU, driven by nvgpu, allocates into `VmRSS`, and neither
+/// NVML nor DRM fdinfo reports it. Thor's iGPU runs NVIDIA's open driver,
+/// whose NVML lists each process's memory as a card's does
+/// (docs/methodology/peak-memory-linux.md, "llama.cpp GPU counter").
 #[cfg(target_os = "linux")]
 pub(crate) fn gpu_memory_is_resident() -> Result<bool, WatchError> {
-    match std::fs::read("/proc/device-tree/compatible") {
-        Ok(compatible) => Ok(is_tegra(&compatible)),
-        // An x86 host, or an arm64 one booted through ACPI, has no device tree.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(WatchError::DeviceTree { kind: err.kind() }),
-    }
+    nvgpu_loaded(std::path::Path::new("/sys/module/nvgpu"))
 }
 
 #[cfg(target_os = "linux")]
-fn is_tegra(compatible: &[u8]) -> bool {
-    compatible
-        .split(|&b| b == 0)
-        .any(|c| c.starts_with(b"nvidia,tegra"))
+fn nvgpu_loaded(module: &std::path::Path) -> Result<bool, WatchError> {
+    std::fs::exists(module).map_err(|err| WatchError::NvgpuModule { kind: err.kind() })
 }
 
 /// A `/proc/<pid>` poller on the process, at the cadence of its [`Watch`].
@@ -1214,15 +1209,13 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[rstest::rstest]
-    #[case::agx_orin(
-        b"nvidia,p3737-0000+p3701-0005\0nvidia,p3701-0005\0nvidia,tegra234\0",
-        true
-    )]
-    #[case::thor(b"nvidia,tegra264\0", true)]
-    #[case::pi5(b"raspberrypi,5-model-b\0brcm,bcm2712\0", false)]
-    #[case::no_device_tree(b"", false)]
-    fn a_tegra_device_tree_is_a_resident_gpu(#[case] compatible: &[u8], #[case] tegra: bool) {
-        assert_eq!(is_tegra(compatible), tegra);
+    #[test]
+    fn only_a_loaded_nvgpu_is_a_resident_gpu() -> anyhow::Result<()> {
+        let sys_module = tempfile::tempdir()?;
+        let nvgpu = sys_module.path().join("nvgpu");
+        assert!(!nvgpu_loaded(&nvgpu)?, "Thor, a card or no GPU");
+        std::fs::create_dir(&nvgpu)?;
+        assert!(nvgpu_loaded(&nvgpu)?, "an Orin");
+        Ok(())
     }
 }

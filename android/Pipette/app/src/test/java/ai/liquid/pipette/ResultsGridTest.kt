@@ -101,6 +101,17 @@ class ResultsGridTest {
     assertEquals("Bonsai 27B", named("prism-ml/Bonsai-27B-gguf"))
   }
 
+  @Test
+  fun resultRowsDistinguishIdenticalFilenamesAtDifferentRevisions() {
+    val unpinned = cell("decode_throughput_512_100", "decode_throughput")
+    val repo = HfRepo.parseReference("LiquidAI/LFM2.5-350M-GGUF@abc123")
+    val filename = GgufFilename.parse("LFM2.5-350M-Q4_0.gguf")
+    val pinned = unpinned.copy(modelPath = "/models/${repo.reference}/$filename", modelRef = Model.GgufText(HfGgufText(repo, filename)))
+
+    assertEquals(2, listOf(unpinned, pinned).map(ResultsGrid::rowKey).toSet().size)
+    assertTrue(ResultsGrid.modelDisplayName(pinned).endsWith("(@abc123)"))
+  }
+
   private fun cell(benchmarkId: String, type: String) =
     JobCell(
       benchmarkId = benchmarkId,

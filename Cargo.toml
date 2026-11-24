@@ -195,7 +195,7 @@ pipette-openvino = { path = "crates/pipette-openvino" }
 pipette-ops = { path = "crates/pipette-ops" }
 pipette-ovms = { path = "crates/pipette-ovms" }
 # Owned by the management server, pipette-mgmt.
-pipette-plan-types = { git = "https://github.com/Liquid4All/pipette-mgmt.git", rev = "1b24fe0c441eef6bf3d4843eac0076f602bfddf3" }
+pipette-plan-types = { git = "https://github.com/Liquid4All/pipette-mgmt.git", rev = "1b118d1d83e69d838aa0643d89192804a27bcf77" }
 pipette-programs = { path = "crates/pipette-programs" }
 pipette-readiness = { path = "crates/pipette-readiness" }
 pipette-ssh = { path = "crates/pipette-ssh" }

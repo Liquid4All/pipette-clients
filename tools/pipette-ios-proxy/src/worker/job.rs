@@ -733,7 +733,7 @@ pub(super) fn failure_cause(error: &anyhow::Error, otherwise: FailureCause) -> F
 /// make a build appear. Only an install attempt goes to `summary`, and
 /// `installed` is raised once `device install app` succeeds, so a check after
 /// it that fails still reports the install.
-fn ensure_installed(
+pub(super) fn ensure_installed(
     phone: &mut Phone,
     pool: &Pool,
     runtime: &Runtime,
@@ -788,7 +788,10 @@ fn ensure_installed(
     })
 }
 
-fn bundle_present(devicectl: &dyn DeviceControl, bundle_id: &str) -> anyhow::Result<bool> {
+pub(super) fn bundle_present(
+    devicectl: &dyn DeviceControl,
+    bundle_id: &str,
+) -> anyhow::Result<bool> {
     let installed = devicectl.info_apps(Some(bundle_id)).with_context(|| {
         format!(
             "listing apps on {} to decide on an install",

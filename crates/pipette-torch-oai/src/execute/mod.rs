@@ -183,7 +183,8 @@ fn run_with(
         | BenchmarkDefinition::AsrThroughput(_)
         | BenchmarkDefinition::AsrMaxMemory(_)
         | BenchmarkDefinition::DecisionLatency(_)
-        | BenchmarkDefinition::DecisionMaxMemory(_) => cell_flags::is_docker(&req.runtime.bound)
+        | BenchmarkDefinition::DecisionMaxMemory(_)
+        | BenchmarkDefinition::Session(_) => cell_flags::is_docker(&req.runtime.bound)
             .then_some(tree)
             .and_then(|tree| {
                 tree.inspect_err(|err| {
@@ -351,7 +352,8 @@ fn dispatch(
         | BenchmarkDefinition::AsrThroughput(_)
         | BenchmarkDefinition::AsrMaxMemory(_)
         | BenchmarkDefinition::DecisionLatency(_)
-        | BenchmarkDefinition::DecisionMaxMemory(_) => Err(not_implemented(kind)),
+        | BenchmarkDefinition::DecisionMaxMemory(_)
+        | BenchmarkDefinition::Session(_) => Err(not_implemented(kind)),
     }
 }
 
@@ -676,7 +678,8 @@ mod batch_tests {
             | BenchmarkDefinition::AsrThroughput(_)
             | BenchmarkDefinition::AsrMaxMemory(_)
             | BenchmarkDefinition::DecisionLatency(_)
-            | BenchmarkDefinition::DecisionMaxMemory(_)) => {
+            | BenchmarkDefinition::DecisionMaxMemory(_)
+            | BenchmarkDefinition::Session(_)) => {
                 anyhow::bail!("not a timing benchmark: {}", other.benchmark_type())
             }
         }?;
@@ -732,7 +735,8 @@ mod batch_tests {
             | BenchmarkResultData::VlThroughput { .. }
             | BenchmarkResultData::AsrThroughput { .. }
             | BenchmarkResultData::VlSpecDecode { .. }
-            | BenchmarkResultData::DecisionLatency { .. }) => {
+            | BenchmarkResultData::DecisionLatency { .. }
+            | BenchmarkResultData::Session { .. }) => {
                 anyhow::bail!("unexpected result data {other:?}")
             }
         };

@@ -99,7 +99,7 @@ struct ModelCatalogUITests {
         )
     }
 
-    @Test func modelCatalogGroupsByModelIdentityPreservingFirstSeenOrder() {
+    @Test func modelCatalogGroupsByModelIdentitySortedByName() {
         let models = [
             model("Gemma-Test-2B-Q4_0.gguf", repo: "google/gemma-test-2B-GGUF"),
             model("Gemma-Test-2B-Q5_K_M.gguf", repo: "google/gemma-test-2B-GGUF"),
@@ -110,19 +110,21 @@ struct ModelCatalogUITests {
 
         let groups = ModelCatalog.groups(from: models)
 
-        // Keyed by normalized model stem (lowercased, quant stripped).
+        // Keyed by normalized model stem (lowercased, quant stripped), sorted by name.
         #expect(groups.map(\.key) == [
             "gemma-test-2b",
-            "sideloaded-model",
-            "qwen-test"
+            "qwen-test",
+            "sideloaded-model"
         ])
-        // These repos aren't in the real catalog, so the family name falls back to the
+        // Absent from the catalog, so each family is the name before its first hyphen.
+        #expect(groups.map(\.family) == ["Gemma", "Qwen", "Sideloaded"])
+        // These repos aren't in the real catalog, so the model name falls back to the
         // filename stem.
         #expect(groups[0].name == "Gemma-Test-2B")
         #expect(groups[0].paramLabel == "2B")
         #expect(groups[0].quantCountLabel == "2 quants")
-        #expect(groups[1].name == "Sideloaded-Model")
-        #expect(groups[1].files.map(\.name) == [
+        #expect(groups[2].name == "Sideloaded-Model")
+        #expect(groups[2].files.map(\.name) == [
             "Sideloaded-Model-Q4_0.gguf",
             "Sideloaded-Model-Q5_K_M.gguf"
         ])
@@ -143,8 +145,6 @@ struct ModelCatalogUITests {
         let groups = ModelCatalog.groups(from: models)
 
         #expect(groups.count == 1, "the same model from two repos should be one card")
-        // The family name resolves from the catalog, by familyId.
-        #expect(groups[0].name == "Ministral 3 3B Instruct 2512")
         #expect(groups[0].quantCountLabel == "3 quants")
         // Per-file provenance survives the merge.
         #expect(
@@ -154,39 +154,25 @@ struct ModelCatalogUITests {
         )
     }
 
-    @Test func catalogDeclaresMinistralAcrossRepos() {
-        func variants(_ familyId: String) -> [(quant: String, repo: String)] {
-            CatalogEntry.catalog
-                .filter { $0.familyId == familyId }
-                .compactMap { entry in entry.quant.map { (quant: $0, repo: entry.repoIdentifier) } }
-        }
-        let ministral = variants("ministral-3-3b-instruct-2512")
-        #expect(!(ministral.isEmpty), "Ministral family missing from the catalog")
-        #expect(Set(ministral.map(\.repo)).count > 1, "Ministral is sourced from two repos")
-        #expect(
-            ministral.first { $0.quant == "Q4_0" }?.repo ==
-            "unsloth/Ministral-3-3B-Instruct-2512-GGUF"
-        )
-        // The GGUF K-quants come from mistralai upstream; the 4bit MLX variant brings in
-        // the mlx-community repo.
-        #expect(
-            Set(ministral.filter { $0.quant != "Q4_0" }.map(\.repo)) ==
-            ["mistralai/Ministral-3-3B-Instruct-2512-GGUF",
-             "mlx-community/Ministral-3-3B-Instruct-2512-4bit"]
-        )
-        // GGUF and MLX of one model unify into a single family, so LFM 2.5 350M
-        // spans its GGUF repo and its MLX repo.
-        #expect(Set(variants("lfm2.5-350m").map(\.repo)).count > 1)
+    @Test func catalogModelSpansGgufAndMlxRepos() {
+        let repos = Set(CatalogEntry.catalog.filter { $0.modelId == "lfm2.5-350m" }.map(\.repoIdentifier))
+        #expect(repos == ["LiquidAI/LFM2.5-350M-GGUF", "LiquidAI/LFM2.5-350M-MLX-4bit"])
+
+        let groups = ModelCatalog.groups(from: [
+            model("LFM2.5-350M-Q4_0.gguf", repo: "LiquidAI/LFM2.5-350M-GGUF"),
+        ])
+        #expect(groups.first?.name == "LFM 2.5 350M")
+        #expect(groups.first?.family == "LFM2.5", "the catalog's family, not the name rule")
     }
 
-    @Test func groupingUnifiesFamilyAcrossReposAndFlagsRepoSpan() {
+    @Test func groupingUnifiesModelAcrossReposAndFlagsRepoSpan() {
         let models = [
             model("Ministral-3-3B-Instruct-2512-Q4_0.gguf",
                   repo: "unsloth/Ministral-3-3B-Instruct-2512-GGUF"),
             model("Ministral-3-3B-Instruct-2512-Q5_K_M.gguf",
                   repo: "mistralai/Ministral-3-3B-Instruct-2512-GGUF"),
             // A sideload, with a synthetic repo: the same stem rejoins via the
-            // spec-derived familyId (repo-independent for GGUF).
+            // spec-derived modelId (repo-independent for GGUF).
             model("Ministral-3-3B-Instruct-2512-Q4_K_M.gguf")
         ]
 
@@ -201,13 +187,12 @@ struct ModelCatalogUITests {
             "unsloth/Ministral-3-3B-Instruct-2512-GGUF",
             "mistralai/Ministral-3-3B-Instruct-2512-GGUF"
         ]))
-        #expect(groups[0].name == "Ministral 3 3B Instruct 2512")
     }
 
-    /// Grouping keys on the spec's `familyId`, which for GGUF is the normalized filename
+    /// Grouping keys on the spec's `modelId`, which for GGUF is the normalized filename
     /// stem regardless of repo, so the two copies share a key though their repos differ.
     @Test func catalogAndSideloadedCopiesShareGroupingKeyForEveryPreset() {
-        for preset in CatalogEntry.defaults {
+        for preset in CatalogEntry.fallback {
             // Only GGUF presets have a weight filename to sideload; a directory-shaped
             // preset has none.
             let filename: String
@@ -223,6 +208,69 @@ struct ModelCatalogUITests {
             #expect(groups.count == 1,
                     "catalog + sideloaded \(filename) must share one group")
         }
+    }
+
+    /// A vision or audio model's weights and projector share one download row. The failed
+    /// file sets the state of the row, the weights come first, and the progress adds both
+    /// files.
+    @Test func aModelsFileTransfersShareOneDownloadRow() throws {
+        let vision = try Self.visionModel()
+        let groups = DownloadTransferGroup.groups([
+            Self.transfer("mmproj-a-F16.gguf", written: 100, total: 100, state: .failed(reason: "x"), source: vision),
+            Self.transfer("a-Q4_0.gguf", written: 100, total: 300, state: .downloading, source: vision),
+            Self.transfer("b-Q4_0.gguf", written: 0, total: 10, state: .queued, source: nil),
+        ])
+
+        #expect(groups.count == 2)
+        let model = try #require(groups.first)
+        #expect(model.files.map(\.fileRole) == [.weights, .projector])
+        #expect(model.lead.filename == "mmproj-a-F16.gguf")
+        #expect(model.progress == 0.5)
+        #expect(groups.last?.files.map(\.fileRole) == [nil])
+    }
+
+    /// The row's control follows every file of the model, so a failed file does not hide
+    /// the control of the other file.
+    @Test(arguments: [
+        (.downloading, .failed(reason: "x"), .pause),
+        (.paused, .failed(reason: "x"), .resume),
+        (.paused, .queued, .resume),
+        (.failed(reason: "x"), .failed(reason: "y"), .none),
+    ] as [(DownloadCoordinator.Download.State, DownloadCoordinator.Download.State, DownloadTransferGroup.Control)])
+    func aDownloadRowOffersTheControlItsFilesNeed(
+        weights: DownloadCoordinator.Download.State, projector: DownloadCoordinator.Download.State,
+        expected: DownloadTransferGroup.Control
+    ) throws {
+        let vision = try Self.visionModel()
+        let group = try #require(DownloadTransferGroup.groups([
+            Self.transfer("a-Q4_0.gguf", written: 0, total: 10, state: weights, source: vision),
+            Self.transfer("mmproj-a-F16.gguf", written: 0, total: 10, state: projector, source: vision),
+        ]).first)
+        #expect(group.control == expected)
+    }
+
+    /// While a file has no known size, the row shows the progress of its lead file.
+    @Test func aDownloadRowWithAnUnknownSizeShowsTheLeadProgress() throws {
+        let vision = try Self.visionModel()
+        let group = try #require(DownloadTransferGroup.groups([
+            Self.transfer("a-Q4_0.gguf", written: 100, total: 400, state: .downloading, source: vision),
+            Self.transfer("mmproj-a-F16.gguf", written: 0, total: nil, state: .queued, source: vision),
+        ]).first)
+        #expect(group.progress == 0.25)
+    }
+
+    private static func visionModel() throws -> Model {
+        Model.ggufVision(.init(source: .huggingFace(
+            repo: try HfRepo.parseOrgRepo("org/a-GGUF"), model: try RepoSubpath("a-Q4_0.gguf"),
+            modelSha256: nil, mmproj: try RepoSubpath("mmproj-a-F16.gguf"), mmprojSha256: nil)))
+    }
+
+    private static func transfer(_ filename: String, written: Int64, total: Int64?,
+                                 state: DownloadCoordinator.Download.State,
+                                 source: Model?) -> DownloadCoordinator.Download {
+        DownloadCoordinator.Download(filename: filename, url: nil, repo: "org/a-GGUF", modelId: nil,
+                                     bytesDownloaded: written, totalBytes: total, state: state,
+                                     source: source)
     }
 
     @Test func modelDisplayNameStripsRepoAndGgufSuffix() {

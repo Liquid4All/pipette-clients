@@ -164,7 +164,7 @@ struct DownloadCoordinatorTests {
     @Suite(.serialized) @MainActor struct Provenance {
         private static let repo = "LiquidAI/LFM2.5-350M-GGUF"
         private static let filename = "LFM2.5-350M-Q4_0.gguf"
-        private static let familyId = "lfm2.5-350m"
+        private static let modelId = "lfm2.5-350m"
 
         @Test func captureProvenanceReadsInMemoryEntryWhenPresent() throws {
             let ws = makeTemporaryWorkspace()
@@ -175,7 +175,7 @@ struct DownloadCoordinatorTests {
             #expect(coordinator.downloads[key] == nil, "test process should start with no in-flight download")
 
             let source = Model.ggufText(.init(source: .huggingFace(repo: try HfRepo.parseOrgRepo(Self.repo), path: try RepoSubpath(Self.filename), sha256: nil)))
-            coordinator.startDownload(source, familyId: Self.familyId)
+            coordinator.startDownload(source, modelId: Self.modelId)
             defer { coordinator.cancel(key: key) }
             try #require(coordinator.downloads[key] != nil, "startDownload should populate the in-flight entry")
 
@@ -184,6 +184,74 @@ struct DownloadCoordinatorTests {
             #expect(provenance.filename == Self.filename)
             // Key reconstruction cannot recover the typed source.
             #expect(provenance.source == source)
+        }
+
+        @Test func sharedFilenameKeepsPinnedAndVisionTransfersSeparate() throws {
+            let ws = makeTemporaryWorkspace()
+            defer { removeWorkspace(ws) }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [UnreachableURLProtocol.self]
+            let coordinator = DownloadCoordinator(ws: ws, sessionConfiguration: configuration)
+            let repo = try HfRepo.parseOrgRepo(Self.repo)
+            var pinnedRepo = repo
+            pinnedRepo.revision = try HfRevision(String(repeating: "a", count: 40))
+            let weights = try RepoSubpath(Self.filename)
+            let text = Model.ggufText(.init(source: .huggingFace(repo: repo, path: weights, sha256: nil)))
+            let pinned = Model.ggufText(.init(source: .huggingFace(
+                repo: pinnedRepo, path: weights, sha256: nil)))
+            let vision = Model.ggufVision(.init(source: .huggingFace(
+                repo: repo, model: weights, modelSha256: nil,
+                mmproj: try RepoSubpath("projector.gguf"), mmprojSha256: nil)))
+
+            coordinator.startDownload(text)
+            coordinator.startDownload(pinned)
+            coordinator.startDownload(vision)
+            defer {
+                for key in Array(coordinator.downloads.keys) { coordinator.cancel(key: key) }
+            }
+            let rows = coordinator.downloads.values
+            #expect(rows.count == 4)
+            #expect(Set(rows.compactMap(\.storageKey)).count == 3)
+            let pinnedRow = try #require(rows.first { $0.source == pinned })
+            let legacyKey = LocalStorage.modelRelativePath(repo: Self.repo, filename: Self.filename)
+            #expect(coordinator.downloads[legacyKey]?.source == text)
+            #expect(pinnedRow.key != legacyKey)
+            #expect(coordinator.downloadStore.allRecords().contains {
+                $0.key == pinnedRow.key && $0.source == pinned
+            })
+        }
+
+        /// The Pause of a model row stops every file of the model. A queued file leaves the
+        /// queue and becomes paused, so it does not start in a slot that the pause frees.
+        @Test func pausingAModelTakesItsQueuedFilesOutOfTheQueue() throws {
+            let ws = makeTemporaryWorkspace()
+            defer { removeWorkspace(ws) }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [UnreachableURLProtocol.self]
+            let coordinator = DownloadCoordinator(ws: ws, sessionConfiguration: configuration)
+            func text(_ file: String) throws -> Model {
+                .ggufText(.init(source: .huggingFace(
+                    repo: try HfRepo.parseOrgRepo(Self.repo), path: try RepoSubpath(file), sha256: nil)))
+            }
+            let vision = Model.ggufVision(.init(source: .huggingFace(
+                repo: try HfRepo.parseOrgRepo("LiquidAI/LFM3-Audio-2B-GGUF"),
+                model: try RepoSubpath("LFM3-Audio-2B-Q4_0.gguf"), modelSha256: nil,
+                mmproj: try RepoSubpath("mmproj-LFM3-Audio-2B-F16.gguf"), mmprojSha256: nil)))
+
+            // Two text models fill both slots, so the vision model's files wait in the queue.
+            coordinator.startDownload(try text("a-Q4_0.gguf"))
+            coordinator.startDownload(try text("b-Q4_0.gguf"))
+            coordinator.startDownload(vision)
+            defer {
+                for key in Array(coordinator.downloads.keys) { coordinator.cancel(key: key) }
+            }
+            let visionRows = { coordinator.downloads.values.filter { $0.source == vision } }
+            try #require(visionRows().count == 2)
+            try #require(visionRows().allSatisfy { $0.state == .queued })
+
+            coordinator.pauseTransfers(for: vision)
+
+            #expect(visionRows().allSatisfy { $0.state == .paused })
         }
 
         @Test func captureProvenanceReconstructsFromKeyWhenNoRecord() throws {
@@ -209,7 +277,7 @@ struct DownloadCoordinatorTests {
             #expect(coordinator.downloads[key] == nil, "test process should start with no in-flight download")
 
             let source = Model.ggufText(.init(source: .huggingFace(repo: try HfRepo.parseOrgRepo(Self.repo), path: try RepoSubpath(Self.filename), sha256: nil)))
-            coordinator.startDownload(source, familyId: Self.familyId)
+            coordinator.startDownload(source, modelId: Self.modelId)
             defer { coordinator.cancel(key: key) }
 
             let provenance = coordinator.captureProvenance(key: key)
@@ -236,7 +304,7 @@ struct DownloadCoordinatorTests {
             let coordinator = DownloadCoordinator(ws: ws)
             let key = LocalStorage.modelRelativePath(repo: Self.repo, filename: Self.filename)
             let source = Model.ggufText(.init(source: .huggingFace(repo: try HfRepo.parseOrgRepo(Self.repo), path: try RepoSubpath(Self.filename), sha256: nil)))
-            coordinator.startDownload(source, familyId: Self.familyId)
+            coordinator.startDownload(source, modelId: Self.modelId)
             try #require(coordinator.downloads[key] != nil)
             let versionBefore = coordinator.completedVersion
 
@@ -255,7 +323,7 @@ struct DownloadCoordinatorTests {
             let coordinator = DownloadCoordinator(ws: ws)
             let key = LocalStorage.modelRelativePath(repo: Self.repo, filename: Self.filename)
             let source = Model.ggufText(.init(source: .huggingFace(repo: try HfRepo.parseOrgRepo(Self.repo), path: try RepoSubpath(Self.filename), sha256: nil)))
-            coordinator.startDownload(source, familyId: Self.familyId)
+            coordinator.startDownload(source, modelId: Self.modelId)
             defer { coordinator.cancel(key: key) }
 
             coordinator.applyCompletion(key: key, result: .failure(URLError(.timedOut)))
@@ -283,7 +351,7 @@ struct DownloadCoordinatorTests {
 
             let coordinator = DownloadCoordinator(ws: ws)
             let key = LocalStorage.modelRelativePath(repo: Self.repo, filename: Self.filename)
-            coordinator.startDownload(try textSource(sha256: Self.digest), familyId: Self.familyId)
+            coordinator.startDownload(try textSource(sha256: Self.digest), modelId: Self.modelId)
             defer { coordinator.cancel(key: key) }
 
             #expect(coordinator.downloads[key]?.sha256?.value == Self.digest)
@@ -296,7 +364,7 @@ struct DownloadCoordinatorTests {
 
             let coordinator = DownloadCoordinator(ws: ws)
             let key = LocalStorage.modelRelativePath(repo: Self.repo, filename: Self.filename)
-            coordinator.startDownload(try textSource(sha256: nil), familyId: Self.familyId)
+            coordinator.startDownload(try textSource(sha256: nil), modelId: Self.modelId)
             defer { coordinator.cancel(key: key) }
 
             #expect(coordinator.downloads[key]?.sha256 == nil)
@@ -336,7 +404,7 @@ struct DownloadCoordinatorTests {
             DownloadStore(dir: ws.downloadsDir).saveRecord(DownloadRecord(
                 filename: Self.filename,
                 urlString: "https://huggingface.co/\(Self.repo)/resolve/main/\(Self.filename)",
-                repo: Self.repo, familyId: Self.familyId, source: source,
+                repo: Self.repo, modelId: Self.modelId, source: source,
                 sha256: try Sha256(Self.digest)))
 
             let coordinator = DownloadCoordinator(ws: ws)
@@ -490,7 +558,7 @@ struct DownloadCoordinatorTests {
             let coord = DownloadCoordinator(ws: ws)
             coord.transport = FakeDownloader(outcome: .success(Self.completeModel), fractions: [0.5, 1.0])
 
-            coord.startDirectoryDownload(.mlx(ref.asMlx()), ref: ref, familyId: "lfm2.5-350m")
+            coord.startDirectoryDownload(.mlx(ref.asMlx()), ref: ref, modelId: "lfm2.5-350m")
             try await waitUntil(coord, ref.key) { $0 == nil }
 
             let model = try #require(ws.availableModels().first { m in
@@ -498,7 +566,7 @@ struct DownloadCoordinatorTests {
                 return m.hfRepo == ref.repo.description
             })
             #expect(model.name == "LFM2.5-350M-MLX-4bit")
-            #expect(model.familyId == "lfm2.5-350m")
+            #expect(model.modelId == "lfm2.5-350m")
         }
 
         @Test func installsSubpathModel() async throws {
@@ -724,7 +792,7 @@ struct DownloadCoordinatorTests {
                 filename: filename,
                 urlString: "https://huggingface.co/\(repo)/resolve/main/\(filename)",
                 repo: repo,
-                familyId: nil,
+                modelId: nil,
                 source: source
             ))
             if paused {
@@ -818,7 +886,7 @@ struct DownloadCoordinatorTests {
                 filename: filename,
                 urlString: "https://huggingface.co/\(repo)/resolve/main/\(filename)",
                 repo: repo,
-                familyId: nil,
+                modelId: nil,
                 source: source,
                 etag: etag,
                 proxy: proxy

@@ -195,13 +195,19 @@ nonisolated enum HeadlessTree {
 
     struct Runtimes: ParsableCommand {
         static let configuration = CommandConfiguration(
-            subcommands: [List.self], defaultSubcommand: List.self)
+            subcommands: [List.self, Readiness.self], defaultSubcommand: List.self)
 
         struct List: HeadlessLeaf {
             static let verbPath = ["runtimes", "list"]
             @Option var format: String?
             @Argument(parsing: .allUnrecognized) var unrecognized: [String] = []
             var bag: [String: String] { headlessBag(["format": format]) }
+        }
+
+        struct Readiness: HeadlessLeaf {
+            static let verbPath = ["runtimes", "readiness"]
+            @Argument(parsing: .allUnrecognized) var unrecognized: [String] = []
+            var bag: [String: String] { [:] }
         }
     }
 

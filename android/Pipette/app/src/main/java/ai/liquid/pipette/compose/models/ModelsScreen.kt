@@ -14,6 +14,9 @@ import ai.liquid.pipette.compose.Chip
 import ai.liquid.pipette.compose.ConfirmAction
 import ai.liquid.pipette.compose.DownloadedGroupUi
 import ai.liquid.pipette.compose.IosDivider
+import ai.liquid.pipette.compose.ModelFamilyList
+import ai.liquid.pipette.compose.ModelFamilyStyle
+import ai.liquid.pipette.compose.ModelFamilyUi
 import ai.liquid.pipette.compose.OutlinedAndroidCard
 import ai.liquid.pipette.compose.PillTabBarReservedHeight
 import ai.liquid.pipette.compose.SectionTitle
@@ -52,6 +55,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -98,9 +102,13 @@ fun ModelsScreen(state: ModelsUiState, onIntent: (ModelsIntent) -> Unit) {
             }
           else ->
             OutlinedAndroidCard(cornerRadius = 18) {
-              state.downloadedGroups.forEachIndexed { i, group ->
-                if (i > 0) IosDivider()
-                DownloadedGroup(group, onIntent)
+              ModelFamilyList(
+                state.downloadedFamilies,
+                onToggleOpen = { onIntent(ModelsIntent.ToggleDownloadedFamilyOpen(it)) },
+                memberKey = { it.key },
+                style = ModelFamilyStyle(verticalPadding = 15.dp, logoSize = 22.dp, titleSize = 17, subtitleSize = 14),
+              ) { group, indent, logoDigest ->
+                DownloadedGroup(group, indent, logoDigest, onIntent)
               }
               if (state.mmprojs.isNotEmpty()) {
                 IosDivider()
@@ -191,10 +199,10 @@ fun ModelsScreen(state: ModelsUiState, onIntent: (ModelsIntent) -> Unit) {
   }
 }
 
-/** A downloaded model family: chevron + brand + name + size + "N quants" badge; expands to quant chips. Long-press to delete. */
+/** Long-press the row to delete the model. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun DownloadedGroup(group: DownloadedGroupUi, onIntent: (ModelsIntent) -> Unit) {
+private fun DownloadedGroup(group: DownloadedGroupUi, indent: Dp, logoDigest: String?, onIntent: (ModelsIntent) -> Unit) {
   val colors = PipetteTheme.colors
   var expanded by remember { mutableStateOf(false) }
   ConfirmAction(
@@ -206,12 +214,12 @@ private fun DownloadedGroup(group: DownloadedGroupUi, onIntent: (ModelsIntent) -
       modifier =
         Modifier.fillMaxWidth()
           .combinedClickable(onClick = { expanded = !expanded }, onLongClick = trigger)
-          .padding(horizontal = 16.dp, vertical = 15.dp),
+          .padding(start = 16.dp + indent, end = 16.dp, top = 15.dp, bottom = 15.dp),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
       ai.liquid.pipette.compose.RotatingChevron(expanded = expanded, tint = colors.gray, modifier = Modifier.width(16.dp))
-      BrandLogo(group.name, size = 22.dp)
+      BrandLogo(group.name, size = 22.dp, logoDigest = logoDigest)
       Column(Modifier.weight(1f)) {
         Text(
           group.name,
@@ -231,7 +239,7 @@ private fun DownloadedGroup(group: DownloadedGroupUi, onIntent: (ModelsIntent) -
   }
   if (expanded) {
     FlowRow(
-      modifier = Modifier.fillMaxWidth().padding(start = 42.dp, end = 16.dp, bottom = 12.dp),
+      modifier = Modifier.fillMaxWidth().padding(start = 42.dp + indent, end = 16.dp, bottom = 12.dp),
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -248,21 +256,29 @@ private fun ModelsScreenPreview() {
       state =
         ModelsUiState(
           hasAnyModel = true,
-          downloadedGroups =
+          downloadedFamilies =
             listOf(
-              DownloadedGroupUi(
-                key = "lfm2-1.2b",
-                name = "LFM2 1.2B",
-                sizeLabel = "731 MB",
-                quantCount = 2,
-                quants = listOf("q4_k_m", "q8_0"),
-                files =
+              ModelFamilyUi(
+                name = "LFM2",
+                logoName = "LFM2 1.2B",
+                open = true,
+                members =
                   listOf(
-                    ModelFile(
-                      name = "lfm2-1.2b-q4_k_m.gguf",
-                      path = "/models/lfm2-1.2b-q4_k_m.gguf",
-                      sizeBytes = 731L * 1024 * 1024,
-                      hfRepo = "LiquidAI/LFM2-1.2B-GGUF",
+                    DownloadedGroupUi(
+                      key = "lfm2-1.2b",
+                      name = "LFM2 1.2B",
+                      sizeLabel = "731 MB",
+                      quantCount = 2,
+                      quants = listOf("q4_k_m", "q8_0"),
+                      files =
+                        listOf(
+                          ModelFile(
+                            name = "lfm2-1.2b-q4_k_m.gguf",
+                            path = "/models/lfm2-1.2b-q4_k_m.gguf",
+                            sizeBytes = 731L * 1024 * 1024,
+                            hfRepo = "LiquidAI/LFM2-1.2B-GGUF",
+                          )
+                        ),
                     )
                   ),
               )

@@ -89,7 +89,7 @@ class ModelProvisioner(
    */
   @Suppress("ReturnCount") // the already-present arm and the two ways starting a transfer fails, each returning its own reason
   private fun ensureOne(repo: HfRepo, filename: GgufFilename, onStatus: (String) -> Unit): Result<String> {
-    val relative = LocalStorage.modelRelativePath(repo.toString(), filename.toString())
+    val relative = LocalStorage.modelRelativePath(repo.reference, filename.toString())
     resolvePath(relative)?.let {
       return Result.success(it)
     }
@@ -113,7 +113,7 @@ class ModelProvisioner(
         onStatus("Downloading $filename")
         // Through the coordinator's own parser rather than composing a URL here: it owns the `org/repo/file.gguf` form AND the per-segment URL
         // encoding, and a second spelling of the second one would quietly break on the first filename that needs escaping.
-        val parsed = runCatching { DownloadCoordinator.parseDownloadInput("$repo/$filename") }
+        val parsed = runCatching { DownloadCoordinator.parseDownloadInput("${repo.reference}/$filename") }
         val input =
           parsed.getOrElse {
             return Result.failure(IllegalStateException("Could not resolve a download URL for $filename: ${it.message}"))

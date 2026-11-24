@@ -4,6 +4,7 @@ import ai.liquid.pipette.BenchmarkType
 import ai.liquid.pipette.CpuAffinitySnapshot
 import ai.liquid.pipette.JobManifest
 import ai.liquid.pipette.JobStore
+import ai.liquid.pipette.Model
 import ai.liquid.pipette.ReadinessPolicy
 import ai.liquid.pipette.RegistrationData
 import ai.liquid.pipette.RuntimeFlagRef
@@ -65,6 +66,8 @@ class FakeJobStore(
       else -> storedPath
     }
 
+  override fun resolveModelFile(storageKey: String): String? = storageKey.takeUnless { it in unresolvablePaths }
+
   override fun writePayload(
     resultJson: String,
     cellId: String,
@@ -72,6 +75,7 @@ class FakeJobStore(
     modelName: String,
     modelPath: String,
     mmprojPath: String?,
+    modelRef: Model?,
     runtimeFlags: RuntimeFlagRef,
     runtimeVersion: String,
     runtimeCpuBackend: String?,

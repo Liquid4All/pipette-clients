@@ -18,17 +18,25 @@ Streaming sends one chunk per generated token as soon as the token exists,
 text or not: a token that completes no character yet carries empty text, and
 the last carries `length`. A generation that stops on EOS ends with a textless
 `stop` chunk instead.
+
+With `--vlm` it compiles a `VLMPipeline` instead and serves the VL cells:
+`POST /tokenize` and a non-streamed `POST /v1/chat/completions` in
+llama-server's form, whose client those cells share.
 """
 
 import argparse
+import base64
+import binascii
 import contextlib
 import itertools
 import json
 import os
 import selectors
+import struct
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MODEL_ID = "default"
@@ -148,13 +156,15 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error_json(404, f"no route for GET {self.path}")
 
+    def routes(self):
+        return {"/tokenize": self.tokenize, "/v1/completions": self.complete}
+
     def do_POST(self):
-        routes = {"/tokenize": self.tokenize, "/v1/completions": self.complete}
         try:
             # Read before any answer, a 404 included: closing on an unread body
             # resets the connection on Windows, and the reset loses the answer.
             raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            route = routes.get(self.path)
+            route = self.routes().get(self.path)
             if route is None:
                 self.send_error_json(404, f"no route for POST {self.path}")
                 return
@@ -429,6 +439,183 @@ def make_server(engine, port):
     return Server(("127.0.0.1", port), handler)
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+DATA_URL = "data:image/png;base64,"
+
+
+def png_rgb(data):
+    """`(height, width, pixels)` of an 8-bit RGB PNG with unfiltered rows, the
+    form of pipette's gray image. The venv has no image library, so any other
+    PNG is refused rather than misread."""
+    if not data.startswith(PNG_SIGNATURE):
+        raise RequestError("an image is not a PNG")
+    header, idat, at = None, b"", len(PNG_SIGNATURE)
+    try:
+        while at + 8 <= len(data):
+            length, kind = struct.unpack(">I4s", data[at : at + 8])
+            body = data[at + 8 : at + 8 + length]
+            if kind == b"IHDR":
+                header = struct.unpack(">IIBBBBB", body)
+            elif kind == b"IDAT":
+                idat += body
+            at += 12 + length
+        rows = zlib.decompress(idat)
+    except (struct.error, zlib.error) as exc:
+        raise RequestError(f"a PNG is malformed: {exc}") from exc
+    if header is None:
+        raise RequestError("a PNG has no IHDR chunk")
+    width, height, depth, color, _, _, interlace = header
+    if (depth, color, interlace) != (8, 2, 0):
+        raise RequestError("only 8-bit RGB PNGs without interlace are served")
+    stride = 1 + 3 * width
+    starts = range(0, len(rows), stride)
+    if len(rows) != stride * height or any(rows[i] for i in starts):
+        raise RequestError("only PNGs with unfiltered rows are served")
+    return height, width, b"".join(rows[i + 1 : i + stride] for i in starts)
+
+
+class ChatCompletion:
+    """A validated `/v1/chat/completions` body: one user turn of text and PNG
+    images, as the prompt GenAI renders through the chat template."""
+
+    def __init__(self, body):
+        messages = body.get("messages")
+        if not (
+            isinstance(messages, list)
+            and len(messages) == 1
+            and isinstance(messages[0], dict)
+            and messages[0].get("role") == "user"
+        ):
+            raise RequestError("messages must be one user turn")
+        content = messages[0].get("content")
+        parts = (
+            [{"type": "text", "text": content}] if isinstance(content, str) else content
+        )
+        if not isinstance(parts, list):
+            raise RequestError("content must be a string or a list of parts")
+        self.prompt, self.images = "", []
+        for part in parts:
+            kind = part.get("type") if isinstance(part, dict) else None
+            if kind == "text" and isinstance(part.get("text"), str):
+                self.prompt += part["text"]
+            elif kind == "image_url":
+                # A tag where the part was keeps llama-server's order of parts.
+                self.prompt += f"<ov_genai_image_{len(self.images)}>"
+                self.images.append(png_rgb(data_url_bytes(part)))
+            else:
+                raise RequestError(f"unsupported content part {kind!r}")
+        self.max_tokens = body.get("max_tokens")
+        if not isinstance(self.max_tokens, int) or self.max_tokens < 1:
+            raise RequestError("max_tokens must be a positive integer")
+        if body.get("temperature", 0) not in (0, 0.0):
+            raise RequestError("only greedy decoding is served: temperature must be 0")
+        self.ignore_eos = bool(body.get("ignore_eos", False))
+
+
+def data_url_bytes(part):
+    url = (part.get("image_url") or {}).get("url")
+    if not isinstance(url, str) or not url.startswith(DATA_URL):
+        raise RequestError("an image must be a base64 PNG data URL")
+    try:
+        return base64.b64decode(url.removeprefix(DATA_URL), validate=True)
+    except binascii.Error as exc:
+        raise RequestError(f"an image is not valid base64: {exc}") from exc
+
+
+class VlmHandler(Handler):
+    """The VL cells' routes, in llama-server's form."""
+
+    def routes(self):
+        return {"/tokenize": self.tokenize_content, "/v1/chat/completions": self.chat}
+
+    def tokenize_content(self, body):
+        content = body.get("content")
+        if not isinstance(content, str):
+            raise RequestError("content must be a string")
+        tokens = self.engine.encode(content, bool(body.get("add_special", False)))
+        self.send_json(200, {"tokens": tokens})
+
+    def chat(self, body):
+        request = ChatCompletion(body)
+        text, finish_reason, timings = self.engine.generate(
+            request.prompt, request.images, request.max_tokens, request.ignore_eos
+        )
+        message = {"role": "assistant", "content": text}
+        choice = {"index": 0, "message": message, "finish_reason": finish_reason}
+        reply = {
+            "id": f"chatcmpl-{next(self.ids)}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": MODEL_ID,
+            "choices": [choice],
+            "usage": usage(timings["prompt_n"], timings["predicted_n"]),
+            "timings": timings,
+        }
+        self.send_json(200, reply)
+
+
+class VlmEngine:
+    def __init__(self, model_dir, device, properties):
+        import numpy
+        import openvino
+        import openvino_genai
+
+        self.np, self.ov, self.ov_genai = numpy, openvino, openvino_genai
+        self.pipe = openvino_genai.VLMPipeline(model_dir, device, **properties)
+        self.tokenizer = self.pipe.get_tokenizer()
+
+    def encode(self, text, add_special_tokens):
+        encoded = self.tokenizer.encode(text, add_special_tokens=add_special_tokens)
+        return [int(i) for i in encoded.input_ids.data[0]]
+
+    def generate(self, prompt, images, max_tokens, ignore_eos):
+        """The reply's text and finish reason, and GenAI's timings in
+        llama-server's terms."""
+        # Fresh, not the IR's generation_config.json, which samples.
+        config = self.ov_genai.GenerationConfig()
+        config.do_sample = False
+        config.max_new_tokens = max_tokens
+        config.ignore_eos = ignore_eos
+        tensors = [
+            self.ov.Tensor(
+                self.np.frombuffer(pixels, dtype=self.np.uint8).reshape(1, h, w, 3)
+            )
+            for h, w, pixels in images
+        ]
+        # A string prompt: GenAI encodes every image, where a chat history encodes
+        # identical ones once. The config by keyword, which is how it binds.
+        result = self.pipe.generate(prompt, images=tensors, generation_config=config)
+        metrics = result.perf_metrics
+        timings = {
+            "prompt_n": metrics.get_num_input_tokens(),
+            # From the call, so it spans the image encode as llama-server's does.
+            "prompt_ms": metrics.get_ttft().mean,
+            "predicted_n": metrics.get_num_generated_tokens(),
+            # The gaps between tokens in microseconds, one per step after the first.
+            "predicted_ms": sum(metrics.raw_metrics.m_durations) / 1000,
+        }
+        return result.texts[0], result.finish_reasons[0].name.lower(), timings
+
+
+def make_vlm_server(engine, port):
+    """`make_server` with the VL routes."""
+    handler = type("EngineHandler", (VlmHandler,), {"engine": engine})
+    return Server(("127.0.0.1", port), handler)
+
+
+def decline_telemetry():
+    """Writes OpenVINO's consent file as declined, so this user's other OpenVINO
+    runs send nothing either; `opt_in_out --opt_out` would report the opt-out."""
+    from openvino_telemetry.utils.opt_in_checker import ConsentCheckResult, OptInChecker
+
+    checker = OptInChecker()
+    # No home folder to keep the file in: the package then declines on its own.
+    if checker.consent_file_base_dir() is None:
+        return
+    if not checker.update_result(ConsentCheckResult.DECLINED):
+        raise RuntimeError("could not write OpenVINO's telemetry consent file")
+
+
 def main(argv=None):
     """Load the engine, then listen: nothing answers the readiness probe until
     the model can serve."""
@@ -438,17 +625,22 @@ def main(argv=None):
     parser.add_argument("--parent-pid", type=int, help="exit when this process does")
     parser.add_argument("--device", required=True)
     parser.add_argument(
-        "--properties", type=json.loads, default={}, help="LLMPipeline properties"
+        "--properties", type=json.loads, default={}, help="pipeline properties"
+    )
+    parser.add_argument(
+        "--vlm", action="store_true", help="a VLMPipeline on the VL routes"
     )
     args = parser.parse_args(argv)
     # Before the load, which can take minutes on a cold cache or an NPU compile.
     if args.parent_pid is not None:
         exit_with_parent(args.parent_pid)
+    decline_telemetry()
 
     started = time.perf_counter()
-    engine = Engine(args.model_dir, args.device, dict(args.properties))
+    load = VlmEngine if args.vlm else Engine
+    engine = load(args.model_dir, args.device, dict(args.properties))
     log(f"loaded {args.model_dir} in {time.perf_counter() - started:.1f}s")
-    server = make_server(engine, args.port)
+    server = (make_vlm_server if args.vlm else make_server)(engine, args.port)
     log(f"listening on http://127.0.0.1:{server.server_address[1]}")
     server.serve_forever()
 

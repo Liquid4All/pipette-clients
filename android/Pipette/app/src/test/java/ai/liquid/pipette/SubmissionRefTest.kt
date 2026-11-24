@@ -265,8 +265,6 @@ class SubmissionRefTest {
 
   @Test
   fun modelFlagsAreAbsentForADefaultModelEvenOnEval() {
-    // The state every Android submission is in today: `typedModelOrNull` builds with default flags, so there is nothing to report even on the one
-    // benchmark type that would report it. This is what makes the field absent rather than `enable_thinking=false`.
     val default = SubmissionRef.typedModelOrNull("LiquidAI/Qwen-GGUF", "qwen-Q4_0.gguf", null)
     assertNotNull(default)
     assertNull(default!!.modelFlags.submissionString(BenchmarkType.EVAL))

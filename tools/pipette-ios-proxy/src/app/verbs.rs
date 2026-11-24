@@ -10,7 +10,7 @@ use serde_json::Value;
 use pipette_plan_types::Runtime;
 
 use super::console::{Signals, relaunch_if_silent};
-use super::{ConsoleRun, HEADLESS_TOKEN, SENTINEL, SentinelStream};
+use super::{APP_LINE, ConsoleRun, EXIT_MALFORMED, HEADLESS_TOKEN, SENTINEL, SentinelStream};
 use crate::device::DeviceControl;
 
 /// A headless verb that did not answer.
@@ -164,6 +164,37 @@ pub(crate) fn list_runtimes(
         });
     }
     Ok(parse_runtime_listing(&run.stdout))
+}
+
+/// Read this phone's Foundation Models state. Older builds lack this verb.
+pub(crate) fn apple_foundation_ready(
+    device: &dyn DeviceControl,
+    bundle_id: &str,
+    timeout: Duration,
+    first_line: Duration,
+) -> anyhow::Result<bool> {
+    let run = run_verb(
+        device,
+        bundle_id,
+        &["runtimes", "readiness"],
+        timeout,
+        first_line,
+        SentinelStream::Stdout,
+    )?;
+    if run.sentinel == Some(EXIT_MALFORMED) {
+        return Ok(false);
+    }
+    if !run.succeeded() {
+        return Err(verb_failed("runtimes readiness", &run));
+    }
+    let readiness = run.stdout.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(APP_LINE)?
+            .strip_prefix("runtimes readiness apple_foundation=")?
+            .parse::<bool>()
+            .ok()
+    });
+    readiness.context("the phone printed no Apple Foundation readiness")
 }
 
 #[derive(Debug, Default, PartialEq)]

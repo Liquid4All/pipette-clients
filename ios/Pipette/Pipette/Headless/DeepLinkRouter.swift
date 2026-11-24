@@ -114,7 +114,7 @@ final class DeepLinkRouter {
         // Also refused above. Exhaustive on purpose: a newly allowed command is a compile
         // error here until it is handled.
         case .authRegister, .diagMemseq, .modelsList, .modelsRm, .listJobs, .removeJob,
-             .worker, .runtimesList, .benchmarksList, .benchmarksShow,
+             .worker, .runtimesList, .runtimesReadiness, .benchmarksList, .benchmarksShow,
              .benchmarksInitLocal,
              .storageStatus, .sync,
              .authMe, .authSetDevice, .authReset, .authExport, .authImport, .diagProbe,

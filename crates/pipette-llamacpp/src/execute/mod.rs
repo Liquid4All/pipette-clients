@@ -314,6 +314,9 @@ pub fn run(
         BenchmarkDefinition::DecisionLatency(_) | BenchmarkDefinition::DecisionMaxMemory(_) => {
             anyhow::bail!("decision benchmarks are not yet supported for llama.cpp")
         }
+        BenchmarkDefinition::Session(_) => {
+            anyhow::bail!("a session runs no model or runtime, so it has no cell to run")
+        }
     }
 }
 

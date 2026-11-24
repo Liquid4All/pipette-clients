@@ -16,6 +16,9 @@ interface JobStore {
 
   fun resolveModelPath(storedPath: String?): String?
 
+  /** Resolve the file at [storageKey] within the current model store. */
+  fun resolveModelFile(storageKey: String): String?
+
   // Intentionally wide: this is the single persistence sink for a completed cell's submission fields — a flat record, not a grouping worth a value
   // object here.
   @Suppress("LongParameterList") // the single flat persistence sink for a completed cell's submission fields
@@ -26,6 +29,7 @@ interface JobStore {
     modelName: String,
     modelPath: String,
     mmprojPath: String?,
+    modelRef: Model?,
     runtimeFlags: RuntimeFlagRef,
     runtimeVersion: String,
     runtimeCpuBackend: String?,

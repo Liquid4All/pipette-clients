@@ -16,6 +16,7 @@ use pipette_plan_types::{Runtime, RuntimeBuildFlagError, runtime_build_flag};
 
 /// What `ios/build-llama.sh` stamps when there is no git metadata.
 const UNKNOWN_BUILD: &str = "unknown";
+pub(crate) const APPLE_FOUNDATION_FLAG: &str = "runtime:apple_foundation";
 
 /// The flags one runtime contributes, as the app would report them, and its build flag.
 pub(crate) fn flags_for(runtime: &Runtime) -> Result<Vec<String>, RuntimeBuildFlagError> {
@@ -80,7 +81,7 @@ pub(crate) fn flags_for(runtime: &Runtime) -> Result<Vec<String>, RuntimeBuildFl
             );
         }
         // Ships with the OS; no build id to pin.
-        Runtime::AppleFoundation(_) => flags.push("runtime:apple_foundation".to_string()),
+        Runtime::AppleFoundation(_) => flags.push(APPLE_FOUNDATION_FLAG.to_owned()),
         // Runtimes no iOS build can be. Listed rather than `_` so a new variant in
         // `pipette-plan-types` forces a decision here.
         Runtime::LlamacppCliStockTools(_)

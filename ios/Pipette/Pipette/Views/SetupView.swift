@@ -278,6 +278,7 @@ struct SetupView: View {
                 // required no identity, and `auth reset` clears synced benchmarks with the identity.
                 BenchmarkSyncCoordinator.syncBestEffortInBackground(
                     serverUrl: server, ws: ws, reason: "registration", clearCacheFirst: false)
+                ModelShortList.refreshInBackground(ws: ws, reason: "registration")
                 await MainActor.run {
                     registrationResult = (registration.clientId.value, registration.status)
                     isRegistered = true

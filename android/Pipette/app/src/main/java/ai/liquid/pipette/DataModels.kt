@@ -60,12 +60,15 @@ data class JobCell(
    * nothing, which is what allows a run against a catalog model that was never downloaded, and what lets a run survive the model being deleted
    * between planning and execution.
    *
-   * Null for a cell this build cannot name a coordinate for: a manifest written before this field existed, and a locally imported file that has no
-   * HuggingFace coordinate to go back to. Such a cell keeps the old behaviour exactly, failing with "Model file not found", because there is nothing
-   * to fetch it from. iOS carries the same thing as `JobCell.source`, where it is non-optional because that client never had a path-only form.
+   * Older jobs and local imports can omit the coordinate. If the manifest supplies a coordinate that this build cannot read, [hasMalformedModelRef]
+   * prevents the runner from using filename recovery.
    */
   val modelRef: Model? = null,
+  private val malformedModelRef: Any? = null,
 ) {
+  val hasMalformedModelRef: Boolean
+    get() = malformedModelRef != null
+
   val isRerunnable: Boolean
     get() = runStatus.isRerunnable
 
@@ -84,11 +87,13 @@ data class JobCell(
       // field existed round-trips byte-identically through a load/save cycle. Same rule for
       // modelRef below, for the same reason.
       .also { obj -> runtimeFlags?.let { obj.put("runtimeFlags", it.toJson()) } }
-      .also { obj -> modelRef?.let { obj.put("modelRef", it.toJson()) } }
+      .putOpt("modelRef", modelRef?.toJson() ?: malformedModelRef)
 
   companion object {
-    fun fromJson(json: JSONObject): JobCell =
-      JobCell(
+    fun fromJson(json: JSONObject): JobCell {
+      val rawModelRef = json.opt("modelRef")
+      val modelRef = Model.fromJsonOrNull(rawModelRef as? JSONObject)
+      return JobCell(
         cellId = json.getString("cellId"),
         benchmarkId = json.getString("benchmarkId"),
         benchmarkType = json.optNullableString("benchmarkType"),
@@ -99,8 +104,10 @@ data class JobCell(
         serverJobId = json.optNullableString("serverJobId"),
         errorMessage = json.optNullableString("errorMessage"),
         runtimeFlags = RuntimeFlagRef.fromJsonOrNull(json.optJSONObject("runtimeFlags")),
-        modelRef = Model.fromJsonOrNull(json.optJSONObject("modelRef")),
+        modelRef = modelRef,
+        malformedModelRef = rawModelRef.takeIf { modelRef == null },
       )
+    }
   }
 }
 
@@ -302,7 +309,7 @@ data class ModelFile(
   val sizeBytes: Long,
   val hfRepo: String?,
   val displayName: String? = null,
-  val familyId: String? = null,
+  val modelId: String? = null,
   /**
    * The coordinate to fetch this model from, when there is one. Carried so a run planned against it can put it on the cell ([JobCell.modelRef]); null
    * for a locally imported file, which has nowhere to go back to.
@@ -317,15 +324,24 @@ data class ModelFile(
    * `DiscoveredModel`, which also carries the catalog and downloaded forms in one value.
    */
   val onDisk: Boolean = true,
+  val catalogQuant: String? = null,
 ) {
   val sizeFormatted: String
     get() = ByteFormat.fileSize(sizeBytes)
 
   val quant: String?
-    get() = LocalStorage.parseQuant(name)
+    get() = catalogQuant ?: LocalStorage.parseQuant(name)
 
   val isMmproj: Boolean
     get() = name.contains("mmproj", ignoreCase = true)
+
+  /** Offers and installed models share the key `repo[@revision]/filename`. Local imports use the filename alone. */
+  val storageKey: String
+    get() = LocalStorage.modelRelativePath(repoReference, name)
+
+  /** The repo with its pin, `org/repo[@revision]`, so two revisions of one repo compare unequal. [hfRepo] when the file has no coordinate. */
+  val repoReference: String?
+    get() = modelRef?.repo?.reference ?: hfRepo
 }
 
 object DateFormats {

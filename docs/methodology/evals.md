@@ -220,11 +220,13 @@ treated as a runtime error instead of a wrong answer. Their `stop_reason` is
 `unknown`, since one constrained token says nothing about how an answer ends.
 
 Both arms send `preserved_tokens: ["<|START_THINKING|>", "<|END_THINKING|>",
-"<|START_TEXT|>", "<|END_TEXT|>"]`. `llama-server` drops control tokens from
+"<|START_TEXT|>", "<|END_TEXT|>", "<|content_thinking|>", "<|content_text|>",
+"<|end_message|>"]`. `llama-server` drops control tokens from
 the text, and the GGUF converter makes every `<|…|>` token one, so without the
 list North-Mini-Code's reasoning and answer arrive with no boundary between
-them. The list makes the server render those tokens as text, as vLLM already
-does, so the scorer can split on them on either runtime. It changes neither
+them, and so do Inkling 2's (the last three tokens). The list makes the server
+render those tokens as text, as vLLM already does for North,
+so the scorer can split on them on either runtime. It changes neither
 sampling nor where generation stops, and the server skips a string that is
 not one token of the model's vocabulary, so every model carries the list.
 

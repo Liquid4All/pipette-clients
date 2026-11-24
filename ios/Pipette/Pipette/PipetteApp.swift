@@ -56,6 +56,8 @@ struct PipetteApp: App {
             LocalStorage.lastUndecodableJobSweepBuild = Bundle.main.appVersionDisplayString
         }
         ws.recoverInterruptedJobs()
+        // Before the headless runner, which reads the model catalog.
+        ModelShortList.loadCache(ws: ws)
 
         // Early, so this launch's events attribute to the device rather than an anonymous id.
         if let clientId = ws.registration.get()?.clientId {
@@ -108,6 +110,9 @@ struct PipetteApp: App {
             // before anything is read from disk. `JobStore` reads disk on first use.
             .onAppear {
                 modelStore.reload()
+                if isRegistered {
+                    ModelShortList.refreshInBackground(ws: ws, reason: "launch")
+                }
             }
             // Downloads finish whichever screen is visible; re-scan so every model consumer sees
             // the file.

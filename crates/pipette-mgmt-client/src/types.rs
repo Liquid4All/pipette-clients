@@ -468,15 +468,13 @@ pub enum ServerUrlError {
     NotABase { url: String },
 }
 
-/// Whether an account may act. An invited account is `active` at once; one
-/// that asked for itself is `pending` until an operator admits it.
+/// Whether an account may act.
 ///
 /// Not mgmt's `UserStatus`, which has no [`Self::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserStatus {
     Active,
-    Pending,
     /// Offboarded. Disabled rather than deleted, so the plans the account filed
     /// keep resolving to a principal that exists.
     Disabled,
@@ -489,7 +487,6 @@ impl std::fmt::Display for UserStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Active => f.write_str("active"),
-            Self::Pending => f.write_str("pending"),
             Self::Disabled => f.write_str("disabled"),
             Self::Unknown(raw) => f.write_str(raw),
         }
@@ -519,21 +516,15 @@ pub struct RegisterResponse {
     pub status: ClientStatus,
 }
 
-/// `POST /api/v1/users/register`: bind a public key to an account. With an
-/// invite, the account exists and the registration is approved. Without one,
-/// `contact_email` asks for an account, created [`UserStatus::Pending`]. Set
-/// one or the other: an address beside an invite would describe a record this
-/// route may not touch.
+/// `POST /api/v1/users/register`: bind a public key to the account an invite
+/// names. Nothing here asks for an account.
 ///
 /// mgmt's `RegisterUserKeyRequest` in JSON, in this crate's field types so a
 /// blank invite is refused at the flag.
 #[derive(Debug, Clone, Serialize)]
 pub struct RegisterUserRequest {
     pub public_key: PublicKey,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_preauth_key: Option<UserPreauthKey>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contact_email: Option<ContactEmail>,
+    pub user_preauth_key: UserPreauthKey,
     pub key_details: KeyDetails,
 }
 
@@ -1041,28 +1032,19 @@ mod tests {
             "contact_email": address, "status": "approved",
         }))?;
         assert_eq!(client.contact_email, address);
-        let public_key = PublicKey::try_new("11".repeat(32))?;
         let device = serde_json::to_value(RegisterRequest {
-            public_key: public_key.clone(),
+            public_key: PublicKey::try_new("11".repeat(32))?,
             organization: "LiquidAI".into(),
             contact_email: parse_contact_email(address)?,
             client_details: "ci box".into(),
             client_preauth_key: None,
             device: Default::default(),
         })?;
-        let account = serde_json::to_value(RegisterUserRequest {
-            public_key,
-            user_preauth_key: None,
-            contact_email: Some(parse_contact_email(address)?),
-            key_details: KeyDetails::try_new("work laptop")?,
-        })?;
-        [device, account].iter().for_each(|body| {
-            assert_eq!(
-                body.get("contact_email").and_then(Value::as_str),
-                Some(address),
-                "{body}"
-            );
-        });
+        assert_eq!(
+            device.get("contact_email").and_then(Value::as_str),
+            Some(address),
+            "{device}"
+        );
         Ok(())
     }
 
@@ -1081,21 +1063,11 @@ mod tests {
     fn the_key_registration_bodies_are_mgmts() -> Result<(), Box<dyn std::error::Error>> {
         let public_key = PublicKey::try_new("11".repeat(32))?;
         let key_details = KeyDetails::try_new("work laptop")?;
-        let invited = RegisterUserRequest {
+        mgmt_reads_back::<plan_types::RegisterUserKeyRequest>(&RegisterUserRequest {
             public_key: public_key.clone(),
-            user_preauth_key: Some(UserPreauthKey::try_new(
-                "user_preauth_0123456789abcdef.secret",
-            )?),
-            contact_email: None,
+            user_preauth_key: UserPreauthKey::try_new("user_preauth_0123456789abcdef.secret")?,
             key_details: key_details.clone(),
-        };
-        let asking = RegisterUserRequest {
-            user_preauth_key: None,
-            contact_email: Some(ContactEmail::try_new("ops@example.com")?),
-            ..invited.clone()
-        };
-        mgmt_reads_back::<plan_types::RegisterUserKeyRequest>(&invited)?;
-        mgmt_reads_back::<plan_types::RegisterUserKeyRequest>(&asking)?;
+        })?;
         [None, Some(Timestamp::try_new("2026-10-11T12:00:00Z")?)]
             .into_iter()
             .try_for_each(|expires_at| {
@@ -1112,7 +1084,7 @@ mod tests {
     fn a_key_receipt_reads_mgmts() -> Result<(), Box<dyn std::error::Error>> {
         let sent = serde_json::to_value(plan_types::UserKeyRegistered {
             user_id: UserId::try_new("user_0192f0c1")?,
-            status: plan_types::UserStatus::Pending,
+            status: plan_types::UserStatus::Active,
             key_id: UserKeyId::try_new("userkey_9f2c")?,
         })?;
         let registered: RegisterUserResponse = serde_json::from_value(sent.clone())?;
@@ -1127,7 +1099,6 @@ mod tests {
     fn a_user_status_reads_each_of_mgmts() -> Result<(), Box<dyn std::error::Error>> {
         [
             plan_types::UserStatus::Active,
-            plan_types::UserStatus::Pending,
             plan_types::UserStatus::Disabled,
         ]
         .into_iter()
@@ -1135,7 +1106,6 @@ mod tests {
             // Exhaustive, so a status mgmt adds stops the build here.
             let expected = match sent {
                 plan_types::UserStatus::Active => UserStatus::Active,
-                plan_types::UserStatus::Pending => UserStatus::Pending,
                 plan_types::UserStatus::Disabled => UserStatus::Disabled,
             };
             let read: UserStatus = serde_json::from_value(serde_json::to_value(sent)?)?;

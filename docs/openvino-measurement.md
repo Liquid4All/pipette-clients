@@ -26,10 +26,13 @@ Do not compare those rows with server-path rows.
 
 Each timing cell runs one in-house OpenAI-compatible server
 (`pipette_openvino_server.py`) that compiles one pipeline before it listens.
-The memory cell runs two such servers, a warm-up server and then a measured
+The memory cells run two such servers, a warm-up server and then a measured
 server ([the memory cell and the cache](#the-memory-cell-and-the-cache)).
-The timing cells read a stream on the client's clock, like every other
-server-driven engine; the methodology pages define each figure.
+The text timing cells read a stream on the client's clock, like every other
+server-driven engine. `vl_throughput` reads GenAI's own prefill and decode times
+from one non-streamed reply, and `total_time_ms` on the client's clock
+([vl-throughput.md](methodology/vl-throughput.md#runtime-details)). The
+methodology pages define each figure.
 
 | cell | sample | first token? | compile? |
 |---|---|---|---|
@@ -156,8 +159,8 @@ believed.
 
 ## Compile time
 
-The compile is `LLMPipeline(...)` construction, which the server runs before it
-listens. It is outside every measured window and is not recorded. *Measured*:
+The compile is `LLMPipeline(...)` construction, `VLMPipeline(...)` for a VL
+cell, which the server runs before it listens. It is outside every measured window and is not recorded. *Measured*:
 
 | model | device | compile | measured decode |
 |---|---|---|---|
@@ -205,8 +208,8 @@ starts from the same place.
 
 #### The memory cell and the cache
 
-The three timing cells time requests to a server that compiled before it
-listened, so a shorter compile cannot reach them. `max_memory_usage` samples
+The timing cells time requests to a server that compiled before it listened,
+so a shorter compile cannot reach them. `max_memory_usage` samples
 the peak resident memory of the process the compile runs in, so it can and does. That is why
 the memory cell warms up: a first server loads the model, which compiles the
 blob, and runs the cell's request, which on a GPU compiles the kernels for the

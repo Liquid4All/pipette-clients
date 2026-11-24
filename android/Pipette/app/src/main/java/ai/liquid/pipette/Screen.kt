@@ -276,7 +276,7 @@ abstract class Screen(protected val ctx: ScreenContext) {
   protected fun modelMatchesSearch(model: ModelFile, query: String): Boolean {
     val q = query.trim().lowercase()
     if (q.isBlank()) return true
-    return listOfNotNull(model.name, model.displayName, model.hfRepo, model.familyId, model.quant).any { it.lowercase().contains(q) }
+    return listOfNotNull(model.name, model.displayName, model.hfRepo, model.modelId, model.quant).any { it.lowercase().contains(q) }
   }
 
   protected fun ensureMmprojSelectionInitialized(mmprojs: List<ModelFile>) {

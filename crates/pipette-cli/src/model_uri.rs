@@ -1148,7 +1148,7 @@ mod tests {
     #[case::gguf_text(r#"{"type":"gguf_text","source":"vault_url","url":"/vault/resources/vault_1/content","principal_id":"org_1"}"#)]
     #[case::gguf_vision(r#"{"type":"gguf_vision","source":"vault_url","model":"/vault/resources/vault_1/content","mmproj":"/vault/resources/vault_2/content","principal_id":"org_1"}"#)]
     #[case::gguf_vision_speculative(r#"{"type":"gguf_vision_speculative","source":"vault_url","model":"/vault/resources/vault_1/content","mmproj":"/vault/resources/vault_2/content","principal_id":"org_1"}"#)]
-    #[case::mlx(r#"{"type":"mlx","source":"vault_archive","url":"/vault/resources/vault_1/content","principal_id":"user_1"}"#)]
+    #[case::mlx(r#"{"type":"mlx","source":"vault_archive","url":"/vault/resources/vault_1/content","principal_id":"org_1"}"#)]
     #[case::torch_speculative(r#"{"type":"torch_speculative","target":{"source":"vault_archive","url":"/vault/resources/vault_1/content","principal_id":"org_1"},"draft":{"source":"huggingface","org":"o","repo_name":"r"}}"#)]
     fn a_vault_model_has_no_uri_and_serializes_structurally(
         #[case] json: &str,

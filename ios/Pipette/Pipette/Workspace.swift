@@ -15,6 +15,7 @@ nonisolated struct PipetteWorkspace: Sendable, RunContext {
     let root: URL
     /// Re-downloadable content, e.g. the MLX hub cache.
     let cacheRoot: URL
+    let modelShortList = ModelShortList()
     /// Where `registration`'s signing key outlives an uninstall. Off unless named, so a
     /// workspace built for a test or a preview never reaches the device-global Keychain.
     var privateKeyMirror: PrivateKeyMirror = .disabled

@@ -6,10 +6,10 @@ import Foundation
 // No endpoint defaults its ``HttpClient``: a default would let a call site reach the
 // process-shared client unseen, which is how a test ends up on the real network.
 //
-// The catalog reads are public (the mgmt repo's `docs/authentication.md` §4); a
-// signature adds the entries private to the signer's organization. The catalog pull
-// reads unsigned, unlike the crate's `sync`; a claim's one-id read signs, and fills a
-// private entry the first time a run names it.
+// The benchmark catalog is public (the mgmt repo's `docs/authentication.md` §4). A
+// signature adds the entries private to the signer's organization. The benchmark
+// catalog pull reads unsigned, and the single-entry read signs to fetch a private
+// entry named in a claim. The device descriptor catalog always requires a signature.
 
 nonisolated extension PipetteMgmtClient {
     enum ClientApi {
@@ -43,6 +43,35 @@ nonisolated extension PipetteMgmtClient {
             try await Call.sendJson(
                 server: server, http: http, method: .patch, path: "/clients/me", auth: auth,
                 body: request)
+        }
+
+        /// `GET /clients/me/descriptor-catalog`: the catalog short list for this device.
+        /// Returns the body as the server sent it, so the caller can cache it unchanged.
+        static func descriptorCatalog(
+            server: ServerUrl,
+            http: HttpClient,
+            auth: ClientIdentity
+        ) async throws(PipetteMgmtClient.Error) -> Data {
+            let dispatched = try await Call.send(
+                server: server, http: http, method: .get, path: "/clients/me/descriptor-catalog",
+                auth: auth)
+            guard (200..<300).contains(dispatched.response.status) else {
+                throw Call.statusError(dispatched)
+            }
+            return dispatched.response.body
+        }
+
+        /// Fetch the logo address for `sha256` from `GET /clients/me/descriptor-catalog/family-logos/{sha256}`.
+        static func familyLogo(
+            server: ServerUrl,
+            http: HttpClient,
+            auth: ClientIdentity,
+            sha256: String
+        ) async throws(PipetteMgmtClient.Error) -> DescriptorFamilyLogo {
+            try await Call.getJson(
+                server: server, http: http,
+                path: "/clients/me/descriptor-catalog/family-logos/\(sha256)", auth: auth,
+                responseLimit: 4 * 1024 * 1024)
         }
 
         /// `GET /benchmarks`: definitions only, no eval samples. A `nil`

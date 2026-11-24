@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UIKit
 
@@ -27,12 +28,21 @@ struct NewJobView: View {
 
     @State private var benchmarks: [BenchmarkItem] = []
     @State private var models: [DiscoveredModel] = []
+    @State private var catalogEntries: [String: CatalogEntry] = [:]
+    @State private var catalogLogoOwner: ModelShortList.Owner?
+    @State private var familyLogoDigests: [String: String] = [:]
     @State private var mmprojFiles: [DiscoveredModel] = []
     @State private var isSyncingBenchmarks: Bool = false
 
     @State private var selectedModelKeys: Set<String> = []  // keyed by group key
     @State private var selectedQuants: Set<QuantPill> = QuantPill.allSelection()
     @State private var modelSearch: String = ""
+    /// The model families closed by hand. Families start open, as the downloaded models
+    /// are few. A search opens every family with a match.
+    @State private var closedModelFamilies: Set<String> = []
+    /// Adds the catalog models that are not on the device. A job downloads them before
+    /// it runs.
+    @State private var showsUndownloadedModels = false
     @State private var benchmarkSearch: String = ""
     @State private var expandedBenchmarkTypes: Set<String> = []
     @State private var selectedBenchmarks: Set<String> = []
@@ -62,16 +72,11 @@ struct NewJobView: View {
         item.type?.isVisionLanguage == true
     }
 
-    /// A `.ggufVision` coordinate names its projector itself. Otherwise a projector
-    /// pairs by shared `hfRepo`, falling back to a filename-stem match for sideloads.
-    nonisolated private static func isVlCompatible(_ model: DiscoveredModel, mmprojFiles: [DiscoveredModel]) -> Bool {
-        if case .ggufVision = model.source { return true }
-        let stem = LocalStorage.normalizedModelStem(model.name)
-        for mmproj in mmprojFiles {
-            if model.hfRepo == mmproj.hfRepo { return true }
-            if LocalStorage.normalizedModelStem(mmproj.name) == stem { return true }
+    nonisolated private static func declaresProjector(_ source: Model) -> Bool {
+        switch source {
+        case .ggufVision, .ggufVisionSpeculative: true
+        default: false
         }
-        return false
     }
 
     /// Independent of the VL pairing gate. An unrecognized benchmark type counts as
@@ -85,8 +90,16 @@ struct NewJobView: View {
         benchmarks.contains { selectedBenchmarks.contains($0.benchmarkId) && Self.isVlBenchmark($0) }
     }
 
-    private var hasVlModelSelected: Bool {
-        resolvedModelFiles.contains { Self.isVlCompatible($0, mmprojFiles: mmprojFiles) }
+    private var canSelectVisionBenchmarks: Bool {
+        Self.allModelsHaveVisionPairings(resolvedModelFiles, mmprojFiles: mmprojFiles)
+    }
+
+    private var selectedProjectors: [DiscoveredModel] {
+        mmprojFiles.filter { selectedMmproj.contains($0.path) }
+    }
+
+    private var visionSelectionIsReady: Bool {
+        !isVlSelected || Self.allModelsHaveVisionPairings(resolvedModelFiles, mmprojFiles: selectedProjectors)
     }
 
     // MARK: - Model grouping & quant resolution
@@ -104,39 +117,96 @@ struct NewJobView: View {
     /// Downloaded rows win a collision, since only they know the real size and path.
     /// Collision is judged by `description` (the crate's `Display`), not `Model`
     /// equality, which also compares a plan's `sha256` that the catalog never states.
-    nonisolated static func offerable(downloaded: [DiscoveredModel]) -> [DiscoveredModel] {
+    nonisolated static func offerable(downloaded: [DiscoveredModel],
+                                      catalog: [CatalogEntry] = CatalogEntry.catalog) -> [DiscoveredModel] {
         var byReference: [String: DiscoveredModel] = [:]
-        for entry in CatalogEntry.catalog {
+        for entry in catalog {
             byReference[entry.source.description] = DiscoveredModel(catalog: entry)
         }
         for model in downloaded { byReference[model.source.description] = model }
         return byReference.values.sorted {
-            ($0.familyId, $0.quant ?? "", $0.source.description)
-                < ($1.familyId, $1.quant ?? "", $1.source.description)
+            ($0.modelId, $0.quant ?? "", $0.source.description)
+                < ($1.modelId, $1.quant ?? "", $1.source.description)
         }
     }
 
     /// The VL coordinates to run `model` as, one per cell.
     ///
-    /// A `.ggufVision` model keeps its portable declared coordinate, as one cell: its
-    /// pairing is not the user's to choose. A sideloaded base is paired by host paths,
-    /// so an undownloaded pair yields nothing rather than a cell that cannot name its files.
+    /// Declared vision coordinates already include their projector. A standalone GGUF
+    /// weight needs a downloaded projector from the same repo and revision, or a matching
+    /// filename stem when one of the files has no repo.
     nonisolated static func visionSources(
         for model: DiscoveredModel, mmprojFiles: [DiscoveredModel]
     ) -> [Model] {
-        if case .ggufVision = model.source { return [model.source] }
+        if declaresProjector(model.source) { return [model.source] }
+        guard case .ggufText = model.source, model.isDownloaded,
+              let weights = try? AbsolutePath(model.path)
+        else { return [] }
         return mmprojFiles.compactMap { mmproj in
-            guard model.isDownloaded, mmproj.isDownloaded,
-                  let weights = try? AbsolutePath(model.path),
+            guard mmproj.isDownloaded,
+                  matchesProjector(mmproj, to: model),
                   let projector = try? AbsolutePath(mmproj.path)
             else { return nil }
             return .ggufVision(.init(source: .absoluteFiles(model: weights, mmproj: projector)))
         }
     }
 
-    private var eligibleModels: [DiscoveredModel] {
+    nonisolated private static func matchesProjector(_ projector: DiscoveredModel, to model: DiscoveredModel) -> Bool {
+        if let modelRepo = model.source.repo, let projectorRepo = projector.source.repo {
+            return modelRepo == projectorRepo
+        }
+        return LocalStorage.normalizedModelStem(projector.name) == LocalStorage.normalizedModelStem(model.name)
+    }
+
+    nonisolated static func allModelsHaveVisionPairings(
+        _ models: [DiscoveredModel], mmprojFiles: [DiscoveredModel]
+    ) -> Bool {
+        !models.isEmpty && models.allSatisfy { !visionSources(for: $0, mmprojFiles: mmprojFiles).isEmpty }
+    }
+
+    private func sources(
+        for model: DiscoveredModel, benchmark: BenchmarkItem, projectors: [DiscoveredModel]
+    ) -> [Model] {
+        guard runtimeSupports(benchmark, on: model) else { return [] }
+        guard Self.isVlBenchmark(benchmark) else { return [model.source] }
+        if case let .ggufVisionSpeculative(speculative) = model.source,
+           benchmark.type != .vlSpecDecode {
+            return [.ggufVision(.init(source: speculative.source.vision))]
+        }
+        return Self.visionSources(for: model, mmprojFiles: projectors)
+    }
+
+    /// Every offer for the selected runtime: the catalog plus what is on disk.
+    private var runtimeModels: [DiscoveredModel] {
         guard let rt = selectedRuntime else { return [] }
         return models.filter { RuntimeKind($0.source) == rt }
+    }
+
+    private var eligibleModels: [DiscoveredModel] {
+        Self.listedModels(runtimeModels, showsUndownloaded: showsUndownloadedModels)
+    }
+
+    /// The downloaded models, with the rest of `offered` added on request. With nothing
+    /// downloaded, `offered` is the whole list.
+    nonisolated static func listedModels(_ offered: [DiscoveredModel],
+                                         showsUndownloaded: Bool) -> [DiscoveredModel] {
+        guard !showsUndownloaded, offered.contains(where: \.isDownloaded) else { return offered }
+        return offered.filter(\.isDownloaded)
+    }
+
+    /// True when a selected model is still offered but the list of downloaded models would
+    /// hide it. The step then shows the models not downloaded, so the selection stays visible.
+    nonisolated static func selectionNeedsUndownloaded(_ selected: Set<String>,
+                                                       offered: [DiscoveredModel]) -> Bool {
+        let listed = Set(listedModels(offered, showsUndownloaded: false).map(\.modelId))
+        let offeredIds = Set(offered.map(\.modelId))
+        return selected.contains { !listed.contains($0) && offeredIds.contains($0) }
+    }
+
+    /// The switch matters only when the runtime has models both on and off the device.
+    private var offersUndownloadedModelsSwitch: Bool {
+        let offered = runtimeModels
+        return offered.contains(where: \.isDownloaded) && offered.contains { !$0.isDownloaded }
     }
 
     /// VL is additionally gated per model by a projector. An unrecognized type is kept.
@@ -150,7 +220,7 @@ struct NewJobView: View {
     }
 
     private var modelGroups: [ModelGroup] {
-        ModelCatalog.groups(from: eligibleModels)
+        ModelCatalog.groups(from: eligibleModels, entries: catalogEntries)
     }
 
     /// Search filters only the model list, never the quant pills.
@@ -160,6 +230,10 @@ struct NewJobView: View {
         return modelGroups.filter {
             $0.name.lowercased().contains(q) || $0.key.lowercased().contains(q)
         }
+    }
+
+    private var modelFamilies: [ModelFamily<ModelGroup>] {
+        ModelFamily.grouping(filteredModelGroups, logoDigests: familyLogoDigests)
     }
 
     /// Quant pills with no matching file among the selected models (or all of them
@@ -205,17 +279,10 @@ struct NewJobView: View {
             selectedBenchmarks.contains($0.benchmarkId) && include($0)
         }
         let resolved = resolvedModelFiles
-        // Follows `start()`'s expansion so the review step's zero-cell gate is honest.
-        // It counts one cell per selected mmproj where `start()` may make fewer: one for
-        // a `.ggufVision` model, none for a model that is not downloaded yet.
+        let projectors = selectedProjectors
         return resolved.reduce(0) { total, model in
             total + selectedItems.reduce(0) { sub, benchmark in
-                guard runtimeSupports(benchmark, on: model) else { return sub }
-                if Self.isVlBenchmark(benchmark) {
-                    guard Self.isVlCompatible(model, mmprojFiles: mmprojFiles) else { return sub }
-                    return sub + selectedMmproj.count
-                }
-                return sub + 1
+                sub + sources(for: model, benchmark: benchmark, projectors: projectors).count
             }
         }
     }
@@ -268,9 +335,9 @@ struct NewJobView: View {
         case .models:
             return !selectedModelKeys.isEmpty
         case .benchmarks:
-            return !selectedBenchmarks.isEmpty && !(isVlSelected && selectedMmproj.isEmpty)
+            return !selectedBenchmarks.isEmpty && visionSelectionIsReady
         case .review:
-            return cellCount > 0
+            return visionSelectionIsReady && cellCount > 0
         }
     }
 
@@ -286,14 +353,21 @@ struct NewJobView: View {
                 wizardFooter
             }
         }
+        .environment(\.catalogLogoOwner, catalogLogoOwner)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
             loadData()
             syncBenchmarksOnVisit()
         }
+        .onReceive(NotificationCenter.default.publisher(
+            for: ModelShortList.didChange, object: ws.modelShortList
+        ).receive(on: DispatchQueue.main)) { _ in
+            loadModels()
+        }
+        .onChange(of: ObjectIdentifier(ws.modelShortList)) { _, _ in
+            loadModels()
+        }
         .onChange(of: selectedRuntime) { _, _ in seedSelectionsForRuntime() }
-        .onChange(of: selectedModelKeys) { _, _ in pruneVlBenchmarksIfNeeded() }
-        .onChange(of: selectedQuants) { _, _ in pruneVlBenchmarksIfNeeded() }
         .alert("Job Already Running", isPresented: Binding<Bool>(
             get: { startBlockedMessage != nil },
             set: { if !$0 { startBlockedMessage = nil } }
@@ -303,14 +377,6 @@ struct NewJobView: View {
             Text(startBlockedMessage ?? "")
         }
         .lowPowerModeWarning(isPresented: $lowPowerWarningPending) { start() }
-    }
-
-    /// Deselect VL benchmarks once no selected model is VL-compatible.
-    private func pruneVlBenchmarksIfNeeded() {
-        if !hasVlModelSelected {
-            let vlIds = Set(benchmarks.filter(Self.isVlBenchmark).map { $0.benchmarkId })
-            selectedBenchmarks.subtract(vlIds)
-        }
     }
 
     // MARK: - Header / footer
@@ -454,7 +520,11 @@ struct NewJobView: View {
 
     private func runtimeRow(_ rt: RuntimeKind) -> some View {
         let isSelected = selectedRuntime == rt
-        let count = models.filter { RuntimeKind($0.source) == rt }.count
+        // Every offer for the runtime: the catalog plus what is on disk. Counted per model,
+        // as the model step lists one row per model.
+        let offered = models.filter { RuntimeKind($0.source) == rt }
+        let available = Set(offered.map(\.modelId)).count
+        let downloaded = Set(offered.filter(\.isDownloaded).map(\.modelId)).count
         return Button {
             withAnimation { selectedRuntime = rt }
         } label: {
@@ -464,7 +534,8 @@ struct NewJobView: View {
                         .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(.primary)
                     // AFM has no downloads, so a count would be meaningless there.
-                    Text(rt == .afm ? rt.detail : "\(rt.detail) · \(count) downloaded")
+                    Text(rt == .afm ? rt.detail
+                         : "\(rt.detail) · \(available) available · \(downloaded) downloaded")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
@@ -495,9 +566,12 @@ struct NewJobView: View {
                 Spacer()
             } else {
                 searchField
+                if offersUndownloadedModelsSwitch {
+                    undownloadedModelsSwitch
+                }
                 modelList
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // Only llama.cpp ships several quants per family; elsewhere the filter
+                // Only llama.cpp ships several quants per model; elsewhere the filter
                 // stays at "all".
                 if selectedRuntime == .llamaCpp {
                     quantSection
@@ -513,10 +587,29 @@ struct NewJobView: View {
         ModelSearchField(text: $modelSearch, placeholder: "Search models")
     }
 
+    private var undownloadedModelsSwitch: some View {
+        Button {
+            showsUndownloadedModels.toggle()
+            // A hidden model must not stay in the job.
+            if !showsUndownloadedModels {
+                selectedModelKeys.formIntersection(Set(modelGroups.map(\.key)))
+            }
+        } label: {
+            HStack(spacing: 10) {
+                WizardCheckbox(isOn: showsUndownloadedModels, size: 18)
+                Text("Show models not downloaded")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Color.primary.opacity(0.78))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private var modelList: some View {
-        let groups = filteredModelGroups
+        let families = modelFamilies
         return ScrollView {
-            if groups.isEmpty {
+            if families.isEmpty {
                 Text("No models match \u{201C}\(modelSearch)\u{201D}.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -524,11 +617,11 @@ struct NewJobView: View {
                     .padding(.vertical, 32)
             } else {
                 ModelListCard(cornerRadius: 16) {
-                    ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                    ForEach(Array(families.enumerated()), id: \.element.id) { index, family in
                         if index > 0 {
                             Divider().padding(.leading, 16)
                         }
-                        modelRow(group)
+                        modelFamilySection(family)
                     }
                 }
             }
@@ -536,9 +629,55 @@ struct NewJobView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private func modelRow(_ group: ModelGroup) -> some View {
+    /// A family with one model shows the model row alone.
+    @ViewBuilder
+    private func modelFamilySection(_ family: ModelFamily<ModelGroup>) -> some View {
+        if family.members.count == 1, let group = family.members.first {
+            modelRow(group, logoDigest: family.logoDigest)
+        } else {
+            let isOpen = !modelSearch.searchNormalized.isEmpty || !closedModelFamilies.contains(family.id)
+            // The visible models only, so a search narrows the checkbox.
+            let keys = Set(family.members.map(\.key))
+            let allSelected = keys.isSubset(of: selectedModelKeys)
+            VStack(spacing: 0) {
+                ModelFamilyHeader(
+                    name: family.name,
+                    count: family.members.count,
+                    brand: family.brand,
+                    logoDigest: family.logoDigest,
+                    isOpen: isOpen,
+                    isSelected: allSelected,
+                    isMixed: !allSelected && !keys.isDisjoint(with: selectedModelKeys),
+                    checkboxSize: 26,
+                    onToggleOpen: {
+                        if closedModelFamilies.remove(family.id) == nil { closedModelFamilies.insert(family.id) }
+                    },
+                    onToggleSelection: {
+                        if allSelected {
+                            selectedModelKeys.subtract(keys)
+                        } else {
+                            selectedModelKeys.formUnion(keys)
+                            closedModelFamilies.remove(family.id)
+                        }
+                    }
+                )
+                if isOpen {
+                    ForEach(family.members) { group in
+                        Divider().padding(.leading, 16 + ModelFamilyHeader.chevronWidth
+                                              + ModelFamilyHeader.memberIndent)
+                        modelRow(group, logoDigest: family.logoDigest)
+                            .padding(.leading, ModelFamilyHeader.memberIndent)
+                    }
+                }
+            }
+        }
+    }
+
+    private func modelRow(_ group: ModelGroup, logoDigest: String?) -> some View {
         let isSelected = selectedModelKeys.contains(group.key)
-        return SelectableModelGroupRow(group: group, isSelected: isSelected, checkboxSize: 26) {
+        return SelectableModelGroupRow(group: group, isSelected: isSelected, logoDigest: logoDigest, checkboxSize: 26,
+                                       leadingInset: ModelFamilyHeader.chevronWidth,
+                                       showsDownloadedHint: showsUndownloadedModels) {
             if isSelected {
                 selectedModelKeys.remove(group.key)
             } else {
@@ -575,7 +714,7 @@ struct NewJobView: View {
                 benchmarkSearchField
                 benchmarkSelectionCard
 
-                if isVlSelected {
+                if isVlSelected && resolvedModelFiles.contains(where: { !Self.declaresProjector($0.source) }) {
                     mmprojSelectionCard
                 }
             }
@@ -648,8 +787,8 @@ struct NewJobView: View {
     }
 
     private func benchmarkGroupHeader(group: (type: String, items: [BenchmarkItem])) -> some View {
-        let groupDisabled = group.items.allSatisfy(Self.isVlBenchmark) && !hasVlModelSelected
-        let enabledItems = group.items.filter { !(Self.isVlBenchmark($0) && !hasVlModelSelected) }
+        let enabledItems = group.items.filter { !isBenchmarkSelectionDisabled($0) }
+        let groupDisabled = enabledItems.isEmpty
         let selectedCount = group.items.filter { selectedBenchmarks.contains($0.benchmarkId) }.count
         let allGroupSelected = !enabledItems.isEmpty
             && enabledItems.allSatisfy { selectedBenchmarks.contains($0.benchmarkId) }
@@ -712,7 +851,7 @@ struct NewJobView: View {
     }
 
     private func benchmarkGroupOptions(group: (type: String, items: [BenchmarkItem])) -> some View {
-        let groupDisabled = group.items.allSatisfy(Self.isVlBenchmark) && !hasVlModelSelected
+        let groupDisabled = group.items.allSatisfy(Self.isVlBenchmark) && !canSelectVisionBenchmarks
 
         return ZStack(alignment: .topLeading) {
             Rectangle()
@@ -746,7 +885,7 @@ struct NewJobView: View {
     ) -> some View {
         VStack(spacing: 20) {
             if groupDisabled {
-                Text("Requires a VL model whose HF repo also contains an mmproj file.")
+                Text("Every selected model needs a compatible projector for vision benchmarks.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -759,7 +898,7 @@ struct NewJobView: View {
     }
 
     private func benchmarkOptionRow(_ item: BenchmarkItem) -> some View {
-        let itemDisabled = Self.isVlBenchmark(item) && !hasVlModelSelected
+        let itemDisabled = isBenchmarkSelectionDisabled(item)
         let isSelected = selectedBenchmarks.contains(item.benchmarkId)
 
         return Button {
@@ -792,7 +931,7 @@ struct NewJobView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("MMProjectors")
                 .font(.system(size: 17, weight: .semibold))
-            Text("Required for VL benchmarks. Each selected mmproj is paired with each selected model.")
+            Text("Select a compatible projector for each model that needs one.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -849,12 +988,16 @@ struct NewJobView: View {
     }
 
     private func toggleBenchmark(_ item: BenchmarkItem) {
-        guard !(Self.isVlBenchmark(item) && !hasVlModelSelected) else { return }
+        guard !isBenchmarkSelectionDisabled(item) else { return }
         if selectedBenchmarks.contains(item.benchmarkId) {
             selectedBenchmarks.remove(item.benchmarkId)
         } else {
             selectedBenchmarks.insert(item.benchmarkId)
         }
+    }
+
+    private func isBenchmarkSelectionDisabled(_ item: BenchmarkItem) -> Bool {
+        Self.isVlBenchmark(item) && !selectedBenchmarks.contains(item.benchmarkId) && !canSelectVisionBenchmarks
     }
 
     private func toggleBenchmarkGroup(items: [BenchmarkItem], allSelected: Bool) {
@@ -1150,11 +1293,7 @@ struct NewJobView: View {
     // MARK: - Data loading
 
     private func loadData() {
-        let all = modelStore.models
-        // mmproj files are regular .gguf files, distinguished only by filename.
-        models = Self.offerable(
-            downloaded: all.filter { $0.name.range(of: "mmproj", options: .caseInsensitive) == nil })
-        mmprojFiles = all.filter { $0.name.range(of: "mmproj", options: .caseInsensitive) != nil }
+        loadModels()
         benchmarks = BenchmarkCatalog.selectable(store: ws.benchmarks)
 
         guard !didApplyInitialSelections else { return }
@@ -1162,6 +1301,51 @@ struct NewJobView: View {
         // projector starts selected so VL pairing works as soon as a VL benchmark is.
         selectedMmproj = Set(mmprojFiles.map(\.path))
         didApplyInitialSelections = true
+    }
+
+    private func loadModels() {
+        let all = modelStore.models
+        // mmproj files are regular .gguf files, distinguished only by filename.
+        let quota = ws.storageQuotaBytes
+        let ram = ProcessInfo.processInfo.physicalMemory
+        let snapshot = ModelShortList.snapshot(ws: ws)
+        catalogEntries = CatalogEntry.firstEntries(in: snapshot.entries)
+        catalogLogoOwner = snapshot.owner
+        familyLogoDigests = CatalogEntry.familyLogoDigests(in: snapshot.entries)
+        models = Self.offerable(downloaded: all.filter {
+            $0.name.range(of: "mmproj", options: .caseInsensitive) == nil
+        }, catalog: snapshot.entries).filter {
+            CatalogEntry.sizeFits($0.sizeBytes, quotaBytes: quota, ramBytes: ram)
+        }
+        mmprojFiles = all.filter { $0.name.range(of: "mmproj", options: .caseInsensitive) != nil }
+
+        guard !selectedModelKeys.isEmpty else { return }
+        // A finished download narrows the list; keep a selected catalog model visible.
+        if !showsUndownloadedModels,
+           Self.selectionNeedsUndownloaded(selectedModelKeys, offered: runtimeModels) {
+            showsUndownloadedModels = true
+        }
+        let available = Set(eligibleModels.map(\.modelId))
+        let selection = Self.reconcileModelSelection(selectedModelKeys, available: available, step: step)
+        selectedModelKeys = selection.keys
+        if step != selection.step {
+            step = selection.step
+            lowPowerWarningPending = false
+        }
+        if step == .review && !visionSelectionIsReady {
+            step = .benchmarks
+            lowPowerWarningPending = false
+        }
+    }
+
+    static func reconcileModelSelection(
+        _ selected: Set<String>, available: Set<String>, step: Step
+    ) -> (keys: Set<String>, step: Step) {
+        let kept = selected.intersection(available)
+        if !selected.isEmpty, kept.isEmpty, step == .benchmarks || step == .review {
+            return (kept, .models)
+        }
+        return (kept, step)
     }
 
     private func syncBenchmarksOnVisit() {
@@ -1196,15 +1380,17 @@ struct NewJobView: View {
 
     private func seedSelectionsForRuntime() {
         selectedModelKeys = []
+        showsUndownloadedModels = false
+        closedModelFamilies = []
         selectedQuants = QuantPill.allSelection()
         selectedMmproj = Set(mmprojFiles.map(\.path))
         seedBenchmarksForSelectedRuntime()
     }
 
     private func seedBenchmarksForSelectedRuntime() {
-        let hasVlModel = eligibleModels.contains { Self.isVlCompatible($0, mmprojFiles: mmprojFiles) }
+        let visionAvailable = canSelectVisionBenchmarks
         selectedBenchmarks = Set(runtimeBenchmarks.compactMap { item in
-            Self.isVlBenchmark(item) && !hasVlModel ? nil : item.benchmarkId
+            Self.isVlBenchmark(item) && !visionAvailable ? nil : item.benchmarkId
         })
     }
 
@@ -1219,49 +1405,27 @@ struct NewJobView: View {
     }
 
     private func start() {
+        guard visionSelectionIsReady, cellCount > 0 else { return }
         let selectedBenchmarkItems = benchmarks.filter { selectedBenchmarks.contains($0.benchmarkId) }
         let selectedModelItems = resolvedModelFiles
-        let selectedMmprojItems = mmprojFiles.filter { selectedMmproj.contains($0.path) }
+        let projectors = selectedProjectors
 
         // Model outer, benchmark inner: the runner loads each model once and runs
         // all of its benchmarks before unloading.
         var cells: [JobCell] = []
         for model in selectedModelItems {
             for benchmark in selectedBenchmarkItems {
-                // No unsupported cell is created, so the run doesn't fail late.
-                guard runtimeSupports(benchmark, on: model) else { continue }
-                let isVl = Self.isVlBenchmark(benchmark)
-                let benchmarkType = benchmark.type
-                if isVl {
-                    guard Self.isVlCompatible(model, mmprojFiles: mmprojFiles) else { continue }
-                    // `GgufVisionSource` names both files, so a VL cell is one coordinate.
-                    for source in Self.visionSources(for: model, mmprojFiles: selectedMmprojItems) {
-                        cells.append(JobCell(
-                            cellId: CellId(UUID().uuidString),
-                            benchmarkId: benchmark.benchmarkId,
-                            benchmarkType: benchmarkType,
-                            runStatus: .pending,
-                            serverJobId: nil,
-                            errorMessage: nil,
-                            spec: ClientRunSpec.authored(
-                                benchmarkId: benchmark.benchmarkId,
-                                benchmarkType: benchmarkType, model: source,
-                                numberGpuLayers: UInt32(max(0, nGpuLayers)),
-                                nUbatch: UInt32(max(1, prefillBatch))),
-                            benchmarkSource: benchmark.source
-                        ))
-                    }
-                } else {
+                for source in sources(for: model, benchmark: benchmark, projectors: projectors) {
                     cells.append(JobCell(
                         cellId: CellId(UUID().uuidString),
                         benchmarkId: benchmark.benchmarkId,
-                        benchmarkType: benchmarkType,
+                        benchmarkType: benchmark.type,
                         runStatus: .pending,
                         serverJobId: nil,
                         errorMessage: nil,
                         spec: ClientRunSpec.authored(
                             benchmarkId: benchmark.benchmarkId,
-                            benchmarkType: benchmarkType, model: model.source,
+                            benchmarkType: benchmark.type, model: source,
                             numberGpuLayers: UInt32(max(0, nGpuLayers)),
                             nUbatch: UInt32(max(1, prefillBatch))),
                         benchmarkSource: benchmark.source

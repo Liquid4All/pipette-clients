@@ -108,8 +108,8 @@ pub enum Kind {
     /// holding it (`@path` too on the CLI). JSON goes as JSON, TOML as the
     /// document itself.
     JsonOrToml,
-    /// An owner: `user_…` or `org_…` for the `{type, …_id}` object the server
-    /// takes, or the object itself. Where `detach` holds, `none` or `null`
+    /// An owner: `org_…` for the `{type, org_id}` object the server takes, or
+    /// the object itself. Where `detach` holds, `none` or `null`
     /// sends `null`, which the server reads as no owner.
     Owner {
         detach: bool,
@@ -278,7 +278,7 @@ pub fn param_help(name: &str) -> &'static str {
              (`lfm3-1.7b`), or a vault resource id; a `model_params_list` row's key"
         }
         "org_id" => "Organization id (`org_…`) or handle",
-        "principal_id" => "Owner of the file: a `user_…` or `org_…` id, not a handle",
+        "principal_id" => "Owner of the file: an `org_…` id, not a handle",
         "sha256" => "The file's SHA-256: 64 hex characters, sent lowercased",
         "benchmark_id" => "Benchmark id, e.g. `decode_throughput_512_100`",
         "campaign_id" => "Campaign id (`campaign_…`)",
@@ -325,20 +325,18 @@ pub(crate) const CATALOG_KINDS: &[&str] = &["stable", "daily", "hand-made"];
 pub(crate) const CATALOG_STATES: &[&str] = &["pinned", "active", "hidden"];
 pub(crate) const DESCRIPTOR_KINDS: &[&str] = &["runtime", "model"];
 const CLIENT_STATUS: Kind = Kind::Enum(CLIENT_STATUSES);
-pub(crate) const OWNER_FILTERS: &[&str] = &["mine", "org"];
+pub(crate) const OWNER_FILTERS: &[&str] = &["org"];
 const OWNER_FILTER: Field = opt(
     "owner",
     Kind::Enum(OWNER_FILTERS),
-    "mine: only records the caller owns. org: only organization-owned records in reach, \
-     narrowed to one organization by `org_id`",
+    "org: organization-owned records in reach, which is every record; narrow to one \
+     organization with `org_id`",
 );
 const ORG_FILTER: Field = opt(
     "org_id",
     Kind::String,
     "Only records owned by this organization (`org_…`)",
 );
-/// `owner` on the fleet listing, where an organization's devices are `org_id`.
-pub(crate) const FLEET_OWNERS: &[&str] = &["mine"];
 pub(crate) const LIST_ORDERS: &[&str] = &["oldest", "newest"];
 const ORDER: Field = opt(
     "order",
@@ -352,7 +350,7 @@ const ORDER: Field = opt(
 const OWNER_NAMES: Field = opt(
     "names",
     Kind::Boolean,
-    "Add names, keyed by id: each owner's address, or an organization's handle",
+    "Add names, keyed by id: each owning organization's handle",
 );
 const SUBMITTER_NAMES: Field = opt(
     "names",
@@ -384,7 +382,7 @@ pub(crate) const PLAN_STATUSES: &[&str] = &[
 const PLAN_STATUS: Kind = Kind::Enum(PLAN_STATUSES);
 pub(crate) const PLAN_SCOPES: &[&str] = &["mine", "all"];
 pub(crate) const RERUN_ANSWERED: &[&str] = &["failed", "all"];
-pub(crate) const USER_STATUSES: &[&str] = &["active", "pending", "disabled"];
+pub(crate) const USER_STATUSES: &[&str] = &["active", "disabled"];
 pub(crate) const ACCOUNT_TYPES: &[&str] = &["human", "service"];
 pub(crate) const ORG_STATUSES: &[&str] = &["active", "disabled"];
 /// `VaultModel`'s tags, then `VaultRuntime`'s.
@@ -418,6 +416,7 @@ pub(crate) const BENCHMARK_TYPES: &[&str] = &[
     "asr_max_memory",
     "decision_latency",
     "decision_max_memory",
+    "session",
 ];
 const NOTE: Field = opt(
     "note",
@@ -543,18 +542,11 @@ pub static ROUTES: &[Route] = &[
                 Kind::Boolean,
                 "true: only devices somebody owns. false: only devices nobody owns",
             ),
-            // Not `OWNER_FILTER`: an `org` owner is a 400 here.
-            opt(
-                "owner",
-                Kind::Enum(FLEET_OWNERS),
-                "mine: only devices the caller owns as a person",
-            ),
             opt(
                 "org_id",
                 Kind::String,
-                "Only devices this organization (`org_…`) owns, directly or through a member. \
-                 Gated, not only a filter: needs `read_orgs` over it (403 without, 404 outside \
-                 your reach)",
+                "Only devices this organization (`org_…`) owns. Gated, not only a filter: needs \
+                 `read_orgs` over it (403 without, 404 outside your reach)",
             ),
         ],
         response: Response::Page,
@@ -565,8 +557,8 @@ pub static ROUTES: &[Route] = &[
             "/api/v1/clients",
             "List the devices in reach, with their capabilities, tags and permissions.\n\
              Needs `read_clients`; `read_any_clients` reaches the whole fleet. A capability \
-             clause without `requires` matches nobody. `owned`, `owner` and `org_id` exclude \
-             each other.",
+             clause without `requires` matches nobody. `owned` and `org_id` exclude each \
+             other.",
         )
     },
     Route {
@@ -640,15 +632,15 @@ pub static ROUTES: &[Route] = &[
         body: Body::Fields(&[req(
             "owner",
             Kind::Owner { detach: true },
-            "New owner: a `user_…` or `org_…` id (an organization by its id, not its handle), \
-             or the owner object; `none` or null detaches the device",
+            "New owner: an `org_…` id (an organization by its id, not its handle), or the \
+             owner object; `none` or null detaches the device",
         )]),
         ..route(
             "clients",
             "set-owner",
             PUT,
             "/api/v1/clients/{client_id}/owner",
-            "Hand a device to an organization or an account, or detach it.\n\
+            "Hand a device to an organization, or detach it.\n\
              Needs `manage_clients` over both the device and the destination.",
         )
     },
@@ -731,7 +723,8 @@ pub static ROUTES: &[Route] = &[
                 "org_id",
                 Kind::String,
                 "Organization id (`org_…`). A `manage_orgs` caller may name only its own and \
-                 defaults to it; a `manage_any_orgs` caller's account joins none unless named",
+                 defaults to it; a `manage_any_orgs` caller that omits it creates the account in \
+                 a new organization of its own, which the account administers",
             ),
             opt(
                 "account_type",
@@ -749,9 +742,8 @@ pub static ROUTES: &[Route] = &[
             "Create an active account with no key.\n\
              Needs `manage_orgs`. Its holder signs in by registering with a user pre-auth key \
              minted for it, by its administrator with `users_preauth_create` or on the server \
-             host (`pipette-mgmt users preauth create`). Registering by the address instead is \
-             refused: 409, or 403 where the server requires a pre-auth key or a Clerk rule \
-             covers the address.",
+             host (`pipette-mgmt users preauth create`), or through a Clerk sign-in at its \
+             address.",
         )
     },
     route(
@@ -772,9 +764,8 @@ pub static ROUTES: &[Route] = &[
             "set-status",
             PATCH,
             "/api/v1/users/{user_id}",
-            "Approve, disable or re-enable an account.\n\
-             Needs `manage_orgs`; approving one asked for by address takes `manage_any_orgs`, \
-             since it belongs to no organization. An account cannot disable itself.",
+            "Disable or re-enable an account.\n\
+             Needs `manage_orgs`. An account cannot disable itself.",
         )
     },
     Route {
@@ -837,15 +828,17 @@ pub static ROUTES: &[Route] = &[
     Route {
         body: Body::Fields(&[req(
             "org_id",
-            Kind::Clearable,
-            "Organization id (`org_…`, not a handle); `none` or null clears membership",
+            Kind::String,
+            "Organization id (`org_…`, not a handle)",
         )]),
         ..route(
             "users",
             "set-org",
             PUT,
             "/api/v1/users/{user_id}/org",
-            "Move an account into an organization, or out of every one.\nNeeds `manage_orgs`.",
+            "Move an account to another organization.\n\
+             Needs `manage_orgs`. Nothing clears a membership: `users_set_status` disables an \
+             account instead.",
         )
     },
     Route {
@@ -936,7 +929,7 @@ pub static ROUTES: &[Route] = &[
             req(
                 "slug",
                 Kind::String,
-                "Handle: `[a-z0-9_-]`, at most 64, not `org_…`",
+                "Handle: `[a-z0-9_-]`, at most 64, not `org_…` or `u-…`",
             ),
             opt(
                 "display_name",
@@ -984,10 +977,9 @@ pub static ROUTES: &[Route] = &[
         DELETE,
         "/api/v1/orgs/{org_id}",
         "Delete an organization.\n\
-         Needs `manage_any_orgs`. 409 while an account belongs to it, a device is owned by it \
-         directly, or it keeps a private benchmark, a campaign, a vault resource or an \
-         unexpired client pre-auth key; the refusal names the counts. A device a member owns \
-         does not block it.",
+         Needs `manage_any_orgs`. 409 while an account belongs to it, a device is owned by it, \
+         or it keeps a private benchmark, a campaign, a vault resource or an unexpired client \
+         pre-auth key; the refusal names the counts.",
     ),
     Route {
         rows: Some("items"),
@@ -1006,7 +998,7 @@ pub static ROUTES: &[Route] = &[
             "clients",
             GET,
             "/api/v1/orgs/{org_id}/clients",
-            "List the devices an organization owns, directly or through a member.\n\
+            "List the devices an organization owns.\n\
              Needs `read_orgs` and `read_clients`.",
         )
     },
@@ -1201,7 +1193,7 @@ pub static ROUTES: &[Route] = &[
             opt(
                 "owner",
                 Kind::String,
-                "Owner: a `user_…` or `org_…` id; defaults to the caller",
+                "Owner: an `org_…` id; defaults to the caller's organization",
             ),
             NOTE,
             DRY_RUN,
@@ -1245,8 +1237,8 @@ pub static ROUTES: &[Route] = &[
             PATCH,
             "/api/v1/campaigns/{campaign_id}",
             "Rename or label a campaign.\n\
-             Needs to administer it: `submit_plans` for your own, `manage_orgs` for your \
-             organization's or a disabled member's, or `manage_any_orgs` for any. Give `name`, \
+             Needs to administer it: membership of the owning organization with \
+             `submit_plans` or `manage_orgs`, or `manage_any_orgs` for any. Give `name`, \
              `labels` or both. `changed: false` wrote nothing.",
         )
     },
@@ -1279,7 +1271,7 @@ pub static ROUTES: &[Route] = &[
             POST,
             "/api/v1/campaigns/{campaign_id}/plans",
             "File a plan document under a campaign and point the campaign at it.\n\
-             Needs `submit_plans` and the right to file into the campaign: your own, your \
+             Needs `submit_plans` and the right to file into the campaign: your \
              organization's as any member, or any with `manage_any_orgs`. Finished cells run \
              again and the plan it supersedes keeps running: to edit the plan a campaign \
              runs, keeping finished jobs, use `campaigns_revise`.",
@@ -1444,22 +1436,18 @@ pub static ROUTES: &[Route] = &[
         body: Body::Fields(&[req(
             "owner",
             Kind::Owner { detach: false },
-            "New owner: a `user_…` or `org_…` id (an organization by its id, not its handle), \
-             or the owner object. A campaign always has one",
+            "New owner: an `org_…` id (an organization by its id, not its handle), or the \
+             owner object. A campaign always has one",
         )]),
         ..route(
             "campaigns",
             "set-owner",
             PUT,
             "/api/v1/campaigns/{campaign_id}/owner",
-            "Hand a campaign to an organization or an account.\n\
-             Needs what `campaigns_rename` needs over the campaign, and a destination you may \
-             hand it to: yourself, the organization you belong to, a member of the organization \
-             you administer, or anywhere with `manage_any_orgs`. An account taking it must hold \
-             `submit_plans` (400 otherwise). Its plans move with it: from then on they are read \
-             and cancelled under the new owner. A hand-off can leave you unable to administer \
-             it: an organization's campaign is its `manage_orgs` holders', an account's is \
-             that account's, and a `manage_any_orgs` holder administers every campaign.",
+            "Hand a campaign to another organization.\n\
+             Needs what `campaigns_rename` needs over the campaign, and `manage_any_orgs` for \
+             any organization but your own, which already owns it. Its plans move with it: \
+             from then on they are read and cancelled under the new owner.",
         )
     },
     route(
@@ -1496,7 +1484,7 @@ pub static ROUTES: &[Route] = &[
             opt(
                 "owner",
                 Kind::String,
-                "Owner: a `user_…` or `org_…` id, not a handle; defaults to the caller",
+                "Owner: an `org_…` id, not a handle; defaults to the caller's organization",
             ),
             opt(
                 "flavor",
@@ -1600,7 +1588,7 @@ pub static ROUTES: &[Route] = &[
         "Delete a resource's record and every other record of its upload.\n\
          Then deletes each of its files no other record names. Plans naming any of those ids \
          stop resolving, and describing a deleted file again means uploading it again \
-         (`vault_blob_put`). An organization's resource needs `manage_orgs` as a member, or \
+         (`vault_blob_put`). Needs membership of the owning organization, or \
          `manage_any_orgs`.",
     ),
     // ── plans ───────────────────────────────────────────────────────────────
@@ -1611,8 +1599,8 @@ pub static ROUTES: &[Route] = &[
                 "scope",
                 Kind::Enum(PLAN_SCOPES),
                 // Values unquoted: the CLI would respell a quoted `all` as `--all`.
-                "mine: the plans of your campaigns and your organization's, whoever filed \
-                 them, and those you filed outside any campaign. all: every plan, which needs \
+                "mine: the plans of your organization's campaigns, whoever filed them, and \
+                 those you filed outside any campaign. all: every plan, which needs \
                  `read_any_plans`. Left out, the widest your grants allow",
             ),
             opt(
@@ -1783,10 +1771,9 @@ pub static ROUTES: &[Route] = &[
         POST,
         "/api/v1/plans/{plan_id}/cancel",
         "Cancel a plan.\n\
-         Needs `cancel_plans` for a plan of your own campaign, your organization's, or a \
-         disabled member's you wind down as your organization's administrator, whoever \
-         filed it, or one you filed outside every campaign; `cancel_any_plans` for any \
-         other, a deleted campaign's included. 409 if the plan is already complete.",
+         Needs `cancel_plans` for a plan of your organization's campaign, whoever filed it, \
+         or one you filed outside every campaign; `cancel_any_plans` for any other, a \
+         deleted campaign's included. 409 if the plan is already complete.",
     ),
     // ── model parameters ────────────────────────────────────────────────────
     Route {
@@ -1831,8 +1818,7 @@ pub static ROUTES: &[Route] = &[
             "/api/v1/model-params",
             "Add a model's parameter counts.\n\
              Needs `manage_orgs` as a member of the organization owning the vault model the row \
-             is keyed by, or `manage_any_orgs`, which every other row takes, a file a person \
-             owns included. 409 if the key already has a row: `model_params_update` replaces \
+             is keyed by, or `manage_any_orgs`, which every other row takes. 409 if the key already has a row: `model_params_update` replaces \
              it.",
         )
     },

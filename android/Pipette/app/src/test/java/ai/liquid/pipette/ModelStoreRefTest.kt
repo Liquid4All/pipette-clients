@@ -49,6 +49,18 @@ class ModelStoreRefTest {
     assertTrue("the preset catalog must not be consulted", ModelTemplateCatalog.repoToName["some-org/some-repo-GGUF"] == null)
   }
 
+  @Test
+  fun `a revision-bucketed file carries its pin`() {
+    put("LiquidAI/LFM2.5-230M-GGUF@abc123/LFM2.5-230M-Q4_0.gguf")
+
+    val model = store().availableModels().single()
+    val repo = (model.modelRef as? Model.GgufText)?.model?.repo
+
+    assertEquals("LiquidAI/LFM2.5-230M-GGUF", model.hfRepo)
+    assertEquals("LiquidAI/LFM2.5-230M-GGUF@abc123", repo?.reference)
+    assertEquals("LiquidAI/LFM2.5-230M-GGUF@abc123/LFM2.5-230M-Q4_0.gguf", model.storageKey)
+  }
+
   /** A loose import has no repo, so there is no coordinate to invent: null is the honest answer, and the cell then behaves as it did before refs. */
   @Test
   fun `a file with no repo bucket has no coordinate`() {
@@ -71,6 +83,39 @@ class ModelStoreRefTest {
     assertEquals("LiquidAI/LFM2-VL-450M-GGUF", vision?.repo?.toString())
     assertEquals("LFM2-VL-450M-Q4_0.gguf", vision?.filename?.toString())
     assertEquals("mmproj-LFM2-VL-450M-f16.gguf", vision?.mmprojFilename?.toString())
+  }
+
+  @Test
+  fun `the vision planner includes only projectors from the weights revision`() {
+    put("LiquidAI/LFM2-VL-450M-GGUF@abc123/LFM2-VL-450M-Q4_0.gguf")
+    put("LiquidAI/LFM2-VL-450M-GGUF/mmproj-LFM2-VL-450M-f16.gguf")
+    put("LiquidAI/LFM2-VL-450M-GGUF@abc123/mmproj-LFM2-VL-450M-f16.gguf")
+
+    val models = store().availableModels()
+    val weights = models.single { !it.isMmproj }
+    val (pinned, unpinned) = models.filter { it.isMmproj }.partition { it.repoReference == weights.repoReference }
+
+    assertNull(JobRunner.visionRef(weights, unpinned.single()))
+    assertEquals("abc123", (JobRunner.visionRef(weights, pinned.single()) as? Model.GgufVision)?.model?.repo?.revision?.value)
+
+    val projectors = pinned + unpinned
+    val benchmark = BenchmarkDefinition.VlThroughput(BenchmarkId.parse("vl_throughput_256x256_32_128"), 256, 256, 32, 128)
+    val cells = JobRunner.planCells(listOf(weights), projectors, listOf(benchmark), projectors.map { it.path }.toSet())
+
+    assertEquals(pinned.single().path, cells.single().mmprojPath)
+    assertEquals("abc123", cells.single().modelRef?.repo?.revision?.value)
+  }
+
+  @Test
+  fun `an exact model lookup distinguishes a missing pin from its namesake`() {
+    val pinnedKey = "org/model@abc123/model.gguf"
+    val unpinned = put("org/model/model.gguf")
+
+    assertEquals(unpinned.absolutePath, LocalStorage.resolveModelPath(pinnedKey, temp.root))
+    assertNull(LocalStorage.resolveModelFile(pinnedKey, temp.root))
+
+    val pinned = put(pinnedKey)
+    assertEquals(pinned.absolutePath, LocalStorage.resolveModelFile(pinnedKey, temp.root))
   }
 
   /** A downloaded row overwrites its preset offer in `offerable`, so the coordinate has to survive that overwrite. */

@@ -36,11 +36,13 @@ final class DownloadCoordinator: NSObject {
         /// which have no single URL to resume against.
         let url: URL?
         let repo: String?
-        let familyId: String?
+        let modelId: String?
         var bytesDownloaded: Int64
         var totalBytes: Int64?
         var state: State
         var kind: Kind = .file
+        /// Separates active transfers that would otherwise share the same URL-session key.
+        var keyOverride: String?
         /// A directory pull reports a fraction, not byte counts.
         var explicitFraction: Double?
         /// Carried to completion so the manifest is written verbatim.
@@ -74,6 +76,7 @@ final class DownloadCoordinator: NSObject {
 
         /// Per transfer, not the storage key: a vision model is two transfers in one entry.
         var key: String {
+            if let keyOverride { return keyOverride }
             switch kind {
             case .file: return LocalStorage.modelRelativePath(repo: repo, filename: filename)
             // Matches `HfModelRef.key`.
@@ -81,6 +84,10 @@ final class DownloadCoordinator: NSObject {
             // `filename` is the entry's storage key, which names every file of the model.
             case .vault: return "vault/\(filename)"
             }
+        }
+        var storageKey: ModelStorageKey? {
+            let declared = source ?? GGUFModelInstaller.entrySpec(repo: repo, filename: filename, source: nil)
+            return declared.flatMap(ModelStorageKey.of)
         }
         var id: String { key }
         var progress: Double? {
@@ -247,10 +254,10 @@ final class DownloadCoordinator: NSObject {
     ///
     /// No quota check: that is `ensureModel`'s, as in the crate, and every ignition goes
     /// through it. `jobId` is for the vault log events.
-    func startDownload(_ source: Model, familyId: String? = nil, quant: String? = nil,
+    func startDownload(_ source: Model, modelId: String? = nil, quant: String? = nil,
                        jobId: JobId? = nil) {
         if let files = ModelFetch.vaultFiles(source) {
-            startVaultDownload(source, files: files, familyId: familyId, quant: quant,
+            startVaultDownload(source, files: files, modelId: modelId, quant: quant,
                                jobId: jobId)
             return
         }
@@ -262,7 +269,7 @@ final class DownloadCoordinator: NSObject {
                     "local/relative directory models are imported, not downloaded"))
                 return
             }
-            startDirectoryDownload(source, ref: ref, familyId: familyId, quant: quant)
+            startDirectoryDownload(source, ref: ref, modelId: modelId, quant: quant)
             return
         case .ggufText, .ggufVision, .ggufVisionSpeculative, .appleFoundationText:
             break
@@ -281,7 +288,7 @@ final class DownloadCoordinator: NSObject {
                 refuseUnfetchable(source, ModelFetchError.invalidUrl(download.url.value))
                 return
             }
-            enqueueFileDownload(url: url, repo: source.repo?.description, familyId: familyId,
+            enqueueFileDownload(url: url, repo: source.repo?.description, modelId: modelId,
                                 source: source, quant: quant, sha256: download.sha256)
         }
     }
@@ -302,18 +309,19 @@ final class DownloadCoordinator: NSObject {
             "startDownload: \(source.artifactName) cannot be planned: \(reason.localizedDescription)")
     }
 
-    private func enqueueFileDownload(url: URL, repo: String?, familyId: String? = nil, source: Model? = nil,
+    private func enqueueFileDownload(url: URL, repo: String?, modelId: String? = nil, source: Model? = nil,
                                      quant: String? = nil, sha256: Sha256? = nil) {
         let filename = url.lastPathComponent
-        let key = LocalStorage.modelRelativePath(repo: repo, filename: filename)
-
-        if downloads[key] != nil { return }
         // Refuse rather than transfer bytes with no store entry to land in.
         guard let spec = GGUFModelInstaller.entrySpec(repo: repo, filename: filename, source: source),
+              let entry = ModelStorageKey.of(spec),
               let blobs = ws.models.blobsDir(for: spec) else {
             errorMessage = "\(filename) has no model coordinate to store it under."
             return
         }
+        let defaultKey = LocalStorage.modelRelativePath(repo: repo, filename: filename)
+        let key = transferKey(defaultKey, entry: entry, filename: filename)
+        if downloads[key] != nil { return }
         // The installer's own path, not the leaf, so a nested file already on disk is
         // found.
         let dest = GGUFModelInstaller.destination(for: spec, leaf: filename, under: blobs,
@@ -327,10 +335,11 @@ final class DownloadCoordinator: NSObject {
             filename: filename,
             url: url,
             repo: repo,
-            familyId: familyId,
+            modelId: modelId,
             bytesDownloaded: 0,
             totalBytes: nil,
             state: .queued,
+            keyOverride: key == defaultKey ? nil : key,
             source: source,
             sha256: sha256,
             catalogQuant: quant
@@ -366,11 +375,12 @@ final class DownloadCoordinator: NSObject {
             filename: dl.filename,
             urlString: url.absoluteString,
             repo: dl.repo,
-            familyId: dl.familyId,
+            modelId: dl.modelId,
             source: dl.source,
             sha256: dl.sha256,
             etag: dl.resumeETag,
-            proxy: dl.resumeProxy
+            proxy: dl.resumeProxy,
+            keyOverride: dl.keyOverride
         ))
     }
 
@@ -380,8 +390,8 @@ final class DownloadCoordinator: NSObject {
     /// killed pull leaves the files it has so far in `hubCacheDir`, and starting again resumes
     /// from them until the next sweep reclaims them.
     func startDirectoryDownload(_ source: Model, ref: HfModelRef,
-                                familyId: String? = nil, quant: String? = nil) {
-        let key = ref.key
+                                modelId: String? = nil, quant: String? = nil) {
+        let key = ModelStorageKey.of(source).map { transferKey(ref.key, entry: $0) } ?? ref.key
         if downloads[key] != nil { return }
         if let blobs = ws.models.blobsDir(for: source),
            FileManager.default.fileExists(atPath: blobs.path) {
@@ -392,11 +402,12 @@ final class DownloadCoordinator: NSObject {
             filename: ref.leaf,
             url: nil,
             repo: ref.repo.description,
-            familyId: familyId,
+            modelId: modelId,
             bytesDownloaded: 0,
             totalBytes: nil,
             state: .queued,
             kind: .directory(prefix: ref.subpath?.value),
+            keyOverride: key == ref.key ? nil : key,
             explicitFraction: 0,
             source: source,
             catalogQuant: quant
@@ -406,6 +417,16 @@ final class DownloadCoordinator: NSObject {
         Analytics.capture(AnalyticsEvents.modelDownloadStarted, [AnalyticsEvents.modelId: ref.leaf])
 
         gate(key: key) { [weak self] in self?.beginDirectoryDownload(source, ref: ref, key: key) }
+    }
+
+    /// Keep existing session keys where possible so a background task and its resume data
+    /// still match after an app update. Use the full entry key when two artifacts overlap.
+    private func transferKey(_ defaultKey: String, entry: ModelStorageKey, filename: String? = nil) -> String {
+        let entryKey = "storage:\(entry.value)"
+        let scopedKey = filename.map { "\(entryKey)/\($0)" } ?? entryKey
+        if downloads[scopedKey] != nil { return scopedKey }
+        if let existing = downloads[defaultKey], existing.storageKey != entry { return scopedKey }
+        return defaultKey
     }
 
     private func beginDirectoryDownload(_ source: Model, ref: HfModelRef, key: String) {
@@ -560,7 +581,7 @@ final class DownloadCoordinator: NSObject {
     /// Every record is read before a byte moves, so a refusal costs no download and the
     /// row knows its total. `jobId` is the job that started the row.
     func startVaultDownload(_ source: Model, files: [ModelFetch.VaultFile],
-                            familyId: String? = nil, quant: String? = nil,
+                            modelId: String? = nil, quant: String? = nil,
                             jobId: JobId? = nil) {
         guard let entry = ModelStorageKey.of(source) else {
             refuseUnfetchable(source, ModelStoreError.notStorable(source.artifactName))
@@ -576,7 +597,7 @@ final class DownloadCoordinator: NSObject {
                     + "job_id=\(jobId?.value ?? "none")")
             return
         }
-        let row = Download(filename: entry.value, url: nil, repo: nil, familyId: familyId,
+        let row = Download(filename: entry.value, url: nil, repo: nil, modelId: modelId,
                            bytesDownloaded: 0, totalBytes: nil, state: .queued, kind: .vault,
                            source: source, catalogQuant: quant)
         let key = row.key
@@ -886,6 +907,30 @@ final class DownloadCoordinator: NSObject {
         }
     }
 
+    /// Pauses every transfer of `source`, for the one Pause button of a model row. A queued
+    /// file leaves the queue and becomes paused, so it does not start in the slot that the
+    /// pause frees. Its resume starts from zero.
+    func pauseTransfers(for source: Model) {
+        let queued = downloads.compactMap { key, dl -> String? in
+            guard dl.source == source, case .file = dl.kind, dl.state == .queued else { return nil }
+            return key
+        }
+        for key in queued {
+            pendingStarts.removeAll { $0.key == key }
+            downloads[key]?.state = .paused
+        }
+        let active = downloads.compactMap { key, dl -> String? in
+            guard dl.source == source else { return nil }
+            switch dl.state {
+            case .connecting, .downloading, .resuming: return key
+            case .queued, .pausing, .paused, .cancelling, .failed: return nil
+            }
+        }
+        for key in active { pause(key: key) }
+        AppLog.storage.info(
+            "model transfers paused model=\(source.artifactName) active=\(active.count) queued=\(queued.count)")
+    }
+
     func resume(key: String) {
         // Only from `.paused`, which dedups re-entrant taps that would spawn a duplicate
         // task.
@@ -952,7 +997,7 @@ final class DownloadCoordinator: NSObject {
     /// to wait on afterwards.
     @discardableResult
     func restartStalled(
-        for source: Model, familyId: String? = nil, quant: String? = nil
+        for source: Model, modelId: String? = nil, quant: String? = nil
     ) async -> Bool {
         await awaitReachabilityReading()
         guard reachability.isConnected else {
@@ -965,7 +1010,7 @@ final class DownloadCoordinator: NSObject {
         AppLog.storage.info(
             "restarting \(source.artifactName) from scratch after \(stalled.count) "
             + "stalled transfer(s) — a fetch needs these weights")
-        startDownload(source, familyId: familyId, quant: quant)
+        startDownload(source, modelId: modelId, quant: quant)
         return hasTransfer(for: source)
     }
 
@@ -1387,7 +1432,7 @@ final class DownloadCoordinator: NSObject {
 
     private func restoreState() {
         for record in downloadStore.allRecords() {
-            let key = LocalStorage.modelRelativePath(repo: record.repo, filename: record.filename)
+            let key = record.key
             guard let url = URL(string: record.urlString) else {
                 downloadStore.clearRecord(for: key)
                 continue
@@ -1397,10 +1442,11 @@ final class DownloadCoordinator: NSObject {
                 filename: record.filename,
                 url: url,
                 repo: record.repo,
-                familyId: record.familyId,
+                modelId: record.modelId,
                 bytesDownloaded: 0,
                 totalBytes: nil,
                 state: isPaused ? .paused : .connecting,
+                keyOverride: record.keyOverride,
                 source: record.source,
                 sha256: record.sha256,
                 // Only GGUF rows persist, and their quant re-derives from `source`.
@@ -1475,9 +1521,7 @@ final class DownloadCoordinator: NSObject {
             return CompletionProvenance(repo: dl.repo, filename: dl.filename,
                                         source: dl.source, sha256: dl.sha256)
         }
-        if let record = downloadStore.allRecords().first(where: {
-            LocalStorage.modelRelativePath(repo: $0.repo, filename: $0.filename) == key
-        }) {
+        if let record = downloadStore.allRecords().first(where: { $0.key == key }) {
             return CompletionProvenance(repo: record.repo, filename: record.filename,
                                         source: record.source, sha256: record.sha256)
         }

@@ -15,25 +15,23 @@
 //! recorded as the host's alone.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Context;
 
 use pipette_completions::TimingRequest;
 use pipette_http::HttpClient;
-use pipette_memprobe::{Peak, Sampler, SupportedWatch, Watch};
 use pipette_ops::measurement::{
     self, MaxMemoryMeasurementReading, MeasurementObserver, MemoryMeasurementWarmup,
 };
 use pipette_ops::run_response::RunResponseBuilder;
 use pipette_plan_types::{
-    MaxMemoryUsageBenchmark, MaxMemoryUsageUvOpenvinoOpenvino, MemoryObservation, OpenvinoDevice,
-    RunResponse, RuntimeFlags, UvOpenvinoExtraRuntimeConfiguration,
+    MaxMemoryUsageBenchmark, MaxMemoryUsageUvOpenvinoOpenvino, RunResponse, RuntimeFlags,
+    UvOpenvinoExtraRuntimeConfiguration,
 };
-use pipette_subprocess::{OnStop, Process, start_process};
 
 use crate::completions;
+use crate::memory::{serve, watch};
 use crate::models::ResolvedOpenvinoModel;
 use crate::response;
 use crate::runtimes::ResolvedOpenvinoPython;
@@ -89,7 +87,9 @@ pub(super) fn run(
         MemoryMeasurementWarmup::Once,
         &mut served,
         |served| {
-            let peak = serve(served, command, watch, &http, prefill_tokens, observer)?;
+            let peak = serve(served, command, watch, observer, |url| {
+                measure(&http, url, prefill_tokens)
+            })?;
             // The peak counts swap: swap can hold part of the model mid-run.
             #[cfg(any(target_os = "linux", target_os = "android"))]
             let peak = {
@@ -120,42 +120,6 @@ pub(super) fn run(
     Ok(response.build())
 }
 
-/// One server from its launch through one request at the cell's shape, left
-/// in `served` for the entry to check its peak and the cell to record or
-/// quote it. One an earlier attempt left there stops first; the observation
-/// covers both.
-fn serve(
-    served: &mut Option<(Process, MemoryObservation)>,
-    command: impl Fn(u16) -> anyhow::Result<Command>,
-    watch: SupportedWatch,
-    http: &HttpClient,
-    prefill_tokens: u32,
-    observer: MeasurementObserver<'_>,
-) -> anyhow::Result<Peak> {
-    let earlier = match served.take() {
-        Some((mut openvino_server, memory)) => {
-            openvino_server.stop();
-            memory
-        }
-        None => MemoryObservation::default(),
-    };
-    let port = pipette_subprocess::pick_server_port()?;
-    let url = server::url(port);
-    let mut openvino_server =
-        start_process(server::SCRIPT_FILENAME, command(port)?, OnStop::SIGKILL)?;
-    // Watched from the launch, so the load counts.
-    let sampler = Sampler::start(openvino_server.pid(), watch)?;
-    let ready = server::ready(&url)?;
-    observer.outside(|| openvino_server.wait_ready(server::READY_TIMEOUT, ready))?;
-    let measured = measure(http, &url, prefill_tokens);
-    // Stopped while the server lives: Linux reads its `/proc` entry.
-    let (observed, peak) = sampler.stop();
-    // Before the checks, so the cell quotes it on any failure from here.
-    *served = Some((openvino_server, earlier.merge_max(observed)));
-    measured?;
-    Ok(peak?)
-}
-
 /// One request at the cell's shape.
 fn measure(http: &HttpClient, url: &str, prefill_tokens: u32) -> anyhow::Result<()> {
     let prompt =
@@ -169,73 +133,4 @@ fn measure(http: &HttpClient, url: &str, prefill_tokens: u32) -> anyhow::Result<
     measurement::expect_tokens("prompt_tokens", counts.prompt_tokens, prefill_tokens)?;
     measurement::expect_tokens("completion_tokens", counts.completion_tokens, DECODE_TOKENS)?;
     Ok(())
-}
-
-/// `device`'s watch, refused where this OS reads none of its memory, naming
-/// the devices it does read.
-fn watch(device: &OpenvinoDevice) -> anyhow::Result<SupportedWatch> {
-    device_watch(device).supported().with_context(|| {
-        let read: Vec<String> = OpenvinoDevice::known()
-            .filter(|known| device_watch(known).supported().is_ok())
-            .map(|known| known.as_str().to_owned())
-            .collect();
-        format!(
-            "the {} device's memory cannot be read on this OS; run this memory cell on {}",
-            crate::runtimes::device_property(device),
-            read.join(" or ")
-        )
-    })
-}
-
-/// A custom device (`AUTO`, `HETERO:GPU,CPU`, `GPU.1`) may resolve anywhere,
-/// so it requires none. `pipette-ovms` keeps the same rule.
-fn device_watch(device: &OpenvinoDevice) -> Watch {
-    match device {
-        OpenvinoDevice::Cpu => Watch::Peak,
-        OpenvinoDevice::Gpu => Watch::PeakWithGpu,
-        OpenvinoDevice::Npu => Watch::PeakWithNpu,
-        OpenvinoDevice::Custom(_) => Watch::PeakWithAccelerators,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use pipette_memprobe::{UnsupportedError, WatchError};
-
-    use super::*;
-
-    #[rstest::rstest]
-    #[case::cpu(OpenvinoDevice::Cpu, Watch::Peak)]
-    #[case::gpu(OpenvinoDevice::Gpu, Watch::PeakWithGpu)]
-    #[case::npu(OpenvinoDevice::Npu, Watch::PeakWithNpu)]
-    #[case::custom(OpenvinoDevice::Custom("GPU.1".to_owned()), Watch::PeakWithAccelerators)]
-    fn each_device_has_its_watch(#[case] device: OpenvinoDevice, #[case] expected: Watch) {
-        assert_eq!(device_watch(&device), expected);
-    }
-
-    /// Windows reads every device, so there it has nothing to refuse.
-    #[test]
-    fn a_refusal_names_the_device_and_the_devices_this_os_reads() {
-        let Err(err) = watch(&OpenvinoDevice::Npu) else {
-            return;
-        };
-        let refused = UnsupportedError {
-            watch: Watch::PeakWithNpu,
-        };
-        assert_eq!(
-            err.downcast_ref::<WatchError>(),
-            Some(&refused.into()),
-            "{err:#}"
-        );
-        let read = if cfg!(target_os = "linux") {
-            "cpu or gpu"
-        } else {
-            "cpu"
-        };
-        let expected = format!(
-            "the {} device's memory cannot be read on this OS; run this memory cell on {read}",
-            crate::runtimes::device_property(&OpenvinoDevice::Npu)
-        );
-        assert_eq!(err.to_string(), expected);
-    }
 }

@@ -67,11 +67,11 @@ struct ProfileTests {
     // the full set, as `build_profile_update` merges it.
     @Test func aProfileUpdateSendsTheFullMergedCapabilitySet() throws {
         let device = deviceInfoFixture()
+        let runtimeFlags = installedRuntimeCapabilities(appleFoundation: true)
         let sent = try #require(
-            try encoded(profileUpdate(device: device, capabilities: installedRuntimeCapabilities()).device)["capabilities"] as? [String])
+            try encoded(profileUpdate(device: device, capabilities: runtimeFlags).device)["capabilities"] as? [String])
         let clientVersion = clientVersionCapabilityFlag(Bundle.main.buildVersion).map { [$0] } ?? []
-        #expect(Set(sent) == Set(installedRuntimeCapabilities() + hardwareCapabilities(device: device)
-                                 + clientVersion))
+        #expect(Set(sent) == Set(runtimeFlags + hardwareCapabilities(device: device) + clientVersion))
         #expect(sent.contains("cpu_vendor:apple"))
         #expect(sent == sent.sorted())
         #expect(Set(sent).count == sent.count)
@@ -214,7 +214,8 @@ struct ProfileStartupTests {
         let buildFlags = try installedRuntimeBuildFlags()
         try await refreshProfileAtStartup(
             registration: ws.registration, deviceStore: ws.device, http: http,
-            capabilities: installedRuntimeCapabilities() + buildFlags, wait: Self.wait)
+            capabilities: installedRuntimeCapabilities(appleFoundation: true) + buildFlags,
+            wait: Self.wait)
 
         let body = try #require(seen.bodies.first)
         let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])

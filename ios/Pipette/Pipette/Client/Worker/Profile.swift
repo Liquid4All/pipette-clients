@@ -6,10 +6,9 @@ import Foundation
 // fields, as reserved-namespace flags, with `capabilities` into the effective set jobs
 // match against (the mgmt repo's `docs/plan-ingestion.md` §5).
 //
-// Only the planner worker reports: whatever claims as this client owns its profile, and a
-// report from elsewhere would replace the claimer's (`pipette-ios-proxy` claims as a farm
-// phone). Resubmitting an unchanged profile is cheap: the server voids queue standing only
-// when a matching input changed (the mgmt repo's `docs/client-integration.md` §2).
+// The planner worker owns routine profile updates. A launch-time report would replace the
+// claimer's profile (`pipette-ios-proxy` claims as a farm phone). An explicit catalog refresh
+// can fill missing fields on older registrations (see `ModelShortList`).
 
 /// The crate's `REINDEX_POLL_INTERVAL`.
 nonisolated let reindexPollInterval: Duration = .seconds(5)
@@ -58,26 +57,32 @@ nonisolated func clientVersionCapabilityFlag(_ buildVersion: String?) -> String?
 ///
 /// llama.cpp is main's build alone: the in-app worker runs every llama.cpp claim on it.
 ///
-/// The build ids are parameters only so tests can reach the canonicalization and
-/// placeholder branches. llama.cpp arrives as one `LlamaPin.Build`, not a commit/tag pair,
-/// so a test cannot construct a combination `LlamaPins` never builds.
+/// The worker refreshes the Apple Foundation flag at startup. Availability changes take
+/// effect at the next worker start.
+///
+/// Tests pass build identifiers to check normalization and placeholder handling. They
+/// pass `appleFoundation` to check both availability states. A single `LlamaPin.Build`
+/// keeps the llama.cpp commit and tag together.
 nonisolated func installedRuntimeCapabilities(
     llamaCpp: LlamaPin.Build = LlamaPins.main.build,
     mlxSwiftVersion: String = MLXBuildInfo.mlxSwift.submissionVersion,
     mlxSwiftLMVersion: String = MLXBuildInfo.mlxSwiftLM.submissionVersion,
     swiftTransformersVersion: String = MLXBuildInfo.swiftTransformers.submissionVersion,
     onnxGenaiVersion: String = OnnxGenaiBuildInfo.onnxruntimeGenai.submissionVersion,
-    onnxRuntimeVersion: String = OnnxGenaiBuildInfo.onnxruntime.submissionVersion
+    onnxRuntimeVersion: String = OnnxGenaiBuildInfo.onnxruntime.submissionVersion,
+    appleFoundation: Bool = AFMRuntime.isAvailable
 ) -> [String] {
 
     var flags: Set<String> = [
         "runtime:llama_cpp",
         "runtime:mlx",
-        // Ships with the OS and exposes no build id, so no versioned level (as the
-        // crate's `runtime_capability_flags`).
-        "runtime:apple_foundation",
         "runtime:onnx_genai",
     ]
+    // Ships with the OS and exposes no build id, so no versioned level (as the crate's
+    // `runtime_capability_flags`).
+    if appleFoundation {
+        flags.insert("runtime:apple_foundation")
+    }
     // Commit and tag both: desktop runtimes are pinned by tag (`b10216`), so one plan can
     // pin iOS the way it pins the rest of the fleet.
     [llamaCpp.commit, llamaCpp.tag]

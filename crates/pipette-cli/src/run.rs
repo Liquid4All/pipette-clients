@@ -113,7 +113,15 @@ pub fn run_cell(
     // Resolved once and spent twice, by the engine and the record, so the two
     // cannot describe different configurations.
     let entry = client_config.runtimes.for_runtime(&req.runtime.declared);
-    let (outcome, telemetry) = dispatch_run(&req, ws, readiness, entry, cancelled, programs)?;
+    let (outcome, telemetry) = dispatch_run(
+        &req,
+        ws,
+        readiness,
+        entry,
+        client_config.hooks.before_cell_script.as_deref(),
+        cancelled,
+        programs,
+    )?;
     let (payload, extras) = finished_run_payload(labels, &req, &outcome, entry, &telemetry)?;
     let eval_checkpoint = eval_checkpoint(&req)?;
     Ok((payload, extras, eval_checkpoint))
@@ -534,7 +542,8 @@ fn resolved_flags(
         | BenchmarkType::MaxMemoryUsage
         | BenchmarkType::VlMaxMemory
         | BenchmarkType::AsrMaxMemory
-        | BenchmarkType::DecisionMaxMemory => false,
+        | BenchmarkType::DecisionMaxMemory
+        | BenchmarkType::Session => false,
     };
     if gates {
         r.readiness = Some(ReadinessOverrides {
@@ -575,6 +584,70 @@ fn drop_model_cache(ws: &PipetteWorkspace, memory: &MemoryPressure) {
     memory.log("after_drop");
 }
 
+/// The hook runs before the attempt clock starts, so this is all that bounds it.
+const BEFORE_CELL_HOOK_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `sh -e` on Unix; PowerShell with `$ErrorActionPreference = 'Stop'` on
+/// Windows, where a failing native command fails the script only as its last line.
+fn shell(script: &str) -> std::process::Command {
+    if cfg!(windows) {
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!("$ErrorActionPreference = 'Stop'\n{script}"));
+        cmd
+    } else {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-ec").arg(script);
+        cmd
+    }
+}
+
+/// A hook that fails leaves the host unfit to measure on, so the cell fails as
+/// a device error carrying the script's stderr.
+fn run_before_cell_hook(
+    script: &str,
+    runtime_type: RuntimeType,
+    benchmark_type: BenchmarkType,
+    before: &str,
+    limit: std::time::Duration,
+) -> Result<(), HostNotReadyError> {
+    let started = std::time::Instant::now();
+    let ran = || -> anyhow::Result<()> {
+        let mut cmd = shell(script);
+        cmd.env("PIPETTE_HOOK_RUNTIME_TYPE", runtime_type.to_string())
+            .env("PIPETTE_HOOK_BENCHMARK_TYPE", benchmark_type.to_string());
+        let output =
+            pipette_subprocess::output_within(cmd, limit).context("the before_cell hook")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "the before_cell hook failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
+    };
+    ran().map_err(HostNotReadyError)?;
+    tracing::info!(
+        %runtime_type,
+        %benchmark_type,
+        before,
+        elapsed = ?started.elapsed(),
+        "before_cell hook ran"
+    );
+    Ok(())
+}
+
+/// llama.cpp's prefill and decode cells start a `llama-bench` or
+/// `llama-batched-bench` per rep, which reads the model file again, so the
+/// hook runs before each rep too; a server reads it once, before the warm-up.
+fn starts_a_process_per_rep(req: &RunRequest) -> bool {
+    matches!(req.runtime.declared, Runtime::LlamacppCliStockTools(_))
+        && matches!(
+            req.benchmark,
+            BenchmarkDefinition::PrefillThroughput(_) | BenchmarkDefinition::DecodeThroughput(_)
+        )
+}
+
 /// Takes the resolved readiness rather than resolving it: resolving twice could
 /// straddle an environment change, and the gate and the record must agree.
 fn dispatch_run(
@@ -582,6 +655,7 @@ fn dispatch_run(
     ws: &PipetteWorkspace,
     readiness: pipette_readiness::ResolvedReadiness,
     runtime_config: Option<&ExtraRuntimeConfiguration>,
+    before_cell_script: Option<&str>,
     cancelled: &dyn Fn() -> bool,
     programs: &ExternalPrograms,
 ) -> anyhow::Result<(RunResponse, RepTelemetry)> {
@@ -600,6 +674,9 @@ fn dispatch_run(
         .with_poll(&polled)
         .with_cancel(cancelled);
     let clock = Clock::new(pipette_ops::attempt::limit(req));
+    let runtime_type = RuntimeType::of(&req.runtime.declared);
+    let benchmark_type = req.benchmark.benchmark_type();
+    let rep_script = before_cell_script.filter(|_| starts_a_process_per_rep(req));
     let readiness_gate = || -> anyhow::Result<()> {
         // A readiness wait is no part of an attempt; the gate has its own limit.
         clock.hold();
@@ -608,6 +685,18 @@ fn dispatch_run(
         clock.resume();
         waited?;
         gate_wait_recorder.pass();
+        if let Some(script) = rep_script {
+            clock.hold();
+            let ran = run_before_cell_hook(
+                script,
+                runtime_type,
+                benchmark_type,
+                "rep",
+                BEFORE_CELL_HOOK_LIMIT,
+            );
+            clock.resume();
+            ran?;
+        }
         Ok(())
     };
     // The single pending slot assumes reps run one at a time. Probe before
@@ -652,6 +741,18 @@ fn dispatch_run(
     // After the model and runtime downloads, before the warm-up.
     #[cfg(target_os = "android")]
     drop_model_cache(ws, &memory);
+    // Before the first `clock.begin`, so the hook's time is no part of an attempt.
+    if let Some(script) = before_cell_script {
+        memory.log("before_hook");
+        run_before_cell_hook(
+            script,
+            runtime_type,
+            benchmark_type,
+            "cell",
+            BEFORE_CELL_HOOK_LIMIT,
+        )?;
+        memory.log("after_hook");
+    }
     memory.log("before_cell");
     // The whole object, so a new field is logged too; `AuthToken` redacts
     // itself. Debug level: an eval's request carries its whole dataset.
@@ -1063,6 +1164,37 @@ mod resolved_flags_tests {
         Ok(())
     }
 
+    fn decode() -> anyhow::Result<BenchmarkDefinition> {
+        Ok(BenchmarkDefinition::DecodeThroughput(
+            DecodeThroughputBenchmark {
+                benchmark_id: BenchmarkId::try_new("decode_throughput_256_64".to_owned())?,
+                parameter_prefill_tokens: NonNegativeCount::try_new(256)?,
+                parameter_decode_tokens: PositiveCount::try_new(64)?,
+                parameter_batch_size: BatchSize::one(),
+            },
+        ))
+    }
+
+    #[rstest]
+    #[case::llamacpp_decode(req(decode()?), true)]
+    #[case::llamacpp_end_to_end(req(BenchmarkDefinition::EndToEndLatency(
+        EndToEndLatencyBenchmark {
+            benchmark_id: BenchmarkId::try_new("end_to_end_latency_256_64".to_owned())?,
+            parameter_prefill_tokens: NonNegativeCount::try_new(256)?,
+            parameter_decode_tokens: PositiveCount::try_new(64)?,
+            parameter_batch_size: BatchSize::one(),
+        }
+    )), false)]
+    #[case::llamacpp_max_memory(max_memory_req(), false)]
+    #[case::openvino_decode(openvino_req(decode()?), false)]
+    fn the_hook_runs_before_each_rep_only_where_a_rep_starts_a_process(
+        #[case] req: anyhow::Result<RunRequest>,
+        #[case] per_rep: bool,
+    ) -> anyhow::Result<()> {
+        assert_eq!(starts_a_process_per_rep(&req?), per_rep);
+        Ok(())
+    }
+
     #[rstest]
     #[case::host(36, None, false, 36)]
     #[case::cell_overrides_host(36, Some(34), false, 34)]
@@ -1411,6 +1543,125 @@ mod spec_policy_tests {
 
         let err = lock(&series).err().context("a poisoned lock must fail")?;
         assert!(err.to_string().contains("poisoned"), "{err}");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn run(script: &str, limit: Duration) -> Result<(), HostNotReadyError> {
+        run_before_cell_hook(
+            script,
+            RuntimeType::LlamacppCliStockTools,
+            BenchmarkType::DecodeThroughput,
+            "cell",
+            limit,
+        )
+    }
+
+    fn failure(script: &str, limit: Duration) -> anyhow::Result<anyhow::Error> {
+        let err = run(script, limit)
+            .err()
+            .context("the hook must fail the cell")?;
+        let err = anyhow::Error::from(err);
+        assert_eq!(
+            crate::client::worker::protocol::failure_code(&err),
+            Some(pipette_plan_types::FailureCode::DeviceError)
+        );
+        Ok(err)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_script_runs_once_with_the_cells_types() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let marker = dir.path().join("ran");
+        run(
+            &format!(
+                "echo \"$PIPETTE_HOOK_RUNTIME_TYPE $PIPETTE_HOOK_BENCHMARK_TYPE\" >> '{}'",
+                marker.display()
+            ),
+            Duration::from_secs(30),
+        )?;
+        assert_eq!(
+            std::fs::read_to_string(&marker)?,
+            "llamacpp_cli_stock_tools decode_throughput\n"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_script_is_a_host_error_with_its_stderr() -> anyhow::Result<()> {
+        let msg = format!(
+            "{:#}",
+            failure("echo nope >&2\nexit 3", Duration::from_secs(30))?
+        );
+        assert!(
+            msg.contains("before_cell hook failed (exit status: 3)"),
+            "{msg}"
+        );
+        assert!(msg.ends_with(": nope"), "{msg}");
+        Ok(())
+    }
+
+    /// `sh -e`: a failing line ends the script, so a later line cannot hide it.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_line_stops_the_script() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let marker = dir.path().join("after");
+        failure(
+            &format!("false\necho after > '{}'", marker.display()),
+            Duration::from_secs(30),
+        )?;
+        assert!(!marker.exists(), "the line after a failure ran");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_past_its_limit_is_killed_and_fails_the_cell() -> anyhow::Result<()> {
+        let msg = format!("{:#}", failure("sleep 30", Duration::from_millis(300))?);
+        assert!(msg.contains("did not exit within"), "{msg}");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_script_runs_once_with_the_cells_types() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let marker = dir.path().join("ran");
+        run(
+            &format!(
+                "Set-Content -Path '{}' -Value \"$env:PIPETTE_HOOK_RUNTIME_TYPE $env:PIPETTE_HOOK_BENCHMARK_TYPE\"",
+                marker.display()
+            ),
+            Duration::from_secs(60),
+        )?;
+        assert_eq!(
+            std::fs::read_to_string(&marker)?.trim_end(),
+            "llamacpp_cli_stock_tools decode_throughput"
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failing_script_is_a_host_error_with_its_stderr() -> anyhow::Result<()> {
+        let msg = format!(
+            "{:#}",
+            failure(
+                "[Console]::Error.WriteLine('nope'); exit 3",
+                Duration::from_secs(60)
+            )?
+        );
+        assert!(msg.contains("before_cell hook failed"), "{msg}");
+        assert!(msg.ends_with(": nope"), "{msg}");
         Ok(())
     }
 }

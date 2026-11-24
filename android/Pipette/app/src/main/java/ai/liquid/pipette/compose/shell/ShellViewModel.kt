@@ -10,6 +10,8 @@ import ai.liquid.pipette.BenchmarkSync
 import ai.liquid.pipette.BuildConfig
 import ai.liquid.pipette.ClerkState
 import ai.liquid.pipette.DateFormats
+import ai.liquid.pipette.DeviceInfo
+import ai.liquid.pipette.ModelShortList
 import ai.liquid.pipette.OAuthProviderInfo
 import ai.liquid.pipette.PipetteApp
 import ai.liquid.pipette.RegistrationData
@@ -427,6 +429,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app), ShellActions {
     // Pull the latest benchmark catalog from the management server once per launch (mirrors iOS's registration-time sync). Screen VMs collect
     // [BenchmarkCatalog.changes] to re-render when it lands.
     syncBenchmarkCatalog()
+    refreshProfileAndModelList()
   }
 
   // --- ShellActions (called by screen VMs) ---
@@ -834,6 +837,39 @@ class ShellViewModel(app: Application) : AndroidViewModel(app), ShellActions {
     // A registration change (register/clear) may point at a new server — re-sync the catalog. ETag-conditional, so an unchanged catalog is a cheap
     // 304.
     syncBenchmarkCatalog()
+    // A new registration gets its own model list. After a clear there is no registration, and the list falls back.
+    viewModelScope.launch(Dispatchers.IO) { refreshModelList() }
+  }
+
+  /**
+   * Report the device profile (`PATCH /clients/me`), then refresh the model list, once per launch. In that order because the server offers models by
+   * the profile it holds: its inputs drift between launches (an OS update, an APK with another llama.cpp build), and a list fetched first would
+   * answer from the stale one. Both are best-effort, so a failure is logged and the current list stays.
+   */
+  private fun refreshProfileAndModelList() {
+    viewModelScope.launch(Dispatchers.IO) {
+      runCatching { container.profileRefreshService.refresh() }
+        .onSuccess { profile ->
+          // The refresh records the server's `status` on the registration, so re-read it for Settings to show an approval on this launch.
+          if (profile != null) {
+            _registration.value = storage.loadRegistration()
+            publish()
+          }
+        }
+        .onFailure { Log.w("ShellViewModel", "device profile refresh failed", it) }
+      refreshModelList()
+    }
+  }
+
+  /** Fetch the model list for the current registration. Blocking; call on IO. Does nothing for an unregistered device. */
+  private fun refreshModelList() {
+    val registration = storage.loadRegistration() ?: return
+    runCatching {
+        ModelShortList.refresh(storage.modelListCacheFile, registration, storage::loadRegistration, DeviceInfo.ramBytes(getApplication())) {
+          container.managementClient.fetchDescriptorCatalog(it.serverUrl, it.clientId)
+        }
+      }
+      .onFailure { Log.w("ShellViewModel", "model list refresh failed", it) }
   }
 
   /**

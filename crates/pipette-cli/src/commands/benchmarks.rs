@@ -256,6 +256,7 @@ fn write_benchmark(
             write_temperature(out, b.parameter_temperature, None)?;
             write_corpus(out, &b.dataset)?;
         }
+        BenchmarkDefinition::Session(_) => {}
         BenchmarkDefinition::DecisionLatency(b) | BenchmarkDefinition::DecisionMaxMemory(b) => {
             write_decision_shape(out, b)?;
         }
@@ -1235,6 +1236,9 @@ fn run_summary_lines(
                 lines.push(format!("batch_ms_stddev: {stddev:.3}"));
             }
         }
+        BenchmarkResultData::Session { session_duration } => {
+            lines.push(format!("session_duration: {session_duration}"));
+        }
         // Derived for the terminal only; the server derives the row's metrics
         // from the counters. A zero denominator omits the line. No speedup and
         // no identity rate: those need the other run's row, and this client
@@ -1880,6 +1884,7 @@ mod tests {
                     BenchmarkType::AsrEval => &[],
                     BenchmarkType::AsrThroughput => &["audio:", "text:", "decode:"],
                     BenchmarkType::AsrMaxMemory => &["audio:", "text:", "decode:"],
+                    BenchmarkType::Session => &[],
                     BenchmarkType::DecisionLatency | BenchmarkType::DecisionMaxMemory => {
                         &["text:", "images:", "asks:", "batch:"]
                     }

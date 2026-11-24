@@ -80,12 +80,20 @@ struct ClientAuthTests {
         #expect(!message.contains("pre-auth key"))
     }
 
-    /// Registration carries the two fields that the server derives `arch:` and `os_family:`
-    /// from, and none of the profile that the planner worker reports.
-    @Test func registrationProfileCarriesTheArchAndOsFamilyOnly() {
-        #expect(
-            registrationProfile()
-                == DeviceProfileFields(deviceCpuArch: detectCpuArch(), deviceOsFamily: "iOS"))
+    /// Registration sends the profile and build flags before the worker first starts.
+    /// The catalog rules use those flags and derive `os:` from `device_os_name`.
+    @Test func registrationProfileIsTheWorkerProfile() throws {
+        let ws = makeTemporaryWorkspace()
+        defer { removeWorkspace(ws) }
+        let profile = try registrationProfile(deviceStore: ws.device)
+        let worker = try buildProfileUpdate(
+            deviceStore: ws.device,
+            capabilities: installedRuntimeCapabilities() + installedRuntimeBuildFlags())
+        #expect(profile == worker.device)
+        #expect(profile.deviceCpuArch == detectCpuArch(), "the server derives `arch:` from it")
+        #expect(profile.deviceOsName != nil, "the server derives `os:` from it")
+        #expect(profile.deviceOsFamily == "iOS")
+        #expect(profile.capabilities?.contains { $0.hasPrefix(runtimeBuildFlagPrefix) } == true)
     }
 
     /// The crate's `ensure_empty` runs first in `register`, before any keypair or request, so

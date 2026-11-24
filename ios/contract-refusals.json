@@ -3,6 +3,7 @@
     "asr_eval": "no asr_eval engine on iOS",
     "decision_latency": "decision models run on llama-server's /v1/systemone, a desktop runtime",
     "decision_max_memory": "decision models run on llama-server's /v1/systemone, a desktop runtime",
+    "session": "a session runs no model or runtime, so no client runs it",
     "vlm_eval": "no vlm_eval engine on iOS"
   },
   "BenchmarkEvalCompletionStopReason": {
@@ -70,6 +71,7 @@
     "vl_max_memory_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
     "vl_max_memory_mlx_macos_pipette_mlx": "desktop runtime",
     "vl_max_memory_trt_edgellm_gguf_vision": "desktop runtime",
+    "vl_max_memory_uv_openvino_openvino": "desktop runtime",
     "vl_spec_decode_docker_sglang_torch": "desktop runtime",
     "vl_spec_decode_docker_sglang_torch_speculative": "desktop runtime",
     "vl_spec_decode_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
@@ -82,6 +84,7 @@
     "vl_throughput_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
     "vl_throughput_mlx_macos_pipette_mlx": "desktop runtime",
     "vl_throughput_trt_edgellm_gguf_vision": "desktop runtime",
+    "vl_throughput_uv_openvino_openvino": "desktop runtime",
     "vlm_eval_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
     "vlm_eval_uv_vllm_torch": "desktop runtime"
   },
@@ -89,6 +92,7 @@
     "asr_eval": "no asr_eval engine on iOS",
     "decision_latency": "decision models run on llama-server's /v1/systemone, a desktop runtime",
     "decision_max_memory": "decision models run on llama-server's /v1/systemone, a desktop runtime",
+    "session": "a session runs no model or runtime, so no client runs it",
     "vlm_eval": "no vlm_eval engine on iOS"
   },
   "CorpusFormat": {
@@ -180,6 +184,7 @@
     "prefill_throughput_uv_vllm_torch": "desktop runtime",
     "vl_max_memory_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
     "vl_max_memory_trt_edgellm_gguf_vision": "desktop runtime",
+    "vl_max_memory_uv_openvino_openvino": "desktop runtime",
     "vl_spec_decode_docker_sglang_torch": "desktop runtime",
     "vl_spec_decode_docker_sglang_torch_speculative": "desktop runtime",
     "vl_spec_decode_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
@@ -191,6 +196,7 @@
     "vl_throughput_llamacpp_apk_pipette_gguf_vision": "Android runtime",
     "vl_throughput_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
     "vl_throughput_trt_edgellm_gguf_vision": "desktop runtime",
+    "vl_throughput_uv_openvino_openvino": "desktop runtime",
     "vlm_eval_llamacpp_cli_stock_tools_gguf_vision": "desktop runtime",
     "vlm_eval_uv_vllm_torch": "desktop runtime"
   }

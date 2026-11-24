@@ -23,18 +23,7 @@ object SubmissionRef {
   /** The canonical upstream llama.cpp repo, scheme-less per the plan-types `RepositoryUrl` sanitizer — matches iOS `LlamaPins.main.repositoryUrl`. */
   const val LLAMACPP_REPOSITORY_URL = "github.com/ggml-org/llama.cpp"
 
-  /**
-   * `model_descriptor`: the model coordinate as the plan-types `Model` descriptor, reconstructed from the run's [modelName] (the HF `org/repo_name`
-   * slug), on-disk [modelFilename], and optional [mmprojFilename] (present ⇒ a VL model). Returns null when the coordinate is incomplete — an
-   * imported file with no HF slug, or a filename that isn't a valid `*.gguf` — so a source-less legacy cell elides the field rather than sending an
-   * invalid descriptor the server would reject with `400` (mirrors iOS).
-   */
-  /**
-   * The typed [Model] for the run's coordinate, or null when it can't be formed (no HF slug, or a non-`*.gguf` model/projector filename).
-   *
-   * Public rather than an internal step of a descriptor helper because the caller needs the model itself, not just its rendering: `model_descriptor`
-   * and `model_flags` are two fields off one coordinate, and building it twice would let them disagree.
-   */
+  /** Recover the Hugging Face coordinate for a legacy cell, or null if the slug or a filename is invalid. */
   fun typedModelOrNull(modelName: String, modelFilename: String, mmprojFilename: String?): Model? {
     val repo = HfRepo.parseSlugOrNull(modelName)
     val filename = GgufFilename.parseOrNull(modelFilename)
@@ -138,12 +127,13 @@ object SubmissionRef {
   }
 
   /**
-   * The flattened plan-types `HfRepo`: `org` + `repo_name`. Optional `revision` / `auth_token` are `skip_serializing_if`, and the slug-reconstructed
-   * repo carries neither, so neither is emitted (matches iOS).
+   * The flattened plan-types `HfRepo`: `org` + `repo_name`, and `revision` when the repo pins one. Plan-types skips an absent `revision`, so an
+   * unpinned repo emits no key. Android and iOS omit `auth_token`.
    */
   private fun putRepo(obj: JSONObject, repo: HfRepo) {
     obj.put("org", repo.org.value)
     obj.put("repo_name", repo.repoName.value)
+    repo.revision?.let { obj.put("revision", it.value) }
   }
 
   /**

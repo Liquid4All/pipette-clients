@@ -156,6 +156,7 @@ nonisolated struct IdentityRegistration: Codable, Sendable, Equatable {
 /// restore the mirror from the file. Both halves must have both homes: the gate needs the
 /// pair, and `ensureEmpty()` refuses setup over either half.
 nonisolated struct ClientRegistrationStore: Sendable {
+    private static let identityLock = NSRecursiveLock()
     private static let privateKeyName = "id_ed25519"
     private static let registrationName = "registration.json"
 
@@ -177,49 +178,64 @@ nonisolated struct ClientRegistrationStore: Sendable {
         self.registrationMirror = registrationMirror
     }
 
+    /// Keep a check of the signing identity and its dependent writes together.
+    func withIdentityLock<T>(_ body: () throws -> T) rethrows -> T {
+        try Self.identityLock.withLock(body)
+    }
+
     /// The mirror is best-effort: failing over the copy would trade a working identity for a
     /// durable one.
     func putPrivateKey(_ key: PrivateKey) throws {
-        try IdentityFiles.writeSecret(root, Self.privateKeyName, Data(key.value.utf8))
-        if !privateKeyMirror.save(key) {
-            AppLog.storage.error(
-                "identity: signing key not mirrored — it will not survive a reinstall")
+        try withIdentityLock {
+            try IdentityFiles.writeSecret(root, Self.privateKeyName, Data(key.value.utf8))
+            if !privateKeyMirror.save(key) {
+                AppLog.storage.error(
+                    "identity: signing key not mirrored — it will not survive a reinstall")
+            }
         }
     }
 
     /// An absent or unusable file falls through to the Keychain mirror, which is how a
     /// reinstalled app finds its key. Absent and unusable are one state: neither can sign.
     func getPrivateKey() -> PrivateKey? {
-        if let stored = try? IdentityFiles.readText(root, Self.privateKeyName),
-           let key = try? PrivateKey(stored) {
-            return key
+        withIdentityLock {
+            if let stored = try? IdentityFiles.readText(root, Self.privateKeyName),
+               let key = try? PrivateKey(stored) {
+                return key
+            }
+            return restorePrivateKeyFromMirror()
         }
-        return restorePrivateKeyFromMirror()
     }
 
     /// Delete both copies. Returns whether both went, so a caller cannot report "cleared"
     /// over a key that still signs.
     @discardableResult
     func deletePrivateKey() -> Bool {
-        try? IdentityFiles.remove(root, Self.privateKeyName)
-        let fileGone = !FileManager.default.fileExists(
-            atPath: IdentityFiles.path(root, Self.privateKeyName).path)
-        return privateKeyMirror.clear() && fileGone
+        withIdentityLock {
+            try? IdentityFiles.remove(root, Self.privateKeyName)
+            let fileGone = !FileManager.default.fileExists(
+                atPath: IdentityFiles.path(root, Self.privateKeyName).path)
+            return privateKeyMirror.clear() && fileGone
+        }
     }
 
     /// An absent or unreadable file falls through to the Keychain mirror, which is how a
     /// reinstalled app finds its registration. Nil from both means unregistered.
     func get() -> IdentityRegistration? {
-        if let registration: IdentityRegistration = try? IdentityFiles.readJson(
-            root, Self.registrationName) {
-            return registration
+        withIdentityLock {
+            if let registration: IdentityRegistration = try? IdentityFiles.readJson(
+                root, Self.registrationName) {
+                return registration
+            }
+            return restoreRegistrationFromMirror()
         }
-        return restoreRegistrationFromMirror()
     }
 
     func put(_ registration: IdentityRegistration) throws {
-        try IdentityFiles.writeJson(root, Self.registrationName, registration)
-        mirror(registration)
+        try withIdentityLock {
+            try IdentityFiles.writeJson(root, Self.registrationName, registration)
+            mirror(registration)
+        }
     }
 
     /// Nil when either half is absent. Callers that also need the server URL use
@@ -249,8 +265,10 @@ nonisolated struct ClientRegistrationStore: Sendable {
     /// upstream. Returns ``deletePrivateKey()``'s answer.
     @discardableResult
     func clear() -> Bool {
-        deleteRegistration()
-        return deletePrivateKey()
+        withIdentityLock {
+            deleteRegistration()
+            return deletePrivateKey()
+        }
     }
 
     // MARK: - iOS: the Keychain mirrors

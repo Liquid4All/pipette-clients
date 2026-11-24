@@ -51,13 +51,14 @@ enum CompletedResultsCSVExporter {
 
     static func csv(for manifest: JobManifest, ws: PipetteWorkspace) -> String {
         csv(for: manifest, payloadsByCellId: payloadsByCellId(for: manifest, ws: ws),
-            store: ws.benchmarks)
+            store: ws.benchmarks, modelNames: CatalogEntry.modelNames(in: ModelShortList.current(ws: ws)))
     }
 
     static func csv(
         for manifest: JobManifest,
         payloadsByCellId: [CellId: [String: Any]],
-        store: BenchmarkStore
+        store: BenchmarkStore,
+        modelNames: [String: String] = CatalogEntry.modelIdToName
     ) -> String {
         let catalog = catalogById(store: store)
         let metricsByCellId = metricsByCellId(
@@ -76,7 +77,7 @@ enum CompletedResultsCSVExporter {
                 manifest.createdAt,
                 cell.cellId.value,
                 cell.modelName,
-                ModelCatalog.displayName(for: cell.modelName),
+                modelNames[resultModelGroupKey(for: cell)] ?? ModelCatalog.displayName(for: cell.modelName),
                 cell.benchmarkId,
                 benchmarkType,
                 BenchmarkCatalog.displayName(for: benchmarkType),
@@ -129,13 +130,15 @@ enum CompletedResultsCSVExporter {
 
     static func resultGroups(for manifest: JobManifest, ws: PipetteWorkspace) -> [CompletedRunModelResultGroup] {
         let payloadsByCellId = payloadsByCellId(for: manifest, ws: ws)
-        return resultGroups(for: manifest, payloadsByCellId: payloadsByCellId, store: ws.benchmarks)
+        return resultGroups(for: manifest, payloadsByCellId: payloadsByCellId, store: ws.benchmarks,
+                            modelNames: CatalogEntry.modelNames(in: ModelShortList.current(ws: ws)))
     }
 
     static func resultGroups(
         for manifest: JobManifest,
         payloadsByCellId: [CellId: [String: Any]],
-        store: BenchmarkStore
+        store: BenchmarkStore,
+        modelNames: [String: String] = CatalogEntry.modelIdToName
     ) -> [CompletedRunModelResultGroup] {
         let catalog = catalogById(store: store)
         let columns = resultColumns(for: manifest, in: catalog)
@@ -191,7 +194,7 @@ enum CompletedResultsCSVExporter {
                 return CompletedRunQuantResultRow(quant: quant, values: values)
             }
 
-            let displayName = resultModelDisplayName(for: modelKey, cells: modelCells)
+            let displayName = resultModelDisplayName(for: modelKey, cells: modelCells, modelNames: modelNames)
             return CompletedRunModelResultGroup(
                 id: modelKey,
                 modelName: displayName,
@@ -264,12 +267,14 @@ enum CompletedResultsCSVExporter {
 
     static func resultModelGroupKey(for cell: JobCell) -> String {
         // Unifies a model's GGUF and MLX quants.
-        cell.source.familyId
+        cell.source.modelId
     }
 
-    static func resultModelDisplayName(for modelKey: String, cells: [JobCell]) -> String {
-        if let familyName = CatalogEntry.familyIdToName[modelKey] {
-            return familyName
+    static func resultModelDisplayName(
+        for modelKey: String, cells: [JobCell], modelNames: [String: String] = CatalogEntry.modelIdToName
+    ) -> String {
+        if let name = modelNames[modelKey] {
+            return name
         }
         guard let first = cells.first else { return modelKey }
         let displayName = ModelCatalog.displayName(for: first.modelName)
@@ -281,7 +286,7 @@ enum CompletedResultsCSVExporter {
     }
 
     static func resultModelBrand(displayName: String, cells: [JobCell]) -> ModelBrand {
-        // Matched by family keyword over name and repo, not by the repo's org: a
+        // Matched by brand keyword over name and repo, not by the repo's org: a
         // redistributor must not override the packaged model's vendor.
         let hfRepo = cells.first?.source.repo?.description
         return ModelBrand.detect(name: displayName, hfRepo: hfRepo)

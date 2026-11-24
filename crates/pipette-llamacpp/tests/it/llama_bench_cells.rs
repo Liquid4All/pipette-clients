@@ -373,7 +373,8 @@ fn a_timing_cell_measures_one_invocation_per_rep(
         | BenchmarkResultData::VlThroughput { .. }
         | BenchmarkResultData::AsrThroughput { .. }
         | BenchmarkResultData::VlSpecDecode { .. }
-        | BenchmarkResultData::DecisionLatency { .. }) => {
+        | BenchmarkResultData::DecisionLatency { .. }
+        | BenchmarkResultData::Session { .. }) => {
             anyhow::bail!("not a timing result: {other:?}")
         }
     };

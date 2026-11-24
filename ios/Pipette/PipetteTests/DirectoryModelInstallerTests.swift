@@ -44,7 +44,7 @@ import Testing
             return
         }
         #expect(model.name == "LFM2.5-350M-MLX-4bit")
-        #expect(model.familyId == "lfm2.5-350m")
+        #expect(model.modelId == "lfm2.5-350m")
 
         // Install drops a self-describing manifest at the entry root.
         #expect(try ws.models.find(spec)?.declared == spec)

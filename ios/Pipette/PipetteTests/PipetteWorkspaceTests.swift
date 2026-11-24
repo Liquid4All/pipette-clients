@@ -83,7 +83,7 @@ import Testing
         let model = try #require(ws.availableModels().first { $0.name == filename })
         #expect(model.hfRepo == repo)
         #expect(model.displayName == "LFM 2.5 350M")
-        #expect(model.familyId == "lfm2.5-350m")
+        #expect(model.modelId == "lfm2.5-350m")
     }
 
     @Test func savedRegistrationLoadsFromJson() throws {
@@ -118,7 +118,7 @@ import Testing
         #expect(models.count == 1)
         #expect(models[0].hfRepo == repo)
         #expect(models[0].displayName == "LFM 2.5 350M")
-        #expect(models[0].familyId == "lfm2.5-350m")
+        #expect(models[0].modelId == "lfm2.5-350m")
 
         try FileManager.default.removeItem(at: entry.appendingPathComponent("blobs/\(filename)"))
         #expect(fileBacked().isEmpty)
@@ -132,12 +132,12 @@ import Testing
         let filename = "LFM2.5-350M-Q4_0.gguf"
         try installEntry(ws, try ggufTextSpec(repo, filename))
 
-        #expect(ws.availableModels().first?.familyId == "lfm2.5-350m")
+        #expect(ws.availableModels().first?.modelId == "lfm2.5-350m")
 
         let models = ws.availableModels()
         #expect(models.first?.hfRepo == repo)
         #expect(models.first?.displayName == "LFM 2.5 350M")
-        #expect(models.first?.familyId == "lfm2.5-350m")
+        #expect(models.first?.modelId == "lfm2.5-350m")
     }
 
     // MARK: - RunContext

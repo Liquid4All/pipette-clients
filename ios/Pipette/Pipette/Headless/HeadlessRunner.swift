@@ -220,6 +220,9 @@ enum HeadlessRunner {
         case let .runtimesList(format):
             dispatch { RuntimesCommands.list(format: format) }
 
+        case .runtimesReadiness:
+            dispatch { RuntimesCommands.readiness() }
+
         case let .benchmarksList(benchmarkType):
             dispatch { BenchmarksCommands.list(benchmarkType: benchmarkType, ws: ws); return true }
 

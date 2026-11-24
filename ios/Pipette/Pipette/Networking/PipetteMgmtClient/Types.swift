@@ -564,6 +564,18 @@ nonisolated struct UpdateClientRequest: Encodable, Sendable, Equatable {
     }
 }
 
+/// `GET /clients/me/descriptor-catalog/family-logos/{sha256}`
+nonisolated struct DescriptorFamilyLogo: Decodable, Sendable, Equatable {
+    let sha256: String
+    /// This field contains inline image data or an address under `https://pipette.liquid.ai/logos/`.
+    let logoUri: String
+
+    enum CodingKeys: String, CodingKey {
+        case sha256
+        case logoUri = "logo_uri"
+    }
+}
+
 /// `GET`/`PATCH /clients/me`
 nonisolated struct ClientProfile: Decodable, Sendable, Equatable {
     let clientId: String

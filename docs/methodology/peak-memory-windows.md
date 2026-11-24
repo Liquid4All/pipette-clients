@@ -95,6 +95,55 @@ Check `max_host_bytes` against system RAM for fit. On a discrete GPU, check
 needs room on top of `max_host_bytes`. Adding the fields overstates an Intel
 run.
 
+## llama.cpp's input layer
+
+llama.cpp keeps the input layer (the token embedding table, and on gemma-4's E
+models the per-layer embedding table too) in host memory even at `-ngl 99`.
+When the model file is not mapped (`load_mode` `none`, the client's default),
+it allocates those tensors from the GPU backend's host buffer type,
+memory pinned through the driver: `CUDA_Host` or `Vulkan_Host` in the loader's
+log. WDDM bills pinned memory to the process as `Shared Usage`, so
+`max_gpu_bytes` includes the input layer on every Windows GPU, discrete or
+integrated, under CUDA or Vulkan. NVML on Linux reports only device memory, so
+a Linux box leaves it out.
+
+With `--load-mode mmap`, or llama-bench's `--no-host 1`, the same tensors go to
+a plain CPU buffer (`CPU_Mapped` or `CPU`), and `Shared Usage` falls to 0.03 to
+0.26 GiB. `Dedicated Usage` does not move. The extra figure is the size of the
+input layer: 105 MiB for LFM2.5-1.2B, 1,756 MiB for gemma-4-E2B and 2,208 MiB
+for gemma-4-E4B, all Q4_0.
+
+`gemma-4-E2B-it-Q4_0`, llama-bench `-t 8 -ngl 99 -fa on -p 1024 -n 0 -r 10`,
+on a Surface Laptop Ultra (NVIDIA RTX Spark N1X, a discrete GPU) and a GMKtec
+EVO-X2 (AMD Radeon 8060S iGPU), 2026-11-23. PDH was sampled every 50 ms by a
+script rather than the client's poller; the `none` rows match the client's
+figures for the same cells (3.94 and 3.83 GiB).
+
+| Build | Load | Dedicated | Shared | `Total Committed` | Working set | Prefill |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| b12292 CUDA, RTX | `none` | 2.12 GiB | 1.81 GiB | 3.94 GiB | 2.48 GiB | 15,249 tok/s |
+| | `mmap` | 2.12 GiB | 0.10 GiB | 2.22 GiB | 2.15 GiB | 14,418 tok/s |
+| | `none`, `--no-host 1` | 2.12 GiB | 0.10 GiB | 2.22 GiB | 2.48 GiB | 15,301 tok/s |
+| b12292 Vulkan, RTX | `none` | 1.93 GiB | 1.77 GiB | 3.70 GiB | 2.21 GiB | 11,952 tok/s |
+| | `mmap` | 1.93 GiB | 0.26 GiB | 2.19 GiB | 1.82 GiB | 11,898 tok/s |
+| | `none`, `--no-host 1` | 1.88 GiB | 0.05 GiB | 1.93 GiB | 1.94 GiB | 12,547 tok/s |
+| b11988 Vulkan, 8060S | `none` | 2.04 GiB | 1.75 GiB | 3.79 GiB | 1.91 GiB | 3,423 tok/s |
+| | `mmap` | 2.04 GiB | 0.03 GiB | 2.08 GiB | 1.58 GiB | 3,391 tok/s |
+| | `none`, `--no-host 1` | 2.04 GiB | 0.03 GiB | 2.08 GiB | 1.91 GiB | 3,401 tok/s |
+
+With CUDA on the RTX, `none` against `--no-host 1` read 5.82 against 3.66 GiB
+for gemma-4-E4B and 1.15 against 1.05 GiB for LFM2.5-1.2B. A DGX Spark under
+Linux reads 2.10, 3.53 and 1.00 GiB for the three models with `none`.
+
+- `mmap` moves the error to the host figure: mapped file pages count in the
+  working set (LFM2.5-1.2B on the RTX: 0.47 GiB with `none`, 1.02 GiB with
+  `mmap`). `--no-host 1` leaves the working set as with `none` under CUDA.
+- `--no-host 1` kept prefill within -0.6 to +5 % of `none`. Decode was not
+  measured.
+- Counting `Dedicated Usage` alone would fix only a discrete GPU, as on an iGPU
+  it misses the host-coherent buffers (see [GPU and NPU
+  Counter](#gpu-and-npu-counter)).
+
 ## Workload
 
 llama.cpp runs [the llama-bench shape](peak-memory-usage.md#the-llama-bench-shape).

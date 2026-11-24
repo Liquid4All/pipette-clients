@@ -153,8 +153,8 @@ fn the_completion_body_carries_what_the_entry_pinned() -> anyhow::Result<()> {
                     mcq,
                     "{label}: the grammar arm is what mcq_choices selects: {body}"
                 );
-                // North's reasoning and answer markers, which the scorer
-                // splits on; llama-server drops control tokens otherwise.
+                // North's and Inkling 2's reasoning and answer markers, which the
+                // scorer splits on; llama-server drops control tokens otherwise.
                 assert_eq!(
                     body["preserved_tokens"],
                     json!([
@@ -162,6 +162,9 @@ fn the_completion_body_carries_what_the_entry_pinned() -> anyhow::Result<()> {
                         "<|END_THINKING|>",
                         "<|START_TEXT|>",
                         "<|END_TEXT|>",
+                        "<|content_thinking|>",
+                        "<|content_text|>",
+                        "<|end_message|>",
                     ]),
                     "{label}: {body}"
                 );

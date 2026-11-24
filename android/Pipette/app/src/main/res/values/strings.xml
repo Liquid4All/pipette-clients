@@ -7,10 +7,14 @@
     <string name="job_wizard_back">Back</string>
     <string name="job_wizard_next">Next</string>
     <string name="job_wizard_run">Run job</string>
+    <string name="job_wizard_confirm_download_title">Download models and run?</string>
+    <string name="job_wizard_confirm_download_message">The catalog has no download size for these files. The app will check available storage before downloading.</string>
 
     <string name="job_wizard_models_title">Model selection</string>
     <string name="job_wizard_models_subtitle">Select the models to run benchmarks on.</string>
     <string name="job_wizard_search_models">Search models</string>
+    <string name="model_quant_unavailable">On the device or in Active downloads</string>
+    <string name="job_wizard_show_undownloaded_models">Show models not downloaded</string>
     <string name="job_wizard_no_models_title">No models downloaded</string>
     <string name="job_wizard_no_models_subtitle">No models downloaded. Download models to\nselect for a benchmarking job.</string>
     <string name="job_wizard_go_to_models">Go to Models</string>

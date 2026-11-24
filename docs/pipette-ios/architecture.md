@@ -508,18 +508,19 @@ contract
 #### Capability reporting
 
 The planner matches jobs against the device profile and capability set. The app
-reports both only when it runs as a worker, as the CLI does: the planner worker
-sends `PATCH /clients/me` (`refreshProfileAtStartup`) before its first claim and
-waits out `reindex_pending`. The inputs drift between runs (an OS
-update, a build from a different llama.cpp commit), and an unchanged resubmit is a
-server-side no-op. The first report after registration is always a change, so the
-worker's first start waits out one reindex before it claims, as the CLI's does.
+sends both at registration. The planner worker sends `PATCH /clients/me`
+(`refreshProfileAtStartup`) before its first claim and waits for
+`reindex_pending` to clear. The inputs can change between runs, for example
+after an OS update or a new llama.cpp build. An unchanged report is a server-side
+no-op.
 
-Nothing else reports: registration sends no profile, and neither a launch nor a
-one-shot `headlessrun` verb does. Whatever claims as the client owns its profile.
-On a farm phone that is `pipette-ios-proxy`, which holds a lease as this same
-client; a report from the app would replace the proxy's profile and relinquish the
-lease. A one-shot launch (every `headlessrun` verb but `worker`) also drains no
+On app launch, the catalog refresh reads the saved profile on the server. A
+pull-to-refresh on the Models tab or a headless `sync` can fill missing fields
+on an older registration if its OS name is absent. It preserves existing
+capabilities. The worker owns routine updates. On a farm phone, the worker is
+`pipette-ios-proxy`, which holds leases as the same client. A competing profile
+update can replace the proxy's profile and relinquish its leases. A one-shot
+launch (every `headlessrun` verb but `worker`) skips automatic recovery of
 stranded results (`HeadlessRunner.isOneShot`).
 
 `installedRuntimeCapabilities` (`Client/Worker/Profile.swift`) builds the runtime

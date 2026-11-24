@@ -12,24 +12,30 @@ import ai.liquid.pipette.CellRunStatus
 import ai.liquid.pipette.CompletedResultsCsvExporter
 import ai.liquid.pipette.CompletedRunMetric
 import ai.liquid.pipette.DateFormats
+import ai.liquid.pipette.DownloadCoordinator
 import ai.liquid.pipette.JobCell
 import ai.liquid.pipette.JobManifest
-import ai.liquid.pipette.JobQuantFilter
 import ai.liquid.pipette.JobRunner
 import ai.liquid.pipette.JobStatus
 import ai.liquid.pipette.ModelCatalog
+import ai.liquid.pipette.ModelFamily
 import ai.liquid.pipette.ModelGroup
+import ai.liquid.pipette.ModelShortList
+import ai.liquid.pipette.ModelTemplateCatalog
 import ai.liquid.pipette.NewJobWizard
 import ai.liquid.pipette.PipetteApp
 import ai.liquid.pipette.ResultsGrid
+import ai.liquid.pipette.checkJobDownloadSpace
 import ai.liquid.pipette.compose.BenchmarkGroupUi
 import ai.liquid.pipette.compose.BenchmarkItemUi
 import ai.liquid.pipette.compose.CellUi
 import ai.liquid.pipette.compose.Effect
 import ai.liquid.pipette.compose.JobCardUi
 import ai.liquid.pipette.compose.MmprojRowUi
+import ai.liquid.pipette.compose.ModelFamilyUi
 import ai.liquid.pipette.compose.ModelGroupRowUi
 import ai.liquid.pipette.compose.QuantChipUi
+import ai.liquid.pipette.compose.QuantFilter
 import ai.liquid.pipette.compose.ResultCellAccent
 import ai.liquid.pipette.compose.ResultsCellUi
 import ai.liquid.pipette.compose.ResultsGridUi
@@ -38,16 +44,21 @@ import ai.liquid.pipette.compose.RunProgress
 import ai.liquid.pipette.compose.ScreenViewModel
 import ai.liquid.pipette.compose.matchesSearch
 import ai.liquid.pipette.compose.shell.ShellViewModel
+import ai.liquid.pipette.modelDownloadSize
+import ai.liquid.pipette.pendingJobDownloads
 import ai.liquid.pipette.plural
 import ai.liquid.pipette.thermalAccentKind
 import ai.liquid.pipette.thermalDescription
 import ai.liquid.pipette.thermalHeadroomLabel
 import android.app.Application
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -69,7 +80,9 @@ sealed interface JobsUiState {
     val step: Int,
     val stepTitles: List<String>,
     val modelSearch: String,
-    val modelGroups: List<ModelGroupRowUi>,
+    val modelFamilies: List<ModelFamilyUi<ModelGroupRowUi>>,
+    /** The "Show models not downloaded" checkbox, available when the device has a base model and the catalog offers another file. */
+    val showsUndownloadedModels: Boolean?,
     val anyModelGroups: Boolean,
     val modelsMatched: Boolean,
     val selectedBaseModelCount: Int,
@@ -96,6 +109,7 @@ sealed interface JobsUiState {
     val canAdvance: Boolean,
     val canRun: Boolean,
     val runLabel: String,
+    val unknownSizeDownloads: List<String> = emptyList(),
   ) : JobsUiState
 
   data class CellDetail(val cell: CellUi, val jobId: String, val isRunning: Boolean) : JobsUiState
@@ -157,7 +171,15 @@ sealed interface JobsIntent {
 
   data class ToggleModelGroup(val key: String, val checked: Boolean) : JobsIntent
 
-  data class ToggleQuantFilter(val filter: JobQuantFilter, val checked: Boolean) : JobsIntent
+  /** Opens or closes the model family [name] of the Models step. */
+  data class ToggleModelFamilyOpen(val name: String) : JobsIntent
+
+  /** Selects the visible models of the family [name], or clears them when all are selected. */
+  data class ToggleModelFamily(val name: String) : JobsIntent
+
+  data object ToggleShowUndownloadedModels : JobsIntent
+
+  data class ToggleQuantFilter(val quant: String?, val checked: Boolean) : JobsIntent
 
   data class ApplyBenchmarkSearch(val query: String) : JobsIntent
 
@@ -174,6 +196,10 @@ sealed interface JobsIntent {
   data class SetRunSetup(val nGpuLayers: Int, val contextSize: Int, val prefillBatch: Int) : JobsIntent
 
   data class RunJob(val nGpuLayers: Int, val contextSize: Int, val prefillBatch: Int) : JobsIntent
+
+  data object ConfirmRunDownload : JobsIntent
+
+  data object DismissRunDownload : JobsIntent
 
   data object CancelRunningJob : JobsIntent
 
@@ -219,12 +245,18 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
 
   // Wizard + list + detail nav and selections (encapsulated here, not shared with other screens).
   private var newJobStep: Int? = null
+
+  private data class RunConfirmation(val intent: JobsIntent.RunJob, val keys: Set<String>, val names: List<String>)
+
+  private var runConfirmation: RunConfirmation? = null
+  private var downloadCheck: Job? = null
   private var selectedJobId: String? = null
   private var selectedCellId: String? = null
   private val selectedModelKeys = linkedSetOf<String>()
   private val selectedBenchmarkIds = linkedSetOf<String>()
   private val selectedMmprojPaths = linkedSetOf<String>()
-  private val selectedJobQuantFilters = linkedSetOf(JobQuantFilter.ALL)
+  // Empty means "All quants". See [QuantFilter].
+  private val selectedJobQuantFilters = linkedSetOf<String>()
   private val expandedCellIds = linkedSetOf<String>()
   private val selectedRerunCellIds = linkedSetOf<String>()
   // In-flight submit tracking, so the submit buttons show an in-button spinner (iOS parity) and can't
@@ -232,7 +264,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
   private var submittingJobResults = false
   private val submittingCellIds = linkedSetOf<String>()
   private var mmprojSelectionInitialized = false
-  // Set by wizard selection-changing intents; gates the one selection-reconciliation pass in
+  // Set by wizard selection changes and model list updates. Gates the selection reconciliation in
   // buildWizard so a background runner tick (pure render) never mutates the user's selections.
   private var wizardSelectionsDirty = true
 
@@ -240,7 +272,9 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
   // the models dir / re-parse every manifest per character. Invalidated on every non-search intent
   // and on every runner tick (see handle()/the collector), so they never serve stale data.
   private var manifestsCache: List<JobManifest>? = null
-  private var modelsCache: List<ai.liquid.pipette.ModelFile>? = null
+  private var modelsCache: CachedModels? = null
+
+  private data class CachedModels(val presets: List<ai.liquid.pipette.PresetModel>, val models: List<ai.liquid.pipette.ModelFile>)
 
   private fun cachedManifests(): List<JobManifest> = manifestsCache ?: storage.loadAllJobManifests().also { manifestsCache = it }
 
@@ -253,8 +287,10 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
    *
    * Only this view model widens. The Models tab keeps listing what is actually on disk, since its job is managing storage rather than planning a run.
    */
-  private fun cachedModels(): List<ai.liquid.pipette.ModelFile> =
-    modelsCache ?: ModelCatalog.offerable(storage.availableModels()).also { modelsCache = it }
+  private fun cachedModels(catalog: ModelTemplateCatalog.Snapshot = ModelTemplateCatalog.snapshot()): List<ai.liquid.pipette.ModelFile> {
+    return modelsCache?.takeIf { it.presets === catalog.presets }?.models
+      ?: ModelCatalog.offerable(storage.availableModels(), catalog.presets).also { modelsCache = CachedModels(catalog.presets, it) }
+  }
 
   private fun invalidateData() {
     manifestsCache = null
@@ -272,6 +308,11 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
   private var jobSearchText = ""
   private var benchmarkSearchText = ""
   private var jobModelSearchText = ""
+  private var showsUndownloadedModels = false
+  private var catalogWasListedByDefault = false
+  // The Models step families opened or closed by hand. Families start open while the step lists only downloaded models, which are few, and closed
+  // while it lists the catalog too. A search opens every family with a match.
+  private val toggledModelFamilies = mutableSetOf<String>()
   private var nGpuLayers = 99
   private var contextSize = 4096
   private var prefillBatch = JobManifest.DEFAULT_PREFILL_BATCH
@@ -308,11 +349,22 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
     viewModelScope.launch(confine) {
       shell.dataChanges.collect {
         invalidateData()
+        wizardSelectionsDirty = true
         publish()
       }
     }
-    // Re-render (and seed the default selection the first time the catalog lands) when a benchmark sync replaces the catalog. StateFlow replays the
-    // current value immediately, so an already-seeded selection is a no-op; a completed sync re-fires it. Runs on confine, so the mutation is safe.
+    viewModelScope.launch(confine) {
+      ModelShortList.changes.collect {
+        modelsCache = null
+        wizardSelectionsDirty = true
+        if (downloadCheck != null) {
+          clearRunPreparation()
+          showError("The model list changed. Review your selections and run the job again.")
+        }
+        publish()
+      }
+    }
+    // Seed the default selection when the benchmark catalog first arrives.
     viewModelScope.launch(confine) {
       BenchmarkCatalog.changes.collect {
         if (selectedBenchmarkIds.isEmpty()) selectedBenchmarkIds += BenchmarkCatalog.selectable.map { it.benchmarkId.toString() }
@@ -330,16 +382,22 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
     if (intent !is JobsIntent.ApplyJobSearch && intent !is JobsIntent.ApplyJobModelSearch) invalidateData()
     when (intent) {
       JobsIntent.OpenWizard -> {
+        clearRunPreparation()
         newJobStep = 0
+        showsUndownloadedModels = false
+        catalogWasListedByDefault = false
+        toggledModelFamilies.clear()
         wizardSelectionsDirty = true
         contributeResults = storage.isRegistered() && shell.defaultContributeResults.value
         publish()
       }
       JobsIntent.CancelWizard -> {
+        clearRunPreparation()
         newJobStep = null
         publish()
       }
       is JobsIntent.WizardGoToStep -> {
+        clearRunPreparation()
         newJobStep = intent.step.coerceIn(0, NewJobWizard.LAST_STEP)
         publish()
       }
@@ -377,8 +435,37 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
         wizardSelectionsDirty = true
         publish()
       }
+      is JobsIntent.ToggleModelFamilyOpen -> {
+        if (!toggledModelFamilies.remove(intent.name)) toggledModelFamilies += intent.name
+        publish()
+      }
+      is JobsIntent.ToggleModelFamily -> {
+        // Only the models the active search leaves visible, so a search narrows the checkbox.
+        val catalog = ModelTemplateCatalog.snapshot()
+        val families = visibleModelFamilies(listedModelGroups(catalog), catalog)
+        val keys = families.firstOrNull { it.name == intent.name }?.members.orEmpty().map { it.key }
+        if (selectedModelKeys.containsAll(keys)) {
+          selectedModelKeys.removeAll(keys.toSet())
+        } else {
+          selectedModelKeys.addAll(keys)
+          if (catalogFamiliesDefaultClosed()) toggledModelFamilies += intent.name else toggledModelFamilies -= intent.name
+        }
+        wizardSelectionsDirty = true
+        publish()
+      }
+      JobsIntent.ToggleShowUndownloadedModels -> {
+        showsUndownloadedModels = !showsUndownloadedModels
+        toggledModelFamilies.clear()
+        // A hidden model must not stay in the job.
+        if (!showsUndownloadedModels) {
+          catalogWasListedByDefault = false
+          selectedModelKeys.retainAll(listedModelGroups().map { it.key }.toSet())
+        }
+        wizardSelectionsDirty = true
+        publish()
+      }
       is JobsIntent.ToggleQuantFilter -> {
-        updateJobQuantFilter(intent.filter, intent.checked)
+        QuantFilter.toggle(selectedJobQuantFilters, intent.quant, intent.checked)
         wizardSelectionsDirty = true
         publish()
       }
@@ -420,6 +507,15 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
         publish()
       }
       is JobsIntent.RunJob -> runJob(intent)
+      JobsIntent.ConfirmRunDownload -> {
+        val confirmation = runConfirmation
+        runConfirmation = null
+        if (confirmation != null) runJob(confirmation.intent, confirmation.keys)
+      }
+      JobsIntent.DismissRunDownload -> {
+        runConfirmation = null
+        publish()
+      }
       JobsIntent.CancelRunningJob -> {
         runner.cancel()
         publish()
@@ -502,37 +598,77 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
   // Side effects
   // ---------------------------------------------------------------------------
 
-  private fun runJob(intent: JobsIntent.RunJob) {
-    nGpuLayers = intent.nGpuLayers
-    contextSize = intent.contextSize
-    prefillBatch = intent.prefillBatch
-    val allModels = cachedModels()
-    val baseModels = allModels.filterNot { it.isMmproj }
-    val groups = ModelCatalog.groups(baseModels)
+  private fun clearRunPreparation() {
+    runConfirmation = null
+    downloadCheck?.cancel()
+    downloadCheck = null
+  }
+
+  @Suppress("TooGenericExceptionCaught") // show disk, network, and job-start errors on the wizard
+  private fun runJob(intent: JobsIntent.RunJob, approvedDownloads: Set<String> = emptySet()) {
+    if (newJobStep != NewJobWizard.LAST_STEP || downloadCheck != null || runner.isRunning()) {
+      publish()
+      return
+    }
+    val catalog = ModelTemplateCatalog.snapshot()
+    val allModels = cachedModels(catalog)
+    val groups = listedModelGroups(catalog, allModels)
     val mmprojs = allModels.filter { it.isMmproj }
     val runnableModels = ModelCatalog.resolveSelectedFiles(groups = groups, selectedKeys = selectedModelKeys, quantMatches = ::jobQuantMatches)
     val benchmarks = BenchmarkCatalog.selectable.filter { selectedBenchmarkIds.contains(it.benchmarkId.toString()) }
-    runCatching {
-        val jobId =
-          runner.startNewJob(
-            models = runnableModels,
-            mmprojFiles = mmprojs,
-            benchmarks = benchmarks,
-            selectedMmprojPaths = selectedMmprojPaths,
-            nGpuLayers = nGpuLayers,
-            contextSize = contextSize,
-            prefillBatch = prefillBatch,
-            contributeResults = contributeResults,
-          )
-        newJobStep = null
-        selectedJobId = jobId
-        // Pocket mode is entered by BenchmarkActivity, which JobRunner launches in
-        // the :benchmark process when the run's first cell loads — that process
-        // must be the focused top-app one for the CPU-affinity boost, so it (not
-        // the main-process Compose pocket) is the run's pocket screen.
-        publish()
+    val mmprojPaths = selectedMmprojPaths.toSet()
+    val cells = JobRunner.planCells(runnableModels, mmprojs, benchmarks, mmprojPaths)
+    val downloads = pendingJobDownloads(cells, allModels)
+    val unapproved = downloads.filter { it.sizeBytes <= 0L && it.storageKey !in approvedDownloads }
+    if (unapproved.isNotEmpty()) {
+      runConfirmation = RunConfirmation(intent, approvedDownloads + unapproved.map { it.storageKey }, unapproved.map { it.storageKey })
+      publish()
+      return
+    }
+
+    val contribute = contributeResults
+    downloadCheck =
+      viewModelScope.launch(confine) {
+        try {
+          withContext(Dispatchers.IO) {
+            checkJobDownloadSpace(storage.modelsDir, downloads) { model ->
+              val url = DownloadCoordinator.parseDownloadInput(model.storageKey).url
+              runCatching { modelDownloadSize(url, container.secrets.loadHfToken()) }.getOrNull()
+            }
+          }
+          check(!runner.isRunning()) { "A job is already running" }
+          nGpuLayers = intent.nGpuLayers
+          contextSize = intent.contextSize
+          prefillBatch = intent.prefillBatch
+          val jobId =
+            runner.startNewJob(
+              models = runnableModels,
+              mmprojFiles = mmprojs,
+              benchmarks = benchmarks,
+              selectedMmprojPaths = mmprojPaths,
+              nGpuLayers = nGpuLayers,
+              contextSize = contextSize,
+              prefillBatch = prefillBatch,
+              contributeResults = contribute,
+            )
+          newJobStep = null
+          selectedJobId = jobId
+          // Pocket mode is entered by BenchmarkActivity, which JobRunner launches in
+          // the :benchmark process when the run's first cell loads — that process
+          // must be the focused top-app one for the CPU-affinity boost, so it (not
+          // the main-process Compose pocket) is the run's pocket screen.
+        } catch (cancel: CancellationException) {
+          throw cancel
+        } catch (error: Exception) {
+          showError(error.message ?: "Failed to start job")
+        } finally {
+          if (downloadCheck === coroutineContext.job) {
+            downloadCheck = null
+            publish()
+          }
+        }
       }
-      .onFailure { showError(it.message ?: "Failed to start job") }
+    publish()
   }
 
   private fun submitCellResult(jobId: String, cellId: String) {
@@ -689,17 +825,17 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
   }
 
   private fun buildWizard(step: Int, runnerState: ai.liquid.pipette.RunnerState): JobsUiState.Wizard {
-    val allModels = cachedModels()
-    val baseModels = allModels.filterNot { it.isMmproj }
-    val modelGroups = ModelCatalog.groups(baseModels)
+    val catalog = ModelTemplateCatalog.snapshot()
+    val allModels = cachedModels(catalog)
+    val modelGroups = listedModelGroups(catalog, allModels)
     val mmprojs = allModels.filter { it.isMmproj }
     // The groups a quant filter can draw from: the currently-selected models, or all groups when none
     // are selected. Evaluated fresh at each use so it reflects the current selection.
     fun quantSourceGroups(): List<ai.liquid.pipette.ModelGroup> = modelGroups.filter { selectedModelKeys.contains(it.key) }.ifEmpty { modelGroups }
-    // Quant filters some model in [sources] offers (ALL is always available). Single-sourced so the
+    // The quants some model in [sources] offers ("All quants" is always available). Single-sourced so the
     // dirty-selection reconciliation and the pill list can't diverge on which quants are "available".
-    fun availableQuantFiltersFor(sources: List<ai.liquid.pipette.ModelGroup>): List<JobQuantFilter> =
-      JobQuantFilter.entries.filter { f -> f == JobQuantFilter.ALL || sources.any { g -> g.files.any { f.matches(it.quant) } } }
+    fun availableQuantFiltersFor(sources: List<ai.liquid.pipette.ModelGroup>): List<String> =
+      QuantFilter.options(sources.flatMap { g -> g.files.map { it.quant } })
     // Reconcile selections to the current catalog only on real selection/data changes — never on a
     // pure render (a background runner tick), so a tick can't silently alter the user's choices.
     if (wizardSelectionsDirty) {
@@ -707,14 +843,15 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
       // Drop any picked quant filter that no currently-selected model offers, so a filter whose pill
       // is no longer shown can't silently empty the runnable set and block Run (fall back to ALL).
       val available = availableQuantFiltersFor(quantSourceGroups())
-      selectedJobQuantFilters.retainAll { available.contains(it) }
-      if (selectedJobQuantFilters.isEmpty()) selectedJobQuantFilters += JobQuantFilter.ALL
+      selectedJobQuantFilters.retainAll(available.toSet())
       val runnable = ModelCatalog.resolveSelectedFiles(groups = modelGroups, selectedKeys = selectedModelKeys, quantMatches = ::jobQuantMatches)
       if (runnable.none { JobRunner.isVlCompatible(it, mmprojs) }) pruneVlBenchmarks()
       ensureMmprojSelectionInitialized(mmprojs)
       wizardSelectionsDirty = false
     }
-    val filteredModelGroups = modelGroups.filter { modelGroupMatchesSearch(it, jobModelSearchText) }
+    val modelFamilies = visibleModelFamilies(modelGroups, catalog)
+    val offersUndownloaded = !catalogWasListedByDefault && allModels.any { !it.onDisk && !it.isMmproj }
+    val familiesDefaultClosed = catalogFamiliesDefaultClosed()
     val runnableModels = ModelCatalog.resolveSelectedFiles(groups = modelGroups, selectedKeys = selectedModelKeys, quantMatches = ::jobQuantMatches)
     val modelsMissingQuant =
       ModelCatalog.selectedGroupsMissingQuant(groups = modelGroups, selectedKeys = selectedModelKeys, quantMatches = ::jobQuantMatches)
@@ -738,20 +875,28 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
       step = step,
       stepTitles = NewJobWizard.STEP_TITLES,
       modelSearch = jobModelSearchText,
-      modelGroups =
-        filteredModelGroups.map {
-          ModelGroupRowUi(
-            key = it.key,
-            label = modelGroupLabel(it),
-            name = it.name,
-            sizeLabel = modelGroupSizeLabel(it),
-            checked = selectedModelKeys.contains(it.key),
+      modelFamilies =
+        modelFamilies.map { family ->
+          val rows =
+            family.members.map {
+              ModelGroupRowUi(key = it.key, name = it.name, sizeLabel = modelGroupSizeLabel(it), checked = selectedModelKeys.contains(it.key))
+            }
+          val checked = rows.all { it.checked }
+          ModelFamilyUi(
+            name = family.name,
+            logoName = rows.first().name,
+            logoDigest = catalog.familyLogoDigest(family.name),
+            open = jobModelSearchText.isNotBlank() || (family.name in toggledModelFamilies) == familiesDefaultClosed,
+            members = rows,
+            checked = checked,
+            mixed = !checked && rows.any { it.checked },
           )
         },
+      showsUndownloadedModels = showsUndownloadedModels.takeIf { offersUndownloaded },
       anyModelGroups = modelGroups.isNotEmpty(),
-      modelsMatched = filteredModelGroups.isNotEmpty(),
+      modelsMatched = modelFamilies.isNotEmpty(),
       selectedBaseModelCount = selectedBaseModelCount,
-      quantFilters = availableQuantFilters.map { QuantChipUi(it, it.label, selectedJobQuantFilters.contains(it)) },
+      quantFilters = QuantFilter.chips(availableQuantFilters, selectedJobQuantFilters),
       benchmarkSearch = benchmarkSearchText,
       benchmarkGroups = benchmarkGroups,
       benchmarksMatched = benchmarksMatched,
@@ -781,12 +926,18 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
         },
       reviewModels = modelGroups.filter { selectedModelKeys.contains(it.key) }.map { it.name },
       reviewBenchmarks = selectedBenchmarks.map { BenchmarkCatalog.displayName(it.benchmarkType) }.distinct(),
-      reviewQuants = runnableModels.mapNotNull { it.quant }.distinct(),
+      reviewQuants = runnableModels.mapNotNull { it.quant?.uppercase() }.distinct(),
       showSkippedWarning = modelsMissingQuant.isNotEmpty(),
       skippedWarning = if (modelsMissingQuant.isEmpty()) "" else missingQuantWarning(modelsMissingQuant),
       canAdvance = NewJobWizard.canAdvance(step, selectedBaseModelCount, selectedBenchmarks.size),
-      canRun = NewJobWizard.canRun(plannedCells.size, running),
-      runLabel = if (running) "A job is running" else "Run job",
+      canRun = downloadCheck == null && NewJobWizard.canRun(plannedCells.size, running),
+      runLabel =
+        when {
+          downloadCheck != null -> "Checking download space…"
+          running -> "A job is running"
+          else -> "Run job"
+        },
+      unknownSizeDownloads = runConfirmation?.names.orEmpty(),
     )
   }
 
@@ -894,12 +1045,12 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
     val rowModel = linkedMapOf<String, String>()
     val rowQuant = linkedMapOf<String, String>()
     cells.forEach { cell ->
-      val key = CompletedResultsCsvExporter.resultModelGroupKey(cell) + "|" + CompletedResultsCsvExporter.quantLabel(cell)
+      val key = ResultsGrid.rowKey(cell)
       if (!rowCells.containsKey(key)) {
         rowOrder += key
         rowCells[key] = mutableMapOf()
-        rowLabels[key] = "${CompletedResultsCsvExporter.modelDisplayName(cell)}\n${CompletedResultsCsvExporter.quantLabel(cell)}"
-        rowModel[key] = CompletedResultsCsvExporter.modelDisplayName(cell)
+        rowLabels[key] = "${ResultsGrid.modelDisplayName(cell)}\n${CompletedResultsCsvExporter.quantLabel(cell)}"
+        rowModel[key] = ResultsGrid.modelDisplayName(cell)
         rowQuant[key] = CompletedResultsCsvExporter.quantLabel(cell)
       }
       rowCells.getValue(key)[cell.benchmarkId] = cell
@@ -1026,23 +1177,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
       CellRunStatus.PENDING -> AccentKind.MUTED
     }
 
-  private fun updateJobQuantFilter(filter: JobQuantFilter, checked: Boolean) {
-    if (checked) {
-      if (filter == JobQuantFilter.ALL) {
-        selectedJobQuantFilters.clear()
-        selectedJobQuantFilters += JobQuantFilter.ALL
-      } else {
-        selectedJobQuantFilters -= JobQuantFilter.ALL
-        selectedJobQuantFilters += filter
-      }
-    } else {
-      selectedJobQuantFilters -= filter
-    }
-    if (selectedJobQuantFilters.isEmpty()) selectedJobQuantFilters += JobQuantFilter.ALL
-  }
-
-  private fun jobQuantMatches(quant: String?): Boolean =
-    selectedJobQuantFilters.contains(JobQuantFilter.ALL) || selectedJobQuantFilters.any { it.matches(quant) }
+  private fun jobQuantMatches(quant: String?): Boolean = QuantFilter.matches(selectedJobQuantFilters, quant)
 
   private fun benchmarkTypeDescription(typeWire: String): String =
     when (typeWire) {
@@ -1071,28 +1206,46 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
     }
   }
 
-  private fun modelGroupLabel(group: ModelGroup): String =
-    "${group.name}\n${group.quantSummary} - ${ByteFormat.fileSize(group.files.sumOf { it.sizeBytes })}"
+  private fun catalogFamiliesDefaultClosed(): Boolean = showsUndownloadedModels || catalogWasListedByDefault
 
-  /**
-   * The subtitle under a model group's name: its total size, plus how many of its quants a run would have to fetch first.
-   *
-   * A group can mix quants that are on disk with ones only the catalog knows about, now that the run screen offers both, and the count is also the
-   * disclosure that the size beside it is partly a declared estimate rather than a measurement.
-   *
-   * On [ModelGroupRowUi.sizeLabel] rather than on [modelGroupLabel] because `ModelSelectRow` renders `name` and `sizeLabel`; the row's `label`
-   * reaches no composable on this screen.
-   */
+  /** Show total size and, in catalog mode, the quants already on disk. */
   private fun modelGroupSizeLabel(group: ModelGroup): String {
     val size = ByteFormat.fileSize(group.files.sumOf { it.sizeBytes })
-    val pending = group.files.count { !it.onDisk }
-    return if (pending == 0) size else "$size · $pending to download"
+    val hint = NewJobWizard.downloadedHint(group).takeIf { showsUndownloadedModels }
+    return listOfNotNull(size, hint).joinToString(" · ")
   }
 
-  private fun modelGroupMatchesSearch(group: ModelGroup, query: String): Boolean {
+  private fun listedModelGroups(
+    catalog: ModelTemplateCatalog.Snapshot = ModelTemplateCatalog.snapshot(),
+    offered: List<ai.liquid.pipette.ModelFile> = cachedModels(catalog),
+  ): List<ModelGroup> {
+    val catalogByDefault = NewJobWizard.catalogByDefault(offered)
+    if (catalogByDefault != catalogWasListedByDefault && !showsUndownloadedModels) {
+      // When the first file arrives, keep the full list if narrowing it would change the job's selected files.
+      if (!catalogByDefault && NewJobWizard.selectionNeedsUndownloaded(selectedModelKeys, offered, ::jobQuantMatches)) {
+        showsUndownloadedModels = true
+      } else {
+        toggledModelFamilies.clear()
+      }
+      wizardSelectionsDirty = true
+    }
+    catalogWasListedByDefault = catalogByDefault
+    return ModelCatalog.groups(NewJobWizard.listedModels(offered, showsUndownloadedModels), catalog.byModelId)
+  }
+
+  /** The [groups] that the model search leaves visible, grouped by family. */
+  private fun visibleModelFamilies(groups: List<ModelGroup>, catalog: ModelTemplateCatalog.Snapshot): List<ModelFamily<ModelGroup>> =
+    ModelFamily.grouping(
+      groups.filter { modelGroupMatchesSearch(it, jobModelSearchText, catalog.familyByModelId) },
+      family = { ModelFamily.of(it.key, it.name, catalog.familyByModelId) },
+      name = { it.name },
+    )
+
+  private fun modelGroupMatchesSearch(group: ModelGroup, query: String, familyByModelId: Map<String, String>): Boolean {
     val q = query.trim().lowercase()
     if (q.isBlank()) return true
-    return listOf(group.name, group.key, group.quantSummary).any { it.lowercase().contains(q) } || group.files.any { it.matchesSearch(q) }
+    val family = ModelFamily.of(group.key, group.name, familyByModelId)
+    return listOf(group.name, group.key, group.quantSummary, family).any { it.lowercase().contains(q) } || group.files.any { it.matchesSearch(q) }
   }
 
   private fun jobMatchesSearch(manifest: JobManifest, query: String): Boolean {
@@ -1116,11 +1269,7 @@ class JobsViewModel(app: Application, shell: ShellViewModel) : ScreenViewModel(a
   }
 
   private fun quantSummaryForWarning(): String =
-    if (selectedJobQuantFilters.contains(JobQuantFilter.ALL)) {
-      "selected quant"
-    } else {
-      JobQuantFilter.entries.filter { it != JobQuantFilter.ALL && selectedJobQuantFilters.contains(it) }.joinToString(", ") { it.label }
-    }
+    if (selectedJobQuantFilters.isEmpty()) "selected quant" else selectedJobQuantFilters.sorted().joinToString(", ") { it.lowercase() }
 
   private fun missingQuantWarning(groups: List<ModelGroup>): String {
     val names = groups.joinToString(", ") { it.name }

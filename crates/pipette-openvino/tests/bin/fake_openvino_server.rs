@@ -87,8 +87,54 @@ fn serve(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
             respond(&mut stream, &json!({"tokens": tokens, "count": count}))
         }
         (Some("POST"), Some("/v1/completions")) => complete(&mut stream, &body),
+        (Some("POST"), Some("/v1/chat/completions")) => chat(&mut stream, &body),
         _ => Err("no such route".into()),
     }
+}
+
+/// LFM3-VL's chat template around one user turn.
+const TURN_TOKENS: usize = 10;
+/// What any image costs here: a 512x512 one's 256 tokens and its 2 markers on
+/// LFM3-VL, whatever its size.
+const IMAGE_TOKENS: usize = 258;
+
+/// The VL route's reply, with llama-server's counters: the template, a token
+/// per character of text and [`IMAGE_TOKENS`] per image.
+fn chat(stream: &mut TcpStream, body: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    let prompt_tokens = TURN_TOKENS
+        + body
+            .pointer("/messages/0/content")
+            .and_then(Value::as_array)
+            .ok_or("no content parts")?
+            .iter()
+            .map(|part| match part.get("text").and_then(Value::as_str) {
+                Some(text) => text.chars().count(),
+                None => IMAGE_TOKENS,
+            })
+            .sum::<usize>();
+    let max_tokens = body
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .ok_or("no max_tokens")?;
+    let generated = if flag(body, "ignore_eos") {
+        max_tokens
+    } else {
+        1
+    };
+    let finish = if generated == max_tokens {
+        "length"
+    } else {
+        "stop"
+    };
+    let message = json!({"role": "assistant", "content": "x"});
+    let choice = json!({"index": 0, "message": message, "finish_reason": finish});
+    let timings = json!({
+        "prompt_n": prompt_tokens,
+        "prompt_ms": 5.0,
+        "predicted_n": generated,
+        "predicted_ms": generated as f64,
+    });
+    respond(stream, &json!({"choices": [choice], "timings": timings}))
 }
 
 fn complete(stream: &mut TcpStream, body: &Value) -> Result<(), Box<dyn std::error::Error>> {
@@ -131,9 +177,10 @@ fn complete(stream: &mut TcpStream, body: &Value) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// One token per character of a string prompt.
+/// One token per character of a string prompt, or of llama-server's `content`.
 fn prompt_tokens(body: &Value) -> usize {
     body.get("prompt")
+        .or_else(|| body.get("content"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .chars()

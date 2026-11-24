@@ -64,6 +64,11 @@ pub(crate) fn command(
             compile_cache.display()
         )
     })?;
+    let vlm = matches!(
+        flags,
+        RuntimeFlags::VlThroughputUvOpenvinoOpenvino(_)
+            | RuntimeFlags::VlMaxMemoryUvOpenvinoOpenvino(_)
+    );
     let mut command = pipette_venv::python_command(python)?;
     pipette_subprocess::apply_client_config(&mut command, client_config);
     command
@@ -74,12 +79,16 @@ pub(crate) fn command(
         .arg(std::process::id().to_string())
         .args(["--model-dir", model_dir])
         .args(["--device", device_property(&device)])
+        .args(vlm.then_some("--vlm"))
         .arg("--properties")
         .arg(Value::Object(properties(flags, &device, compile_cache)).to_string())
         .env("PYTHONUNBUFFERED", "1")
         // OpenVINO prints non-ASCII diagnostics, which a Windows console's
         // legacy code page turns into a fatal UnicodeEncodeError.
-        .env("PYTHONIOENCODING", "utf-8");
+        .env("PYTHONIOENCODING", "utf-8")
+        // `import openvino` sends a usage event to Google Analytics, which the
+        // openvino-telemetry package skips when CI is "true".
+        .env("CI", "true");
     Ok(command)
 }
 
@@ -171,6 +180,59 @@ mod tests {
         assert!(cache.is_dir(), "the compile cache was not created");
         let json = serde_json::to_string(&flags)?;
         assert!(!json.contains("CACHE_DIR"), "got {json}");
+        Ok(())
+    }
+
+    #[test]
+    fn the_server_starts_with_openvino_telemetry_off() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        // Windows runs the interpreter `pyvenv.cfg` names.
+        let venv = dir.path().join("venv");
+        std::fs::create_dir_all(&venv)?;
+        std::fs::write(venv.join("pyvenv.cfg"), "home = /cpython\n")?;
+        let command = command(
+            &pipette_venv::venv_python(&venv),
+            Path::new("/models/ir"),
+            &npu_flags()?,
+            &dir.path().join("cache"),
+            dir.path(),
+            8000,
+            None,
+        )?;
+        let value = command
+            .get_envs()
+            .find_map(|(name, value)| (name == "CI").then_some(value))
+            .flatten()
+            .context("CI is not set")?;
+        assert_eq!(value, "true");
+        Ok(())
+    }
+
+    /// Only the VL cells' server loads a `VLMPipeline` and serves the VL routes.
+    #[rstest::rstest]
+    #[case::vl_throughput(BenchmarkType::VlThroughput, true)]
+    #[case::vl_max_memory(BenchmarkType::VlMaxMemory, true)]
+    #[case::text(BenchmarkType::PrefillThroughput, false)]
+    fn only_a_vl_cell_starts_the_server_in_vl_mode(
+        #[case] benchmark: BenchmarkType,
+        #[case] vlm: bool,
+    ) -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut r = RuntimeFlagRef::new(benchmark, RuntimeType::UvOpenvino, ModelType::Openvino);
+        r.device = Some(OpenvinoDevice::Cpu);
+        let venv = dir.path().join("venv");
+        std::fs::create_dir_all(&venv)?;
+        std::fs::write(venv.join("pyvenv.cfg"), "home = /cpython\n")?;
+        let command = command(
+            &pipette_venv::venv_python(&venv),
+            Path::new("/models/ir"),
+            &RuntimeFlags::try_from(r)?,
+            &dir.path().join("cache"),
+            dir.path(),
+            8000,
+            None,
+        )?;
+        assert_eq!(command.get_args().any(|arg| arg == "--vlm"), vlm);
         Ok(())
     }
 

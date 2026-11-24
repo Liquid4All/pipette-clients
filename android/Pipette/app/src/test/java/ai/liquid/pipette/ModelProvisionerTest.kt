@@ -40,7 +40,7 @@ class ModelProvisionerTest {
       filename = key.substringAfterLast('/'),
       urlString = "https://example.invalid/$key",
       repo = key.substringBeforeLast('/'),
-      familyId = null,
+      modelId = null,
       displayName = null,
       destPath = "/models/$key",
       partialPath = "/models/$key.part",
@@ -97,6 +97,20 @@ class ModelProvisionerTest {
     assertEquals(1, downloads.enqueued.size)
     // Through the coordinator's parser, so the repo and filename land in the resolve URL.
     assertTrue(downloads.enqueued.single(), downloads.enqueued.single().contains("LiquidAI/LFM2-1.2B-GGUF/resolve/main/"))
+  }
+
+  @Test
+  fun `a pinned model is fetched at its revision under its own key`() {
+    val downloads = Downloads()
+    val pinned = Model.GgufText(HfGgufText(repo.copy(revision = HfRevision.parse("abc123")), weights))
+    val pinnedKey = "LiquidAI/LFM2-1.2B-GGUF@abc123/lfm2-1.2b-q4_k_m.gguf"
+    var looks = 0
+    val onDisk = { if (looks++ >= 1) setOf(pinnedKey) else emptySet() }
+    val records = { if (downloads.enqueued.isEmpty()) emptyList() else listOf(record(pinnedKey, DownloadWorker.STATE_RUNNING)) }
+    val result = provisioner(downloads, onDisk = onDisk, records = records).ensureWeights(pinned)
+
+    assertEquals("/models/$pinnedKey", result.getOrNull())
+    assertEquals("https://huggingface.co/LiquidAI/LFM2-1.2B-GGUF/resolve/abc123/lfm2-1.2b-q4_k_m.gguf", downloads.enqueued.single())
   }
 
   /** The PIP-490 case iOS had to fix separately: a pause left by a process death is not terminal, and nothing else on a headless device clears it. */

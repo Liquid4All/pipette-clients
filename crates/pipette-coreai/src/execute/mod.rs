@@ -72,5 +72,8 @@ pub fn run(
         BenchmarkDefinition::DecisionLatency(_) | BenchmarkDefinition::DecisionMaxMemory(_) => {
             anyhow::bail!("decision benchmarks run on llama-server only, not on Core AI")
         }
+        BenchmarkDefinition::Session(_) => {
+            anyhow::bail!("a session runs no model or runtime, so it has no cell to run")
+        }
     }
 }

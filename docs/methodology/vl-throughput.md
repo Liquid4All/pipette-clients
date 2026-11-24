@@ -64,8 +64,8 @@ request.
 
 1. Resolve the shape (`parameter_image_width`, `parameter_image_height`,
    `parameter_text_tokens`, `parameter_decode_tokens`, `parameter_num_images`).
-   `llama-server` and MLX refuse a cell of fewer than 2
-   decode tokens; the in-process clients do not (see [Decode time](#decode-time)).
+   `llama-server`, MLX and OpenVINO refuse a cell of fewer than 2 decode
+   tokens; the in-process clients do not (see [Decode time](#decode-time)).
 2. Require a multimodal projector (`--mmproj`); fail early if absent.
 3. Before the server starts, count the image tokens of one frame with the
    calibration helper (see [vl-calibration.md](vl-calibration.md)). The count
@@ -229,13 +229,16 @@ The prompt is built to the exact requested shape:
   `image_tokens` is one count over all the frames together, because some
   llama.cpp builds merge frames
   ([vl-image-tokens.md](vl-image-tokens.md#multiple-images-num_images-and-the-prompt)).
+  OpenVINO multiplies its one-image count instead: GenAI encodes each LFM3-VL
+  image on its own.
 
 The invariant is the generated-token count: a run is invalid if the server does
 not generate exactly `parameter_decode_tokens` tokens or does not stop at the
 length limit. Each rep's `prompt_tokens` must also equal the warm-up's. The
 image-token count is a model-specific output of preprocessing. It is the
 marker-free count for the cell's frames, and each path reads it from its own
-source: the calibration helper on `llama-server`, the model's processor on MLX, and mtmd's chunk accounting in process
+source: the calibration helper on `llama-server`, the model's processor on MLX,
+the model's resize rule on OpenVINO, and mtmd's chunk accounting in process
 ([vl-image-tokens.md](vl-image-tokens.md)). A path with no count reports none:
 a marker-inclusive difference would not compare with the other rows. A count
 that differs from the warm-up's or exceeds `prompt_tokens` fails the run, and
@@ -254,7 +257,7 @@ readiness before the platform deadline. The per-platform criteria are in
 ## Runtime Details
 
 `vl_throughput` runs on the **llama.cpp** backend, and on desktop **MLX**
-(below). On desktop platforms, and on Android through the CLI, llama.cpp drives
+and **OpenVINO** (below). On desktop platforms, and on Android through the CLI, llama.cpp drives
 `llama-server` over its chat endpoint; in the Android app and on iOS it runs
 in-process against `libmtmd` (mtmd chunks, no server, no `/tokenize`). The chat
 endpoint is required there because llama.cpp's `/completion` +
@@ -316,6 +319,41 @@ differs from the `llama-server` path in these ways:
   reports none or the cell fails, is in
   [vl-image-tokens.md](vl-image-tokens.md).
 
+**OpenVINO** (`uv_openvino`) runs the `llama-server` path above request for
+request, through the same client, against `pipette_openvino_server.py --vlm`:
+the runtime's `openvino_genai.VLMPipeline` behind `/tokenize` and a
+non-streamed `/v1/chat/completions` in `llama-server`'s form, which report
+GenAI's timings as `llama-server`'s counters
+([OpenVINO](../pipette-cli/openvino.md)). It differs in these ways:
+
+- The server puts a `<ov_genai_image_N>` tag where each image part was, so the
+  prompt is the text, then the images, through the model's chat template with
+  thinking at its default, as `llama-server` renders it. On LFM3-VL the prompt
+  is 10 + text + N x (image tokens + 2) tokens on both engines.
+- `prompt_ms` is GenAI's time to first token, from the call. Besides the vision
+  encode and the prefill, which both engines time, it covers the image resize
+  and normalization, the chat template and tokenization, which `llama-server`
+  does before its timer starts. `predicted_ms` is the gaps between the token timestamps,
+  the n - 1 steps after the first token, scaled as `llama-server`'s is.
+- `image_tokens` is this client's count from the model's resize rule, known
+  for LFM3-VL only: each side rounded to a multiple of 32 pixels and scaled
+  into the processor's pixel bounds, then a token per 32x32 block, 64 to 4096
+  for the ladder's squares of 256 to 2048. Each rep checks the rule against
+  GenAI's own count: a prompt it counts otherwise than 10 + text + N x (image
+  tokens + 2) fails the run. Another model's rows report none.
+- On CPU and GPU the server pins SDPA attention: GenAI's default paged
+  attention keeps a prefix cache, which would serve every rep after the
+  warm-up from cache.
+- The server hands GenAI a string prompt, on which it encodes every image.
+  GenAI's chat-history path encodes identical images once, which would drop
+  all but one of a multi-image cell's encodes.
+- A cell of 0 images sends one, as on `llama-server`.
+- On the NPU the prompt, images included, counts against the compiled prompt
+  length: 1024 tokens unless the cell sets `max_prompt_len`. An LFM3-VL cell
+  over it is refused before the compile; on another model GenAI refuses it
+  after. The vision encoder and the text embeddings run on the CPU, so an NPU
+  `prompt_ms` includes a CPU image encode.
+
 ### Context checkpoints
 
 `no_cache = true` makes the server comparable with `llama-bench`; what it
@@ -352,7 +390,8 @@ them fails fast instead of silently skipping:
 
 - `pipette-torch-oai` refuses `vl_throughput` and `vl_max_memory`; it runs
   `vl_spec_decode` and `vlm_eval`.
-- Core AI, OpenVINO, OVMS and ONNX GenAI on the CLI refuse every VL benchmark.
+- Core AI, OVMS and ONNX GenAI on the CLI refuse every VL benchmark; OpenVINO
+  refuses `vlm_eval` and `vl_spec_decode`.
 - The iOS client's ONNX GenAI, MLX and Apple Foundation engines refuse every VL
   benchmark.
 
@@ -362,7 +401,7 @@ A run is invalid if the projector is missing, the server fails or times out, the
 readiness gate fails, the generated-token count differs from
 `parameter_decode_tokens`, the response does not stop at the length limit, a
 rep's `prompt_tokens` differs from the warm-up's, or the `image_tokens` checks
-fail ([Token Control](#token-control)). `llama-server` and MLX
+fail ([Token Control](#token-control)). `llama-server`, MLX and OpenVINO
 refuse a cell of fewer than 2 decode tokens before the model loads. The
 Android app checks none of the counts: it decodes exactly
 `parameter_decode_tokens` tokens by construction, takes `prompt_tokens` and

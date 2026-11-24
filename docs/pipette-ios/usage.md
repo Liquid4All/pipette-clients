@@ -365,6 +365,12 @@ expands to a set of catalog benchmark ids, so one launch measures a ladder.
 from the catalog by name substring. `model=` never does: it names one exact
 model, so a coordinate from a plan cannot silently match nothing.
 
+`bench match=` reads the saved model catalog for the current device
+registration. Before going offline, run `headlessrun sync` with that
+registration to save the collector's offers. Without a usable catalog, only
+the bundled LFM models are available by name. An offline run also needs the
+model files and benchmark data on the device.
+
 Both forms resolve and **download** a model named with `model=` (or `spec=`)
 first: a bare invocation that names one runs as `bench`. Without `model=`, the
 bare form runs against a matching model already on the device.

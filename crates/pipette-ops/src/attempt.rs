@@ -36,12 +36,13 @@ pub fn default_limit(benchmark: BenchmarkType) -> Option<Duration> {
         | BenchmarkType::AsrMaxMemory
         | BenchmarkType::DecisionLatency
         | BenchmarkType::DecisionMaxMemory => Some(DEFAULT_LIMIT),
-        // A corpus or an eval sets its own length, so a fixed default would cut
-        // healthy runs.
+        // A corpus, an eval or a session sets its own length, so a fixed default
+        // would cut healthy runs.
         BenchmarkType::VlSpecDecode
         | BenchmarkType::Eval
         | BenchmarkType::VlmEval
-        | BenchmarkType::AsrEval => None,
+        | BenchmarkType::AsrEval
+        | BenchmarkType::Session => None,
     }
 }
 

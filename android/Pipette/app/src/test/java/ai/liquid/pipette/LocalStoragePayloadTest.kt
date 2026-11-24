@@ -29,6 +29,7 @@ class LocalStoragePayloadTest {
     modelName: String,
     modelPath: String,
     mmprojPath: String?,
+    modelRef: Model? = null,
     benchmarkType: BenchmarkType = BenchmarkType.DECODE_THROUGHPUT,
     readinessPolicy: ReadinessPolicy = ReadinessPolicy(maxWaitSecs = 180L, skipThermal = false),
   ): JSONObject {
@@ -41,6 +42,7 @@ class LocalStoragePayloadTest {
       modelName = modelName,
       modelPath = modelPath,
       mmprojPath = mmprojPath,
+      modelRef = modelRef,
       runtimeFlags = RuntimeFlagRef(numberGpuLayers = 99, ctxSize = 4096, nUbatch = 512, loadMode = LlamacppLoadMode.READ),
       runtimeVersion = "b8683",
       runtimeCpuBackend = "dotprod,neon",
@@ -92,6 +94,24 @@ class LocalStoragePayloadTest {
     assertEquals("Android", payload.getString("device_os_family"))
     assertEquals("arm64-v8a", payload.getString("device_cpu_arch"))
     assertTrue(payload.has("device_name"))
+  }
+
+  @Test
+  fun payloadUsesTheDeclaredModelAndOmitsUnappliedFlags() {
+    val model =
+      Model.GgufText(
+        HfGgufText(
+          HfRepo.parseReference("LiquidAI/LFM2.5-350M-GGUF@abc123"),
+          GgufFilename.parse("LFM2.5-350M-Q4_0.gguf"),
+          ModelFlags(enableThinking = true),
+        )
+      )
+    val payload =
+      writeAndRead("LiquidAI/LFM2.5-350M-GGUF", "/models/local-copy-Q4_0.gguf", null, modelRef = model, benchmarkType = BenchmarkType.EVAL)
+
+    assertEquals("LiquidAI/LFM2.5-350M-GGUF", payload.getString("model_name"))
+    assertEquals(SubmissionRef.model(model), payload.getString("model_descriptor"))
+    assertFalse(payload.has("model_flags"))
   }
 
   @Test

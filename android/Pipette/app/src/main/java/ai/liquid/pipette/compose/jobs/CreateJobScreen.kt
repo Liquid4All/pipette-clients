@@ -8,7 +8,10 @@ import ai.liquid.pipette.compose.AndroidTopAppBar
 import ai.liquid.pipette.compose.BenchmarkGroupUi
 import ai.liquid.pipette.compose.BrandLogo
 import ai.liquid.pipette.compose.Chip
+import ai.liquid.pipette.compose.FamilyChevronColumn
 import ai.liquid.pipette.compose.IosDivider
+import ai.liquid.pipette.compose.ModelFamilyList
+import ai.liquid.pipette.compose.ModelFamilyStyle
 import ai.liquid.pipette.compose.MutedLabel
 import ai.liquid.pipette.compose.OutlinedAndroidCard
 import ai.liquid.pipette.compose.QuantPill
@@ -42,9 +45,11 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,6 +63,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -66,6 +72,20 @@ import androidx.compose.ui.unit.sp
 fun CreateJobScreen(state: JobsUiState.Wizard, onIntent: (JobsIntent) -> Unit) {
   val colors = PipetteTheme.colors
   BackHandler { if (state.step > 0) onIntent(JobsIntent.WizardGoToStep(state.step - 1)) else onIntent(JobsIntent.CancelWizard) }
+  if (state.unknownSizeDownloads.isNotEmpty()) {
+    AlertDialog(
+      onDismissRequest = { onIntent(JobsIntent.DismissRunDownload) },
+      title = { Text(stringResource(R.string.job_wizard_confirm_download_title)) },
+      text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text(stringResource(R.string.job_wizard_confirm_download_message))
+          for (download in state.unknownSizeDownloads) Text(download)
+        }
+      },
+      confirmButton = { TextButton(onClick = { onIntent(JobsIntent.ConfirmRunDownload) }) { Text(stringResource(R.string.job_wizard_run)) } },
+      dismissButton = { TextButton(onClick = { onIntent(JobsIntent.DismissRunDownload) }) { Text(stringResource(android.R.string.cancel)) } },
+    )
+  }
   Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
     AndroidTopAppBar(
       title = stringResource(R.string.job_wizard_title),
@@ -166,6 +186,7 @@ private fun WizardStepModels(state: JobsUiState.Wizard, onIntent: (JobsIntent) -
     onValueChange = { onIntent(JobsIntent.ApplyJobModelSearch(it)) },
   )
   Spacer(Modifier.height(14.dp))
+  state.showsUndownloadedModels?.let { UndownloadedModelsSwitch(it) { onIntent(JobsIntent.ToggleShowUndownloadedModels) } }
   when {
     !state.anyModelGroups ->
       JobWizardEmptyState(
@@ -175,13 +196,22 @@ private fun WizardStepModels(state: JobsUiState.Wizard, onIntent: (JobsIntent) -
         onButton = { onIntent(JobsIntent.GoToModels) },
       )
     !state.modelsMatched -> MutedLabel(stringResource(R.string.job_wizard_no_models_match, state.modelSearch))
-    else ->
+    else -> {
       OutlinedAndroidCard(cornerRadius = 16) {
-        state.modelGroups.forEachIndexed { i, group ->
-          if (i > 0) IosDivider()
-          ModelSelectRow(group.name, group.sizeLabel, group.checked) { onIntent(JobsIntent.ToggleModelGroup(group.key, !group.checked)) }
+        ModelFamilyList(
+          state.modelFamilies,
+          onToggleOpen = { onIntent(JobsIntent.ToggleModelFamilyOpen(it)) },
+          onToggleChecked = { onIntent(JobsIntent.ToggleModelFamily(it)) },
+          memberKey = { it.key },
+          style =
+            ModelFamilyStyle(horizontalPadding = 18.dp, verticalPadding = 16.dp, logoSize = 26.dp, gap = 12.dp, titleSize = 17, subtitleSize = 14),
+        ) { group, indent, logoDigest ->
+          ModelSelectRow(group.name, group.sizeLabel, group.checked, indent, logoDigest) {
+            onIntent(JobsIntent.ToggleModelGroup(group.key, !group.checked))
+          }
         }
       }
+    }
   }
   Spacer(Modifier.height(28.dp))
   Text(stringResource(R.string.job_wizard_quants_title), style = serif(21), color = colors.label)
@@ -194,16 +224,32 @@ private fun WizardStepModels(state: JobsUiState.Wizard, onIntent: (JobsIntent) -
   QuantPillRow(state, onIntent)
 }
 
-/** A model row in the wizard list: brand placeholder + name + size + a square checkbox. */
+/** "Show models not downloaded": adds the catalog models that are not on the device. A job downloads them before it runs. */
 @Composable
-private fun ModelSelectRow(name: String, size: String, checked: Boolean, onToggle: () -> Unit) {
+private fun UndownloadedModelsSwitch(checked: Boolean, onToggle: () -> Unit) {
+  Row(
+    modifier = Modifier.clickableNoRipple(onToggle).padding(bottom = 12.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
+    WizardCheckbox(isOn = checked, size = 18)
+    Text(stringResource(R.string.job_wizard_show_undownloaded_models), style = TextStyle(fontSize = 15.sp), color = PipetteTheme.colors.label)
+  }
+}
+
+/** Apply the family [indent] after reserving space for the header chevron. */
+@Composable
+private fun ModelSelectRow(name: String, size: String, checked: Boolean, indent: Dp, logoDigest: String?, onToggle: () -> Unit) {
   val colors = PipetteTheme.colors
   Row(
-    modifier = Modifier.fillMaxWidth().clickableNoRipple(onToggle).padding(horizontal = 18.dp, vertical = 16.dp),
+    modifier =
+      Modifier.fillMaxWidth()
+        .clickableNoRipple(onToggle)
+        .padding(start = 18.dp + FamilyChevronColumn + indent, end = 18.dp, top = 16.dp, bottom = 16.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    BrandLogo(name, size = 26.dp)
+    BrandLogo(name, size = 26.dp, logoDigest = logoDigest)
     Column(modifier = Modifier.weight(1f)) {
       Text(
         name,
@@ -222,9 +268,13 @@ private fun ModelSelectRow(name: String, size: String, checked: Boolean, onToggl
 @Composable
 private fun QuantPillRow(state: JobsUiState.Wizard, onIntent: (JobsIntent) -> Unit) {
   val colors = PipetteTheme.colors
-  Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+  FlowRow(
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+    itemVerticalAlignment = Alignment.CenterVertically,
+  ) {
     state.quantFilters.forEachIndexed { i, chip ->
-      QuantPill(chip.label, chip.selected) { onIntent(JobsIntent.ToggleQuantFilter(chip.filter, !chip.selected)) }
+      QuantPill(chip.label, chip.selected) { onIntent(JobsIntent.ToggleQuantFilter(chip.quant, !chip.selected)) }
       if (i == 0) Box(Modifier.width(1.dp).height(22.dp).background(colors.gray4))
     }
   }
@@ -383,7 +433,7 @@ private fun ReviewChipSection(label: String, values: List<String>, withLogos: Bo
   }
 }
 
-/** Centered empty state used by the wizard's Models step when no model families are downloaded yet. */
+/** Centered empty state used by the wizard's Models step when the device offers no model. */
 @Composable
 private fun JobWizardEmptyState(title: String, subtitle: String, buttonLabel: String?, onButton: () -> Unit) {
   val colors = PipetteTheme.colors
@@ -423,7 +473,8 @@ private fun CreateJobScreenPreview() {
           step = 0,
           stepTitles = listOf("Models", "Benchmarks", "Review"),
           modelSearch = "",
-          modelGroups = emptyList(),
+          modelFamilies = emptyList(),
+          showsUndownloadedModels = null,
           anyModelGroups = false,
           modelsMatched = true,
           selectedBaseModelCount = 0,

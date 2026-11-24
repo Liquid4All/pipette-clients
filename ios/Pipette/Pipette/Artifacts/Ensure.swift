@@ -13,7 +13,7 @@ import Foundation
 /// The crate's `ensure_model`. Returns the bound model, so a caller gets launchable paths
 /// rather than a promise that a transfer was queued.
 ///
-/// `familyId` / `quant` are the catalog labels the transfer is displayed under. A `nil`
+/// `modelId` / `quant` are the catalog labels the transfer is displayed under. A `nil`
 /// `declaredSizeBytes` is resolved from the vault records or the Hub on a miss, and a
 /// model nobody can size is refused.
 ///
@@ -24,7 +24,7 @@ func ensureModel(
     _ declared: Model,
     ws: PipetteWorkspace,
     coordinator: DownloadCoordinator,
-    familyId: String? = nil,
+    modelId: String? = nil,
     quant: String? = nil,
     declaredSizeBytes: Int64? = nil,
     jobId: JobId? = nil,
@@ -46,7 +46,7 @@ func ensureModel(
         do {
             try await coordinator.transfers.join(key) {
                 try await fetchAndWait(declared, ws: ws, coordinator: coordinator,
-                                       familyId: familyId, quant: quant,
+                                       modelId: modelId, quant: quant,
                                        declaredSizeBytes: declaredSizeBytes, jobId: jobId,
                                        stallTimeout: stallTimeout, progress: progress)
             }
@@ -64,7 +64,7 @@ private func fetchAndWait(
     _ declared: Model,
     ws: PipetteWorkspace,
     coordinator: DownloadCoordinator,
-    familyId: String?,
+    modelId: String?,
     quant: String?,
     declaredSizeBytes: Int64?,
     jobId: JobId?,
@@ -98,7 +98,7 @@ private func fetchAndWait(
         }
         coordinator.holdReservation(reservation, for: entry)
     }
-    coordinator.startDownload(declared, familyId: familyId, quant: quant, jobId: jobId)
+    coordinator.startDownload(declared, modelId: modelId, quant: quant, jobId: jobId)
     // A declined start enqueues nothing, so read its reason now instead of at the deadline.
     guard coordinator.hasTransfer(for: declared) else {
         if let entry { coordinator.releaseReservation(for: entry) }
@@ -107,7 +107,7 @@ private func fetchAndWait(
             source: coordinator.errorMessage ?? "the download did not start")
     }
     try await awaitFetch(of: declared, ws: ws, coordinator: coordinator,
-                         familyId: familyId, quant: quant,
+                         modelId: modelId, quant: quant,
                          stallTimeout: stallTimeout, progress: progress)
 }
 
@@ -166,7 +166,7 @@ private func awaitFetch(
     of declared: Model,
     ws: PipetteWorkspace,
     coordinator: DownloadCoordinator,
-    familyId: String?,
+    modelId: String?,
     quant: String?,
     stallTimeout: Duration,
     progress: ProgressSink?
@@ -201,7 +201,7 @@ private func awaitFetch(
     func restartOnce() async -> Bool {
         guard mayRestart else { return false }
         mayRestart = false
-        return await coordinator.restartStalled(for: declared, familyId: familyId, quant: quant)
+        return await coordinator.restartStalled(for: declared, modelId: modelId, quant: quant)
     }
 
     while ContinuousClock.now < deadline {

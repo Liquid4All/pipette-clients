@@ -20,14 +20,14 @@ pub struct UnsupportedError {
 pub enum WatchError {
     #[error(transparent)]
     Unsupported(#[from] UnsupportedError),
-    /// Read as no device tree instead, a Jetson's GPU watch would look for a
+    /// Read as no nvgpu instead, a Jetson Orin's GPU watch would look for a
     /// separate GPU pool its iGPU never bills.
     #[cfg(target_os = "linux")]
     #[error(
-        "could not read /proc/device-tree/compatible, which tells a Jetson's GPU memory from a \
-         card's: {kind}"
+        "could not read /sys/module/nvgpu, which tells a Jetson Orin's GPU memory from one NVML \
+         reads: {kind}"
     )]
-    DeviceTree { kind: io::ErrorKind },
+    NvgpuModule { kind: io::ErrorKind },
 }
 
 /// A [`WatchError`] for a build that runs on this OS alone, such as a llama.cpp

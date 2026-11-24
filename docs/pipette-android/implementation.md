@@ -43,7 +43,7 @@ android/Pipette/
       DataModels.kt                          # job, cell, registration, model, submission models
       LocalStorage.kt JobStore.kt            # filesystem-JSON storage and its JobRunner slice
       ModelStore.kt ModelCatalog.kt          # live model scan; family grouping
-      ModelTemplates.kt                      # ModelTemplateCatalog: bundled GGUF presets
+      ModelTemplates.kt ModelShortList.kt    # offered models: catalog short list, cache, fallback
       ModelRef.kt ModelUri.kt RuntimeFlagRef.kt SubmissionRef.kt  # plan-types mirrors
       AppSettingsStore.kt                    # DataStore preferences
       BenchmarkSync.kt BenchmarkStore.kt     # catalog sync from the server, and its store
@@ -244,10 +244,10 @@ filesDir/Pipette/
   jobs/<jobId>/cells/<cellId>/submission.json
 ```
 
-Model files live in **external** app storage, in one directory per repo:
+Model files live in **external** app storage. A revision has its own repo directory.
 
 ```text
-<getExternalFilesDir(null)>/models/<hf-org>/<hf-repo>/<filename>.gguf
+<getExternalFilesDir(null)>/models/<hf-org>/<hf-repo>[@<revision>]/<filename>.gguf
 <getExternalFilesDir(null)>/models/<local-file>.gguf
 ```
 
@@ -261,13 +261,15 @@ Storage behavior:
   `payload.json`, `metrics.json`, and `submission.json`.
 - `ModelStore` derives `ModelFile` metadata from a live scan of the models
   directory on each call.
-- Repo directories: `modelRelativePath(repo, filename)` → `repo/filename`, or the
-  bare `filename` when there is no repo. A delete removes empty `<org>/<repo>`
-  directories.
+- `modelRelativePath` gives `<org>/<repo>[@<revision>]/<filename>` for a repo file.
+  A local import without a repo uses the filename alone. The app removes the
+  model's repository directory if it is empty after deletion.
 - At startup, a legacy internal `Pipette/models` directory moves to external
   storage and is deleted. Internal storage holds models only when external
   storage is unavailable.
-- The stale-path resolver (`resolveModelPath`) tries these in order:
+- Pinned jobs and model provisioning look for the exact storage key under the
+  current models root. Other job paths use the stale-path resolver
+  (`resolveModelPath`), which tries these in order:
   1. The stored path, if the file exists.
   2. The same path tail under the current models root.
   3. A unique file with the same name anywhere under the models root.
@@ -416,8 +418,11 @@ the transfer. Behavior:
   (for example `LiquidAI/LFM2.5-350M-GGUF:Q4_0`), `org/repo-GGUF:file.gguf`,
   `org/repo/file.gguf`, and a full URL. It normalizes a Hugging Face `blob/`
   URL to `resolve/`, requires a `.gguf` file name, and URL-encodes each path
-  segment.
-- Each download is a unique work named by its `<repo>/<filename>` key. It writes
+  segment. To select a revision, use `org/repo@<revision>` or a Hugging Face
+  file URL with a supported revision.
+- WorkManager uses `<repo>[@<revision>]/<filename>` as the unique name for a
+  download. A pinned file has its own `<org>/<repo>@<revision>/` directory.
+  The worker writes
   `<dest>.part` and resumes it with an HTTP `Range` request. On success it moves
   the file to its final path and registers it with
   `LocalStorage.registerModelFile`.
@@ -441,20 +446,49 @@ the transfer. Behavior:
 - `DownloadNotifications` posts one ongoing notification per download, with
   pause, resume, and cancel actions that `DownloadActionReceiver` handles.
 
-## Model Templates
+## Model List
 
-`ModelTemplates.kt` holds `ModelTemplateCatalog`, the bundled catalog of default
-GGUF presets. Each `PresetModel` has a stable id, a display name, a detail label
-(quant and size), and a Hugging Face identifier. The repo, file name, quant,
-family id, and estimated size derive from these. The catalog also exposes
-`repoToName`, `families`, and `byFamilyId`.
+The app offers the models in the descriptor catalog short list for the device.
+`ModelShortList` fetches the list with `GET /clients/me/descriptor-catalog`.
+The server offers a model when it offers the device a runtime that can load
+it. It decides from the device profile and the capability flags, so
+registration sends the same profile as `PATCH /clients/me`.
 
-Most families have Q4_0, Q4_K_M, and Q5_K_M. Some have one quant: a family added
-from a benchmark run that measured one quant has only that quant. A family's
-quants can come from more than one repo: Ministral takes Q4_0 from `unsloth` and
-its K-quants from `mistralai`. The catalog itself is the inventory, and
-`ci/checks/model-catalog-parity.py` lists the rows that iOS offers and Android
-does not.
+- Each Hugging Face `gguf_text` member becomes one `PresetModel`. The display
+  name is the catalog entry name. The size is the member's `size_bytes`, or
+  unknown when the catalog records none. The identifier is
+  `<org>/<repo>@<revision>/<file>`, so the download fetches the pinned commit.
+- The app excludes other members and members larger than the device's
+  random-access memory (RAM). It logs the count.
+- An entry can offer one quant from more than one member: another repo, or
+  another revision of the file. The catalog labels these members
+  `<quant>@<variant>`, for example `q4_k_m@bartowski`. The Add Models screen
+  lists each variant as its own row, `<entry> (<variant>)`, so the user picks
+  which file to download. A member with the plain label stays in the row of
+  the entry.
+- The app refreshes the list at launch, after the profile report, and after
+  registration. A failed refresh keeps the current list.
+- The app writes each answer to `catalog/short-list.json` with the
+  registration that fetched it. At startup the app loads the cache only for
+  the same registration. A deleted registration, or one for another identity,
+  clears the list and the cache.
+- The app discards a response if it clears the list or publishes a newer
+  response first.
+
+`ModelTemplateCatalog.current` is the short list, or `ModelTemplateCatalog.fallback`
+when the short list offers no model. The fallback holds the GGUF rows from the
+`LiquidAI` organization, with exact byte sizes. The app offers fallback rows
+that fit in device RAM. The catalog also exposes
+`repoToName`, `families`, and `byFamilyId`, built from the current list.
+
+The Add Models screen downloads a file once when two rows name it. It asks for
+confirmation before a download of unknown size.
+
+Create Job asks for confirmation on Run if any missing file has no catalog
+size. Before the job starts, the app checks the combined remaining size of
+its downloads against free storage. It requests size metadata from the model
+host for files with no catalog size. If the host gives no size or the batch
+does not fit, the job stays in the wizard.
 
 ## Quant Grouping And Job Model Selection
 
@@ -467,9 +501,14 @@ does not.
 - resolves selected family keys through the active quant filters
 - detects selected families that have no file for the selected quant
 
-`JobQuantFilter.kt` defines the four filters: `ALL`, `Q4_0`, `Q4_K_M`, `Q5_K_M`.
-`ALL` excludes the specific filters, and the set is never empty. Users select
-model families, then choose which quant variants run.
+The Add Models and Create Job screens build their quant pills with
+`compose/QuantFilter.kt`. The pills are "All quants" and one pill for each quant
+that the selected models offer, or that all listed models offer before a
+selection. An empty selection is "All quants". A selected quant that no listed
+model offers drops out of the selection. A catalog row takes its quant from
+the catalog's label, and a file on disk takes it from its file name. Users
+select model families, then choose which quant variants run. The legacy view
+screens keep the fixed filters in `JobQuantFilter.kt` and `ModelQuantFilter.kt`.
 
 ## Benchmark Catalog
 

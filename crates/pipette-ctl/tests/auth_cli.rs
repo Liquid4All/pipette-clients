@@ -124,65 +124,13 @@ fn every_auth_verb_routes_through_the_cli() -> anyhow::Result<()> {
         args.command
     );
 
-    // Without an invite, register is a request for an account, and the address
-    // an operator answers is the one thing it cannot derive.
-    let cli = parse(&["auth", "register", "--contact-email", "ops@example.com"])
-        .map_err(|error| anyhow::anyhow!("register should parse as a request: {error}"))?;
-    let Command::Auth(args) = cli.command else {
-        anyhow::bail!("register should route to the auth verbs");
-    };
-    anyhow::ensure!(
-        matches!(&args.command, AuthCommand::Register(register)
-            if register.user_preauth_key.is_none() && register.contact_email.is_some()),
-        "register should carry the address and no invite: {:?}",
-        args.command
-    );
-
-    // The flag takes mgmt's rule, and a refusal names it.
-    let cli = parse(&["auth", "register", "--contact-email", "ops@münchen.de"])
-        .map_err(|error| anyhow::anyhow!("register should take a non-ASCII domain: {error}"))?;
-    let Command::Auth(args) = cli.command else {
-        anyhow::bail!("register should route to the auth verbs");
-    };
-    anyhow::ensure!(
-        matches!(&args.command, AuthCommand::Register(register)
-            if register.contact_email.as_ref().map(|email| email.as_str()) == Some("ops@münchen.de")),
-        "register should carry the address as typed: {:?}",
-        args.command
-    );
-    let error = parse(&["auth", "register", "--contact-email", "ops@localhost"])
-        .err()
-        .ok_or_else(|| {
-            anyhow::anyhow!("register should refuse an address with no dotted domain")
-        })?;
-    anyhow::ensure!(
-        error.to_string().contains("dotted domain"),
-        "clap error should name the rule: {error}"
-    );
-
-    // Neither flag is no path at all, and clap says which one is missing.
+    // Register only binds a key to an invited account: no invite, no path.
     let error = parse(&["auth", "register"])
         .err()
-        .ok_or_else(|| anyhow::anyhow!("register should refuse with neither flag"))?;
+        .ok_or_else(|| anyhow::anyhow!("register should refuse without an invite"))?;
     anyhow::ensure!(
-        error.to_string().contains("--contact-email"),
-        "clap error should name --contact-email: {error}"
-    );
-
-    // Both at once is refused at the flag: an invite already names the account.
-    let error = parse(&[
-        "auth",
-        "register",
-        "--user-preauth-key",
-        "user_preauth_k1.secret",
-        "--contact-email",
-        "ops@example.com",
-    ])
-    .err()
-    .ok_or_else(|| anyhow::anyhow!("register should refuse an invite with an address"))?;
-    anyhow::ensure!(
-        error.to_string().contains("cannot be used with"),
-        "clap error should report the conflict: {error}"
+        error.to_string().contains("--user-preauth-key"),
+        "clap error should name --user-preauth-key: {error}"
     );
 
     // The key a registration signs with: named, or minted, never both. Nothing
@@ -190,8 +138,8 @@ fn every_auth_verb_routes_through_the_cli() -> anyhow::Result<()> {
     let cli = parse(&[
         "auth",
         "register",
-        "--contact-email",
-        "ops@example.com",
+        "--user-preauth-key",
+        "user_preauth_k1.secret",
         "--ssh-key",
         "SHA256:eJQWmJmce1mUjjLjicIm/xIjF6YmW2R9Aoz0r6yyFjo",
     ])

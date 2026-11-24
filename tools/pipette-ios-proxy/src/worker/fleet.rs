@@ -12,7 +12,7 @@ use pipette_mgmt_client::types::DeviceProfileFields;
 
 use super::install;
 use super::pause::{Pause, pause_or_remind};
-use crate::app::Signals;
+use crate::app::{self, Signals};
 use crate::cli::Cli;
 use crate::config::{self, Config, ConfigError, DeviceConfig};
 use crate::device::{DeviceControl, DeviceDetails, Devicectl};
@@ -64,6 +64,8 @@ pub(crate) struct Phone {
     pub(crate) paths: DevicePaths,
     pub(crate) installed: Option<PathBuf>,
     pub(crate) facts: Option<DeviceFacts>,
+    /// The Foundation Models readiness sampled for this worker start.
+    pub(crate) apple_foundation_ready: bool,
     /// Set by the signal handler; every wait checks it.
     pub(crate) stop: Arc<AtomicBool>,
 }
@@ -79,6 +81,26 @@ impl std::fmt::Debug for Phone {
 }
 
 impl Phone {
+    pub(crate) fn probe_apple_foundation(&self) -> bool {
+        let devicectl = &self.config.devicectl;
+        match app::apple_foundation_ready(
+            self.control.as_ref(),
+            &self.entry.bundle_id,
+            devicectl.call_timeout,
+            devicectl.first_line_timeout,
+        ) {
+            Ok(ready) => ready,
+            Err(error) => {
+                tracing::warn!(
+                    device = %self.control.udid(),
+                    error = %format!("{error:#}"),
+                    "could not read Apple Foundation readiness"
+                );
+                false
+            }
+        }
+    }
+
     /// Record which build is on this phone, in memory and on disk together.
     /// `None` is "unknown", which is what an install in flight leaves behind.
     pub(crate) fn set_installed(&mut self, build: Option<&Path>) -> anyhow::Result<()> {
@@ -200,6 +222,7 @@ pub(crate) fn prepare(
                 details,
                 installed: InstalledBuild::load(&device_paths.installed)?.path,
                 facts: DeviceFacts::load(&device_paths.device_facts)?,
+                apple_foundation_ready: false,
                 paths: device_paths,
                 stop: Arc::clone(&stop),
             })
@@ -571,6 +594,7 @@ pub(crate) mod testing {
             paths,
             installed: None,
             facts: None,
+            apple_foundation_ready: false,
             stop: Arc::new(AtomicBool::new(false)),
         };
         Ok((phone, pool))

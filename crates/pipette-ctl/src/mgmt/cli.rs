@@ -911,11 +911,10 @@ fn push_leaves(prefix: &str, object: &Map<String, Value>, leaves: &mut Vec<Strin
     }
 }
 
-/// The id an owner `{type, user_id | org_id}` names; its prefix says which.
+/// The id an owner `{type: "org", org_id}` names.
 fn owner_id(object: &Map<String, Value>) -> Option<&str> {
-    let kind = object.get("type")?.as_str()?;
-    let id = object.get(&format!("{kind}_id"))?.as_str()?;
-    (object.len() == 2 && matches!(kind, "user" | "org")).then_some(id)
+    let id = object.get("org_id")?.as_str()?;
+    (object.len() == 2 && object.get("type")?.as_str()? == "org").then_some(id)
 }
 
 /// A value as text: a list joined with `,`, an object of scalars as
@@ -1105,14 +1104,13 @@ mod tests {
         Ok(())
     }
 
-    /// mgmt refuses a membership change that names no organization, so
-    /// clearing one is spelled `none` rather than left out.
+    /// mgmt refuses a membership change that names no organization.
     #[test]
-    fn set_org_requires_an_org_or_none() -> anyhow::Result<()> {
-        let command = parse(&["users", "set-org", "user_1", "--org-id", "none"])?;
+    fn set_org_requires_an_org() -> anyhow::Result<()> {
+        let command = parse(&["users", "set-org", "user_1", "--org-id", "org_acme"])?;
         assert_eq!(
             Value::Object(command.args),
-            json!({ "user_id": "user_1", "org_id": "none" })
+            json!({ "user_id": "user_1", "org_id": "org_acme" })
         );
         assert!(parse(&["users", "set-org", "user_1"]).is_err());
         Ok(())
@@ -1452,11 +1450,8 @@ mod tests {
     /// first one, and a value holding newlines stays on its row.
     #[test]
     fn a_table_cell_keeps_what_the_row_is_read_for() {
-        let user = "user_01a0dc0d-e066-74d6-a724-5f0e9c3b2a18";
-        assert_eq!(
-            cell("owner", &json!({ "type": "user", "user_id": user })),
-            user
-        );
+        let org = "org_01a0dc0d-e066-74d6-a724-5f0e9c3b2a18";
+        assert_eq!(cell("owner", &json!({ "type": "org", "org_id": org })), org);
         let progress = json!({
             "computed_at": "2026-09-03T20:40:46.523914209Z",
             "counts": {

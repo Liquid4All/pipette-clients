@@ -35,9 +35,9 @@ class ModelStore(private val modelsDir: File) {
    * A downloaded/imported file needs no registration — the next scan surfaces it. Kept for call-site compatibility; returns the derived [ModelFile],
    * honoring any provenance the caller already knows, and invalidates the cache so the new file shows up.
    */
-  fun registerModel(file: File, repo: String?, displayName: String? = null, familyId: String? = null): ModelFile {
+  fun registerModel(file: File, repo: String?, displayName: String? = null, modelId: String? = null): ModelFile {
     invalidate()
-    return modelFileFor(file, repoOverride = repo, displayNameOverride = displayName, familyIdOverride = familyId)
+    return modelFileFor(file, repoOverride = repo, displayNameOverride = displayName, modelIdOverride = modelId)
   }
 
   /** Nothing is persisted, so there is nothing to clear but the in-memory cache. */
@@ -47,10 +47,13 @@ class ModelStore(private val modelsDir: File) {
     file: File,
     repoOverride: String? = null,
     displayNameOverride: String? = null,
-    familyIdOverride: String? = null,
+    modelIdOverride: String? = null,
   ): ModelFile {
-    val repo = (repoOverride ?: repoFromBucketPath(file))?.takeIf { it.isNotBlank() }
-    val familyId = familyIdOverride ?: LocalStorage.normalizedModelStem(file.name)
+    val bucket = (repoOverride ?: repoFromBucketPath(file))?.takeIf { it.isNotBlank() }
+    val hfRepo = bucket?.let { HfRepo.parseReferenceOrNull(it) }
+    // The bare slug, so a pinned copy shows and submits under the same repo name as an unpinned one. The revision rides on [ModelFile.modelRef].
+    val repo = hfRepo?.toString() ?: bucket
+    val modelId = modelIdOverride ?: LocalStorage.normalizedModelStem(file.name)
     val displayName = displayNameOverride ?: repo?.let { ModelTemplateCatalog.repoToName[it] }
     return ModelFile(
       name = file.name,
@@ -58,8 +61,8 @@ class ModelStore(private val modelsDir: File) {
       sizeBytes = file.length(),
       hfRepo = repo,
       displayName = displayName,
-      familyId = familyId,
-      modelRef = refFor(repo, file.name),
+      modelId = modelId,
+      modelRef = refFor(hfRepo, file.name),
     )
   }
 
@@ -75,8 +78,7 @@ class ModelStore(private val modelsDir: File) {
    * Without this, the models with no coordinate would be precisely the ones already on disk, so a cell whose file was deleted between planning and
    * execution could not recover it, which is the case [JobCell.modelRef] exists to cover.
    */
-  private fun refFor(repo: String?, filename: String): Model? {
-    val hfRepo = repo?.let { HfRepo.parseSlugOrNull(it) }
+  private fun refFor(hfRepo: HfRepo?, filename: String): Model? {
     val gguf = GgufFilename.parseOrNull(filename)
     return if (hfRepo == null || gguf == null) null else Model.GgufText(HfGgufText(hfRepo, gguf))
   }

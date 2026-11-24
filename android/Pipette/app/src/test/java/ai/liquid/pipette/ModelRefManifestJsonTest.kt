@@ -42,6 +42,24 @@ class ModelRefManifestJsonTest {
   }
 
   @Test
+  fun `a pinned revision survives the round-trip`() {
+    val pinned = repo.copy(revision = HfRevision.parse("abc123"))
+    val ref = Model.GgufText(HfGgufText(pinned, GgufFilename.parse("lfm2-1.2b-q4_k_m.gguf")))
+
+    assertEquals(ref, Model.fromJsonOrNull(ref.toJson()))
+    assertEquals("abc123", ref.toJson().getString("revision"))
+  }
+
+  @Test
+  fun `a revision that does not parse drops the entry`() {
+    val json = Model.GgufText(HfGgufText(repo, GgufFilename.parse("lfm2-1.2b-q4_k_m.gguf"))).toJson()
+
+    for (value in listOf("refs/pr/3", true, 123, JSONObject.NULL)) {
+      assertNull(Model.fromJsonOrNull(json.put("revision", value)))
+    }
+  }
+
+  @Test
   fun `model flags survive the round-trip`() {
     val ref = Model.GgufText(HfGgufText(repo, GgufFilename.parse("lfm2-1.2b-q4_k_m.gguf"), ModelFlags(enableThinking = true)))
 

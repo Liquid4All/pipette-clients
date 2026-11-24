@@ -439,7 +439,7 @@ Not every benchmark type runs on every runtime:
 | llama.cpp | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | MLX (macOS only) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | vLLM / SGLang (docker or uv) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | SGLang only | uv vLLM only | uv vLLM only | ❌ | ❌ |
-| OpenVINO | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| OpenVINO | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | OVMS | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | ONNX GenAI | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Core AI (macOS 27+) | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -1190,6 +1190,48 @@ Each value is range-checked at startup. The table only tunes the gate, and no
 result carries it. A result records what the gate saw before each rep
 (`readiness_gate_waits`) and the device's own readings around it: see
 [Per-rep readings](../methodology/device-conditions.md#per-rep-readings).
+
+#### Hooks
+
+A `[hooks]` table holds a `before_cell_script` the client runs for every cell,
+after the model and runtime downloads and before the warm-up (or before the
+first rep, for a cell without one). A llama.cpp prefill or decode cell starts a
+`llama-bench` or `llama-batched-bench` per rep, which reads the model file
+again, so the client runs the script before each of its reps too, after the
+rep's readiness gate. A cell that runs on a server runs it once. The script
+sees the cell's runtime type and benchmark type, as a plan names them, in
+`PIPETTE_HOOK_RUNTIME_TYPE` and `PIPETTE_HOOK_BENCHMARK_TYPE`, and picks the
+cells it acts on itself.
+
+```toml
+# Jetson Orin Nano: freed GPU pages stay in NVIDIA's nvmap page pool, which the
+# kernel counts as used, until the page cache is dropped.
+[hooks]
+before_cell_script = '''
+case "$PIPETTE_HOOK_BENCHMARK_TYPE" in
+  prefill_throughput|decode_throughput) sudo -n /usr/local/sbin/pipette-drop-caches ;;
+esac
+'''
+```
+
+- Unix runs the script with `sh -e`. Windows runs it with
+  `powershell -NoProfile -NonInteractive -Command` after
+  `$ErrorActionPreference = 'Stop'`. There a native command's non-zero exit
+  stops the script only on its last line, so check `$LASTEXITCODE` after one
+  that is not last.
+- It has no stdin and runs as the client's own user: a step that needs root
+  goes through a sudo rule that lets that user run exactly it, with `-n` so a
+  missing rule fails instead of prompting.
+- A non-zero exit fails the cell as a device error, with the script's stderr
+  in the error. So does a script still running after 60 s, which is killed
+  with everything it started.
+- Its time counts toward no attempt timeout, as with a readiness wait.
+- The memory log brackets the run before the cell (`before_hook`,
+  `after_hook`), so the log shows `MemAvailable` before and after; a run
+  before a rep shows in that rep's `before_rep`. A result does not record the
+  hook.
+- A worker reads the file at its start, so a new hook applies from its next
+  restart.
 
 #### What a result records about the configuration
 

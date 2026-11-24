@@ -1,5 +1,5 @@
 //! OpenVINO execution through a minimal OpenAI-compatible server
-//! (`pipette_openvino_server.py`), one per cell, read on the client's clock.
+//! (`pipette_openvino_server.py`), one per cell.
 //! The server compiles exactly one pipeline before it listens: compiling more
 //! than once per process took an NPU down mid-run (`docs/openvino-ir.md`).
 //! The blob cache keeps that compile to a load for a cell compiled before
@@ -9,6 +9,8 @@ mod decode_throughput;
 mod end_to_end_latency;
 mod max_memory_usage;
 mod prefill_throughput;
+mod vl_max_memory;
+mod vl_throughput;
 
 /// Why the timing cells refuse a batched entry on this engine. The server
 /// runs one `LLMPipeline.generate` at a time, so a batched entry would be
@@ -31,7 +33,7 @@ use pipette_plan_types::{
 };
 
 use crate::flags::resolve_runtime_flags;
-use crate::models::ResolvedOpenvinoModel;
+use crate::models::{ResolvedOpenvinoModel, ResolvedOpenvinoVlModel};
 use crate::runtimes::ResolvedOpenvinoPython;
 
 /// Run a prepared cell; the CLI owns preparation and result recording.
@@ -97,14 +99,32 @@ pub fn run(
             observer,
             client_config,
         ),
+        BenchmarkDefinition::VlThroughput(benchmark) => vl_throughput::run(
+            benchmark,
+            resolve_runtime_flags(req)?.try_into()?,
+            &ResolvedOpenvinoPython::try_from(&req.runtime.bound)?,
+            &ResolvedOpenvinoVlModel::try_from(&req.model.bound)?,
+            compile_cache,
+            timeout,
+            readiness_gate,
+            observer,
+            client_config,
+        ),
+        BenchmarkDefinition::VlMaxMemory(benchmark) => vl_max_memory::run(
+            benchmark,
+            resolve_runtime_flags(req)?.try_into()?,
+            &ResolvedOpenvinoPython::try_from(&req.runtime.bound)?,
+            &ResolvedOpenvinoVlModel::try_from(&req.model.bound)?,
+            compile_cache,
+            timeout,
+            observer,
+            client_config,
+        ),
         BenchmarkDefinition::Eval(_) => {
             anyhow::bail!("eval benchmarks are not yet supported for OpenVINO")
         }
-        BenchmarkDefinition::VlThroughput(_)
-        | BenchmarkDefinition::VlMaxMemory(_)
-        | BenchmarkDefinition::VlmEval(_)
-        | BenchmarkDefinition::VlSpecDecode(_) => {
-            anyhow::bail!("VL benchmarks are not yet supported for OpenVINO")
+        BenchmarkDefinition::VlmEval(_) | BenchmarkDefinition::VlSpecDecode(_) => {
+            anyhow::bail!("vlm_eval and vl_spec_decode are not yet supported for OpenVINO")
         }
         BenchmarkDefinition::AsrEval(_) => {
             anyhow::bail!("asr_eval is not yet supported for OpenVINO")
@@ -114,6 +134,9 @@ pub fn run(
         }
         BenchmarkDefinition::DecisionLatency(_) | BenchmarkDefinition::DecisionMaxMemory(_) => {
             anyhow::bail!("decision benchmarks run on llama-server only, not on OpenVINO")
+        }
+        BenchmarkDefinition::Session(_) => {
+            anyhow::bail!("a session runs no model or runtime, so it has no cell to run")
         }
     }
 }

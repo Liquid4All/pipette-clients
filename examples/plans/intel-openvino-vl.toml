@@ -1,0 +1,76 @@
+# Example plan: OpenVINO GenAI's VLMPipeline on an Intel Core Ultra laptop,
+# vision-language cells on the CPU, the iGPU and the NPU.
+#
+# LFM3-VL needs OpenVINO 2026.5, which is not released yet, so the runtime
+# installs the 2026-11-16 nightly wheels from OpenVINO's nightly index.
+#
+# The models are the official IRs on Hugging Face, pinned by commit. The NPU
+# variant takes the fp16 IR: the int4 one (INT4 asymmetric, group size 64)
+# fails the NPU compile.
+#
+# The NPU compiles a fixed prompt length, 1024 tokens unless `max_prompt_len`
+# raises it, and every image token counts toward it: a 512x512 image is 256
+# tokens on LFM3-VL. All three benchmarks below fit 1024. A larger rung needs
+# `max_prompt_len` on the NPU variant's entries, and each distinct value is a
+# compile of its own (about two minutes for this model).
+#
+# State written to
+# .pipette-ctl/plans/intel-openvino-vl/state.jsonl.
+
+plan_id = "intel-openvino-vl"
+benchmarks = [
+  "vl_throughput_512x512_text0_decode256_img1",
+  "vl_throughput_256x256_text0_decode256_img5",
+  "vl_max_memory_512x512_text0_img1",
+]
+
+[[transports]]
+client_id   = "intel-node-1"
+type        = "ssh"
+host        = "intel-node-1"
+user        = "eval"
+binary_path = "C:/pipette/pipette.exe"
+work_dir    = "C:/pipette"
+shell       = "powershell"
+
+[retry]
+max_consecutive_failures = 3
+
+[[variants]]
+clients = ["intel-node-1"]
+models = [
+  { type = "openvino", source = "huggingface", org = "OpenVINO", repo_name = "LFM3-VL-2B-int4-ov", revision = "68e8d8c72051672e552532920eaac25a2a714633" },
+]
+runtimes = [
+  { type = "uv_openvino", server_version = "2026.5.1.0.dev20261116", python_version = "3.12", source = { type = "pip_requirements_text", contents = "numpy==2.5.5\nopenvino==2026.5.1.dev20261116\nopenvino-genai==2026.5.1.0.dev20261116\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.5.1.0.dev20261116\n", install_flags = ["--extra-index-url", "https://storage.openvinotoolkit.org/simple/wheels/nightly", "--index-strategy", "unsafe-best-match", "--prerelease", "allow"] } },
+]
+runtime_flags = [
+  { benchmark_type = "vl_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
+  { benchmark_type = "vl_max_memory", runtime_type = "uv_openvino", model_type = "openvino", device = "cpu" },
+]
+
+[[variants]]
+clients = ["intel-node-1"]
+models = [
+  { type = "openvino", source = "huggingface", org = "OpenVINO", repo_name = "LFM3-VL-2B-int4-ov", revision = "68e8d8c72051672e552532920eaac25a2a714633" },
+]
+runtimes = [
+  { type = "uv_openvino", server_version = "2026.5.1.0.dev20261116", python_version = "3.12", source = { type = "pip_requirements_text", contents = "numpy==2.5.5\nopenvino==2026.5.1.dev20261116\nopenvino-genai==2026.5.1.0.dev20261116\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.5.1.0.dev20261116\n", install_flags = ["--extra-index-url", "https://storage.openvinotoolkit.org/simple/wheels/nightly", "--index-strategy", "unsafe-best-match", "--prerelease", "allow"] } },
+]
+runtime_flags = [
+  { benchmark_type = "vl_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
+  { benchmark_type = "vl_max_memory", runtime_type = "uv_openvino", model_type = "openvino", device = "gpu" },
+]
+
+[[variants]]
+clients = ["intel-node-1"]
+models = [
+  { type = "openvino", source = "huggingface", org = "OpenVINO", repo_name = "LFM3-VL-2B-fp16-ov", revision = "c25a61e0fa3d163784aaf8409979ca0371cdfc3c" },
+]
+runtimes = [
+  { type = "uv_openvino", server_version = "2026.5.1.0.dev20261116", python_version = "3.12", source = { type = "pip_requirements_text", contents = "numpy==2.5.5\nopenvino==2026.5.1.dev20261116\nopenvino-genai==2026.5.1.0.dev20261116\nopenvino-telemetry==2025.2.0\nopenvino-tokenizers==2026.5.1.0.dev20261116\n", install_flags = ["--extra-index-url", "https://storage.openvinotoolkit.org/simple/wheels/nightly", "--index-strategy", "unsafe-best-match", "--prerelease", "allow"] } },
+]
+runtime_flags = [
+  { benchmark_type = "vl_throughput", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
+  { benchmark_type = "vl_max_memory", runtime_type = "uv_openvino", model_type = "openvino", device = "npu" },
+]

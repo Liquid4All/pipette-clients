@@ -831,6 +831,7 @@ struct SettingsView: View {
     private func deleteDeviceIdentity() {
         PlannerWorker.shared.setEnabled(false, ws: ws, jobRunner: jobRunner, jobStore: jobStore)
         ws.registration.clear()
+        ModelShortList.clearCacheBestEffort(ws: ws)
         _ = KeychainHelper.deleteHfToken()
         let clearedModelTokens = KeychainHelper.deleteAllModelHfTokens()
         if clearedModelTokens > 0 {

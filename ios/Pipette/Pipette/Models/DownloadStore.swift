@@ -31,9 +31,8 @@ struct DownloadStore {
 
     func saveRecord(_ record: DownloadRecord) {
         guard let data = try? PropertyListEncoder().encode(record) else { return }
-        let key = LocalStorage.modelRelativePath(repo: record.repo, filename: record.filename)
         ensureDir()
-        try? data.write(to: recordPath(for: key), options: .atomic)
+        try? data.write(to: recordPath(for: record.key), options: .atomic)
     }
 
     func clearRecord(for key: String) {

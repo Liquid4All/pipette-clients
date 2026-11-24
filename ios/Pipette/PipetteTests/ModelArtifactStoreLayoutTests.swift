@@ -38,7 +38,7 @@ import Testing
         #expect(model.hfRepo == "LiquidAI/LFM2.5-350M-GGUF")
         #expect(model.name == "LFM2.5-350M-Q4_0.gguf")
         #expect(model.path == entry.appendingPathComponent("blobs/LFM2.5-350M-Q4_0.gguf").path)
-        #expect(model.familyId == "lfm2.5-350m")
+        #expect(model.modelId == "lfm2.5-350m")
         #expect(model.sizeBytes == entrySizeBytes(at: entry))
     }
 
